@@ -2,7 +2,7 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use crate::camera::Camera;
-use crate::contour::{MAX_LEVELS, band_colors_linear};
+use crate::contour::{MAX_LEVELS, band_colors};
 use crate::mesh::{RenderMesh, Vertex};
 
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -12,15 +12,16 @@ const SAMPLE_COUNT: u32 = 4;
 /// the model size, so that edges on the back of thin walls stay hidden when zoomed in.
 const EDGE_OFFSET_PX: f32 = 1.5;
 
-/// Background gradient in the style of PrePoMax (linear RGB).
-const BACKGROUND_TOP: [f32; 4] = [0.073, 0.147, 0.343, 1.0];
-const BACKGROUND_BOTTOM: [f32; 4] = [0.83, 0.87, 0.93, 1.0];
+/// PrePoMax's background gradient: Gainsboro at the top, WhiteSmoke at the bottom.
+const BACKGROUND_TOP: [f32; 4] = [220.0 / 255.0, 220.0 / 255.0, 220.0 / 255.0, 1.0];
+const BACKGROUND_BOTTOM: [f32; 4] = [245.0 / 255.0, 245.0 / 255.0, 245.0 / 255.0, 1.0];
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Globals {
     view_proj: [[f32; 4]; 4],
-    light_dir: [f32; 4],
+    lights: [[f32; 4]; 3],
+    view_dir: [f32; 4],
     background_top: [f32; 4],
     background_bottom: [f32; 4],
     /// x: edge depth offset in normalized depth units.
@@ -41,6 +42,7 @@ struct GpuMesh {
     triangles: Option<GpuBuffer>,
     feature_edges: Option<GpuBuffer>,
     mesh_edges: Option<GpuBuffer>,
+    wireframe_edges: Option<GpuBuffer>,
     visible: bool,
 }
 
@@ -126,7 +128,8 @@ impl ViewportRenderer {
                         fs: &str,
                         buffers: &[Option<wgpu::VertexBufferLayout>],
                         topology: wgpu::PrimitiveTopology,
-                        depth: wgpu::DepthStencilState| {
+                        depth: wgpu::DepthStencilState,
+                        blend: Option<wgpu::BlendState>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
@@ -149,7 +152,11 @@ impl ViewportRenderer {
                     module: &shader,
                     entry_point: Some(fs),
                     compilation_options: Default::default(),
-                    targets: &[Some(COLOR_FORMAT.into())],
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: COLOR_FORMAT,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
                 }),
                 multiview_mask: None,
                 cache: None,
@@ -172,6 +179,7 @@ impl ViewportRenderer {
             &[],
             wgpu::PrimitiveTopology::TriangleList,
             depth_state(false, wgpu::CompareFunction::Always, Default::default()),
+            None,
         );
         let surface_pipeline = pipeline(
             "viewport surfaces",
@@ -188,6 +196,7 @@ impl ViewportRenderer {
                     clamp: 0.0,
                 },
             ),
+            None,
         );
         let edge_pipeline = pipeline(
             "viewport edges",
@@ -196,6 +205,7 @@ impl ViewportRenderer {
             &[Some(vertex_layout)],
             wgpu::PrimitiveTopology::LineList,
             depth_state(false, wgpu::CompareFunction::LessEqual, Default::default()),
+            Some(wgpu::BlendState::ALPHA_BLENDING),
         );
 
         Self {
@@ -249,6 +259,12 @@ impl ViewportRenderer {
                     mesh.mesh_edges.len(),
                     vertex,
                 ),
+                wireframe_edges: buffer(
+                    "part wireframe edges",
+                    bytemuck::cast_slice(&mesh.wireframe_edges),
+                    mesh.wireframe_edges.len(),
+                    vertex,
+                ),
                 visible: true,
             })
             .collect();
@@ -285,7 +301,8 @@ impl ViewportRenderer {
         let aspect = self.targets.width as f32 / self.targets.height as f32;
         let globals = Globals {
             view_proj: camera.view_proj(aspect).to_cols_array_2d(),
-            light_dir: camera.light_direction().extend(0.0).into(),
+            lights: camera.light_directions().map(|l| l.extend(0.0).into()),
+            view_dir: (-camera.forward()).extend(0.0).into(),
             background_top: BACKGROUND_TOP,
             background_bottom: BACKGROUND_BOTTOM,
             edge: [
@@ -350,7 +367,12 @@ impl ViewportRenderer {
             pass.set_pipeline(&self.edge_pipeline);
             for part in visible() {
                 let mesh_edges = part.mesh_edges.as_ref().filter(|_| options.mesh_edges);
-                for lines in [part.feature_edges.as_ref(), mesh_edges]
+                let lines = [
+                    part.wireframe_edges.as_ref(),
+                    mesh_edges,
+                    part.feature_edges.as_ref(),
+                ];
+                for lines in lines
                     .into_iter()
                     .flatten()
                 {
@@ -366,7 +388,7 @@ impl ViewportRenderer {
 fn palette(levels: Option<u32>) -> [[f32; 4]; MAX_LEVELS as usize] {
     let mut palette = [[0.0; 4]; MAX_LEVELS as usize];
     if let Some(levels) = levels {
-        for (slot, [r, g, b]) in palette.iter_mut().zip(band_colors_linear(levels)) {
+        for (slot, [r, g, b]) in palette.iter_mut().zip(band_colors(levels)) {
             *slot = [r, g, b, 1.0];
         }
     }

@@ -19,10 +19,10 @@ pub fn band_color(index: u32, levels: u32) -> [f32; 3] {
     hsv_to_rgb(240.0 * (1.0 - t), 1.0 - BRIGHTNESS, 1.0)
 }
 
-/// Linear RGB colours of all bands, for the shader.
-pub fn band_colors_linear(levels: u32) -> Vec<[f32; 3]> {
+/// sRGB colours of all bands, for the shader.
+pub fn band_colors(levels: u32) -> Vec<[f32; 3]> {
     (0..levels.clamp(2, MAX_LEVELS))
-        .map(|i| band_color(i, levels).map(srgb_to_linear))
+        .map(|i| band_color(i, levels))
         .collect()
 }
 
@@ -58,14 +58,6 @@ fn hsv_to_rgb(hue_deg: f32, saturation: f32, value: f32) -> [f32; 3] {
     };
     let m = value - c;
     [r + m, g + m, b + m]
-}
-
-pub(crate) fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
 }
 
 #[cfg(test)]

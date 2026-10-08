@@ -7,7 +7,8 @@ pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 3],
-    /// Result value normalized to 0..1 for contour plots; negative where there is none.
+    /// Surfaces: result value normalized to 0..1 for contour plots, negative where there is
+    /// none. Lines: opacity.
     pub scalar: f32,
 }
 
@@ -20,6 +21,8 @@ pub struct RenderMesh {
     pub feature_edges: Vec<Vertex>,
     /// Every element edge on the surface, drawn when the mesh is shown.
     pub mesh_edges: Vec<Vertex>,
+    /// Outline of the undeformed shape, drawn behind deformed results.
+    pub wireframe_edges: Vec<Vertex>,
 }
 
 impl RenderMesh {

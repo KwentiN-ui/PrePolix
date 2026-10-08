@@ -50,9 +50,15 @@ impl Camera {
         (self.distance * 0.5).max(MIN_HALF_EXTENT)
     }
 
-    /// Direction the light travels in world space: a headlight slightly above and left of the eye.
-    pub fn light_direction(&self) -> Vec3 {
-        self.rotation * Vec3::new(0.25, -0.35, -1.0).normalize()
+    /// Directions towards PrePoMax's three camera lights in world space. The lights sit at
+    /// (-1, 1, 1), (1, 1, 1) and (0, -1, 0) in camera space and shine at the focal point.
+    pub fn light_directions(&self) -> [Vec3; 3] {
+        [
+            Vec3::new(-1.0, 1.0, 1.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(0.0, -1.0, 0.0),
+        ]
+        .map(|p| self.rotation * p.normalize())
     }
 
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
