@@ -26,6 +26,9 @@ pub enum Icon {
     Previous,
     Next,
     Last,
+    /// Play triangle; also opens the animation.
+    Animate,
+    Pause,
 }
 
 /// Flat toolbar button in the Windows style: frame only while hovered or checked.
@@ -207,6 +210,25 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
         Icon::View(view) => cube(shapes, r, Some(view), false),
         Icon::FeatureEdges => cube(shapes, r, None, false),
         Icon::MeshEdges => cube(shapes, r, None, true),
+        Icon::Animate => {
+            let green = Color32::from_rgb(40, 150, 60);
+            polygon(
+                shapes,
+                vec![p(4.0, 2.0), p(14.0, 8.0), p(4.0, 14.0)],
+                green,
+                Color32::from_rgb(20, 100, 35),
+            );
+        }
+        Icon::Pause => {
+            let color = Color32::from_rgb(50, 50, 50);
+            for x in [4.0, 9.5] {
+                shapes.push(Shape::rect_filled(
+                    Rect::from_min_max(p(x, 3.0), p(x + 3.0, 13.0)),
+                    0.0,
+                    color,
+                ));
+            }
+        }
         Icon::First | Icon::Previous | Icon::Next | Icon::Last => {
             let forward = matches!(icon, Icon::Next | Icon::Last);
             let s = if forward { 1.0 } else { -1.0 };

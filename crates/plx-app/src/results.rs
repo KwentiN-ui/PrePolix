@@ -1,4 +1,6 @@
 use plx_render::contour::DEFAULT_LEVELS;
+
+use crate::animation::{Animation, AnimationKind, ColorLimits};
 use plx_results::{AnalysisKind, Component, Field, Increment};
 
 /// How the deformed shape is scaled, as in PrePoMax's results toolbar.
@@ -48,6 +50,8 @@ pub struct ResultsView {
     /// When CalculiX ran the analysis, as written into the file.
     pub date: Option<String>,
     pub time: Option<String>,
+    /// Running animation, if the animation window is open.
+    pub animation: Option<Animation>,
     /// Characteristic model size for the automatic scale (PrePoMax: cube root of the bounding
     /// box volume, square root of the area for flat models).
     model_size: f64,
@@ -74,6 +78,7 @@ impl ResultsView {
             show_undeformed: true,
             date: None,
             time: None,
+            animation: None,
             model_size: bounds.map_or(1.0, model_size),
         };
         view.increment = view.default_increment();
@@ -181,7 +186,21 @@ impl ResultsView {
             Deformation::TrueScale => 1.0,
             Deformation::UserDefined => self.user_scale,
             Deformation::Automatic(factor) => {
-                let Some(max) = self.current_increment().and_then(max_deformation) else {
+                // An increment animation keeps one scale for all frames: that of the largest
+                // displacement among them.
+                let animated = self
+                    .animation
+                    .as_ref()
+                    .filter(|a| a.kind == AnimationKind::Increments)
+                    .map(|a| a.increments.as_slice());
+                let max = match animated.filter(|i| !i.is_empty()) {
+                    Some(indices) => indices
+                        .iter()
+                        .filter_map(|&i| self.increments.get(i).and_then(max_deformation))
+                        .reduce(f32::max),
+                    None => self.current_increment().and_then(max_deformation),
+                };
+                let Some(max) = max else {
                     return 0.0;
                 };
                 if max <= 0.0 {
@@ -192,9 +211,76 @@ impl ResultsView {
         }
     }
 
-    pub fn legend(&self) -> Option<Legend> {
+    /// Factor on deformation and values of the shown animation frame; 1 without animation.
+    pub fn amplitude(&self) -> f32 {
+        self.animation.as_ref().map_or(1.0, Animation::amplitude)
+    }
+
+    /// Opens an animation of the given kind over the step of the shown increment.
+    pub fn start_animation(&mut self, kind: AnimationKind) {
+        let start = self
+            .animation
+            .take()
+            .map_or(self.increment, |a| a.start_increment);
+        self.select_increment(start);
+        let step = self.current_increment().map(|i| i.step);
+        let increments = (0..self.increments.len())
+            .filter(|&i| Some(self.increments[i].step) == step)
+            .collect();
+        self.animation = Some(Animation::new(kind, increments, start));
+        self.show_animation_frame();
+    }
+
+    /// Ends the animation and shows the increment from before it again.
+    pub fn stop_animation(&mut self) {
+        if let Some(animation) = self.animation.take() {
+            self.select_increment(animation.start_increment);
+        }
+    }
+
+    /// Selects the increment of the current frame of an increment animation.
+    pub fn show_animation_frame(&mut self) {
+        if let Some(increment) = self.animation.as_ref().and_then(Animation::increment)
+            && increment != self.increment
+        {
+            self.select_increment(increment);
+        }
+    }
+
+    /// Value range of the legend: that of the shown values, or over all animation frames.
+    fn value_range(&self) -> Option<(f32, f32)> {
         let (field, component) = self.current()?;
         let (min, max) = component.range()?;
+        let Some(animation) = &self.animation else {
+            return Some((min, max));
+        };
+        match (animation.kind, animation.limits) {
+            (AnimationKind::ScaleFactor, ColorLimits::CurrentFrame) => {
+                let a = animation.amplitude();
+                Some((a * min, a * max))
+            }
+            // Scaling runs every value from zero to its full size.
+            (AnimationKind::ScaleFactor, ColorLimits::AllFrames) => {
+                Some((min.min(0.0), max.max(0.0)))
+            }
+            (AnimationKind::Increments, ColorLimits::CurrentFrame) => Some((min, max)),
+            (AnimationKind::Increments, ColorLimits::AllFrames) => animation
+                .increments
+                .iter()
+                .filter_map(|&i| {
+                    self.increments
+                        .get(i)?
+                        .field(&field.name)?
+                        .component(&component.name)?
+                        .range()
+                })
+                .reduce(|(a, b), (c, d)| (a.min(c), b.max(d))),
+        }
+    }
+
+    pub fn legend(&self) -> Option<Legend> {
+        let (field, component) = self.current()?;
+        let (min, max) = self.value_range()?;
         // PrePoMax writes names with blanks instead of underscores and dashes.
         let name = |n: &str| n.replace(['_', '-'], " ");
         Some(Legend {
@@ -332,6 +418,40 @@ mod tests {
         );
         assert_eq!(modes.increment, 1);
         assert_eq!(modes.current().unwrap().1.name, "ALL");
+    }
+
+    #[test]
+    fn animation_scales_values_and_sets_legend_limits() {
+        let still = [[0.0; 3]];
+        let mut view = ResultsView::new(
+            vec![
+                increment(1, 1, AnalysisKind::Static, &[[0.0, 0.0, 1.0]]),
+                increment(1, 2, AnalysisKind::Static, &[[0.0, 0.0, 3.0]]),
+                increment(2, 1, AnalysisKind::Static, &still),
+            ],
+            Some(([0.0; 3], [10.0; 3])),
+        );
+        view.select_increment(0);
+        view.field = 0;
+        view.component = 3; // U3
+        view.start_animation(AnimationKind::Increments);
+        let animation = view.animation.as_mut().unwrap();
+        assert_eq!(animation.increments, [0, 1]);
+        animation.limits = ColorLimits::AllFrames;
+        assert_eq!(view.legend().map(|l| (l.min, l.max)), Some((1.0, 3.0)));
+
+        view.start_animation(AnimationKind::ScaleFactor);
+        let animation = view.animation.as_mut().unwrap();
+        animation.frames = 3;
+        animation.go_to(1);
+        assert_eq!(view.amplitude(), 0.5);
+        assert_eq!(view.legend().map(|l| (l.min, l.max)), Some((0.5, 0.5)));
+        view.animation.as_mut().unwrap().limits = ColorLimits::AllFrames;
+        assert_eq!(view.legend().map(|l| (l.min, l.max)), Some((0.0, 1.0)));
+
+        view.stop_animation();
+        assert_eq!(view.increment, 0);
+        assert_eq!(view.amplitude(), 1.0);
     }
 
     #[test]

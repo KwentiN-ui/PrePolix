@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod animation;
 mod app;
 mod icons;
 mod model;
@@ -35,6 +36,7 @@ mod tests {
     #[test]
     fn gui_sources_only_use_glyphs_of_the_default_font() {
         let sources = [
+            ("animation.rs", include_str!("animation.rs")),
             ("app.rs", include_str!("app.rs")),
             ("icons.rs", include_str!("icons.rs")),
             ("main.rs", include_str!("main.rs")),

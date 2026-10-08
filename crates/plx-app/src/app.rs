@@ -3,6 +3,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use plx_render::StandardView;
 
+use crate::animation::{AnimationKind, ColorLimits, Playback};
 use crate::icons::{self, Icon};
 use crate::model::{self, LoadedModel, Model};
 use crate::overlay::{Marker, Overlay};
@@ -10,6 +11,7 @@ use crate::properties;
 use crate::results::{Deformation, ResultsView, format_legend_value};
 use crate::tree::{self, TreeItem, TreeState, TreeView};
 use crate::viewport::{ViewCommand, Viewport};
+use plx_render::RenderMesh;
 
 enum LoadEvent {
     Started(PathBuf),
@@ -28,6 +30,10 @@ struct Workbench {
     view_command: Option<ViewCommand>,
     /// The result selection or deformation changed; the scene must be rebuilt.
     results_changed: bool,
+    /// Only the animation frame changed; frames already built are reused.
+    frame_changed: bool,
+    /// Scene of each animation frame shown so far, cleared when anything else changes.
+    frame_cache: std::collections::HashMap<usize, Vec<RenderMesh>>,
 }
 
 pub struct PrepolixApp {
@@ -62,6 +68,8 @@ impl PrepolixApp {
                 output,
                 view_command: None,
                 results_changed: false,
+                frame_changed: false,
+                frame_cache: Default::default(),
             },
             load_events: channel(),
             loading: None,
@@ -282,6 +290,7 @@ impl eframe::App for PrepolixApp {
                 }
             }
         });
+        self.workbench.animate(&ctx);
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         // PrePoMax's fixed layout: tree on the left over the full height, 3D view with the
         // output below it; only the separators move.
@@ -503,15 +512,64 @@ impl Workbench {
         self.update_contour();
     }
 
+    /// Plays the animation and shows its window; marks the scene for rebuilding.
+    fn animate(&mut self, ctx: &egui::Context) {
+        let Some(view) = self.model.as_mut().and_then(|m| m.results.as_mut()) else {
+            return;
+        };
+        let Some(animation) = &mut view.animation else {
+            return;
+        };
+        if animation.playing {
+            let dt = ctx.input(|i| i.stable_dt).min(0.1);
+            if animation.tick(dt) {
+                view.show_animation_frame();
+                self.frame_changed = true;
+            }
+            ctx.request_repaint();
+        }
+        match animation_window(ctx, view) {
+            WindowEvent::None => {}
+            WindowEvent::Frame => {
+                view.show_animation_frame();
+                self.frame_changed = true;
+            }
+            WindowEvent::Settings => self.results_changed = true,
+            WindowEvent::Close => {
+                view.stop_animation();
+                self.results_changed = true;
+            }
+        }
+    }
+
     /// Rebuilds the scene after the result selection or deformation changed.
     fn rebuild_if_results_changed(&mut self) {
-        if !std::mem::take(&mut self.results_changed) {
+        let frame_only = !self.results_changed && self.frame_changed;
+        if !(std::mem::take(&mut self.results_changed) | std::mem::take(&mut self.frame_changed)) {
             return;
         }
         let Some(model) = &mut self.model else { return };
-        let meshes = model.render_meshes();
-        self.viewport.set_parts(&meshes);
-        for (index, (part, mesh)) in model.parts.iter_mut().zip(&meshes).enumerate() {
+        let frame = model
+            .results
+            .as_ref()
+            .and_then(|v| v.animation.as_ref())
+            .map(|a| a.frame);
+        if !frame_only {
+            self.frame_cache.clear();
+        }
+        let fresh;
+        let meshes: &Vec<RenderMesh> = match frame {
+            Some(frame) => self
+                .frame_cache
+                .entry(frame)
+                .or_insert_with(|| model.render_meshes()),
+            None => {
+                fresh = model.render_meshes();
+                &fresh
+            }
+        };
+        self.viewport.set_parts(meshes);
+        for (index, (part, mesh)) in model.parts.iter_mut().zip(meshes).enumerate() {
             part.bounds = mesh.bounds();
             self.viewport.set_part_visible(index, part.visible);
         }
@@ -534,6 +592,7 @@ impl Workbench {
             maximum: view
                 .and_then(ResultsView::maximum)
                 .and_then(|(index, value)| {
+                    let value = value * view.map_or(1.0, ResultsView::amplitude);
                     Some(Marker {
                         position: model.node_position(index)?,
                         text: format!(
@@ -612,14 +671,164 @@ fn results_tool_bar(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
             (Icon::Next, "Nächstes Inkrement", (current + 1).min(last)),
             (Icon::Last, "Letztes Inkrement", last),
         ] {
-            if icons::button(ui, icon, tooltip, target != current, false).clicked() {
+            let enabled = target != current && view.animation.is_none();
+            if icons::button(ui, icon, tooltip, enabled, false).clicked() {
                 increment = target;
             }
         }
-        if increment != view.increment {
+        if increment != view.increment && view.animation.is_none() {
             view.select_increment(increment);
+            changed = true;
+        }
+        ui.add_space(4.0);
+        let animating = view.animation.is_some();
+        if icons::button(ui, Icon::Animate, "Animation", true, animating).clicked() {
+            if animating {
+                view.stop_animation();
+            } else {
+                view.start_animation(AnimationKind::ScaleFactor);
+            }
             changed = true;
         }
     });
     changed
+}
+
+enum WindowEvent {
+    None,
+    /// Another frame is shown.
+    Frame,
+    /// Settings changed that affect every frame.
+    Settings,
+    Close,
+}
+
+/// PrePoMax's animation dialog: kind, frames, speed, playback mode, colour limits and the
+/// player controls.
+fn animation_window(ctx: &egui::Context, view: &mut ResultsView) -> WindowEvent {
+    let mut event = WindowEvent::None;
+    let mut open = true;
+    let mut restart = None;
+    egui::Window::new("Animation")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .pivot(egui::Align2::RIGHT_BOTTOM)
+        .default_pos(ctx.content_rect().right_bottom() + egui::vec2(-130.0, -230.0))
+        .show(ctx, |ui| {
+            let Some(animation) = &mut view.animation else {
+                return;
+            };
+            egui::Grid::new("animation settings")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Art");
+                    ui.horizontal(|ui| {
+                        for (kind, label) in [
+                            (AnimationKind::ScaleFactor, "Skalierung"),
+                            (AnimationKind::Increments, "Inkremente des Steps"),
+                        ] {
+                            if ui.radio(animation.kind == kind, label).clicked()
+                                && animation.kind != kind
+                            {
+                                restart = Some(kind);
+                            }
+                        }
+                    });
+                    ui.end_row();
+                    if animation.kind == AnimationKind::ScaleFactor {
+                        ui.label("Bilder");
+                        let frames = egui::DragValue::new(&mut animation.frames).range(2..=200);
+                        if ui.add(frames).changed() {
+                            animation.go_to(animation.frame);
+                            event = WindowEvent::Settings;
+                        }
+                        ui.end_row();
+                    }
+                    ui.label("Bilder pro Sekunde");
+                    ui.add(egui::DragValue::new(&mut animation.fps).range(1.0..=60.0));
+                    ui.end_row();
+                    ui.label("Ablauf");
+                    ui.horizontal(|ui| {
+                        for (playback, label) in [
+                            (Playback::Once, "Einmal"),
+                            (Playback::Loop, "Schleife"),
+                            (Playback::Swing, "Hin und her"),
+                        ] {
+                            ui.radio_value(&mut animation.playback, playback, label);
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Farbskala");
+                    ui.horizontal(|ui| {
+                        for (limits, label) in [
+                            (ColorLimits::CurrentFrame, "Aktuelles Bild"),
+                            (ColorLimits::AllFrames, "Alle Bilder"),
+                        ] {
+                            if ui
+                                .radio_value(&mut animation.limits, limits, label)
+                                .changed()
+                            {
+                                event = WindowEvent::Settings;
+                            }
+                        }
+                    });
+                    ui.end_row();
+                });
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 1.0;
+                let last = animation.frame_count() - 1;
+                let frame = animation.frame;
+                let mut target = None;
+                if icons::button(ui, Icon::First, "Erstes Bild", frame > 0, false).clicked() {
+                    target = Some(0);
+                }
+                if icons::button(ui, Icon::Previous, "Vorheriges Bild", frame > 0, false).clicked()
+                {
+                    target = Some(frame - 1);
+                }
+                let (icon, tip) = if animation.playing {
+                    (Icon::Pause, "Anhalten")
+                } else {
+                    (Icon::Animate, "Abspielen")
+                };
+                if icons::button(ui, icon, tip, true, false).clicked() {
+                    if animation.playing {
+                        animation.playing = false;
+                    } else {
+                        animation.play();
+                    }
+                }
+                if icons::button(ui, Icon::Next, "Nächstes Bild", frame < last, false).clicked() {
+                    target = Some(frame + 1);
+                }
+                if icons::button(ui, Icon::Last, "Letztes Bild", frame < last, false).clicked() {
+                    target = Some(last);
+                }
+                ui.add_space(8.0);
+                let mut slider = frame;
+                let response = ui.add(egui::Slider::new(&mut slider, 0..=last).show_value(false));
+                if response.changed() {
+                    target = Some(slider);
+                }
+                ui.add_space(8.0);
+                ui.label(format!("Bild {} von {}", frame + 1, last + 1));
+                if let Some(target) = target {
+                    animation.playing = false;
+                    if animation.go_to(target) && matches!(event, WindowEvent::None) {
+                        event = WindowEvent::Frame;
+                    }
+                }
+            });
+        });
+    if let Some(kind) = restart {
+        view.start_animation(kind);
+        event = WindowEvent::Settings;
+    }
+    if !open {
+        event = WindowEvent::Close;
+    }
+    event
 }
