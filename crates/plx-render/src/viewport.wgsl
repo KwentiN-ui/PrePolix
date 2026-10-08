@@ -7,6 +7,14 @@ struct Globals {
 
 @group(0) @binding(0) var<uniform> globals: Globals;
 
+// The target is a plain UNORM texture that the GUI shows as is, so colors are sRGB encoded here.
+fn encode_srgb(linear: vec3<f32>) -> vec4<f32> {
+    let c = clamp(linear, vec3<f32>(0.0), vec3<f32>(1.0));
+    let low = c * 12.92;
+    let high = 1.055 * pow(c, vec3<f32>(1.0 / 2.4)) - 0.055;
+    return vec4<f32>(select(high, low, c <= vec3<f32>(0.0031308)), 1.0);
+}
+
 struct BackgroundOut {
     @builtin(position) position: vec4<f32>,
     @location(0) t: f32,
@@ -23,7 +31,7 @@ fn vs_background(@builtin(vertex_index) index: u32) -> BackgroundOut {
 
 @fragment
 fn fs_background(in: BackgroundOut) -> @location(0) vec4<f32> {
-    return mix(globals.background_bottom, globals.background_top, clamp(in.t, 0.0, 1.0));
+    return encode_srgb(mix(globals.background_bottom, globals.background_top, clamp(in.t, 0.0, 1.0)).rgb);
 }
 
 struct SurfaceIn {
@@ -50,16 +58,29 @@ fn vs_surface(in: SurfaceIn) -> SurfaceOut {
 @fragment
 fn fs_surface(in: SurfaceOut) -> @location(0) vec4<f32> {
     let diffuse = abs(dot(normalize(in.normal), -globals.light_dir.xyz));
-    let shade = 0.3 + 0.7 * diffuse;
-    return vec4<f32>(in.color * shade, 1.0);
+    let shade = 0.45 + 0.55 * diffuse;
+    return encode_srgb(in.color * shade);
 }
 
+struct EdgeOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec3<f32>,
+};
+
+// Edges lie exactly on surface triangles; pulling them slightly towards the viewer keeps them from
+// flickering in and out of the depth test (polygon offset alone is too weak for a float depth buffer).
+const EDGE_DEPTH_OFFSET: f32 = 2e-4;
+
 @vertex
-fn vs_edge(in: SurfaceIn) -> @builtin(position) vec4<f32> {
-    return globals.view_proj * vec4<f32>(in.position, 1.0);
+fn vs_edge(in: SurfaceIn) -> EdgeOut {
+    var out: EdgeOut;
+    out.position = globals.view_proj * vec4<f32>(in.position, 1.0);
+    out.position.z -= EDGE_DEPTH_OFFSET * out.position.w;
+    out.color = in.color;
+    return out;
 }
 
 @fragment
-fn fs_edge() -> @location(0) vec4<f32> {
-    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+fn fs_edge(in: EdgeOut) -> @location(0) vec4<f32> {
+    return encode_srgb(in.color);
 }
