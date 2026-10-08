@@ -7,7 +7,8 @@ use plx_io::inp::{InpImport, read_inp};
 use plx_mesh::{FeMesh, extract_part_skin};
 use plx_render::{RenderMesh, part_color, part_render_mesh};
 
-/// Angle between neighbouring faces above which their common edge counts as a feature edge.
+/// Angle between neighbouring faces above which their common edge counts as a feature edge
+/// and the shading across it stays sharp.
 const FEATURE_ANGLE_DEG: f64 = 30.0;
 
 /// Summary of one part, computed once on load so the GUI never iterates large meshes.
@@ -62,7 +63,7 @@ pub fn load(path: &Path) -> Result<LoadedModel, String> {
     for (index, part) in mesh.parts.iter().enumerate() {
         let color = part_color(index);
         let skin = extract_part_skin(&mesh, part, FEATURE_ANGLE_DEG);
-        let render = part_render_mesh(&mesh, &skin, origin, color);
+        let render = part_render_mesh(&mesh, &skin, origin, color, FEATURE_ANGLE_DEG);
         let mut types: BTreeMap<&str, usize> = BTreeMap::new();
         let mut nodes = std::collections::HashSet::new();
         for element in part.elements.iter().filter_map(|&id| mesh.element(id)) {

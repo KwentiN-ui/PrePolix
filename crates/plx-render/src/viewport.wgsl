@@ -67,10 +67,15 @@ struct EdgeOut {
     @location(0) color: vec3<f32>,
 };
 
+// Edges lie exactly on surface triangles; pulling them slightly towards the viewer keeps them from
+// flickering in and out of the depth test (polygon offset alone is too weak for a float depth buffer).
+const EDGE_DEPTH_OFFSET: f32 = 2e-4;
+
 @vertex
 fn vs_edge(in: SurfaceIn) -> EdgeOut {
     var out: EdgeOut;
     out.position = globals.view_proj * vec4<f32>(in.position, 1.0);
+    out.position.z -= EDGE_DEPTH_OFFSET * out.position.w;
     out.color = in.color;
     return out;
 }
