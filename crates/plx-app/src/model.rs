@@ -149,7 +149,7 @@ impl Model {
         let mut scalars = None;
         let mut deformed = false;
         if let Some(view) = &self.results {
-            let scale = view.scale() as f64;
+            let scale = (view.scale() * view.amplitude()) as f64;
             let displacements = view.current_increment().and_then(|i| i.displacements());
             if let (Some(displacements), true) = (displacements, scale != 0.0) {
                 coords = std::borrow::Cow::Owned(
@@ -162,7 +162,9 @@ impl Model {
                 deformed = view.show_undeformed;
             }
             if let (Some((_, component)), Some(legend)) = (view.current(), view.legend()) {
-                scalars = Some(normalize(&component.values, legend.min, legend.max));
+                let amplitude = view.amplitude();
+                let values: Vec<f32> = component.values.iter().map(|v| v * amplitude).collect();
+                scalars = Some(normalize(&values, legend.min, legend.max));
             }
         }
         self.mesh
@@ -191,7 +193,7 @@ impl Model {
     pub fn node_position(&self, index: usize) -> Option<Vec3> {
         let mut p = DVec3::from(*self.mesh.coords().get(index)?);
         if let Some(view) = &self.results {
-            let scale = view.scale() as f64;
+            let scale = (view.scale() * view.amplitude()) as f64;
             let displacement = view
                 .current_increment()
                 .and_then(|i| i.field("DISP"))
