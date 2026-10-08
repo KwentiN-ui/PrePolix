@@ -1,89 +1,77 @@
 use crate::{Component, Field};
 
-/// Adds the quantities PrePoMax shows besides the raw components: the magnitude of vector
-/// fields and, for tensor fields, the von Mises and Tresca equivalents and the principal values.
+/// Field names whose three components form a vector, as PrePoMax classifies them.
+const VECTOR_FIELDS: [&str; 5] = ["DISP", "VELO", "FORC", "FLUX", "NORM"];
+/// Stress-like tensor fields: von Mises and Tresca equivalents.
+const STRESS_FIELDS: [&str; 2] = ["STRESS", "ZZSTR"];
+/// Strain tensor fields: equivalent strain (2/3 of the von Mises expression), no Tresca.
+const STRAIN_FIELDS: [&str; 2] = ["TOSTRAIN", "MESTRAIN"];
+
+/// Adds the quantities PrePoMax shows besides the raw components, in PrePoMax's order: the
+/// magnitude `ALL` of vector fields first; for tensor fields the equivalent value(s) first and
+/// the principal values last.
 pub fn add_derived_components(field: &mut Field) {
-    let column = |names: &[&str]| -> Option<Vec<&[f32]>> {
-        names
-            .iter()
-            .map(|n| field.component(n).map(|c| c.values.as_slice()))
-            .collect()
+    field.components.retain(|c| !c.derived && c.name != "ALL");
+    let base: Vec<&[f32]> = field
+        .components
+        .iter()
+        .map(|c| c.values.as_slice())
+        .collect();
+    let count = base.first().map_or(0, |c| c.len());
+    let name = field.name.as_str();
+    let derived = |name: &str, values: Vec<f32>| Component {
+        name: name.to_string(),
+        values,
+        derived: true,
     };
-    let mut derived: Vec<(&str, Vec<f32>)> = Vec::new();
-    if let Some(v) = vector_columns(field).and_then(|names| column(&names)) {
-        let all = (0..v[0].len())
-            .map(|i| (v[0][i].powi(2) + v[1][i].powi(2) + v[2][i].powi(2)).sqrt())
+
+    if VECTOR_FIELDS.contains(&name) && base.len() == 3 {
+        let all = (0..count)
+            .map(|i| (base[0][i].powi(2) + base[1][i].powi(2) + base[2][i].powi(2)).sqrt())
             .collect();
-        derived.push(("ALL", all));
-    } else if let Some(t) = tensor_columns(field).and_then(|names| column(&names)) {
-        let count = t[0].len();
-        let mut mises = Vec::with_capacity(count);
-        let mut tresca = Vec::with_capacity(count);
-        let mut principal = [
-            Vec::with_capacity(count),
-            Vec::with_capacity(count),
-            Vec::with_capacity(count),
-        ];
-        let mut signed_max_abs = Vec::with_capacity(count);
-        for i in 0..count {
-            let [xx, yy, zz, xy, yz, zx] = [0, 1, 2, 3, 4, 5].map(|k| t[k][i] as f64);
-            let m = (0.5
-                * ((xx - yy).powi(2)
-                    + (yy - zz).powi(2)
-                    + (zz - xx).powi(2)
-                    + 6.0 * (xy * xy + yz * yz + zx * zx)))
-                .sqrt();
-            let [p1, p2, p3] = principal_values([xx, yy, zz, xy, yz, zx]);
-            mises.push(m as f32);
-            tresca.push((p1 - p3) as f32);
-            principal[0].push(p1 as f32);
-            principal[1].push(p2 as f32);
-            principal[2].push(p3 as f32);
-            let signed = if p1.abs() >= p3.abs() { p1 } else { p3 };
-            signed_max_abs.push(signed as f32);
+        field.components.insert(0, derived("ALL", all));
+        return;
+    }
+    let strain = STRAIN_FIELDS.contains(&name);
+    if !(strain || STRESS_FIELDS.contains(&name)) || base.len() != 6 {
+        return;
+    }
+    let mut equivalent = Vec::with_capacity(count);
+    let mut tresca = Vec::with_capacity(count);
+    let mut signed_max_abs = Vec::with_capacity(count);
+    let mut principal = [(); 3].map(|_| Vec::with_capacity(count));
+    for i in 0..count {
+        let t = [0, 1, 2, 3, 4, 5].map(|k| base[k][i] as f64);
+        let [xx, yy, zz, xy, yz, zx] = t;
+        let mises = (0.5
+            * ((xx - yy).powi(2)
+                + (yy - zz).powi(2)
+                + (zz - xx).powi(2)
+                + 6.0 * (xy * xy + yz * yz + zx * zx)))
+            .sqrt();
+        let [p1, p2, p3] = principal_values(t);
+        equivalent.push(if strain { mises * 2.0 / 3.0 } else { mises } as f32);
+        tresca.push((p1 - p3) as f32);
+        signed_max_abs.push(if p1.abs() > p3.abs() { p1 } else { p3 } as f32);
+        for (column, value) in principal.iter_mut().zip([p1, p2, p3]) {
+            column.push(value as f32);
         }
-        let [p1, p2, p3] = principal;
-        derived.extend([
-            ("MISES", mises),
-            ("TRESCA", tresca),
-            ("SGN-MAX-ABS-PRI", signed_max_abs),
-            ("MAX-PRI", p1),
-            ("MID-PRI", p2),
-            ("MIN-PRI", p3),
-        ]);
     }
-    for (name, values) in derived {
-        field.components.retain(|c| c.name != name);
-        field.components.push(Component {
-            name: name.to_string(),
-            values,
-            derived: true,
-        });
+    let [p1, p2, p3] = principal;
+    if strain {
+        field
+            .components
+            .insert(0, derived("EQUIVALENT", equivalent));
+    } else {
+        field.components.insert(0, derived("MISES", equivalent));
+        field.components.insert(1, derived("TRESCA", tresca));
     }
-}
-
-/// Names of the x, y, z components of a vector field, if the field has them.
-fn vector_columns(field: &Field) -> Option<[&'static str; 3]> {
-    const VECTORS: [[&str; 3]; 4] = [
-        ["D1", "D2", "D3"],
-        ["V1", "V2", "V3"],
-        ["F1", "F2", "F3"],
-        ["RF1", "RF2", "RF3"],
-    ];
-    VECTORS
-        .into_iter()
-        .find(|names| names.iter().all(|n| field.component(n).is_some()))
-}
-
-/// Names of the six components of a symmetric tensor field (xx, yy, zz, xy, yz, zx).
-fn tensor_columns(field: &Field) -> Option<[&'static str; 6]> {
-    const TENSORS: [[&str; 6]; 2] = [
-        ["SXX", "SYY", "SZZ", "SXY", "SYZ", "SZX"],
-        ["EXX", "EYY", "EZZ", "EXY", "EYZ", "EZX"],
-    ];
-    TENSORS
-        .into_iter()
-        .find(|names| names.iter().all(|n| field.component(n).is_some()))
+    field.components.extend([
+        derived("SGN_MAX_ABS_PRI", signed_max_abs),
+        derived("PRINCIPAL_MAX", p1),
+        derived("PRINCIPAL_MID", p2),
+        derived("PRINCIPAL_MIN", p3),
+    ]);
 }
 
 /// Eigenvalues of a symmetric 3 × 3 tensor given as (xx, yy, zz, xy, yz, zx), largest first.
@@ -132,9 +120,10 @@ mod tests {
 
     #[test]
     fn displacement_magnitude() {
-        let mut disp = field("DISP", &[("D1", 3.0), ("D2", 0.0), ("D3", 4.0)]);
+        let mut disp = field("DISP", &[("U1", 3.0), ("U2", 0.0), ("U3", 4.0)]);
         add_derived_components(&mut disp);
         assert_eq!(value(&disp, "ALL"), 5.0);
+        assert_eq!(disp.components[0].name, "ALL");
     }
 
     #[test]
@@ -142,19 +131,45 @@ mod tests {
         let mut stress = field(
             "STRESS",
             &[
-                ("SXX", 100.0),
-                ("SYY", 0.0),
-                ("SZZ", 0.0),
-                ("SXY", 0.0),
-                ("SYZ", 0.0),
-                ("SZX", 0.0),
+                ("S11", 100.0),
+                ("S22", 0.0),
+                ("S33", 0.0),
+                ("S12", 0.0),
+                ("S23", 0.0),
+                ("S13", 0.0),
             ],
         );
         add_derived_components(&mut stress);
         assert!((value(&stress, "MISES") - 100.0).abs() < 1e-4);
         assert!((value(&stress, "TRESCA") - 100.0).abs() < 1e-4);
-        assert!((value(&stress, "MAX-PRI") - 100.0).abs() < 1e-4);
-        assert!(value(&stress, "MIN-PRI").abs() < 1e-4);
+        assert!((value(&stress, "PRINCIPAL_MAX") - 100.0).abs() < 1e-4);
+        assert!(value(&stress, "PRINCIPAL_MIN").abs() < 1e-4);
+    }
+
+    #[test]
+    fn strain_gets_equivalent_strain_but_no_tresca() {
+        let mut strain = field(
+            "TOSTRAIN",
+            &[
+                ("E11", 3.0),
+                ("E22", 0.0),
+                ("E33", 0.0),
+                ("E12", 0.0),
+                ("E23", 0.0),
+                ("E13", 0.0),
+            ],
+        );
+        add_derived_components(&mut strain);
+        assert!((value(&strain, "EQUIVALENT") - 2.0).abs() < 1e-6);
+        assert!(strain.component("TRESCA").is_none());
+    }
+
+    #[test]
+    fn deriving_twice_does_not_duplicate() {
+        let mut disp = field("DISP", &[("U1", 1.0), ("U2", 0.0), ("U3", 0.0)]);
+        add_derived_components(&mut disp);
+        add_derived_components(&mut disp);
+        assert_eq!(disp.components.len(), 4);
     }
 
     #[test]

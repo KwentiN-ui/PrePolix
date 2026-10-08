@@ -84,7 +84,7 @@ impl Increment {
     /// Nodal displacements, if the increment has a `DISP` field with three components.
     pub fn displacements(&self) -> Option<Vec<[f32; 3]>> {
         let field = self.field("DISP")?;
-        let [x, y, z] = ["D1", "D2", "D3"].map(|n| field.component(n));
+        let [x, y, z] = ["U1", "U2", "U3"].map(|n| field.component(n));
         let (x, y, z) = (x?, y?, z?);
         Some(
             x.values

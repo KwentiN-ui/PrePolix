@@ -2437,6 +2437,7 @@ name = "plx-io"
 version = "0.1.0"
 dependencies = [
  "plx-mesh",
+ "plx-results",
  "thiserror 2.0.21",
 ]
 
