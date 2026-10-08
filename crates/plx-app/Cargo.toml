@@ -14,7 +14,6 @@ path = "src/main.rs"
 eframe.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true
-egui_dock.workspace = true
 env_logger.workspace = true
 glam.workspace = true
 log.workspace = true

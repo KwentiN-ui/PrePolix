@@ -16,7 +16,7 @@ pub const CONTROL: Color32 = Color32::from_rgb(240, 240, 240);
 pub const WINDOW: Color32 = Color32::WHITE;
 /// Windows highlight for selected items.
 pub const HIGHLIGHT: Color32 = Color32::from_rgb(0, 120, 215);
-const BORDER: Color32 = Color32::from_rgb(173, 173, 173);
+pub const BORDER: Color32 = Color32::from_rgb(173, 173, 173);
 const TEXT: Color32 = Color32::from_rgb(0, 0, 0);
 pub const HOVER_FILL: Color32 = Color32::from_rgb(229, 241, 251);
 pub const PRESSED_FILL: Color32 = Color32::from_rgb(204, 228, 247);
@@ -101,41 +101,4 @@ fn visuals() -> Visuals {
         state.corner_radius = CornerRadius::ZERO;
     }
     v
-}
-
-/// Dock panels as plain Windows panes: grey tab strip, white content for trees and lists.
-pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
-    let mut dock = egui_dock::Style::from_egui(style);
-    dock.tab_bar.bg_fill = CONTROL;
-    dock.tab_bar.corner_radius = CornerRadius::ZERO;
-    dock.tab_bar.hline_color = BORDER;
-    dock.tab.tab_body.bg_fill = WINDOW;
-    dock.tab.tab_body.corner_radius = CornerRadius::ZERO;
-    dock.tab.tab_body.stroke = Stroke::new(1.0, BORDER);
-    for tab in [
-        &mut dock.tab.active,
-        &mut dock.tab.focused,
-        &mut dock.tab.active_with_kb_focus,
-        &mut dock.tab.focused_with_kb_focus,
-    ] {
-        tab.bg_fill = WINDOW;
-        tab.text_color = TEXT;
-        tab.outline_color = BORDER;
-        tab.corner_radius = CornerRadius::ZERO;
-    }
-    for tab in [
-        &mut dock.tab.inactive,
-        &mut dock.tab.hovered,
-        &mut dock.tab.inactive_with_kb_focus,
-    ] {
-        tab.bg_fill = CONTROL;
-        tab.text_color = Color32::from_rgb(60, 60, 60);
-        tab.outline_color = BORDER;
-        tab.corner_radius = CornerRadius::ZERO;
-    }
-    dock.separator.color_idle = BORDER;
-    dock.separator.color_hovered = HIGHLIGHT;
-    dock.separator.color_dragged = HIGHLIGHT;
-    dock.main_surface_border_stroke = Stroke::NONE;
-    dock
 }
