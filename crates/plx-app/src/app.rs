@@ -134,6 +134,13 @@ impl PrepolixApp {
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("Datei", |ui| {
+                let new = egui::Button::new("Neu").shortcut_text("Strg+N");
+                if ui
+                    .add_enabled(self.workbench.model.is_some(), new)
+                    .clicked()
+                {
+                    self.workbench.close_model();
+                }
                 let open = egui::Button::new("Öffnen …").shortcut_text("Strg+O");
                 if ui.add_enabled(self.loading.is_none(), open).clicked() {
                     self.open_dialog(ui.ctx());
@@ -223,6 +230,9 @@ impl eframe::App for PrepolixApp {
         let ctx = ui.ctx().clone();
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.open_dialog(&ctx);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
+            self.workbench.close_model();
         }
         let dropped = ctx.input(|i| {
             i.raw
@@ -381,6 +391,17 @@ impl Workbench {
         for (index, visible) in visibility_changes {
             self.viewport.set_part_visible(index, visible);
         }
+    }
+
+    /// Removes the model and its results, like PrePoMax's File > New.
+    fn close_model(&mut self) {
+        if let Some(model) = self.model.take() {
+            self.output
+                .push(format!("{} geschlossen", model.file_name()));
+        }
+        self.selection = None;
+        self.viewport.set_parts(&[]);
+        self.update_contour();
     }
 
     /// Rebuilds the scene after the result selection or deformation changed.
