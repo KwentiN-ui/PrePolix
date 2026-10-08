@@ -1,14 +1,17 @@
-//! Reader for CalculiX/Abaqus input files (`.inp`).
+//! Reader and writer for CalculiX/Abaqus input files (`.inp`).
 //!
-//! Currently reads the mesh: nodes, elements, node and element sets, and surfaces.
+//! The reader currently takes the mesh: nodes, elements, node and element sets, and surfaces.
 //! Every other keyword is skipped and reported in [`InpImport::skipped_keywords`].
 
 mod lines;
+mod write;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use plx_mesh::{Element, ElementId, ElementShape, FeMesh, NodeId, Part, SurfaceDefinition};
+
+pub use write::{WriteError, write_inp};
 
 use lines::{Keyword, SourceLine, fields, is_keyword, parse_f64};
 

@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 plx-mesh.workspace = true
+plx-model.workspace = true
 plx-results.workspace = true
 thiserror.workspace = true
 

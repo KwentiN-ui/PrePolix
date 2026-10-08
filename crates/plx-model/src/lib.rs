@@ -55,15 +55,26 @@ pub enum StepKind {
     Static(StaticStep),
 }
 
-/// Settings of a `*STATIC` step.
+/// How the increments of a step are chosen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Incrementation {
+    /// CalculiX's own defaults; no increment data is written.
+    #[default]
+    Default,
+    /// Automatic increments within the given limits.
+    Automatic,
+    /// Fixed increments of `initial_increment` (`DIRECT`).
+    Direct,
+}
+
+/// Settings of a `*STATIC` step, with PrePoMax's defaults.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StaticStep {
     /// Geometrically nonlinear (`NLGEOM`).
     pub nlgeom: bool,
-    /// Maximum number of increments (`INC`).
+    pub incrementation: Incrementation,
+    /// Maximum number of increments (`INC`), written unless incrementation is default.
     pub max_increments: u32,
-    /// Let CalculiX choose the increments; otherwise use `initial` throughout.
-    pub automatic_increments: bool,
     pub initial_increment: f64,
     pub time_period: f64,
     pub min_increment: f64,
@@ -74,12 +85,12 @@ impl Default for StaticStep {
     fn default() -> Self {
         Self {
             nlgeom: false,
+            incrementation: Incrementation::Default,
             max_increments: 100,
-            automatic_increments: true,
             initial_increment: 1.0,
             time_period: 1.0,
             min_increment: 1e-5,
-            max_increment: 1.0,
+            max_increment: 1e30,
         }
     }
 }
@@ -121,7 +132,7 @@ pub struct Load {
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum LoadKind {
-    /// Total force on a node region, split equally among its nodes.
+    /// Force applied at every node of the region, as CalculiX's `*CLOAD` on a node set.
     ConcentratedForce([f64; 3]),
     /// Pressure on a surface region; positive pushes into the material.
     Pressure(f64),
@@ -143,7 +154,7 @@ pub enum OutputKind {
 }
 
 impl FieldOutput {
-    /// Field outputs PrePoMax adds to a new static step.
+    /// Field outputs PrePoMax adds to a new static step. `NOE` is added when writing.
     pub fn defaults() -> Vec<Self> {
         vec![
             Self {
@@ -154,7 +165,7 @@ impl FieldOutput {
             Self {
                 name: "EF-Output-1".into(),
                 kind: OutputKind::Element,
-                variables: vec!["E".into(), "ME".into(), "PEEQ".into(), "S".into()],
+                variables: vec!["S".into(), "E".into()],
             },
         ]
     }
