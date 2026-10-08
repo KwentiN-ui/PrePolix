@@ -1,0 +1,14 @@
+[package]
+name = "plx-results"
+description = "Ergebnis-Datenmodell und abgeleitete Größen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+plx-core.workspace = true
+plx-mesh.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "plx-core"
+description = "Einheiten, Formeln, Selektions-Rezepte und gemeinsame Typen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+
+[lints]
+workspace = true

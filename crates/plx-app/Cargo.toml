@@ -1,0 +1,27 @@
+[package]
+name = "plx-app"
+description = "prepolix: FEM-Präprozessor und Postprozessor für CalculiX"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "prepolix"
+path = "src/main.rs"
+
+[dependencies]
+eframe.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui_dock.workspace = true
+env_logger.workspace = true
+glam.workspace = true
+log.workspace = true
+plx-core.workspace = true
+plx-mesh.workspace = true
+plx-model.workspace = true
+plx-render.workspace = true
+
+[lints]
+workspace = true
