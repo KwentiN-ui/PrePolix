@@ -1,6 +1,18 @@
 use glam::camera::rh::{proj::directx, view::look_at_mat4};
 use glam::{Mat4, Quat, Vec3};
 
+/// Viewing directions of the view toolbar: the eye looks from the named side at the target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StandardView {
+    Front,
+    Back,
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Isometric,
+}
+
 /// Orthographic camera orbiting a target point, as used in CAE viewports.
 ///
 /// `rotation` maps camera space (x right, y up, looking along -z) to world space.
@@ -118,14 +130,26 @@ impl Camera {
         self.distance = self.scene_radius * 2.2;
     }
 
-    pub fn set_front(&mut self) {
-        self.rotation = Quat::IDENTITY;
+    pub fn set_isometric(&mut self) {
+        self.set_view(StandardView::Isometric);
     }
 
-    pub fn set_isometric(&mut self) {
-        let yaw = Quat::from_rotation_y(std::f32::consts::FRAC_PI_4);
-        let pitch = Quat::from_rotation_x(-(1.0_f32 / 2.0_f32.sqrt()).atan());
-        self.rotation = yaw * pitch;
+    /// Looks at the target from one of PrePoMax's standard directions.
+    pub fn set_view(&mut self, view: StandardView) {
+        use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+        self.rotation = match view {
+            StandardView::Front => Quat::IDENTITY,
+            StandardView::Back => Quat::from_rotation_y(PI),
+            StandardView::Right => Quat::from_rotation_y(FRAC_PI_2),
+            StandardView::Left => Quat::from_rotation_y(-FRAC_PI_2),
+            StandardView::Top => Quat::from_rotation_x(-FRAC_PI_2),
+            StandardView::Bottom => Quat::from_rotation_x(FRAC_PI_2),
+            StandardView::Isometric => {
+                let yaw = Quat::from_rotation_y(FRAC_PI_4);
+                let pitch = Quat::from_rotation_x(-(1.0_f32 / 2.0_f32.sqrt()).atan());
+                yaw * pitch
+            }
+        };
     }
 }
 
@@ -221,6 +245,23 @@ mod tests {
         assert!((before - 2.0 * camera.half_extent() / 400.0).abs() < EPS);
         camera.zoom(0.5);
         assert!((camera.pixel_size(800.0, 400.0) - before * 0.5).abs() < EPS);
+    }
+
+    #[test]
+    fn standard_views_look_from_the_named_side() {
+        let mut camera = Camera::default();
+        for (view, eye, up) in [
+            (StandardView::Front, Vec3::Z, Vec3::Y),
+            (StandardView::Back, Vec3::NEG_Z, Vec3::Y),
+            (StandardView::Right, Vec3::X, Vec3::Y),
+            (StandardView::Left, Vec3::NEG_X, Vec3::Y),
+            (StandardView::Top, Vec3::Y, Vec3::NEG_Z),
+            (StandardView::Bottom, Vec3::NEG_Y, Vec3::Z),
+        ] {
+            camera.set_view(view);
+            assert!((camera.forward() + eye).length() < EPS, "{view:?}");
+            assert!((camera.up() - up).length() < EPS, "{view:?}");
+        }
     }
 
     #[test]

@@ -60,3 +60,7 @@ Die unteren Crates kennen keine Oberfläche und lassen sich einzeln testen (`car
 ## Lizenz
 
 GPL-3.0-or-later, siehe [LICENSE](LICENSE).
+
+Die mitgelieferte Schrift Noto Sans (`crates/plx-app/assets/fonts`, auf Latein, Griechisch und
+gängige Symbole reduziert) steht unter der SIL Open Font License 1.1, siehe
+[OFL.txt](crates/plx-app/assets/fonts/OFL.txt).

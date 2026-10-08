@@ -1,8 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod icons;
 mod model;
+mod overlay;
+mod properties;
 mod results;
+mod style;
+mod tree;
 mod viewport;
 
 fn main() -> eframe::Result {
@@ -24,15 +29,21 @@ fn main() -> eframe::Result {
 
 #[cfg(test)]
 mod tests {
-    /// egui's default proportional font lacks most symbols and emoji, which then show up as
-    /// empty boxes. The GUI sources stick to Latin-1 plus a few checked typographic signs.
+    /// The bundled Noto Sans subset and egui's fallback fonts lack emoji and many symbols,
+    /// which then show up as empty boxes. The GUI sources stick to Latin-1 plus a few checked
+    /// typographic signs.
     #[test]
     fn gui_sources_only_use_glyphs_of_the_default_font() {
         let sources = [
             ("app.rs", include_str!("app.rs")),
+            ("icons.rs", include_str!("icons.rs")),
             ("main.rs", include_str!("main.rs")),
             ("model.rs", include_str!("model.rs")),
+            ("overlay.rs", include_str!("overlay.rs")),
+            ("properties.rs", include_str!("properties.rs")),
             ("results.rs", include_str!("results.rs")),
+            ("style.rs", include_str!("style.rs")),
+            ("tree.rs", include_str!("tree.rs")),
             ("viewport.rs", include_str!("viewport.rs")),
         ];
         for (file, text) in sources {

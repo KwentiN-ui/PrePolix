@@ -174,18 +174,6 @@ impl ResultsView {
             .reduce(|a, b| if b.1 > a.1 { b } else { a })
     }
 
-    /// Node index and value of the smallest value of the shown component.
-    pub fn minimum(&self) -> Option<(usize, f32)> {
-        let (_, component) = self.current()?;
-        component
-            .values
-            .iter()
-            .copied()
-            .enumerate()
-            .filter(|(_, v)| v.is_finite())
-            .reduce(|a, b| if b.1 < a.1 { b } else { a })
-    }
-
     /// Displacement scale factor for the current increment and deformation setting.
     pub fn scale(&self) -> f32 {
         match self.deformation {
@@ -210,7 +198,11 @@ impl ResultsView {
         // PrePoMax writes names with blanks instead of underscores and dashes.
         let name = |n: &str| n.replace(['_', '-'], " ");
         Some(Legend {
-            title: format!("{}: {}", name(&field.name), name(&component.name)),
+            title: format!(
+                "{}: {}\nAutomatic",
+                name(&field.name),
+                name(&component.name)
+            ),
             min,
             max,
             levels: self.levels,
