@@ -1,9 +1,9 @@
 name: CI
 
-# Das Repo ist privat, Actions-Minuten sind knapp (Windows zählt doppelt).
-# Pull Requests und master laufen deshalb nur auf Linux; der master-Lauf füllt
-# zugleich den Cargo-Cache, den Pull Requests mitnutzen. Windows und die
-# Release-Builds gibt es nur per Hand über "Run workflow".
+# Das Repo ist privat, Actions-Minuten sind knapp. Die CI läuft deshalb nur auf
+# Linux; Windows wird später nachgerüstet. Der master-Lauf füllt zugleich den
+# Cargo-Cache, den Pull Requests mitnutzen. Den Release-Build gibt es nur per
+# Hand über "Run workflow".
 on:
   push:
     branches: [master]
@@ -22,12 +22,8 @@ env:
 
 jobs:
   check:
-    name: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ${{ github.event_name == 'workflow_dispatch' && fromJSON('["ubuntu-latest", "windows-latest"]') || fromJSON('["ubuntu-latest"]') }}
-    runs-on: ${{ matrix.os }}
+    name: ubuntu-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -44,8 +40,6 @@ jobs:
       - if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: prepolix-${{ runner.os }}
-          path: |
-            target/release/prepolix
-            target/release/prepolix.exe
+          name: prepolix-linux
+          path: target/release/prepolix
           if-no-files-found: error
