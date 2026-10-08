@@ -3,6 +3,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use plx_render::StandardView;
 
+use crate::analysis::{Analysis, MonitorEvent};
 use crate::animation::{AnimationKind, ColorLimits, Playback};
 use crate::icons::{self, Icon};
 use crate::model::{self, LoadedModel, Model};
@@ -10,13 +11,16 @@ use crate::overlay::{Marker, Overlay};
 use crate::properties;
 use crate::results::{Deformation, ResultsView, format_legend_value};
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
+use crate::setup::{Editor, EditorResult, NewItem};
 use crate::tree::{self, TreeItem, TreeState, TreeView};
-use crate::viewport::{ViewCommand, Viewport};
+use crate::viewport::{Click, ViewCommand, Viewport};
 use plx_render::RenderMesh;
 
 enum LoadEvent {
     Started(PathBuf),
     Finished(PathBuf, Result<Box<LoadedModel>, String>),
+    /// Results of an analysis of the open model.
+    Results(PathBuf, Result<Box<plx_io::frd::FrdImport>, String>),
 }
 
 struct Workbench {
@@ -38,6 +42,13 @@ struct Workbench {
     frame_changed: bool,
     /// Scene of each animation frame shown so far, cleared when anything else changes.
     frame_cache: std::collections::HashMap<usize, Vec<RenderMesh>>,
+    /// Open dialog creating or editing an item of the FE model.
+    editor: Option<Editor>,
+    /// The tree selection whose region is highlighted.
+    highlighted: Option<(TreeView, TreeItem)>,
+    analysis: Option<Analysis>,
+    /// Results file the user asked to open; read by the app on a worker thread.
+    open_results: Option<PathBuf>,
 }
 
 pub struct PrepolixApp {
@@ -79,6 +90,10 @@ impl PrepolixApp {
                 results_changed: false,
                 frame_changed: false,
                 frame_cache: Default::default(),
+                editor: None,
+                highlighted: None,
+                analysis: None,
+                open_results: None,
             },
             load_events: channel(),
             loading: None,
@@ -126,8 +141,28 @@ impl PrepolixApp {
                     self.loading = None;
                     self.workbench.model_loaded(path, result);
                 }
+                LoadEvent::Results(path, result) => {
+                    self.loading = None;
+                    self.workbench.results_loaded(path, result);
+                }
             }
         }
+    }
+
+    /// Reads the results of an analysis on a worker thread.
+    fn read_results(&mut self, path: PathBuf, ctx: &egui::Context) {
+        if self.loading.is_some() {
+            return;
+        }
+        self.loading = Some(path.clone());
+        let (sender, ctx) = (self.load_events.0.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let result = plx_io::frd::read_frd(&path)
+                .map(Box::new)
+                .map_err(|e| e.to_string());
+            let _ = sender.send(LoadEvent::Results(path, result));
+            ctx.request_repaint();
+        });
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
@@ -143,6 +178,11 @@ impl PrepolixApp {
                 let open = egui::Button::new("Öffnen …").shortcut_text("Strg+O");
                 if ui.add_enabled(self.loading.is_none(), open).clicked() {
                     self.open_dialog(ui.ctx());
+                }
+                let setup = self.workbench.setup_model().is_some();
+                let export = egui::Button::new("CalculiX-Eingabedatei exportieren …");
+                if ui.add_enabled(setup, export).clicked() {
+                    self.workbench.export_inp();
                 }
                 ui.separator();
                 if ui.button("Beenden").clicked() {
@@ -165,9 +205,12 @@ impl PrepolixApp {
                     "Netzkanten",
                 );
             });
-            for menu in ["Geometrie", "Netz", "Modell", "Analyse", "Ergebnisse"] {
+            for menu in ["Geometrie", "Netz"] {
                 ui.menu_button(menu, not_implemented);
             }
+            ui.menu_button("Modell", |ui| self.workbench.model_menu(ui));
+            ui.menu_button("Analyse", |ui| self.workbench.analysis_menu(ui));
+            ui.menu_button("Ergebnisse", not_implemented);
             ui.menu_button("Werkzeuge", |ui| {
                 if ui.button("Einstellungen …").clicked() {
                     self.workbench.settings_window =
@@ -294,7 +337,7 @@ impl eframe::App for PrepolixApp {
                 .workbench
                 .model
                 .as_mut()
-                .and_then(|m| m.results.as_mut())
+                .and_then(Model::shown_results_mut)
             {
                 ui.separator();
                 if results_tool_bar(ui, view) {
@@ -329,11 +372,21 @@ impl eframe::App for PrepolixApp {
             .frame(pane.inner_margin(4))
             .show(ui, |ui| self.workbench.output(ui));
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            if let Some(command) = self.workbench.viewport.ui(ui) {
+            let response = self.workbench.viewport.ui(ui);
+            if let Some(command) = response.command {
                 self.workbench.view_command = Some(command);
+            }
+            if let Some(click) = response.click {
+                self.workbench.click(click);
             }
         });
         self.workbench.properties_window(&ctx);
+        self.workbench.editor_window(&ctx);
+        self.workbench.run_analysis(&ctx);
+        if let Some(path) = self.workbench.open_results.take() {
+            self.read_results(path, &ctx);
+        }
+        self.workbench.update_highlight();
         self.workbench.settings_window(&ctx);
         self.workbench.rebuild_if_results_changed();
 
@@ -410,6 +463,8 @@ impl Workbench {
                     .as_ref()
                     .map(|v| (TreeView::Results, TreeItem::Component(v.field, v.component)));
                 self.dialog = None;
+                self.editor = None;
+                self.highlighted = None;
                 self.viewport.labels = Default::default();
                 self.model = Some(model);
                 self.update_contour();
@@ -457,8 +512,9 @@ impl Workbench {
                     galley,
                     egui::Color32::BLACK,
                 );
-                if response.clicked() {
+                if response.clicked() && self.tree_view != view {
                     self.tree_view = view;
+                    self.show_results_for_view();
                 }
             }
         });
@@ -493,7 +549,273 @@ impl Workbench {
             self.results_changed = true;
         }
         if let Some(item) = response.open {
-            self.dialog = Some(item);
+            let fe = self.model.as_ref().map(|m| &m.fe);
+            match fe.and_then(|fe| Editor::edit(&item, fe)) {
+                Some(editor) => self.editor = Some(editor),
+                None => self.dialog = Some(item),
+            }
+        }
+        if let Some(kind) = response.create {
+            self.create(kind);
+        }
+        if let (Some(item), Some(model)) = (response.delete, self.model.as_mut())
+            && crate::setup::delete(&mut model.fe, &item)
+        {
+            self.tree.selected = None;
+            self.editor = None;
+        }
+        if response.run {
+            self.start_analysis();
+        }
+    }
+
+    /// The model, when it can be set up (not a results file).
+    fn setup_model(&self) -> Option<&Model> {
+        self.model.as_ref().filter(|m| !m.results_only)
+    }
+
+    fn create(&mut self, kind: NewItem) {
+        if let Some(model) = self.setup_model() {
+            self.editor = Editor::create(kind, &model.fe);
+            self.tree_view = TreeView::FeModel;
+            self.show_results_for_view();
+        }
+    }
+
+    /// PrePoMax's Model menu: create items of the FE model.
+    fn model_menu(&mut self, ui: &mut egui::Ui) {
+        let Some(model) = self.setup_model() else {
+            ui.label("Zuerst eine .inp-Datei öffnen");
+            return;
+        };
+        let last_step = model.fe.steps.len().checked_sub(1);
+        let mut kind = None;
+        for (item, label, enabled) in [
+            (NewItem::Material, "Material erstellen …", true),
+            (NewItem::Section, "Section erstellen …", true),
+            (NewItem::Step, "Step erstellen …", true),
+            (
+                NewItem::BoundaryCondition(last_step.unwrap_or(0)),
+                "Randbedingung erstellen …",
+                last_step.is_some(),
+            ),
+            (
+                NewItem::Load(last_step.unwrap_or(0)),
+                "Last erstellen …",
+                last_step.is_some(),
+            ),
+        ] {
+            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                kind = Some(item);
+            }
+        }
+        if let Some(kind) = kind {
+            self.create(kind);
+        }
+    }
+
+    fn analysis_menu(&mut self, ui: &mut egui::Ui) {
+        let running = self.analysis.as_ref().is_some_and(Analysis::is_running);
+        let can_start = self.setup_model().is_some() && !running;
+        if ui
+            .add_enabled(
+                can_start,
+                egui::Button::new("Analyse starten").shortcut_text("F5"),
+            )
+            .clicked()
+        {
+            self.start_analysis();
+        }
+        if ui
+            .add_enabled(running, egui::Button::new("Analyse abbrechen"))
+            .clicked()
+            && let Some(analysis) = &mut self.analysis
+        {
+            analysis.kill();
+        }
+        if ui
+            .add_enabled(self.analysis.is_some(), egui::Button::new("Monitor"))
+            .clicked()
+            && let Some(analysis) = &mut self.analysis
+        {
+            analysis.monitor = true;
+        }
+        let results = self.analysis.as_ref().and_then(Analysis::results);
+        if ui
+            .add_enabled(
+                !running && results.is_some(),
+                egui::Button::new("Ergebnisse öffnen"),
+            )
+            .clicked()
+        {
+            self.open_results = results;
+        }
+    }
+
+    fn start_analysis(&mut self) {
+        if self.analysis.as_ref().is_some_and(Analysis::is_running) {
+            return;
+        }
+        let Some(model) = self.setup_model() else {
+            return;
+        };
+        match Analysis::start(&self.settings.solver, model) {
+            Ok(analysis) => {
+                self.output.push(format!(
+                    "Analyse gestartet: {}",
+                    self.settings.solver.work_dir().display()
+                ));
+                self.analysis = Some(analysis);
+            }
+            Err(error) => self.output.push(error),
+        }
+    }
+
+    /// Polls the running analysis and shows its monitor.
+    fn run_analysis(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F5)) {
+            self.start_analysis();
+        }
+        let Some(analysis) = &mut self.analysis else {
+            return;
+        };
+        if let Some(status) = analysis.poll() {
+            self.output
+                .push(format!("Analyse {}", Analysis::status_text(status)));
+        }
+        if analysis.monitor
+            && let MonitorEvent::OpenResults(path) = analysis.window(ctx)
+        {
+            self.open_results = Some(path);
+        }
+    }
+
+    fn results_loaded(
+        &mut self,
+        path: PathBuf,
+        result: Result<Box<plx_io::frd::FrdImport>, String>,
+    ) {
+        let Some(model) = self.model.as_mut().filter(|m| !m.results_only) else {
+            return;
+        };
+        match result {
+            Ok(frd) => {
+                model.attach_results(*frd);
+                if let Some(view) = &mut model.results {
+                    view.levels = self.settings.post.levels;
+                    view.show_undeformed = self.settings.post.undeformed_outline;
+                    self.output.push(format!(
+                        "{} geladen: {} Ergebnis-Inkrement(e)",
+                        path.display(),
+                        view.increments.len()
+                    ));
+                    self.tree.selected = Some((
+                        TreeView::Results,
+                        TreeItem::Component(view.field, view.component),
+                    ));
+                }
+                self.tree_view = TreeView::Results;
+                self.editor = None;
+                self.viewport.labels = Default::default();
+                self.results_changed = true;
+            }
+            Err(error) => self
+                .output
+                .push(format!("Fehler beim Lesen der Ergebnisse: {error}")),
+        }
+    }
+
+    /// Results are drawn on the Results tab only, as in PrePoMax.
+    fn show_results_for_view(&mut self) {
+        if let Some(model) = &mut self.model {
+            let show = model.results_only || self.tree_view == TreeView::Results;
+            if model.show_results != show {
+                model.show_results = show;
+                self.results_changed = true;
+            }
+        }
+    }
+
+    /// Writes the input file of the set-up model to a file the user picks.
+    fn export_inp(&mut self) {
+        let Some(model) = self.setup_model() else {
+            return;
+        };
+        let heading = format!("prepolix: {}", model.file_name());
+        let text = match plx_io::inp::write_inp(&model.mesh, &model.fe, &heading) {
+            Ok(text) => text,
+            Err(error) => {
+                self.output.push(format!("Export nicht möglich: {error}"));
+                return;
+            }
+        };
+        let picked = rfd::FileDialog::new()
+            .set_title("CalculiX-Eingabedatei exportieren")
+            .add_filter("Eingabedatei (*.inp)", &["inp"])
+            .set_file_name(format!("{}.inp", crate::tree::ANALYSIS_NAME))
+            .save_file();
+        if let Some(path) = picked {
+            match std::fs::write(&path, text) {
+                Ok(()) => self.output.push(format!("{} geschrieben", path.display())),
+                Err(error) => self.output.push(format!("{}: {error}", path.display())),
+            }
+        }
+    }
+
+    /// A click in the 3D view picks for the open dialog.
+    fn click(&mut self, click: Click) {
+        let (Some(editor), Some(model)) = (&mut self.editor, &self.model) else {
+            return;
+        };
+        if !editor.picks() {
+            return;
+        }
+        if let Some(hit) = model.pick(click.origin, click.direction) {
+            editor.click(model, &hit, click.remove);
+        }
+    }
+
+    fn editor_window(&mut self, ctx: &egui::Context) {
+        let (Some(editor), Some(model)) = (&mut self.editor, &mut self.model) else {
+            return;
+        };
+        match editor.show(ctx, model) {
+            EditorResult::Open => {}
+            EditorResult::Ok => {
+                if let Some(editor) = self.editor.take() {
+                    editor.apply(&mut model.fe);
+                }
+                self.highlighted = None;
+            }
+            EditorResult::Cancel => {
+                self.editor = None;
+                self.highlighted = None;
+            }
+        }
+    }
+
+    /// Highlights the region of the open dialog, or of the item selected in the tree.
+    fn update_highlight(&mut self) {
+        let Some(model) = &mut self.model else {
+            return;
+        };
+        let highlight = if let Some(editor) = &self.editor {
+            editor.highlight(model)
+        } else {
+            if self.highlighted == self.tree.selected {
+                return;
+            }
+            self.highlighted = self.tree.selected.clone();
+            match &self.tree.selected {
+                Some((TreeView::FeModel, item)) => crate::setup::item_region(&model.fe, item)
+                    .map(|region| crate::setup::region_highlight(model, region))
+                    .unwrap_or_default(),
+                _ => Default::default(),
+            }
+        };
+        if highlight != model.highlight {
+            model.highlight = highlight;
+            self.results_changed = true;
         }
     }
 
@@ -559,7 +881,7 @@ impl Workbench {
 
     /// Plays the animation and shows its window; marks the scene for rebuilding.
     fn animate(&mut self, ctx: &egui::Context) {
-        let Some(view) = self.model.as_mut().and_then(|m| m.results.as_mut()) else {
+        let Some(view) = self.model.as_mut().and_then(Model::shown_results_mut) else {
             return;
         };
         let Some(animation) = &mut view.animation else {
@@ -595,8 +917,7 @@ impl Workbench {
         }
         let Some(model) = &mut self.model else { return };
         let frame = model
-            .results
-            .as_ref()
+            .shown_results()
             .and_then(|v| v.animation.as_ref())
             .map(|a| a.frame);
         if !frame_only {
@@ -631,7 +952,7 @@ impl Workbench {
             };
             return;
         };
-        let view = model.results.as_ref();
+        let view = model.shown_results();
         self.viewport.options.contour_levels =
             view.filter(|v| v.current().is_some()).map(|v| v.levels);
         let (graphics, post) = (&self.settings.graphics, &self.settings.post);
@@ -661,6 +982,9 @@ impl Workbench {
             global_origin: graphics.global_axes.then(|| model.global_origin()),
             show_scale_bar: graphics.scale_bar,
             show_view_triad: graphics.view_triad,
+            nodes: (model.highlight.nodes.iter())
+                .filter_map(|&id| model.node_position(model.mesh.node_index(id)?))
+                .collect(),
         };
     }
 }

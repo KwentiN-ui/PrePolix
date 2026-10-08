@@ -11,6 +11,7 @@ pub const STORAGE_KEY: &str = "settings";
 pub struct Settings {
     pub graphics: Graphics,
     pub post: PostProcessing,
+    pub solver: Solver,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -60,20 +61,61 @@ impl Default for PostProcessing {
     }
 }
 
+/// How CalculiX is run, PrePoMax's "CalculiX" settings page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Solver {
+    /// The CalculiX executable; a bare name is looked up on `PATH`.
+    pub executable: String,
+    /// Threads for the solver (`OMP_NUM_THREADS`).
+    pub threads: u32,
+    /// Where analyses run; empty for a `prepolix` folder in the temporary directory.
+    pub work_dir: String,
+}
+
+impl Default for Solver {
+    fn default() -> Self {
+        Self {
+            executable: "ccx".into(),
+            threads: 1,
+            work_dir: String::new(),
+        }
+    }
+}
+
+impl Solver {
+    pub fn work_dir(&self) -> std::path::PathBuf {
+        if self.work_dir.trim().is_empty() {
+            std::env::temp_dir().join("prepolix")
+        } else {
+            std::path::PathBuf::from(self.work_dir.trim())
+        }
+    }
+
+    pub fn job_solver(&self) -> plx_job::Solver {
+        plx_job::Solver {
+            executable: self.executable.trim().into(),
+            threads: self.threads.max(1),
+        }
+    }
+}
+
 /// Pages of the settings window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Graphics,
     PostProcessing,
+    Solver,
 }
 
 impl Page {
-    const ALL: [Page; 2] = [Page::Graphics, Page::PostProcessing];
+    const ALL: [Page; 3] = [Page::Graphics, Page::PostProcessing, Page::Solver];
 
     fn title(self) -> &'static str {
         match self {
             Page::Graphics => "Grafik",
             Page::PostProcessing => "Postprocessing",
+            Page::Solver => "CalculiX",
         }
     }
 }
@@ -82,6 +124,7 @@ impl Page {
 pub struct SettingsWindow {
     page: Page,
     draft: Settings,
+    default_work_dir: String,
 }
 
 /// What the user decided in the settings window.
@@ -99,6 +142,7 @@ impl SettingsWindow {
         Self {
             page: Page::PostProcessing,
             draft: settings.clone(),
+            default_work_dir: Solver::default().work_dir().display().to_string(),
         }
     }
 
@@ -186,6 +230,26 @@ impl SettingsWindow {
                             .range(2..=plx_render::contour::MAX_LEVELS),
                     );
                 });
+            }
+            Page::Solver => {
+                let solver = &mut self.draft.solver;
+                egui::Grid::new("solver settings")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Programm");
+                        ui.text_edit_singleline(&mut solver.executable);
+                        ui.end_row();
+                        ui.label("Threads");
+                        ui.add(egui::DragValue::new(&mut solver.threads).range(1..=256));
+                        ui.end_row();
+                        ui.label("Arbeitsverzeichnis");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut solver.work_dir)
+                                .hint_text(self.default_work_dir.as_str()),
+                        );
+                        ui.end_row();
+                    });
             }
         }
     }

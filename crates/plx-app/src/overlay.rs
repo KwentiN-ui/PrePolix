@@ -35,6 +35,8 @@ pub struct Overlay {
     pub global_origin: Option<Vec3>,
     pub show_scale_bar: bool,
     pub show_view_triad: bool,
+    /// Selected nodes in render coordinates, drawn as highlighted points.
+    pub nodes: Vec<Vec3>,
 }
 
 /// Annotated point of the model, e.g. the node with the largest result value.
@@ -73,6 +75,19 @@ pub fn draw(ui: &Ui, rect: Rect, camera: &Camera, overlay: &Overlay, offsets: &m
         if rect.contains(center) {
             triad(&painter, camera, center, 36.0, false);
         }
+    }
+    let view_proj = camera.view_proj(rect.aspect_ratio());
+    for &node in &overlay.nodes {
+        let ndc = view_proj.project_point3(node);
+        let point = pos2(
+            rect.center().x + ndc.x * rect.width() * 0.5,
+            rect.center().y - ndc.y * rect.height() * 0.5,
+        );
+        painter.rect_filled(
+            Rect::from_center_size(point, vec2(5.0, 5.0)),
+            0.0,
+            Color32::RED,
+        );
     }
     if overlay.show_scale_bar {
         draw_scale_bar(&painter, rect, camera);
