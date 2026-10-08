@@ -3,7 +3,7 @@
 Ein FEM-Präprozessor und Postprozessor für [CalculiX](http://www.calculix.de/), geschrieben in Rust und lauffähig unter Linux und Windows.
 Vorbild für Bedienung und Funktionsumfang ist [PrePoMax](https://prepomax.fs.um.si/).
 
-> Status: Meilenstein M1, CalculiX-Netze (`.inp`) lassen sich öffnen und ansehen. Plan und Roadmap stehen in [docs/PLANUNG_TECH_STACK.md](docs/PLANUNG_TECH_STACK.md).
+> Status: Meilenstein M2, CalculiX-Netze (`.inp`) und -Ergebnisse (`.frd`) lassen sich öffnen und ansehen. Plan und Roadmap stehen in [docs/PLANUNG_TECH_STACK.md](docs/PLANUNG_TECH_STACK.md).
 
 ## Bauen und starten
 
@@ -13,10 +13,11 @@ Voraussetzung ist ein aktuelles stabiles Rust (`rustup`).
 cargo run --release
 ```
 
-Ein Modell öffnest du über *Datei → Öffnen* (Strg+O), indem du eine `.inp`-Datei ins Fenster ziehst oder sie beim Start angibst:
+Ein Modell oder eine Ergebnisdatei öffnest du über *Datei → Öffnen* (Strg+O), indem du eine `.inp`- oder `.frd`-Datei ins Fenster ziehst oder sie beim Start angibst:
 
 ```sh
 cargo run --release -- testdata/wuerfel_c3d10.inp
+cargo run --release -- testdata/kragbalken_c3d8.frd
 ```
 
 Unter Linux braucht das Programm zur Laufzeit `libxkbcommon-x11` (X11) bzw. `libxkbcommon` (Wayland) sowie einen Vulkan- oder OpenGL-Treiber. Die meisten Desktop-Installationen bringen das bereits mit.
@@ -35,8 +36,10 @@ Unter Linux braucht das Programm zur Laufzeit `libxkbcommon-x11` (X11) bzw. `lib
 - `.inp`-Netze lesen: Knoten, Elemente (C3D4/6/8/10/15/20 inkl. R/I-Varianten, S3/4/6/8, M3D, CPS/CPE/CAX, B31/B32, T3D2/T3D3), `*NSET`, `*ELSET` (auch `GENERATE`), `*SURFACE`, `*INCLUDE`. Alle anderen Keywords werden übersprungen und in der Ausgabe aufgezählt.
 - Parts entstehen aus dem `ELSET=` der `*ELEMENT`-Blöcke und lassen sich im Modellbaum ein- und ausblenden.
 - Darstellung der Außenhaut mit Feature-Kanten und optionalen Netzkanten, auch für quadratische Elemente.
+- `.frd`-Ergebnisse lesen (ASCII und binär): Netz, Materialien als Parts, alle Steps und Inkremente inklusive Eigenformen. Komponenten heißen wie in PrePoMax (`U1`, `S11`, …); ergänzt werden Verschiebungsbetrag `ALL`, `MISES`, `TRESCA`, Hauptspannungen und Vergleichsdehnung.
+- Ergebnisanzeige wie in PrePoMax: Konturplot in 9 Farbstufen (Regenbogen, einstellbar), Legende, Min/Max mit Knoten, verformte Darstellung mit automatischem, echtem oder eigenem Faktor.
 
-Beispielmodelle liegen in [testdata/](testdata/), erzeugt von `testdata/erzeugen.py`. Die Modelle mit Step lassen sich direkt mit `ccx` rechnen.
+Beispielmodelle liegen in [testdata/](testdata/), erzeugt von `testdata/erzeugen.py`. Die Modelle mit Step lassen sich direkt mit `ccx` rechnen; zwei Ergebnisdateien (`*.frd`) liegen bei.
 
 ## Aufbau
 

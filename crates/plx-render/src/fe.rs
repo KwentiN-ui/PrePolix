@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use glam::DVec3;
-use plx_mesh::{FeMesh, PartSkin, SkinFace, face_normal};
+use plx_mesh::{PartSkin, SkinFace, face_normal};
+
+use crate::contour::{NO_VALUE, srgb_to_linear};
 
 use crate::mesh::{RenderMesh, Vertex};
 
@@ -25,27 +27,21 @@ pub fn part_color(index: usize) -> [f32; 3] {
     PART_COLORS_SRGB[index % PART_COLORS_SRGB.len()].map(|c| srgb_to_linear(c as f32 / 255.0))
 }
 
-fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-/// Builds the GPU-ready geometry of one part. Positions are shifted by `-origin`, so that
-/// large coordinates keep their precision in `f32`.
+/// Builds the GPU-ready geometry of one part from node coordinates (undeformed or deformed).
+/// Positions are shifted by `-origin`, so that large coordinates keep their precision in `f32`.
+/// `scalars` holds one normalized contour value per node (see [`crate::contour::normalize`]).
 ///
 /// Faces of the same surface patch that meet at less than `smooth_angle_deg` share averaged
 /// vertex normals, so curved surfaces look round; across feature edges the shading stays flat.
 pub fn part_render_mesh(
-    mesh: &FeMesh,
+    coords: &[[f64; 3]],
     skin: &PartSkin,
     origin: DVec3,
     color: [f32; 3],
     smooth_angle_deg: f64,
+    scalars: Option<&[f32]>,
 ) -> RenderMesh {
-    let coords = mesh.coords();
+    let scalar = |node: usize| scalars.map_or(NO_VALUE, |s| s[node]);
     let position = |node: usize| (DVec3::from(coords[node]) - origin).as_vec3().to_array();
     let mut render = RenderMesh::default();
     let normals = smooth_vertex_normals(coords, skin, smooth_angle_deg);
@@ -57,6 +53,7 @@ pub fn part_render_mesh(
                 position: position(node),
                 normal,
                 color,
+                scalar: scalar(node),
             });
         }
         render
@@ -68,6 +65,7 @@ pub fn part_render_mesh(
         position: position(node),
         normal: [0.0; 3],
         color,
+        scalar: NO_VALUE,
     };
     for edge in &skin.edges {
         let segments: &[[usize; 2]] = match edge.mid {
@@ -175,7 +173,7 @@ fn face_triangles(face: &SkinFace) -> &'static [u32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plx_mesh::{Element, ElementShape, Part, extract_part_skin};
+    use plx_mesh::{Element, ElementShape, FeMesh, Part, extract_part_skin};
 
     fn single_element(shape: ElementShape, coords: &[[f64; 3]]) -> FeMesh {
         let mut mesh = FeMesh::default();
@@ -222,7 +220,7 @@ mod tests {
         ];
         let mesh = single_element(ElementShape::Quad8, &coords);
         let skin = extract_part_skin(&mesh, &mesh.parts[0], 30.0);
-        let render = part_render_mesh(&mesh, &skin, DVec3::ZERO, [1.0; 3], 30.0);
+        let render = part_render_mesh(mesh.coords(), &skin, DVec3::ZERO, [1.0; 3], 30.0, None);
         assert_eq!(render.triangles.len(), 6 * 3);
         assert!((triangle_area_sum(&render) - 4.0).abs() < 1e-5);
         // Four curved boundary edges of two segments each, all on the outline.
@@ -250,7 +248,7 @@ mod tests {
         ]);
         let mesh = single_element(ElementShape::Tet10, &coords);
         let skin = extract_part_skin(&mesh, &mesh.parts[0], 30.0);
-        let render = part_render_mesh(&mesh, &skin, DVec3::ZERO, [1.0; 3], 30.0);
+        let render = part_render_mesh(mesh.coords(), &skin, DVec3::ZERO, [1.0; 3], 30.0, None);
         let expected = 3.0 * 0.5 + 3.0_f32.sqrt() / 2.0;
         assert!((triangle_area_sum(&render) - expected).abs() < 1e-5);
     }
@@ -260,7 +258,14 @@ mod tests {
         let coords = [[1000.0, 0.0, 0.0], [1001.0, 0.0, 0.0], [1000.0, 1.0, 0.0]];
         let mesh = single_element(ElementShape::Tri3, &coords);
         let skin = extract_part_skin(&mesh, &mesh.parts[0], 30.0);
-        let render = part_render_mesh(&mesh, &skin, DVec3::new(1000.0, 0.0, 0.0), [1.0; 3], 30.0);
+        let render = part_render_mesh(
+            mesh.coords(),
+            &skin,
+            DVec3::new(1000.0, 0.0, 0.0),
+            [1.0; 3],
+            30.0,
+            None,
+        );
         assert_eq!(render.vertices[1].position, [1.0, 0.0, 0.0]);
     }
 
@@ -293,7 +298,7 @@ mod tests {
             elements: vec![1, 2, 3],
         });
         let skin = extract_part_skin(&mesh, &mesh.parts[0], 30.0);
-        let render = part_render_mesh(&mesh, &skin, DVec3::ZERO, [1.0; 3], 30.0);
+        let render = part_render_mesh(mesh.coords(), &skin, DVec3::ZERO, [1.0; 3], 30.0, None);
         let normal_at_origin = |face: usize| glam::Vec3::from(render.vertices[face * 3].normal);
         // The flat face and the 20° face blend, the 90° face keeps its own normal.
         let blended = normal_at_origin(0);

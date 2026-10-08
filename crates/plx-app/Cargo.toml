@@ -21,6 +21,7 @@ log.workspace = true
 plx-io.workspace = true
 plx-mesh.workspace = true
 plx-render.workspace = true
+plx-results.workspace = true
 rfd.workspace = true
 
 [lints]

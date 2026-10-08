@@ -2,6 +2,7 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use crate::camera::Camera;
+use crate::contour::{MAX_LEVELS, band_colors_linear};
 use crate::mesh::{RenderMesh, Vertex};
 
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -24,6 +25,9 @@ struct Globals {
     background_bottom: [f32; 4],
     /// x: edge depth offset in normalized depth units.
     edge: [f32; 4],
+    /// x: number of contour bands, 0 when surfaces show their part colour.
+    contour: [f32; 4],
+    palette: [[f32; 4]; MAX_LEVELS as usize],
 }
 
 /// A vertex or index buffer with its element count; `None` when there is nothing to draw.
@@ -44,11 +48,16 @@ struct GpuMesh {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DisplayOptions {
     pub mesh_edges: bool,
+    /// Colour surfaces by their normalized vertex scalars in this many bands.
+    pub contour_levels: Option<u32>,
 }
 
 impl Default for DisplayOptions {
     fn default() -> Self {
-        Self { mesh_edges: true }
+        Self {
+            mesh_edges: true,
+            contour_levels: None,
+        }
     }
 }
 
@@ -110,7 +119,7 @@ impl ViewportRenderer {
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3],
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Float32],
         };
         let pipeline = |label: &str,
                         vs: &str,
@@ -287,6 +296,15 @@ impl ViewportRenderer {
                 0.0,
                 0.0,
             ],
+            contour: [
+                options
+                    .contour_levels
+                    .map_or(0.0, |n| n.clamp(2, MAX_LEVELS) as f32),
+                0.0,
+                0.0,
+                0.0,
+            ],
+            palette: palette(options.contour_levels),
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -343,6 +361,16 @@ impl ViewportRenderer {
         }
         queue.submit([encoder.finish()]);
     }
+}
+
+fn palette(levels: Option<u32>) -> [[f32; 4]; MAX_LEVELS as usize] {
+    let mut palette = [[0.0; 4]; MAX_LEVELS as usize];
+    if let Some(levels) = levels {
+        for (slot, [r, g, b]) in palette.iter_mut().zip(band_colors_linear(levels)) {
+            *slot = [r, g, b, 1.0];
+        }
+    }
+    palette
 }
 
 impl Targets {
