@@ -13,6 +13,9 @@ pub struct SkinFace {
     pub corners: Vec<usize>,
     /// Midside nodes of quadratic faces, `mids[i]` between `corners[i]` and `corners[i + 1]`.
     pub mids: Vec<usize>,
+    /// Smooth surface patch the face belongs to, numbered from 0 per part. Patches are
+    /// bounded by feature edges, like the faces of the CAD geometry the mesh came from.
+    pub region: usize,
 }
 
 /// An edge of the skin, optionally curved through a midside node.
@@ -21,7 +24,8 @@ pub struct SkinEdge {
     pub a: usize,
     pub b: usize,
     pub mid: Option<usize>,
-    /// Edge on the outline: a free boundary, a junction of more than two faces, or a sharp crease.
+    /// Edge on the outline: a free boundary, a junction of more than two faces, or a sharp
+    /// crease between two different surface patches.
     pub feature: bool,
 }
 
@@ -75,6 +79,7 @@ pub fn extract_part_skin(mesh: &FeMesh, part: &Part, feature_angle_deg: f64) -> 
                 } else {
                     Vec::new()
                 },
+                region: 0,
             };
             if shape.family() == ElementFamily::Surface {
                 skin.faces.push(face);
@@ -92,7 +97,7 @@ pub fn extract_part_skin(mesh: &FeMesh, part: &Part, feature_angle_deg: f64) -> 
     let mut outer: Vec<SkinFace> = solid_faces.into_values().flatten().collect();
     outer.sort_by_key(|f| (f.element, f.face));
     skin.faces.extend(outer);
-    skin.edges = collect_edges(mesh.coords(), &skin.faces, feature_angle_deg);
+    skin.edges = collect_edges(mesh.coords(), &mut skin.faces, feature_angle_deg);
     skin
 }
 
@@ -100,15 +105,28 @@ struct EdgeAccumulator {
     a: usize,
     b: usize,
     mid: Option<usize>,
-    normals: Vec<[f64; 3]>,
+    faces: Vec<usize>,
 }
 
-fn collect_edges(coords: &[[f64; 3]], faces: &[SkinFace], feature_angle_deg: f64) -> Vec<SkinEdge> {
+/// Collects the skin edges and splits the faces into smooth patches.
+///
+/// Faces are joined into one patch across every edge they share at less than the feature
+/// angle. A sharp edge only counts as a feature when it separates two patches: on coarse
+/// meshes of curved surfaces single edges often exceed the angle, but such creases end
+/// inside a patch and are mesh noise rather than geometry.
+fn collect_edges(
+    coords: &[[f64; 3]],
+    faces: &mut [SkinFace],
+    feature_angle_deg: f64,
+) -> Vec<SkinEdge> {
     let cos_limit = feature_angle_deg.to_radians().cos();
+    let normals: Vec<[f64; 3]> = faces
+        .iter()
+        .map(|f| face_normal(coords, &f.corners))
+        .collect();
     let mut order = Vec::new();
     let mut edges: HashMap<(usize, usize), EdgeAccumulator> = HashMap::new();
-    for face in faces {
-        let normal = face_normal(coords, &face.corners);
+    for (face_index, face) in faces.iter().enumerate() {
         let n = face.corners.len();
         for i in 0..n {
             let (a, b) = (face.corners[i], face.corners[(i + 1) % n]);
@@ -121,19 +139,35 @@ fn collect_edges(coords: &[[f64; 3]], faces: &[SkinFace], feature_angle_deg: f64
                         a,
                         b,
                         mid: face.mids.get(i).copied(),
-                        normals: Vec::with_capacity(2),
+                        faces: Vec::with_capacity(2),
                     }
                 })
-                .normals
-                .push(normal);
+                .faces
+                .push(face_index);
         }
     }
+
+    let smooth = |edge: &EdgeAccumulator| match edge.faces.as_slice() {
+        &[f0, f1] => dot(normals[f0], normals[f1]) >= cos_limit,
+        _ => false,
+    };
+    let mut patches = UnionFind::new(faces.len());
+    for edge in edges.values().filter(|e| smooth(e)) {
+        patches.union(edge.faces[0], edge.faces[1]);
+    }
+    merge_tiny_patches(coords, &edges, &normals, &mut patches);
+    let mut region_of_root = HashMap::new();
+    for (index, face) in faces.iter_mut().enumerate() {
+        let next = region_of_root.len();
+        face.region = *region_of_root.entry(patches.find(index)).or_insert(next);
+    }
+
     order
         .into_iter()
         .map(|key| {
             let edge = &edges[&key];
-            let feature = match edge.normals.as_slice() {
-                [n0, n1] => dot(*n0, *n1) < cos_limit,
+            let feature = match edge.faces.as_slice() {
+                &[f0, f1] => !smooth(edge) && faces[f0].region != faces[f1].region,
                 _ => true,
             };
             SkinEdge {
@@ -144,6 +178,98 @@ fn collect_edges(coords: &[[f64; 3]], faces: &[SkinFace], feature_angle_deg: f64
             }
         })
         .collect()
+}
+
+/// Patches of at most this many faces are treated as mesh noise, not as faces of the geometry.
+const MAX_NOISE_PATCH_FACES: usize = 4;
+
+/// Patches only merge across borders folding less than this on average; steeper borders, such
+/// as the 90° edges of a box meshed with one element per side, are real geometry.
+const MAX_NOISE_FOLD_DEG: f64 = 60.0;
+
+/// Joins tiny patches to the neighbour they share the longest gently folded border with. Coarse
+/// meshes of curved surfaces otherwise break into small patches whose outlines clutter the view.
+fn merge_tiny_patches(
+    coords: &[[f64; 3]],
+    edges: &HashMap<(usize, usize), EdgeAccumulator>,
+    normals: &[[f64; 3]],
+    patches: &mut UnionFind,
+) {
+    let face_count = patches.parent.len();
+    let mut size = vec![0usize; face_count];
+    for face in 0..face_count {
+        size[patches.find(face)] += 1;
+    }
+    // Per pair of neighbouring patch roots: shared edge length and length-weighted fold angle.
+    let mut borders: HashMap<(usize, usize), (f64, f64)> = HashMap::new();
+    for edge in edges.values() {
+        if let &[f0, f1] = edge.faces.as_slice() {
+            let (r0, r1) = (patches.find(f0), patches.find(f1));
+            if r0 != r1 {
+                let (p, q) = (coords[edge.a], coords[edge.b]);
+                let d = [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+                let length = dot(d, d).sqrt();
+                let fold = dot(normals[f0], normals[f1]).clamp(-1.0, 1.0).acos();
+                let border = borders.entry((r0.min(r1), r0.max(r1))).or_default();
+                border.0 += length;
+                border.1 += length * fold;
+            }
+        }
+    }
+    let max_fold = MAX_NOISE_FOLD_DEG.to_radians();
+    borders.retain(|_, &mut (length, weighted_fold)| weighted_fold < max_fold * length);
+    let mut tiny: Vec<usize> = (0..face_count)
+        .filter(|&root| size[root] > 0 && size[root] <= MAX_NOISE_PATCH_FACES)
+        .collect();
+    tiny.sort_by_key(|&root| size[root]);
+    for root in tiny {
+        let root = patches.find(root);
+        if size[root] > MAX_NOISE_PATCH_FACES {
+            continue;
+        }
+        let mut best: Option<(usize, f64)> = None;
+        for (&(a, b), &(length, _)) in &borders {
+            let (a, b) = (patches.find(a), patches.find(b));
+            let other = match (a == root, b == root) {
+                (true, false) => b,
+                (false, true) => a,
+                _ => continue,
+            };
+            if best.is_none_or(|(_, l)| length > l) {
+                best = Some((other, length));
+            }
+        }
+        if let Some((other, _)) = best {
+            let merged = size[root] + size[other];
+            patches.union(root, other);
+            size[patches.find(root)] = merged;
+        }
+    }
+}
+
+struct UnionFind {
+    parent: Vec<usize>,
+}
+
+impl UnionFind {
+    fn new(len: usize) -> Self {
+        Self {
+            parent: (0..len).collect(),
+        }
+    }
+
+    fn find(&mut self, mut i: usize) -> usize {
+        while self.parent[i] != i {
+            self.parent[i] = self.parent[self.parent[i]];
+            i = self.parent[i];
+        }
+        i
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let (a, b) = (self.find(a), self.find(b));
+        self.parent[a.max(b)] = a.min(b);
+    }
 }
 
 /// Unit normal of a planar or slightly warped polygon (Newell's method).
@@ -252,6 +378,57 @@ mod tests {
         assert_eq!(skin.faces.len(), 2);
         assert_eq!(skin.edges.len(), 7);
         assert_eq!(skin.edges.iter().filter(|e| e.feature).count(), 6);
+    }
+
+    /// 2 × 2 S3 triangle pairs around a centre node lifted by `height`.
+    fn tent(height: f64) -> FeMesh {
+        let mut mesh = FeMesh::default();
+        for j in 0..3 {
+            for i in 0..3 {
+                let z = if (i, j) == (1, 1) { height } else { 0.0 };
+                mesh.set_node(1 + i + 3 * j, [i as f64, j as f64, z]);
+            }
+        }
+        let mut id = 0;
+        for j in 0..2 {
+            for i in 0..2 {
+                let n = |di: u32, dj: u32| 1 + (i + di) + 3 * (j + dj);
+                for nodes in [
+                    vec![n(0, 0), n(1, 0), n(1, 1)],
+                    vec![n(0, 0), n(1, 1), n(0, 1)],
+                ] {
+                    id += 1;
+                    mesh.add_element(Element {
+                        id,
+                        type_name: "S3".into(),
+                        shape: ElementShape::Tri3,
+                        nodes,
+                    })
+                    .unwrap();
+                }
+            }
+        }
+        mesh.parts.push(Part {
+            name: "TENT".into(),
+            elements: (1..=id).collect(),
+        });
+        mesh
+    }
+
+    #[test]
+    fn gentle_folds_of_a_coarse_surface_are_no_features() {
+        // Neighbouring faces fold by 32–53°, but the surface has no real edges inside.
+        let mesh = tent(0.8);
+        let skin = extract_part_skin(&mesh, &mesh.parts[0], 30.0);
+        assert!(skin.faces.iter().all(|f| f.region == 0));
+        assert_eq!(skin.edges.iter().filter(|e| e.feature).count(), 8);
+    }
+
+    #[test]
+    fn steep_folds_stay_features_even_on_tiny_patches() {
+        let mesh = tent(3.0);
+        let skin = extract_part_skin(&mesh, &mesh.parts[0], 30.0);
+        assert!(skin.edges.iter().filter(|e| e.feature).count() > 8);
     }
 
     #[test]

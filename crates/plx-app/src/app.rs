@@ -290,7 +290,7 @@ impl Workbench {
 
     fn model_tree(&mut self, ui: &mut egui::Ui) {
         let Some(model) = &mut self.model else {
-            ui.weak("Kein Modell geladen.\nDatei → Öffnen (Strg+O) oder eine .inp-Datei ins Fenster ziehen.");
+            ui.weak("Kein Modell geladen.\nDatei > Öffnen (Strg+O) oder eine .inp-Datei ins Fenster ziehen.");
             return;
         };
         let selection = &mut self.selection;

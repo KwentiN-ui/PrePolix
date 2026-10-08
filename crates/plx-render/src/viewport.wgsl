@@ -3,6 +3,8 @@ struct Globals {
     light_dir: vec4<f32>,
     background_top: vec4<f32>,
     background_bottom: vec4<f32>,
+    // x: depth offset of edges towards the viewer, about one and a half pixels.
+    edge: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -69,13 +71,12 @@ struct EdgeOut {
 
 // Edges lie exactly on surface triangles; pulling them slightly towards the viewer keeps them from
 // flickering in and out of the depth test (polygon offset alone is too weak for a float depth buffer).
-const EDGE_DEPTH_OFFSET: f32 = 2e-4;
-
+// The offset is a fixed number of pixels, so it never reaches through thin walls.
 @vertex
 fn vs_edge(in: SurfaceIn) -> EdgeOut {
     var out: EdgeOut;
     out.position = globals.view_proj * vec4<f32>(in.position, 1.0);
-    out.position.z -= EDGE_DEPTH_OFFSET * out.position.w;
+    out.position.z -= globals.edge.x * out.position.w;
     out.color = in.color;
     return out;
 }
