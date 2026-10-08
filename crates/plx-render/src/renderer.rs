@@ -7,6 +7,9 @@ use crate::mesh::{RenderMesh, Vertex};
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SAMPLE_COUNT: u32 = 4;
+/// How far edges are pulled towards the viewer, in pixels. Tied to the pixel size rather than
+/// the model size, so that edges on the back of thin walls stay hidden when zoomed in.
+const EDGE_OFFSET_PX: f32 = 1.5;
 
 /// Background gradient in the style of PrePoMax (linear RGB).
 const BACKGROUND_TOP: [f32; 4] = [0.073, 0.147, 0.343, 1.0];
@@ -19,6 +22,8 @@ struct Globals {
     light_dir: [f32; 4],
     background_top: [f32; 4],
     background_bottom: [f32; 4],
+    /// x: edge depth offset in normalized depth units.
+    edge: [f32; 4],
 }
 
 /// A vertex or index buffer with its element count; `None` when there is nothing to draw.
@@ -274,6 +279,14 @@ impl ViewportRenderer {
             light_dir: camera.light_direction().extend(0.0).into(),
             background_top: BACKGROUND_TOP,
             background_bottom: BACKGROUND_BOTTOM,
+            edge: [
+                EDGE_OFFSET_PX
+                    * camera.pixel_size(self.targets.width as f32, self.targets.height as f32)
+                    / camera.depth_range(),
+                0.0,
+                0.0,
+                0.0,
+            ],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 

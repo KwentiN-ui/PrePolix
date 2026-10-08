@@ -62,7 +62,7 @@ impl Camera {
         } else {
             (self.half_extent(), self.half_extent() / aspect)
         };
-        let depth = self.scene_radius.max(self.distance) * 4.0;
+        let depth = self.depth_range() * 0.5;
         let view = look_at_mat4(self.eye(), self.target, self.up());
         let proj = directx::orthographic(
             -half_width,
@@ -75,6 +75,16 @@ impl Camera {
         proj * view
     }
 
+    /// Distance between the near and far clipping planes in world units.
+    pub fn depth_range(&self) -> f32 {
+        self.scene_radius.max(self.distance) * 8.0
+    }
+
+    /// World size of one pixel for a viewport of the given size.
+    pub fn pixel_size(&self, viewport_width_px: f32, viewport_height_px: f32) -> f32 {
+        2.0 * self.half_extent() / viewport_width_px.min(viewport_height_px).max(1.0)
+    }
+
     /// Rotates the view around the target by a mouse drag in pixels.
     pub fn orbit(&mut self, dx_px: f32, dy_px: f32) {
         let yaw = Quat::from_axis_angle(self.up(), -dx_px * ORBIT_RADIANS_PER_PIXEL);
@@ -84,8 +94,7 @@ impl Camera {
 
     /// Moves the target so that the scene follows a mouse drag in pixels.
     pub fn pan(&mut self, dx_px: f32, dy_px: f32, viewport_width_px: f32, viewport_height_px: f32) {
-        let shorter_side_px = viewport_width_px.min(viewport_height_px).max(1.0);
-        let world_per_pixel = 2.0 * self.half_extent() / shorter_side_px;
+        let world_per_pixel = self.pixel_size(viewport_width_px, viewport_height_px);
         self.target -= self.right() * dx_px * world_per_pixel;
         self.target += self.up() * dy_px * world_per_pixel;
     }
@@ -197,6 +206,15 @@ mod tests {
             (after.x - before.x - 0.2).abs() < EPS,
             "{before} -> {after}"
         );
+    }
+
+    #[test]
+    fn pixel_size_shrinks_when_zooming_in() {
+        let mut camera = Camera::default();
+        let before = camera.pixel_size(800.0, 400.0);
+        assert!((before - 2.0 * camera.half_extent() / 400.0).abs() < EPS);
+        camera.zoom(0.5);
+        assert!((camera.pixel_size(800.0, 400.0) - before * 0.5).abs() < EPS);
     }
 
     #[test]
