@@ -45,6 +45,9 @@ pub struct ResultsView {
     pub levels: u32,
     /// Draw the undeformed outline behind the deformed shape.
     pub show_undeformed: bool,
+    /// When CalculiX ran the analysis, as written into the file.
+    pub date: Option<String>,
+    pub time: Option<String>,
     /// Characteristic model size for the automatic scale (PrePoMax: cube root of the bounding
     /// box volume, square root of the area for flat models).
     model_size: f64,
@@ -69,6 +72,8 @@ impl ResultsView {
             user_scale: 10.0,
             levels: DEFAULT_LEVELS,
             show_undeformed: true,
+            date: None,
+            time: None,
             model_size: bounds.map_or(1.0, model_size),
         };
         view.increment = view.default_increment();
@@ -122,14 +127,63 @@ impl ResultsView {
         }
     }
 
+    /// Entry of the increment list, "step, increment" as in PrePoMax's results toolbar.
     pub fn increment_label(increment: &Increment) -> String {
-        format!(
-            "Schritt {}, Inkrement {} ({} {})",
-            increment.step,
-            increment.increment,
-            increment.kind.value_label(),
-            format_value(increment.value as f32)
-        )
+        format!("{}, {}", increment.step, increment.increment)
+    }
+
+    /// PrePoMax's information block in the top right corner of the 3D view.
+    pub fn status_lines(&self, file_name: &str) -> Vec<String> {
+        let mut lines = vec![format!(
+            "Name: {file_name}   Date: {}   Time: {}",
+            self.date.as_deref().unwrap_or("-"),
+            self.time.as_deref().unwrap_or("-")
+        )];
+        if let Some(inc) = self.current_increment() {
+            let value = format_value(inc.value as f32);
+            lines.push(match inc.kind {
+                AnalysisKind::Frequency => format!(
+                    "Step: #{}   Mode: #{}   Frequency: {value}",
+                    inc.step, inc.increment
+                ),
+                AnalysisKind::Buckling => {
+                    format!("Step: #{}   Buckling factor: {value}", inc.step)
+                }
+                _ => format!(
+                    "Step: #{}   Increment: #{}   Analysis time: {value}",
+                    inc.step, inc.increment
+                ),
+            });
+        }
+        lines.push(format!(
+            "Deformation variable: Displacements   Deformation scale factor: {}",
+            format_value(self.scale())
+        ));
+        lines
+    }
+
+    /// Node index and value of the largest value of the shown component.
+    pub fn maximum(&self) -> Option<(usize, f32)> {
+        let (_, component) = self.current()?;
+        component
+            .values
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, v)| v.is_finite())
+            .reduce(|a, b| if b.1 > a.1 { b } else { a })
+    }
+
+    /// Node index and value of the smallest value of the shown component.
+    pub fn minimum(&self) -> Option<(usize, f32)> {
+        let (_, component) = self.current()?;
+        component
+            .values
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, v)| v.is_finite())
+            .reduce(|a, b| if b.1 < a.1 { b } else { a })
     }
 
     /// Displacement scale factor for the current increment and deformation setting.
@@ -153,8 +207,10 @@ impl ResultsView {
     pub fn legend(&self) -> Option<Legend> {
         let (field, component) = self.current()?;
         let (min, max) = component.range()?;
+        // PrePoMax writes names with blanks instead of underscores and dashes.
+        let name = |n: &str| n.replace(['_', '-'], " ");
         Some(Legend {
-            title: format!("{}: {}", field.name, component.name),
+            title: format!("{}: {}", name(&field.name), name(&component.name)),
             min,
             max,
             levels: self.levels,

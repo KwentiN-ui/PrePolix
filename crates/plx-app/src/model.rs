@@ -62,9 +62,17 @@ pub fn load(path: &Path) -> Result<LoadedModel, String> {
             mesh,
             increments,
             warnings,
+            date,
+            time,
             ..
         } = read_frd(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        (mesh, warnings, BTreeMap::new(), 0, Some(increments))
+        (
+            mesh,
+            warnings,
+            BTreeMap::new(),
+            0,
+            Some((increments, date, time)),
+        )
     } else {
         let InpImport {
             mesh,
@@ -105,7 +113,12 @@ pub fn load(path: &Path) -> Result<LoadedModel, String> {
         });
         skins.push(extract_part_skin(&mesh, part, FEATURE_ANGLE_DEG));
     }
-    let results = increments.map(|increments| ResultsView::new(increments, mesh.bounds()));
+    let results = increments.map(|(increments, date, time)| {
+        let mut view = ResultsView::new(increments, mesh.bounds());
+        view.date = date;
+        view.time = time;
+        view
+    });
     let mut model = Model {
         path: path.to_path_buf(),
         mesh,
@@ -172,6 +185,29 @@ impl Model {
                 mesh
             })
             .collect()
+    }
+
+    /// Where a node is drawn, relative to the model origin, including the shown deformation.
+    pub fn node_position(&self, index: usize) -> Option<Vec3> {
+        let mut p = DVec3::from(*self.mesh.coords().get(index)?);
+        if let Some(view) = &self.results {
+            let scale = view.scale() as f64;
+            let displacement = view
+                .current_increment()
+                .and_then(|i| i.field("DISP"))
+                .map(|f| {
+                    ["U1", "U2", "U3"].map(|n| f.component(n).map_or(0.0, |c| c.values[index]))
+                });
+            if let (Some(d), true) = (displacement, scale != 0.0) {
+                p += scale * DVec3::new(d[0] as f64, d[1] as f64, d[2] as f64);
+            }
+        }
+        Some((p - self.origin).as_vec3())
+    }
+
+    /// The global origin in render coordinates.
+    pub fn global_origin(&self) -> Vec3 {
+        (-self.origin).as_vec3()
     }
 
     pub fn file_name(&self) -> String {

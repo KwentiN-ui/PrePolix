@@ -96,9 +96,10 @@ pub fn part_render_mesh(
     }
     let line_color = color.map(|c| c * 0.5);
     for &[a, b] in &skin.lines {
-        render
-            .feature_edges
-            .extend([line_vertex(a, line_color, 1.0), line_vertex(b, line_color, 1.0)]);
+        render.feature_edges.extend([
+            line_vertex(a, line_color, 1.0),
+            line_vertex(b, line_color, 1.0),
+        ]);
     }
     render
 }

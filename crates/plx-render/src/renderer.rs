@@ -372,10 +372,7 @@ impl ViewportRenderer {
                     mesh_edges,
                     part.feature_edges.as_ref(),
                 ];
-                for lines in lines
-                    .into_iter()
-                    .flatten()
-                {
+                for lines in lines.into_iter().flatten() {
                     pass.set_vertex_buffer(0, lines.buffer.slice(..));
                     pass.draw(0..lines.count, 0..1);
                 }
