@@ -1,0 +1,206 @@
+//! User settings, grouped like PrePoMax's settings dialog and stored by eframe in the user's
+//! data directory (Linux `~/.local/share/prepolix`, Windows `%APPDATA%\prepolix\data`).
+
+use serde::{Deserialize, Serialize};
+
+/// Key of the settings in eframe's storage.
+pub const STORAGE_KEY: &str = "settings";
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub graphics: Graphics,
+    pub post: PostProcessing,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Graphics {
+    /// Axis triad at the global origin of the model.
+    pub global_axes: bool,
+    /// Axis triad in the bottom right corner showing the view direction.
+    pub view_triad: bool,
+    pub scale_bar: bool,
+}
+
+impl Default for Graphics {
+    fn default() -> Self {
+        Self {
+            global_axes: true,
+            view_triad: true,
+            scale_bar: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PostProcessing {
+    /// Label at the node with the largest value (PrePoMax: on).
+    pub max_label: bool,
+    /// Label at the node with the smallest value (PrePoMax: off).
+    pub min_label: bool,
+    /// Information block with file, step and deformation.
+    pub status_block: bool,
+    /// Outline of the undeformed shape behind deformed results, for newly opened results.
+    pub undeformed_outline: bool,
+    /// Colour bands of the legend for newly opened results.
+    pub levels: u32,
+}
+
+impl Default for PostProcessing {
+    fn default() -> Self {
+        Self {
+            max_label: true,
+            min_label: false,
+            status_block: true,
+            undeformed_outline: true,
+            levels: plx_render::contour::DEFAULT_LEVELS,
+        }
+    }
+}
+
+/// Pages of the settings window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Page {
+    Graphics,
+    PostProcessing,
+}
+
+impl Page {
+    const ALL: [Page; 2] = [Page::Graphics, Page::PostProcessing];
+
+    fn title(self) -> &'static str {
+        match self {
+            Page::Graphics => "Grafik",
+            Page::PostProcessing => "Postprocessing",
+        }
+    }
+}
+
+/// The settings window while it is open: a draft that OK or Apply copies into the settings.
+pub struct SettingsWindow {
+    page: Page,
+    draft: Settings,
+}
+
+/// What the user decided in the settings window.
+pub enum WindowResult {
+    Open,
+    /// Take over the draft and keep the window open.
+    Apply(Settings),
+    /// Take over the draft and close.
+    Ok(Settings),
+    Cancel,
+}
+
+impl SettingsWindow {
+    pub fn new(settings: &Settings) -> Self {
+        Self {
+            page: Page::PostProcessing,
+            draft: settings.clone(),
+        }
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context) -> WindowResult {
+        let mut open = true;
+        let mut result = WindowResult::Open;
+        egui::Window::new("Einstellungen")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                ui.horizontal_top(|ui| {
+                    egui::Frame::new()
+                        .fill(crate::style::WINDOW)
+                        .stroke(egui::Stroke::new(1.0, crate::style::BORDER))
+                        .inner_margin(4)
+                        .show(ui, |ui| {
+                            ui.set_min_size(egui::vec2(130.0, 220.0));
+                            ui.vertical(|ui| {
+                                for page in Page::ALL {
+                                    if ui
+                                        .selectable_label(self.page == page, page.title())
+                                        .clicked()
+                                    {
+                                        self.page = page;
+                                    }
+                                }
+                            });
+                        });
+                    ui.add_space(8.0);
+                    ui.vertical(|ui| {
+                        ui.set_min_width(300.0);
+                        ui.heading(self.page.title());
+                        ui.add_space(4.0);
+                        self.page_ui(ui);
+                    });
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Standardwerte").clicked() {
+                        self.draft = Settings::default();
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Übernehmen").clicked() {
+                            result = WindowResult::Apply(self.draft.clone());
+                        }
+                        if ui.button("Abbrechen").clicked() {
+                            result = WindowResult::Cancel;
+                        }
+                        if ui.button("OK").clicked() {
+                            result = WindowResult::Ok(self.draft.clone());
+                        }
+                    });
+                });
+            });
+        if !open {
+            result = WindowResult::Cancel;
+        }
+        result
+    }
+
+    fn page_ui(&mut self, ui: &mut egui::Ui) {
+        match self.page {
+            Page::Graphics => {
+                let g = &mut self.draft.graphics;
+                ui.checkbox(&mut g.global_axes, "Achsenkreuz am globalen Ursprung");
+                ui.checkbox(&mut g.view_triad, "Achsenkreuz in der Ecke (Blickrichtung)");
+                ui.checkbox(&mut g.scale_bar, "Maßstab");
+            }
+            Page::PostProcessing => {
+                let p = &mut self.draft.post;
+                ui.checkbox(&mut p.max_label, "Label am Maximum anzeigen");
+                ui.checkbox(&mut p.min_label, "Label am Minimum anzeigen");
+                ui.checkbox(&mut p.status_block, "Infoblock anzeigen");
+                ui.checkbox(
+                    &mut p.undeformed_outline,
+                    "Unverformte Kontur zeigen (neu geöffnete Ergebnisse)",
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Farbstufen (neu geöffnete Ergebnisse)");
+                    ui.add(
+                        egui::DragValue::new(&mut p.levels)
+                            .range(2..=plx_render::contour::MAX_LEVELS),
+                    );
+                });
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_fields_take_their_defaults() {
+        // Settings files of older versions lack newer fields.
+        let settings: Settings = ron::from_str("(post: (min_label: true))").unwrap();
+        assert!(settings.post.min_label);
+        assert!(settings.post.max_label);
+        assert!(settings.graphics.global_axes);
+    }
+}

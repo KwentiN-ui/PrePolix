@@ -19,13 +19,14 @@ plx-job = { path = "crates/plx-job" }
 plx-render = { path = "crates/plx-render" }
 
 bytemuck = { version = "1.25", features = ["derive"] }
-eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "wayland", "x11"] }
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wgpu", "wayland", "x11"] }
 egui = "0.36"
 egui-wgpu = "0.36"
 env_logger = "0.11"
 glam = { version = "0.34", features = ["bytemuck"] }
 log = "0.4"
 rfd = "0.17"
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 
 [workspace.lints.rust]

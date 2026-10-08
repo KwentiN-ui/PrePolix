@@ -278,6 +278,18 @@ impl ResultsView {
         }
     }
 
+    /// Node index and value of the smallest value of the shown component.
+    pub fn minimum(&self) -> Option<(usize, f32)> {
+        let (_, component) = self.current()?;
+        component
+            .values
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, v)| v.is_finite())
+            .reduce(|a, b| if b.1 < a.1 { b } else { a })
+    }
+
     pub fn legend(&self) -> Option<Legend> {
         let (field, component) = self.current()?;
         let (min, max) = self.value_range()?;

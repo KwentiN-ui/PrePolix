@@ -1,8 +1,12 @@
 //! Annotations drawn over the 3D view in PrePoMax's layout: legend top left, information block
-//! top right, scale bar bottom centre, axis triad bottom right, plus the maximum marker and a
-//! triad at the global origin.
+//! top right, scale bar bottom centre, axis triad bottom right, plus markers at the minimum and
+//! maximum and a triad at the global origin. Legend, information block and markers can be
+//! dragged within the view.
 
-use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, StrokeKind, pos2, vec2};
+use egui::{
+    Align2, Color32, CursorIcon, FontId, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
+    pos2, vec2,
+};
 use glam::Vec3;
 use plx_render::Camera;
 use plx_render::contour::band_color;
@@ -16,22 +20,37 @@ const BAND_HEIGHT: f32 = 18.0;
 const SCALE_BAR_WIDTH: f32 = 400.0;
 const SCALE_BAR_HEIGHT: f32 = 8.0;
 const SCALE_BAR_FIELDS: usize = 5;
+const STATUS_PADDING: f32 = 5.0;
+const MARKER_PADDING: Vec2 = vec2(6.0, 3.0);
 
-/// Everything drawn over the scene besides the triads.
+/// Everything drawn over the scene.
 #[derive(Default)]
 pub struct Overlay {
     pub legend: Option<Legend>,
-    /// Lines of the information block in the top right corner.
+    /// Lines of the information block in the top right corner; empty to hide it.
     pub status: Vec<String>,
     pub maximum: Option<Marker>,
+    pub minimum: Option<Marker>,
     /// Global origin in render coordinates, where the global axis triad is drawn.
     pub global_origin: Option<Vec3>,
+    pub show_scale_bar: bool,
+    pub show_view_triad: bool,
 }
 
 /// Annotated point of the model, e.g. the node with the largest result value.
 pub struct Marker {
     pub position: Vec3,
     pub text: String,
+}
+
+/// Where the user dragged the labels to, relative to their default places.
+#[derive(Default)]
+pub struct LabelOffsets {
+    pub legend: Vec2,
+    pub status: Vec2,
+    /// Box position relative to the marked point, once dragged.
+    pub maximum: Option<Vec2>,
+    pub minimum: Option<Vec2>,
 }
 
 fn font() -> FontId {
@@ -47,48 +66,100 @@ pub fn project(camera: &Camera, rect: Rect, point: Vec3) -> Pos2 {
     )
 }
 
-pub fn draw(painter: &Painter, rect: Rect, camera: &Camera, overlay: &Overlay) {
+pub fn draw(ui: &Ui, rect: Rect, camera: &Camera, overlay: &Overlay, offsets: &mut LabelOffsets) {
+    let painter = ui.painter_at(rect);
     if let Some(origin) = overlay.global_origin {
         let center = project(camera, rect, origin);
         if rect.contains(center) {
-            triad(painter, camera, center, 36.0, false);
+            triad(&painter, camera, center, 36.0, false);
         }
     }
-    if let Some(marker) = &overlay.maximum {
-        draw_marker(
-            painter,
-            rect,
-            project(camera, rect, marker.position),
-            &marker.text,
-        );
+    if overlay.show_scale_bar {
+        draw_scale_bar(&painter, rect, camera);
+    }
+    if overlay.show_view_triad {
+        let corner = rect.right_bottom() - vec2(24.0 + 45.0, 24.0 + 45.0);
+        triad(&painter, camera, corner, 45.0, true);
+    }
+    for (marker, offset, id) in [
+        (&overlay.minimum, &mut offsets.minimum, "minimum label"),
+        (&overlay.maximum, &mut offsets.maximum, "maximum label"),
+    ] {
+        if let Some(marker) = marker {
+            let point = project(camera, rect, marker.position);
+            draw_marker(ui, &painter, rect, point, &marker.text, offset, id);
+        }
     }
     if let Some(legend) = &overlay.legend {
-        draw_legend(painter, rect, legend);
+        draw_legend(ui, &painter, rect, legend, &mut offsets.legend);
     }
     if !overlay.status.is_empty() {
-        draw_status(painter, rect, &overlay.status);
+        draw_status(ui, &painter, rect, &overlay.status, &mut offsets.status);
     }
-    if overlay.global_origin.is_some() {
-        draw_scale_bar(painter, rect, camera);
+}
+
+/// Places a draggable label: its default position plus the user's offset, kept inside the
+/// view. Dragging moves the offset.
+fn drag_label(ui: &Ui, rect: Rect, id: &str, default: Pos2, size: Vec2, offset: &mut Vec2) -> Rect {
+    let frame = Rect::from_min_size(default + *offset, size);
+    let response = ui.interact(frame, ui.id().with(id), Sense::drag());
+    if response.dragged() {
+        *offset += response.drag_delta();
+        ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+    } else if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::Grab);
     }
-    let corner = rect.right_bottom() - vec2(24.0 + 45.0, 24.0 + 45.0);
-    triad(painter, camera, corner, 45.0, true);
+    let mut min = default + *offset;
+    min.x = min
+        .x
+        .clamp(rect.left(), (rect.right() - size.x).max(rect.left()));
+    min.y = min
+        .y
+        .clamp(rect.top(), (rect.bottom() - size.y).max(rect.top()));
+    *offset = min - default;
+    Rect::from_min_size(min, size)
 }
 
 /// Title lines, then one box per band with the band limits as labels, maximum on top.
-fn draw_legend(painter: &Painter, rect: Rect, legend: &Legend) {
-    let left = rect.left() + MARGIN;
-    let mut top = rect.top() + MARGIN;
-    for line in legend.title.lines() {
-        let r = painter.text(pos2(left, top), Align2::LEFT_TOP, line, font(), TEXT);
-        top = r.bottom() + 2.0;
+fn draw_legend(ui: &Ui, painter: &Painter, rect: Rect, legend: &Legend, offset: &mut Vec2) {
+    let titles: Vec<_> = legend
+        .title
+        .lines()
+        .map(|l| painter.layout_no_wrap(l.to_string(), font(), TEXT))
+        .collect();
+    let levels = legend.levels;
+    let values: Vec<_> = (0..=levels)
+        .map(|i| {
+            let t = 1.0 - i as f32 / levels as f32;
+            let value = legend.min + t * (legend.max - legend.min);
+            painter.layout_no_wrap(format_legend_value(value), font(), TEXT)
+        })
+        .collect();
+    let band = vec2(BAND_HEIGHT / 0.75, BAND_HEIGHT);
+    let label_height = values.first().map_or(0.0, |g| g.size().y);
+    let title_height: f32 = titles.iter().map(|g| g.size().y + 2.0).sum::<f32>() + 6.0;
+    let width = titles
+        .iter()
+        .map(|g| g.size().x)
+        .chain(values.iter().map(|g| band.x + 8.0 + g.size().x))
+        .fold(0.0, f32::max);
+    let size = vec2(
+        width,
+        title_height + levels as f32 * band.y + label_height * 0.5,
+    );
+    let default = rect.left_top() + vec2(MARGIN, MARGIN);
+    let frame = drag_label(ui, rect, "legend", default, size, offset);
+
+    let mut top = frame.top();
+    for galley in titles {
+        let height = galley.size().y;
+        painter.galley(pos2(frame.left(), top), galley, TEXT);
+        top += height + 2.0;
     }
     top += 6.0;
-    let levels = legend.levels;
-    let band = vec2(BAND_HEIGHT / 0.75, BAND_HEIGHT);
     for i in 0..levels {
         let [r, g, b] = band_color(levels - 1 - i, levels).map(|c| (c * 255.0).round() as u8);
-        let cell = Rect::from_min_size(pos2(left, top + i as f32 * band.y), band);
+        let cell = Rect::from_min_size(pos2(frame.left(), top + i as f32 * band.y), band);
         painter.rect(
             cell,
             0.0,
@@ -97,36 +168,31 @@ fn draw_legend(painter: &Painter, rect: Rect, legend: &Legend) {
             StrokeKind::Middle,
         );
     }
-    for i in 0..=levels {
-        let t = 1.0 - i as f32 / levels as f32;
-        let value = legend.min + t * (legend.max - legend.min);
-        painter.text(
-            pos2(left + band.x + 8.0, top + i as f32 * band.y),
-            Align2::LEFT_CENTER,
-            format_legend_value(value),
-            font(),
-            TEXT,
-        );
+    for (i, galley) in values.into_iter().enumerate() {
+        let y = top + i as f32 * band.y - galley.size().y * 0.5;
+        painter.galley(pos2(frame.left() + band.x + 8.0, y), galley, TEXT);
     }
 }
 
-/// Framed text block in the top right corner.
-fn draw_status(painter: &Painter, rect: Rect, lines: &[String]) {
+/// Framed text block, by default in the top right corner.
+fn draw_status(ui: &Ui, painter: &Painter, rect: Rect, lines: &[String], offset: &mut Vec2) {
     let galleys: Vec<_> = lines
         .iter()
         .map(|l| painter.layout_no_wrap(l.clone(), font(), TEXT))
         .collect();
     let width = galleys.iter().map(|g| g.size().x).fold(0.0, f32::max);
     let line_height = galleys.first().map_or(0.0, |g| g.size().y) + 2.0;
-    let padding = 5.0;
-    let size = vec2(width, line_height * galleys.len() as f32) + vec2(2.0 * padding, padding);
-    let frame = Rect::from_min_size(
-        pos2(rect.right() - MARGIN - size.x, rect.top() + MARGIN),
-        size,
-    );
+    let size = vec2(width, line_height * galleys.len() as f32)
+        + vec2(2.0 * STATUS_PADDING, STATUS_PADDING);
+    let default = pos2(rect.right() - MARGIN - size.x, rect.top() + MARGIN);
+    let frame = drag_label(ui, rect, "status", default, size, offset);
     painter.rect_stroke(frame, 0.0, Stroke::new(1.0, TEXT), StrokeKind::Inside);
     for (i, galley) in galleys.into_iter().enumerate() {
-        let pos = frame.min + vec2(padding, padding * 0.5 + i as f32 * line_height);
+        let pos = frame.min
+            + vec2(
+                STATUS_PADDING,
+                STATUS_PADDING * 0.5 + i as f32 * line_height,
+            );
         painter.galley(pos, galley, TEXT);
     }
 }
@@ -172,42 +238,60 @@ pub fn scale_bar_length(world_per_point: f32) -> Option<(f32, f32)> {
     Some((length, length / world_per_point))
 }
 
-/// Framed label next to a model point, with a line pointing at it.
-fn draw_marker(painter: &Painter, rect: Rect, point: Pos2, text: &str) {
+/// Framed label next to a model point, with an arrow pointing at it. The box follows the point
+/// when the view moves; dragging it changes where it sits relative to the point.
+fn draw_marker(
+    ui: &Ui,
+    painter: &Painter,
+    rect: Rect,
+    point: Pos2,
+    text: &str,
+    offset: &mut Option<Vec2>,
+    id: &str,
+) {
     if !rect.contains(point) {
         return;
     }
     let galley = painter.layout_no_wrap(text.to_string(), font(), TEXT);
-    let padding = vec2(6.0, 3.0);
-    let size = galley.size() + 2.0 * padding;
+    let size = galley.size() + 2.0 * MARKER_PADDING;
     // Above right of the point, or mirrored where the view ends.
-    let dx = if point.x + 60.0 + size.x < rect.right() {
-        60.0
-    } else {
-        -60.0 - size.x
+    let automatic = || {
+        let dx = if point.x + 60.0 + size.x < rect.right() {
+            60.0
+        } else {
+            -60.0 - size.x
+        };
+        let dy = if point.y - 50.0 - size.y > rect.top() {
+            -50.0 - size.y
+        } else {
+            50.0
+        };
+        vec2(dx, dy)
     };
-    let dy = if point.y - 50.0 - size.y > rect.top() {
-        -50.0 - size.y
-    } else {
-        50.0
-    };
-    let frame = Rect::from_min_size(point + vec2(dx, dy), size);
+    let mut relative = offset.unwrap_or_else(automatic);
+    let before = relative;
+    let frame = drag_label(ui, rect, id, point, size, &mut relative);
+    if relative != before {
+        *offset = Some(relative);
+    }
     let anchor = pos2(
         point.x.clamp(frame.left(), frame.right()),
         point.y.clamp(frame.top(), frame.bottom()),
     );
-    painter.line_segment([anchor, point], Stroke::new(1.0, TEXT));
-    let direction = (point - anchor).normalized();
-    let normal = direction.rot90();
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            point,
-            point - direction * 9.0 + normal * 3.0,
-            point - direction * 9.0 - normal * 3.0,
-        ],
-        TEXT,
-        Stroke::NONE,
-    ));
+    if anchor.distance(point) > 1.0 {
+        painter.line_segment([anchor, point], Stroke::new(1.0, TEXT));
+        let direction = (point - anchor).normalized();
+        let normal = direction.rot90();
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                point,
+                point - direction * 9.0 + normal * 3.0,
+                point - direction * 9.0 - normal * 3.0,
+            ],
+            TEXT,
+            Stroke::NONE,
+        ));
+    }
     painter.rect(
         frame,
         0.0,
@@ -215,7 +299,7 @@ fn draw_marker(painter: &Painter, rect: Rect, point: Pos2, text: &str) {
         Stroke::new(1.0, TEXT),
         StrokeKind::Inside,
     );
-    painter.galley(frame.min + padding, galley, TEXT);
+    painter.galley(frame.min + MARKER_PADDING, galley, TEXT);
 }
 
 /// Axes X, Y, Z as arrows in screen space, drawn back to front; `full` adds PrePoMax's centre
