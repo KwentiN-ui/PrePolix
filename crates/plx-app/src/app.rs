@@ -658,7 +658,7 @@ impl Workbench {
             minimum: view
                 .filter(|_| post.min_label)
                 .and_then(|v| marker("Min", v.minimum())),
-            global_origin: Some(model.global_origin()).filter(|_| graphics.global_axes),
+            global_origin: graphics.global_axes.then(|| model.global_origin()),
             show_scale_bar: graphics.scale_bar,
             show_view_triad: graphics.view_triad,
         };
