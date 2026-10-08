@@ -36,8 +36,8 @@ fn srgb_to_linear(c: f32) -> f32 {
 /// Builds the GPU-ready geometry of one part. Positions are shifted by `-origin`, so that
 /// large coordinates keep their precision in `f32`.
 ///
-/// Faces meeting at less than `smooth_angle_deg` share averaged vertex normals, so curved
-/// surfaces look round; across sharper creases the shading stays flat.
+/// Faces of the same surface patch that meet at less than `smooth_angle_deg` share averaged
+/// vertex normals, so curved surfaces look round; across feature edges the shading stays flat.
 pub fn part_render_mesh(
     mesh: &FeMesh,
     skin: &PartSkin,
@@ -98,7 +98,8 @@ pub fn part_render_mesh(
 }
 
 /// Per face, one normal for each of its corner and mid nodes: the area-weighted average of the
-/// normals of all faces at that node that deviate from this face by less than the angle.
+/// normals of all faces of the same patch at that node that deviate from this face by less
+/// than the angle.
 fn smooth_vertex_normals(
     coords: &[[f64; 3]],
     skin: &PartSkin,
@@ -131,7 +132,10 @@ fn smooth_vertex_normals(
                 .map(|node| {
                     let sum: DVec3 = faces_at_node[node]
                         .iter()
-                        .filter(|&&other| own.dot(face_normals[other]) >= cos_limit)
+                        .filter(|&&other| {
+                            skin.faces[other].region == face.region
+                                && own.dot(face_normals[other]) >= cos_limit
+                        })
                         .map(|&other| face_normals[other] * weights[other])
                         .sum();
                     sum.try_normalize().unwrap_or(own).as_vec3().to_array()
