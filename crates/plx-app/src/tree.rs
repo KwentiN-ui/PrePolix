@@ -57,6 +57,42 @@ pub struct TreeResponse {
     pub open: Option<TreeItem>,
 }
 
+/// Tree label with a fixed size: highlight and hover frame are painted over the same area, so
+/// that hovering never moves the rows below (egui's selectable label grows by its frame).
+fn row_label(ui: &mut Ui, selected: bool, text: impl Into<WidgetText>) -> Response {
+    let padding = egui::vec2(3.0, 1.0);
+    let galley = text.into().into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Body,
+    );
+    let (rect, response) =
+        ui.allocate_exact_size(galley.size() + 2.0 * padding, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.visuals();
+        let text_color = if selected {
+            visuals.selection.stroke.color
+        } else {
+            visuals.text_color()
+        };
+        if selected {
+            ui.painter()
+                .rect_filled(rect, 0.0, visuals.selection.bg_fill);
+        } else if response.hovered() {
+            ui.painter().rect(
+                rect,
+                0.0,
+                crate::style::HOVER_FILL,
+                egui::Stroke::new(1.0, crate::style::HIGHLIGHT),
+                egui::StrokeKind::Inside,
+            );
+        }
+        ui.painter().galley(rect.min + padding, galley, text_color);
+    }
+    response
+}
+
 /// "Name (n)" when there are entries, as PrePoMax labels its containers.
 fn counted(name: &str, count: usize) -> String {
     if count > 0 {
@@ -82,7 +118,7 @@ impl Tree<'_> {
 
     /// Selectable label of an item: a click selects it, a double click opens its properties.
     fn label(&mut self, ui: &mut Ui, item: TreeItem, text: impl Into<WidgetText>) -> Response {
-        let response = ui.selectable_label(self.is_selected(&item), text);
+        let response = row_label(ui, self.is_selected(&item), text);
         if response.clicked() || response.double_clicked() {
             self.state.selected = Some((self.view, item.clone()));
         }

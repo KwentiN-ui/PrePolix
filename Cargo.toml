@@ -22,7 +22,6 @@ bytemuck = { version = "1.25", features = ["derive"] }
 eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "wayland", "x11"] }
 egui = "0.36"
 egui-wgpu = "0.36"
-egui_dock = "0.21"
 env_logger = "0.11"
 glam = { version = "0.34", features = ["bytemuck"] }
 log = "0.4"

@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 use plx_render::StandardView;
 
 use crate::icons::{self, Icon};
@@ -11,23 +10,6 @@ use crate::properties;
 use crate::results::{Deformation, ResultsView, format_legend_value};
 use crate::tree::{self, TreeItem, TreeState, TreeView};
 use crate::viewport::{ViewCommand, Viewport};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Tab {
-    Tree(TreeView),
-    Viewport,
-    Output,
-}
-
-impl Tab {
-    fn title(self) -> &'static str {
-        match self {
-            Tab::Tree(view) => view.title(),
-            Tab::Viewport => "3D-Ansicht",
-            Tab::Output => "Ausgabe",
-        }
-    }
-}
 
 enum LoadEvent {
     Started(PathBuf),
@@ -40,8 +22,8 @@ struct Workbench {
     tree: TreeState,
     /// Item whose properties window is open.
     dialog: Option<TreeItem>,
-    /// Tree view to bring to the front, after loading a model.
-    show_tree: Option<TreeView>,
+    /// Which of the three trees is shown.
+    tree_view: TreeView,
     output: Vec<String>,
     view_command: Option<ViewCommand>,
     /// The result selection or deformation changed; the scene must be rebuilt.
@@ -49,7 +31,6 @@ struct Workbench {
 }
 
 pub struct PrepolixApp {
-    dock: DockState<Tab>,
     workbench: Workbench,
     load_events: (Sender<LoadEvent>, Receiver<LoadEvent>),
     loading: Option<PathBuf>,
@@ -72,13 +53,12 @@ impl PrepolixApp {
             adapter.backend
         )];
         let mut app = Self {
-            dock: default_layout(),
             workbench: Workbench {
                 viewport: Viewport::new(render_state),
                 model: None,
                 tree: TreeState::default(),
                 dialog: None,
-                show_tree: None,
+                tree_view: TreeView::FeModel,
                 output,
                 view_command: None,
                 results_changed: false,
@@ -266,18 +246,6 @@ const STANDARD_VIEWS: [(StandardView, &str); 7] = [
     (StandardView::Isometric, "Isometrisch"),
 ];
 
-fn default_layout() -> DockState<Tab> {
-    let mut dock = DockState::new(vec![Tab::Viewport]);
-    let surface = dock.main_surface_mut();
-    let trees = [TreeView::Geometry, TreeView::FeModel, TreeView::Results].map(Tab::Tree);
-    let [viewport, _] = surface.split_left(NodeIndex::root(), 0.2, trees.to_vec());
-    surface.split_below(viewport, 0.82, vec![Tab::Output]);
-    if let Some(path) = dock.find_tab(&Tab::Tree(TreeView::FeModel)) {
-        let _ = dock.set_active_tab(path);
-    }
-    dock
-}
-
 impl eframe::App for PrepolixApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.handle_load_events();
@@ -315,18 +283,35 @@ impl eframe::App for PrepolixApp {
             }
         });
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
-        if let Some(view) = self.workbench.show_tree.take()
-            && let Some(path) = self.dock.find_tab(&Tab::Tree(view))
-        {
-            let _ = self.dock.set_active_tab(path);
-        }
-        let dock_style = crate::style::dock_style(ui.style());
-        DockArea::new(&mut self.dock)
-            .style(dock_style)
-            .show_close_buttons(false)
-            .show_leaf_close_all_buttons(false)
-            .show_leaf_collapse_buttons(false)
-            .show_inside(ui, &mut self.workbench);
+        // PrePoMax's fixed layout: tree on the left over the full height, 3D view with the
+        // output below it; only the separators move.
+        let pane = egui::Frame::new()
+            .fill(crate::style::WINDOW)
+            .stroke(egui::Stroke::new(1.0, crate::style::BORDER));
+        egui::Panel::left("tree")
+            .resizable(true)
+            .default_size(280.0)
+            .size_range(160.0..=700.0)
+            .frame(egui::Frame::new().fill(crate::style::CONTROL))
+            .show(ui, |ui| {
+                self.workbench.tree_tabs(ui);
+                pane.inner_margin(4).show(ui, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    let view = self.workbench.tree_view;
+                    self.workbench.model_tree(ui, view);
+                });
+            });
+        egui::Panel::bottom("output")
+            .resizable(true)
+            .default_size(140.0)
+            .size_range(40.0..=600.0)
+            .frame(pane.inner_margin(4))
+            .show(ui, |ui| self.workbench.output(ui));
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            if let Some(command) = self.workbench.viewport.ui(ui) {
+                self.workbench.view_command = Some(command);
+            }
+        });
         self.workbench.properties_window(&ctx);
         self.workbench.rebuild_if_results_changed();
 
@@ -384,11 +369,11 @@ impl Workbench {
                 self.viewport.set_parts(&render_meshes);
                 self.viewport
                     .apply(ViewCommand::Fit, model.visible_bounds());
-                self.show_tree = Some(if model.results.is_some() {
+                self.tree_view = if model.results.is_some() {
                     TreeView::Results
                 } else {
                     TreeView::FeModel
-                });
+                };
                 self.tree.selected = model
                     .results
                     .as_ref()
@@ -399,6 +384,63 @@ impl Workbench {
             }
             Err(error) => self.output.push(format!("Fehler beim Laden: {error}")),
         }
+    }
+
+    /// Tab strip above the tree, like PrePoMax's Windows tab control.
+    fn tree_tabs(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(2.0);
+            for view in [TreeView::Geometry, TreeView::FeModel, TreeView::Results] {
+                let selected = self.tree_view == view;
+                let galley = ui.painter().layout_no_wrap(
+                    view.title().to_string(),
+                    egui::TextStyle::Body.resolve(ui.style()),
+                    egui::Color32::BLACK,
+                );
+                let size = galley.size() + egui::vec2(16.0, 8.0);
+                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                let fill = if selected {
+                    crate::style::WINDOW
+                } else if response.hovered() {
+                    crate::style::HOVER_FILL
+                } else {
+                    crate::style::CONTROL
+                };
+                let rect = if selected {
+                    rect
+                } else {
+                    rect.shrink2(egui::vec2(0.0, 1.0))
+                        .translate(egui::vec2(0.0, 1.0))
+                };
+                ui.painter().rect(
+                    rect,
+                    0.0,
+                    fill,
+                    egui::Stroke::new(1.0, crate::style::BORDER),
+                    egui::StrokeKind::Inside,
+                );
+                ui.painter().galley(
+                    rect.center() - galley.size() * 0.5,
+                    galley,
+                    egui::Color32::BLACK,
+                );
+                if response.clicked() {
+                    self.tree_view = view;
+                }
+            }
+        });
+    }
+
+    fn output(&self, ui: &mut egui::Ui) {
+        egui::ScrollArea::both()
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for line in &self.output {
+                    ui.monospace(line);
+                }
+            });
     }
 
     fn model_tree(&mut self, ui: &mut egui::Ui, view: TreeView) {
@@ -580,47 +622,4 @@ fn results_tool_bar(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
         }
     });
     changed
-}
-
-impl TabViewer for Workbench {
-    type Tab = Tab;
-
-    fn id(&mut self, tab: &mut Tab) -> egui::Id {
-        egui::Id::new(*tab)
-    }
-
-    fn title(&mut self, tab: &mut Tab) -> egui::WidgetText {
-        tab.title().into()
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Tab) {
-        match tab {
-            Tab::Tree(view) => self.model_tree(ui, *view),
-            Tab::Viewport => {
-                if let Some(command) = self.viewport.ui(ui) {
-                    self.view_command = Some(command);
-                }
-            }
-            Tab::Output => {
-                egui::ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for line in &self.output {
-                            ui.monospace(line);
-                        }
-                    });
-            }
-        }
-    }
-
-    fn scroll_bars(&self, tab: &Tab) -> [bool; 2] {
-        match tab {
-            Tab::Viewport => [false, false],
-            _ => [true, true],
-        }
-    }
-
-    fn clear_background(&self, _tab: &Tab) -> bool {
-        true
-    }
 }
