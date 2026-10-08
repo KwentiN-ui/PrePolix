@@ -40,8 +40,7 @@ pub fn add_derived_components(field: &mut Field) {
     let mut tresca = Vec::with_capacity(count);
     let mut signed_max_abs = Vec::with_capacity(count);
     let mut principal = [(); 3].map(|_| Vec::with_capacity(count));
-    for i in 0..count {
-        let t = [0, 1, 2, 3, 4, 5].map(|k| base[k][i] as f64);
+    for t in (0..count).map(|i| [0, 1, 2, 3, 4, 5].map(|k| base[k][i] as f64)) {
         let [xx, yy, zz, xy, yz, zx] = t;
         let mises = (0.5
             * ((xx - yy).powi(2)
