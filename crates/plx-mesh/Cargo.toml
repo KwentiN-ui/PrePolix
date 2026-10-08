@@ -1,0 +1,13 @@
+[package]
+name = "plx-mesh"
+description = "FE-Netz: Knoten, Elemente, Sets, Surfaces, Geometrie-Topologie"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+plx-core.workspace = true
+
+[lints]
+workspace = true

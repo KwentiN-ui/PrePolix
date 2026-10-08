@@ -1,0 +1,15 @@
+[package]
+name = "plx-render"
+description = "wgpu-Renderer für FE-Netze und Ergebnisse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+glam.workspace = true
+wgpu = { version = "30", default-features = false, features = ["wgsl"] }
+
+[lints]
+workspace = true
