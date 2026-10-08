@@ -43,6 +43,8 @@ pub struct ResultsView {
     pub deformation: Deformation,
     pub user_scale: f32,
     pub levels: u32,
+    /// Draw the undeformed outline behind the deformed shape.
+    pub show_undeformed: bool,
     /// Characteristic model size for the automatic scale (PrePoMax: cube root of the bounding
     /// box volume, square root of the area for flat models).
     model_size: f64,
@@ -66,6 +68,7 @@ impl ResultsView {
             deformation: Deformation::Automatic(1.0),
             user_scale: 10.0,
             levels: DEFAULT_LEVELS,
+            show_undeformed: true,
             model_size: bounds.map_or(1.0, model_size),
         };
         view.increment = view.default_increment();

@@ -103,6 +103,29 @@ pub fn part_render_mesh(
     render
 }
 
+/// Feature edges of a part as translucent black lines, PrePoMax's wireframe of the undeformed
+/// shape behind deformed results.
+pub fn wireframe_edges(coords: &[[f64; 3]], skin: &PartSkin, origin: DVec3) -> Vec<Vertex> {
+    let vertex = |node: usize| Vertex {
+        position: (DVec3::from(coords[node]) - origin).as_vec3().to_array(),
+        normal: [0.0; 3],
+        color: EDGE_COLOR,
+        scalar: WIREFRAME_OPACITY,
+    };
+    let mut lines = Vec::new();
+    for edge in skin.edges.iter().filter(|e| e.feature) {
+        let nodes: &[usize] = match edge.mid {
+            Some(mid) => &[edge.a, mid, mid, edge.b],
+            None => &[edge.a, edge.b],
+        };
+        lines.extend(nodes.iter().map(|&n| vertex(n)));
+    }
+    for &[a, b] in &skin.lines {
+        lines.extend([vertex(a), vertex(b)]);
+    }
+    lines
+}
+
 /// Per face, one normal for each of its corner and mid nodes: the area-weighted average of the
 /// normals of all faces of the same patch at that node that deviate from this face by less
 /// than the angle.

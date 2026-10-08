@@ -7,7 +7,7 @@ use plx_io::frd::{FrdImport, read_frd};
 use plx_io::inp::{InpImport, read_inp};
 use plx_mesh::{FeMesh, PartSkin, extract_part_skin};
 use plx_render::contour::normalize;
-use plx_render::{RenderMesh, part_color, part_render_mesh};
+use plx_render::{RenderMesh, part_color, part_render_mesh, wireframe_edges};
 
 use crate::results::ResultsView;
 
@@ -134,6 +134,7 @@ impl Model {
     pub fn render_meshes(&self) -> Vec<RenderMesh> {
         let mut coords = std::borrow::Cow::Borrowed(self.mesh.coords());
         let mut scalars = None;
+        let mut deformed = false;
         if let Some(view) = &self.results {
             let scale = view.scale() as f64;
             let displacements = view.current_increment().and_then(|i| i.displacements());
@@ -145,6 +146,7 @@ impl Model {
                         .map(|(p, d)| [0, 1, 2].map(|k| p[k] + scale * d[k] as f64))
                         .collect(),
                 );
+                deformed = view.show_undeformed;
             }
             if let (Some((_, component)), Some(legend)) = (view.current(), view.legend()) {
                 scalars = Some(normalize(&component.values, legend.min, legend.max));
@@ -156,14 +158,18 @@ impl Model {
             .zip(&self.parts)
             .zip(&self.skins)
             .map(|((_, info), skin)| {
-                part_render_mesh(
+                let mut mesh = part_render_mesh(
                     &coords,
                     skin,
                     self.origin,
                     info.color,
                     SMOOTH_ANGLE_DEG,
                     scalars.as_deref(),
-                )
+                );
+                if deformed {
+                    mesh.wireframe_edges = wireframe_edges(self.mesh.coords(), skin, self.origin);
+                }
+                mesh
             })
             .collect()
     }
