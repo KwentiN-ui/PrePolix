@@ -1,6 +1,7 @@
 //! wgpu-Renderer für FE-Netze und Ergebnisse.
 
 mod camera;
+pub mod contour;
 mod fe;
 mod mesh;
 mod renderer;

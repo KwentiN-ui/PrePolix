@@ -3,9 +3,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use glam::{DVec3, Vec3};
+use plx_io::frd::{FrdImport, read_frd};
 use plx_io::inp::{InpImport, read_inp};
-use plx_mesh::{FeMesh, extract_part_skin};
+use plx_mesh::{FeMesh, PartSkin, extract_part_skin};
+use plx_render::contour::normalize;
 use plx_render::{RenderMesh, part_color, part_render_mesh};
+
+use crate::results::ResultsView;
 
 /// Angle between neighbouring faces above which their common edge counts as a feature edge
 /// and the shading across it stays sharp.
@@ -35,6 +39,11 @@ pub struct Model {
     pub skipped_keywords: BTreeMap<String, usize>,
     pub included_files: usize,
     pub load_time: Duration,
+    /// Results read from an `.frd` file, with what the user currently looks at.
+    pub results: Option<ResultsView>,
+    /// Centre of the mesh; render positions are relative to it.
+    origin: DVec3,
+    skins: Vec<PartSkin>,
 }
 
 /// Result of loading on a worker thread: the model plus one GPU-ready mesh per part.
@@ -45,12 +54,27 @@ pub struct LoadedModel {
 
 pub fn load(path: &Path) -> Result<LoadedModel, String> {
     let start = Instant::now();
-    let InpImport {
-        mesh,
-        warnings,
-        skipped_keywords,
-        files,
-    } = read_inp(path).map_err(|e| e.to_string())?;
+    let is_frd = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("frd"));
+    let (mesh, warnings, skipped_keywords, included_files, increments) = if is_frd {
+        let FrdImport {
+            mesh,
+            increments,
+            warnings,
+            ..
+        } = read_frd(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        (mesh, warnings, BTreeMap::new(), 0, Some(increments))
+    } else {
+        let InpImport {
+            mesh,
+            warnings,
+            skipped_keywords,
+            files,
+        } = read_inp(path).map_err(|e| e.to_string())?;
+        let included = files.len().saturating_sub(1);
+        (mesh, warnings, skipped_keywords, included, None)
+    };
     if mesh.element_count() == 0 {
         return Err(format!(
             "{} enthält keine darstellbaren Elemente",
@@ -62,11 +86,8 @@ pub fn load(path: &Path) -> Result<LoadedModel, String> {
     });
 
     let mut parts = Vec::with_capacity(mesh.parts.len());
-    let mut render_meshes = Vec::with_capacity(mesh.parts.len());
+    let mut skins = Vec::with_capacity(mesh.parts.len());
     for (index, part) in mesh.parts.iter().enumerate() {
-        let color = part_color(index);
-        let skin = extract_part_skin(&mesh, part, FEATURE_ANGLE_DEG);
-        let render = part_render_mesh(&mesh, &skin, origin, color, SMOOTH_ANGLE_DEG);
         let mut types: BTreeMap<&str, usize> = BTreeMap::new();
         let mut nodes = std::collections::HashSet::new();
         for element in part.elements.iter().filter_map(|&id| mesh.element(id)) {
@@ -75,30 +96,78 @@ pub fn load(path: &Path) -> Result<LoadedModel, String> {
         }
         parts.push(PartInfo {
             name: part.name.clone(),
-            color,
+            color: part_color(index),
             element_count: part.elements.len(),
             node_count: nodes.len(),
             element_types: types.into_iter().map(|(t, n)| (t.to_string(), n)).collect(),
-            bounds: render.bounds(),
+            bounds: None,
             visible: true,
         });
-        render_meshes.push(render);
+        skins.push(extract_part_skin(&mesh, part, FEATURE_ANGLE_DEG));
     }
+    let results = increments.map(|increments| ResultsView::new(increments, mesh.bounds()));
+    let mut model = Model {
+        path: path.to_path_buf(),
+        mesh,
+        parts,
+        warnings,
+        skipped_keywords,
+        included_files,
+        load_time: Duration::ZERO,
+        results,
+        origin,
+        skins,
+    };
+    let render_meshes = model.render_meshes();
+    for (part, render) in model.parts.iter_mut().zip(&render_meshes) {
+        part.bounds = render.bounds();
+    }
+    model.load_time = start.elapsed();
     Ok(LoadedModel {
-        model: Model {
-            path: path.to_path_buf(),
-            mesh,
-            parts,
-            warnings,
-            skipped_keywords,
-            included_files: files.len().saturating_sub(1),
-            load_time: start.elapsed(),
-        },
+        model,
         render_meshes,
     })
 }
 
 impl Model {
+    /// GPU-ready meshes of all parts, deformed and coloured by the selected result if any.
+    pub fn render_meshes(&self) -> Vec<RenderMesh> {
+        let mut coords = std::borrow::Cow::Borrowed(self.mesh.coords());
+        let mut scalars = None;
+        if let Some(view) = &self.results {
+            let scale = view.scale() as f64;
+            let displacements = view.current_increment().and_then(|i| i.displacements());
+            if let (Some(displacements), true) = (displacements, scale != 0.0) {
+                coords = std::borrow::Cow::Owned(
+                    coords
+                        .iter()
+                        .zip(&displacements)
+                        .map(|(p, d)| [0, 1, 2].map(|k| p[k] + scale * d[k] as f64))
+                        .collect(),
+                );
+            }
+            if let (Some((_, component)), Some(legend)) = (view.current(), view.legend()) {
+                scalars = Some(normalize(&component.values, legend.min, legend.max));
+            }
+        }
+        self.mesh
+            .parts
+            .iter()
+            .zip(&self.parts)
+            .zip(&self.skins)
+            .map(|((_, info), skin)| {
+                part_render_mesh(
+                    &coords,
+                    skin,
+                    self.origin,
+                    info.color,
+                    SMOOTH_ANGLE_DEG,
+                    scalars.as_deref(),
+                )
+            })
+            .collect()
+    }
+
     pub fn file_name(&self) -> String {
         self.path.file_name().map_or_else(
             || self.path.display().to_string(),
@@ -146,6 +215,26 @@ mod tests {
         model.parts[1].visible = false;
         let (min, max) = model.visible_bounds().unwrap();
         assert_eq!(max.z - min.z, 0.0);
+    }
+
+    #[test]
+    fn loads_frd_results_with_deformation() {
+        let loaded = load(&testdata("kragbalken_c3d8.frd")).unwrap();
+        let model = &loaded.model;
+        assert_eq!(model.parts[0].name, "STEEL");
+        let view = model.results.as_ref().unwrap();
+        assert_eq!(view.current().unwrap().1.name, "ALL");
+        assert!(view.scale() > 1.0);
+        // The beam bends downwards, so the deformed bounds reach below the undeformed ones.
+        let undeformed_min_z = -5.0;
+        let (min, _) = model.visible_bounds().unwrap();
+        assert!(min.z < undeformed_min_z, "{min}");
+        assert!(
+            loaded.render_meshes[0]
+                .vertices
+                .iter()
+                .all(|v| v.scalar >= 0.0)
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 
 use crate::model::{self, LoadedModel, Model};
+use crate::results::{Deformation, ResultsView, format_value};
 use crate::viewport::{ViewCommand, Viewport};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -44,6 +45,8 @@ struct Workbench {
     selection: Option<Selection>,
     output: Vec<String>,
     view_command: Option<ViewCommand>,
+    /// The result selection or deformation changed; the scene must be rebuilt.
+    results_changed: bool,
 }
 
 pub struct PrepolixApp {
@@ -76,6 +79,7 @@ impl PrepolixApp {
                 selection: None,
                 output,
                 view_command: None,
+                results_changed: false,
             },
             load_events: channel(),
             loading: None,
@@ -95,7 +99,12 @@ impl PrepolixApp {
         std::thread::spawn(move || {
             let picked = rfd::FileDialog::new()
                 .set_title("Modell öffnen")
-                .add_filter("CalculiX / Abaqus (*.inp)", &["inp", "INP"])
+                .add_filter(
+                    "CalculiX-Modell oder -Ergebnisse (*.inp, *.frd)",
+                    &["inp", "INP", "frd", "FRD"],
+                )
+                .add_filter("Eingabedatei (*.inp)", &["inp", "INP"])
+                .add_filter("Ergebnisdatei (*.frd)", &["frd", "FRD"])
                 .pick_file();
             if let Some(path) = picked {
                 load_in_background(path, sender, ctx);
@@ -232,6 +241,7 @@ impl eframe::App for PrepolixApp {
             .show_close_buttons(false)
             .show_leaf_close_all_buttons(false)
             .show_inside(ui, &mut self.workbench);
+        self.workbench.rebuild_if_results_changed();
 
         if let Some(command) = self.workbench.view_command.take() {
             let bounds = self
@@ -278,11 +288,18 @@ impl Workbench {
                     self.output
                         .push(format!("Noch nicht ausgewertet: {}", keywords.join(", ")));
                 }
+                if let Some(view) = &model.results {
+                    self.output.push(format!(
+                        "{} Ergebnis-Inkrement(e) gelesen",
+                        view.increments.len()
+                    ));
+                }
                 self.viewport.set_parts(&render_meshes);
                 self.viewport
                     .apply(ViewCommand::Fit, model.visible_bounds());
                 self.model = Some(model);
                 self.selection = None;
+                self.update_contour();
             }
             Err(error) => self.output.push(format!("Fehler beim Laden: {error}")),
         }
@@ -290,7 +307,7 @@ impl Workbench {
 
     fn model_tree(&mut self, ui: &mut egui::Ui) {
         let Some(model) = &mut self.model else {
-            ui.weak("Kein Modell geladen.\nDatei > Öffnen (Strg+O) oder eine .inp-Datei ins Fenster ziehen.");
+            ui.weak("Kein Modell geladen.\nDatei > Öffnen (Strg+O) oder eine .inp- oder .frd-Datei ins Fenster ziehen.");
             return;
         };
         let selection = &mut self.selection;
@@ -347,12 +364,45 @@ impl Workbench {
                     |name, surface| (Selection::Surface(name.to_string()), surface_size(surface)),
                 );
             });
-        egui::CollapsingHeader::new("Ergebnisse").show(ui, |ui| {
-            ui.weak("Keine Ergebnisse geladen");
-        });
+        egui::CollapsingHeader::new("Ergebnisse")
+            .default_open(model.results.is_some())
+            .show(ui, |ui| match &mut model.results {
+                Some(view) => {
+                    if results_tree(ui, view) {
+                        self.results_changed = true;
+                    }
+                }
+                None => {
+                    ui.weak(
+                        "Keine Ergebnisse geladen.\nEine .frd-Datei öffnen, um sie anzuzeigen.",
+                    );
+                }
+            });
         for (index, visible) in visibility_changes {
             self.viewport.set_part_visible(index, visible);
         }
+    }
+
+    /// Rebuilds the scene after the result selection or deformation changed.
+    fn rebuild_if_results_changed(&mut self) {
+        if !std::mem::take(&mut self.results_changed) {
+            return;
+        }
+        let Some(model) = &mut self.model else { return };
+        let meshes = model.render_meshes();
+        self.viewport.set_parts(&meshes);
+        for (index, (part, mesh)) in model.parts.iter_mut().zip(&meshes).enumerate() {
+            part.bounds = mesh.bounds();
+            self.viewport.set_part_visible(index, part.visible);
+        }
+        self.update_contour();
+    }
+
+    fn update_contour(&mut self) {
+        let view = self.model.as_ref().and_then(|m| m.results.as_ref());
+        self.viewport.options.contour_levels =
+            view.filter(|v| v.current().is_some()).map(|v| v.levels);
+        self.viewport.legend = view.and_then(ResultsView::legend);
     }
 
     fn properties(&self, ui: &mut egui::Ui) {
@@ -376,6 +426,9 @@ impl Workbench {
                         row("Knoten", mesh.node_count().to_string());
                         row("Elemente", mesh.element_count().to_string());
                         row("Parts", model.parts.len().to_string());
+                        if let Some(view) = &model.results {
+                            result_properties(&mut row, mesh, view);
+                        }
                     }
                     Some(Selection::Part(index)) => {
                         let part = &model.parts[*index];
@@ -418,6 +471,114 @@ impl Workbench {
                 }
             });
     }
+}
+
+/// Result tree: increment choice, fields with their components, deformation and colour bands.
+/// Returns true when anything that affects the scene changed.
+fn results_tree(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
+    let mut changed = false;
+    let mut increment = view.increment;
+    let selected = view
+        .current_increment()
+        .map(ResultsView::increment_label)
+        .unwrap_or_default();
+    egui::ComboBox::from_id_salt("increment")
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            for (index, inc) in view.increments.iter().enumerate() {
+                ui.selectable_value(&mut increment, index, ResultsView::increment_label(inc));
+            }
+        });
+    if increment != view.increment {
+        view.select_increment(increment);
+        changed = true;
+    }
+
+    let mut pick = None;
+    if let Some(inc) = view.current_increment() {
+        for (f, field) in inc.fields.iter().enumerate() {
+            egui::CollapsingHeader::new(&field.name)
+                .id_salt(("field", &field.name))
+                .default_open(f == view.field)
+                .show(ui, |ui| {
+                    for (c, component) in field.components.iter().enumerate() {
+                        let active = f == view.field && c == view.component;
+                        if ui.selectable_label(active, &component.name).clicked() && !active {
+                            pick = Some((f, c));
+                        }
+                    }
+                });
+        }
+    }
+    if let Some((field, component)) = pick {
+        view.field = field;
+        view.component = component;
+        changed = true;
+    }
+
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("Verformung");
+        let before = view.deformation;
+        egui::ComboBox::from_id_salt("deformation")
+            .selected_text(view.deformation.label())
+            .show_ui(ui, |ui| {
+                for choice in Deformation::CHOICES {
+                    ui.selectable_value(&mut view.deformation, choice, choice.label());
+                }
+            });
+        changed |= view.deformation != before;
+    });
+    if view.deformation == Deformation::UserDefined {
+        ui.horizontal(|ui| {
+            ui.label("Faktor");
+            changed |= ui
+                .add(egui::DragValue::new(&mut view.user_scale).speed(0.1))
+                .changed();
+        });
+    }
+    ui.horizontal(|ui| {
+        ui.label("Farbstufen");
+        changed |= ui
+            .add(egui::DragValue::new(&mut view.levels).range(2..=plx_render::contour::MAX_LEVELS))
+            .changed();
+    });
+    changed
+}
+
+fn result_properties(
+    row: &mut impl FnMut(&str, String),
+    mesh: &plx_mesh::FeMesh,
+    view: &ResultsView,
+) {
+    let Some((field, component)) = view.current() else {
+        return;
+    };
+    row("Ergebnis", format!("{}: {}", field.name, component.name));
+    let extreme = |pick_max: bool| {
+        component
+            .values
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.is_finite())
+            .reduce(|a, b| {
+                let better = if pick_max { b.1 > a.1 } else { b.1 < a.1 };
+                if better { b } else { a }
+            })
+    };
+    for (label, pick_max) in [("Maximum", true), ("Minimum", false)] {
+        if let Some((index, value)) = extreme(pick_max) {
+            row(
+                label,
+                format!(
+                    "{} (Knoten {})",
+                    format_value(*value),
+                    mesh.node_ids()[index]
+                ),
+            );
+        }
+    }
+    row("Verformungsfaktor", format_value(view.scale()));
 }
 
 fn surface_size(surface: &plx_mesh::SurfaceDefinition) -> usize {

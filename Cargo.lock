@@ -2425,6 +2425,7 @@ dependencies = [
  "plx-io",
  "plx-mesh",
  "plx-render",
+ "plx-results",
  "rfd",
 ]
 

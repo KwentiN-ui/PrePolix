@@ -2,6 +2,7 @@
 
 mod app;
 mod model;
+mod results;
 mod viewport;
 
 fn main() -> eframe::Result {
@@ -31,6 +32,7 @@ mod tests {
             ("app.rs", include_str!("app.rs")),
             ("main.rs", include_str!("main.rs")),
             ("model.rs", include_str!("model.rs")),
+            ("results.rs", include_str!("results.rs")),
             ("viewport.rs", include_str!("viewport.rs")),
         ];
         for (file, text) in sources {

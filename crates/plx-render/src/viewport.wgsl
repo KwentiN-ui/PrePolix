@@ -5,6 +5,9 @@ struct Globals {
     background_bottom: vec4<f32>,
     // x: depth offset of edges towards the viewer, about one and a half pixels.
     edge: vec4<f32>,
+    // x: number of contour bands, 0 to show part colours.
+    contour: vec4<f32>,
+    palette: array<vec4<f32>, 24>,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -40,13 +43,18 @@ struct SurfaceIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
+    @location(3) scalar: f32,
 };
 
 struct SurfaceOut {
     @builtin(position) position: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) color: vec3<f32>,
+    @location(2) scalar: f32,
 };
+
+// Colour without a result value: light grey, like PrePoMax's NaN colour on a lit surface.
+const NO_VALUE_COLOR: vec3<f32> = vec3<f32>(0.6, 0.6, 0.6);
 
 @vertex
 fn vs_surface(in: SurfaceIn) -> SurfaceOut {
@@ -54,14 +62,31 @@ fn vs_surface(in: SurfaceIn) -> SurfaceOut {
     out.position = globals.view_proj * vec4<f32>(in.position, 1.0);
     out.normal = in.normal;
     out.color = in.color;
+    out.scalar = in.scalar;
     return out;
+}
+
+// Discrete band of a normalized value; the top value 1.0 belongs to the last band.
+fn contour_color(t: f32) -> vec3<f32> {
+    let levels = globals.contour.x;
+    if t < 0.0 {
+        return NO_VALUE_COLOR;
+    }
+    let band = u32(clamp(floor(t * levels), 0.0, levels - 1.0));
+    return globals.palette[band].rgb;
 }
 
 @fragment
 fn fs_surface(in: SurfaceOut) -> @location(0) vec4<f32> {
     let diffuse = abs(dot(normalize(in.normal), -globals.light_dir.xyz));
-    let shade = 0.45 + 0.55 * diffuse;
-    return encode_srgb(in.color * shade);
+    var color = in.color;
+    var shade = 0.45 + 0.55 * diffuse;
+    if globals.contour.x > 0.0 {
+        color = contour_color(in.scalar);
+        // Contours stay readable: lighting only modulates them gently.
+        shade = 0.7 + 0.3 * diffuse;
+    }
+    return encode_srgb(color * shade);
 }
 
 struct EdgeOut {
