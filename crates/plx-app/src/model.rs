@@ -7,7 +7,7 @@ use plx_io::frd::{FrdImport, read_frd};
 use plx_io::inp::{InpImport, read_inp};
 use plx_mesh::{FeMesh, PartSkin, extract_part_skin};
 use plx_render::contour::normalize;
-use plx_render::{RenderMesh, part_color, part_render_mesh};
+use plx_render::{RenderMesh, part_color, part_render_mesh, wireframe_edges};
 
 use crate::results::ResultsView;
 
@@ -62,9 +62,17 @@ pub fn load(path: &Path) -> Result<LoadedModel, String> {
             mesh,
             increments,
             warnings,
+            date,
+            time,
             ..
         } = read_frd(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        (mesh, warnings, BTreeMap::new(), 0, Some(increments))
+        (
+            mesh,
+            warnings,
+            BTreeMap::new(),
+            0,
+            Some((increments, date, time)),
+        )
     } else {
         let InpImport {
             mesh,
@@ -105,7 +113,12 @@ pub fn load(path: &Path) -> Result<LoadedModel, String> {
         });
         skins.push(extract_part_skin(&mesh, part, FEATURE_ANGLE_DEG));
     }
-    let results = increments.map(|increments| ResultsView::new(increments, mesh.bounds()));
+    let results = increments.map(|(increments, date, time)| {
+        let mut view = ResultsView::new(increments, mesh.bounds());
+        view.date = date;
+        view.time = time;
+        view
+    });
     let mut model = Model {
         path: path.to_path_buf(),
         mesh,
@@ -134,6 +147,7 @@ impl Model {
     pub fn render_meshes(&self) -> Vec<RenderMesh> {
         let mut coords = std::borrow::Cow::Borrowed(self.mesh.coords());
         let mut scalars = None;
+        let mut deformed = false;
         if let Some(view) = &self.results {
             let scale = view.scale() as f64;
             let displacements = view.current_increment().and_then(|i| i.displacements());
@@ -145,6 +159,7 @@ impl Model {
                         .map(|(p, d)| [0, 1, 2].map(|k| p[k] + scale * d[k] as f64))
                         .collect(),
                 );
+                deformed = view.show_undeformed;
             }
             if let (Some((_, component)), Some(legend)) = (view.current(), view.legend()) {
                 scalars = Some(normalize(&component.values, legend.min, legend.max));
@@ -156,16 +171,43 @@ impl Model {
             .zip(&self.parts)
             .zip(&self.skins)
             .map(|((_, info), skin)| {
-                part_render_mesh(
+                let mut mesh = part_render_mesh(
                     &coords,
                     skin,
                     self.origin,
                     info.color,
                     SMOOTH_ANGLE_DEG,
                     scalars.as_deref(),
-                )
+                );
+                if deformed {
+                    mesh.wireframe_edges = wireframe_edges(self.mesh.coords(), skin, self.origin);
+                }
+                mesh
             })
             .collect()
+    }
+
+    /// Where a node is drawn, relative to the model origin, including the shown deformation.
+    pub fn node_position(&self, index: usize) -> Option<Vec3> {
+        let mut p = DVec3::from(*self.mesh.coords().get(index)?);
+        if let Some(view) = &self.results {
+            let scale = view.scale() as f64;
+            let displacement = view
+                .current_increment()
+                .and_then(|i| i.field("DISP"))
+                .map(|f| {
+                    ["U1", "U2", "U3"].map(|n| f.component(n).map_or(0.0, |c| c.values[index]))
+                });
+            if let (Some(d), true) = (displacement, scale != 0.0) {
+                p += scale * DVec3::new(d[0] as f64, d[1] as f64, d[2] as f64);
+            }
+        }
+        Some((p - self.origin).as_vec3())
+    }
+
+    /// The global origin in render coordinates.
+    pub fn global_origin(&self) -> Vec3 {
+        (-self.origin).as_vec3()
     }
 
     pub fn file_name(&self) -> String {

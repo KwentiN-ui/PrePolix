@@ -1,38 +1,15 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
+use plx_render::StandardView;
 
+use crate::icons::{self, Icon};
 use crate::model::{self, LoadedModel, Model};
-use crate::results::{Deformation, ResultsView, format_value};
+use crate::overlay::{Marker, Overlay};
+use crate::properties;
+use crate::results::{Deformation, ResultsView, format_legend_value};
+use crate::tree::{self, TreeItem, TreeState, TreeView};
 use crate::viewport::{ViewCommand, Viewport};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Tab {
-    ModelTree,
-    Properties,
-    Viewport,
-    Output,
-}
-
-impl Tab {
-    fn title(self) -> &'static str {
-        match self {
-            Tab::ModelTree => "Modell",
-            Tab::Properties => "Eigenschaften",
-            Tab::Viewport => "3D-Ansicht",
-            Tab::Output => "Ausgabe",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Selection {
-    Part(usize),
-    NodeSet(String),
-    ElementSet(String),
-    Surface(String),
-}
 
 enum LoadEvent {
     Started(PathBuf),
@@ -42,7 +19,11 @@ enum LoadEvent {
 struct Workbench {
     viewport: Viewport,
     model: Option<Model>,
-    selection: Option<Selection>,
+    tree: TreeState,
+    /// Item whose properties window is open.
+    dialog: Option<TreeItem>,
+    /// Which of the three trees is shown.
+    tree_view: TreeView,
     output: Vec<String>,
     view_command: Option<ViewCommand>,
     /// The result selection or deformation changed; the scene must be rebuilt.
@@ -50,7 +31,6 @@ struct Workbench {
 }
 
 pub struct PrepolixApp {
-    dock: DockState<Tab>,
     workbench: Workbench,
     load_events: (Sender<LoadEvent>, Receiver<LoadEvent>),
     loading: Option<PathBuf>,
@@ -64,6 +44,7 @@ impl PrepolixApp {
             .wgpu_render_state
             .clone()
             .ok_or("prepolix benötigt das wgpu-Backend von eframe")?;
+        crate::style::apply(&cc.egui_ctx);
         let adapter = render_state.adapter.get_info();
         let output = vec![format!(
             "prepolix {} gestartet, Grafik: {} ({:?})",
@@ -72,11 +53,12 @@ impl PrepolixApp {
             adapter.backend
         )];
         let mut app = Self {
-            dock: default_layout(),
             workbench: Workbench {
                 viewport: Viewport::new(render_state),
                 model: None,
-                selection: None,
+                tree: TreeState::default(),
+                dialog: None,
+                tree_view: TreeView::FeModel,
                 output,
                 view_command: None,
                 results_changed: false,
@@ -134,6 +116,13 @@ impl PrepolixApp {
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("Datei", |ui| {
+                let new = egui::Button::new("Neu").shortcut_text("Strg+N");
+                if ui
+                    .add_enabled(self.workbench.model.is_some(), new)
+                    .clicked()
+                {
+                    self.workbench.close_model();
+                }
                 let open = egui::Button::new("Öffnen …").shortcut_text("Strg+O");
                 if ui.add_enabled(self.loading.is_none(), open).clicked() {
                     self.open_dialog(ui.ctx());
@@ -145,13 +134,12 @@ impl PrepolixApp {
             });
             ui.menu_button("Bearbeiten", not_implemented);
             ui.menu_button("Ansicht", |ui| {
-                for (label, command) in [
-                    ("Einpassen", ViewCommand::Fit),
-                    ("Isometrisch", ViewCommand::Isometric),
-                    ("Vorne", ViewCommand::Front),
-                ] {
+                if ui.button("Einpassen").clicked() {
+                    self.workbench.view_command = Some(ViewCommand::Fit);
+                }
+                for (view, label) in STANDARD_VIEWS {
                     if ui.button(label).clicked() {
-                        self.workbench.view_command = Some(command);
+                        self.workbench.view_command = Some(ViewCommand::View(view));
                     }
                 }
                 ui.separator();
@@ -170,6 +158,46 @@ impl PrepolixApp {
                 "Hilfe",
             ] {
                 ui.menu_button(menu, not_implemented);
+            }
+        });
+    }
+
+    /// PrePoMax's main tool bar: file commands, then views and display options.
+    fn tool_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 1.0;
+            let has_model = self.workbench.model.is_some();
+            if icons::button(ui, Icon::New, "Neu (Strg+N)", has_model, false).clicked() {
+                self.workbench.close_model();
+            }
+            let can_open = self.loading.is_none();
+            if icons::button(ui, Icon::Open, "Öffnen (Strg+O)", can_open, false).clicked() {
+                self.open_dialog(ui.ctx());
+            }
+            icons::button(
+                ui,
+                Icon::Save,
+                "Speichern (noch nicht implementiert)",
+                false,
+                false,
+            );
+            ui.separator();
+            if icons::button(ui, Icon::Fit, "Einpassen", true, false).clicked() {
+                self.workbench.view_command = Some(ViewCommand::Fit);
+            }
+            for (view, label) in STANDARD_VIEWS {
+                if icons::button(ui, Icon::View(view), label, true, false).clicked() {
+                    self.workbench.view_command = Some(ViewCommand::View(view));
+                }
+            }
+            ui.separator();
+            let options = &mut self.workbench.viewport.options;
+            let mesh = options.mesh_edges;
+            if icons::button(ui, Icon::FeatureEdges, "Nur Kanten", true, !mesh).clicked() {
+                options.mesh_edges = false;
+            }
+            if icons::button(ui, Icon::MeshEdges, "Netzkanten", true, mesh).clicked() {
+                options.mesh_edges = true;
             }
         });
     }
@@ -208,14 +236,15 @@ fn load_in_background(path: PathBuf, sender: Sender<LoadEvent>, ctx: egui::Conte
     ctx.request_repaint();
 }
 
-fn default_layout() -> DockState<Tab> {
-    let mut dock = DockState::new(vec![Tab::Viewport]);
-    let surface = dock.main_surface_mut();
-    let [viewport, model] = surface.split_left(NodeIndex::root(), 0.22, vec![Tab::ModelTree]);
-    surface.split_below(viewport, 0.8, vec![Tab::Output]);
-    surface.split_below(model, 0.55, vec![Tab::Properties]);
-    dock
-}
+const STANDARD_VIEWS: [(StandardView, &str); 7] = [
+    (StandardView::Front, "Vorne"),
+    (StandardView::Back, "Hinten"),
+    (StandardView::Top, "Oben"),
+    (StandardView::Bottom, "Unten"),
+    (StandardView::Left, "Links"),
+    (StandardView::Right, "Rechts"),
+    (StandardView::Isometric, "Isometrisch"),
+];
 
 impl eframe::App for PrepolixApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -223,6 +252,9 @@ impl eframe::App for PrepolixApp {
         let ctx = ui.ctx().clone();
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.open_dialog(&ctx);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
+            self.workbench.close_model();
         }
         let dropped = ctx.input(|i| {
             i.raw
@@ -236,11 +268,51 @@ impl eframe::App for PrepolixApp {
         }
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
+        egui::Panel::top("tools").show(ui, |ui| {
+            self.tool_bar(ui);
+            if let Some(view) = self
+                .workbench
+                .model
+                .as_mut()
+                .and_then(|m| m.results.as_mut())
+            {
+                ui.separator();
+                if results_tool_bar(ui, view) {
+                    self.workbench.results_changed = true;
+                }
+            }
+        });
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
-        DockArea::new(&mut self.dock)
-            .show_close_buttons(false)
-            .show_leaf_close_all_buttons(false)
-            .show_inside(ui, &mut self.workbench);
+        // PrePoMax's fixed layout: tree on the left over the full height, 3D view with the
+        // output below it; only the separators move.
+        let pane = egui::Frame::new()
+            .fill(crate::style::WINDOW)
+            .stroke(egui::Stroke::new(1.0, crate::style::BORDER));
+        egui::Panel::left("tree")
+            .resizable(true)
+            .default_size(280.0)
+            .size_range(160.0..=700.0)
+            .frame(egui::Frame::new().fill(crate::style::CONTROL))
+            .show(ui, |ui| {
+                self.workbench.tree_tabs(ui);
+                pane.inner_margin(4).show(ui, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    let view = self.workbench.tree_view;
+                    self.workbench.model_tree(ui, view);
+                });
+            });
+        egui::Panel::bottom("output")
+            .resizable(true)
+            .default_size(140.0)
+            .size_range(40.0..=600.0)
+            .frame(pane.inner_margin(4))
+            .show(ui, |ui| self.workbench.output(ui));
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            if let Some(command) = self.workbench.viewport.ui(ui) {
+                self.workbench.view_command = Some(command);
+            }
+        });
+        self.workbench.properties_window(&ctx);
         self.workbench.rebuild_if_results_changed();
 
         if let Some(command) = self.workbench.view_command.take() {
@@ -297,90 +369,138 @@ impl Workbench {
                 self.viewport.set_parts(&render_meshes);
                 self.viewport
                     .apply(ViewCommand::Fit, model.visible_bounds());
+                self.tree_view = if model.results.is_some() {
+                    TreeView::Results
+                } else {
+                    TreeView::FeModel
+                };
+                self.tree.selected = model
+                    .results
+                    .as_ref()
+                    .map(|v| (TreeView::Results, TreeItem::Component(v.field, v.component)));
+                self.dialog = None;
                 self.model = Some(model);
-                self.selection = None;
                 self.update_contour();
             }
             Err(error) => self.output.push(format!("Fehler beim Laden: {error}")),
         }
     }
 
-    fn model_tree(&mut self, ui: &mut egui::Ui) {
-        let Some(model) = &mut self.model else {
-            ui.weak("Kein Modell geladen.\nDatei > Öffnen (Strg+O) oder eine .inp- oder .frd-Datei ins Fenster ziehen.");
-            return;
-        };
-        let selection = &mut self.selection;
-        let mut visibility_changes = Vec::new();
-        egui::CollapsingHeader::new(format!("Modell: {}", model.file_name()))
-            .default_open(true)
+    /// Tab strip above the tree, like PrePoMax's Windows tab control.
+    fn tree_tabs(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(2.0);
+            for view in [TreeView::Geometry, TreeView::FeModel, TreeView::Results] {
+                let selected = self.tree_view == view;
+                let galley = ui.painter().layout_no_wrap(
+                    view.title().to_string(),
+                    egui::TextStyle::Body.resolve(ui.style()),
+                    egui::Color32::BLACK,
+                );
+                let size = galley.size() + egui::vec2(16.0, 8.0);
+                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                let fill = if selected {
+                    crate::style::WINDOW
+                } else if response.hovered() {
+                    crate::style::HOVER_FILL
+                } else {
+                    crate::style::CONTROL
+                };
+                let rect = if selected {
+                    rect
+                } else {
+                    rect.shrink2(egui::vec2(0.0, 1.0))
+                        .translate(egui::vec2(0.0, 1.0))
+                };
+                ui.painter().rect(
+                    rect,
+                    0.0,
+                    fill,
+                    egui::Stroke::new(1.0, crate::style::BORDER),
+                    egui::StrokeKind::Inside,
+                );
+                ui.painter().galley(
+                    rect.center() - galley.size() * 0.5,
+                    galley,
+                    egui::Color32::BLACK,
+                );
+                if response.clicked() {
+                    self.tree_view = view;
+                }
+            }
+        });
+    }
+
+    fn output(&self, ui: &mut egui::Ui) {
+        egui::ScrollArea::both()
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
             .show(ui, |ui| {
-                egui::CollapsingHeader::new(format!("Parts ({})", model.parts.len()))
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        for (index, part) in model.parts.iter_mut().enumerate() {
-                            ui.horizontal(|ui| {
-                                if ui.checkbox(&mut part.visible, "").changed() {
-                                    visibility_changes.push((index, part.visible));
-                                }
-                                let (swatch, _) = ui.allocate_exact_size(
-                                    egui::vec2(12.0, 12.0),
-                                    egui::Sense::hover(),
-                                );
-                                let [r, g, b] = part.color;
-                                ui.painter().rect_filled(
-                                    swatch,
-                                    2.0,
-                                    egui::Color32::from(egui::Rgba::from_rgb(r, g, b)),
-                                );
-                                let item = Selection::Part(index);
-                                let label =
-                                    format!("{} ({} Elemente)", part.name, part.element_count);
-                                if ui
-                                    .selectable_label(*selection == Some(item.clone()), label)
-                                    .clicked()
-                                {
-                                    *selection = Some(item);
-                                }
-                            });
-                        }
-                    });
-                let mesh = &model.mesh;
-                set_list(ui, "Knotensets", &mesh.node_sets, selection, |name, ids| {
-                    (Selection::NodeSet(name.to_string()), ids.len())
-                });
-                set_list(
-                    ui,
-                    "Elementsets",
-                    &mesh.element_sets,
-                    selection,
-                    |name, ids| (Selection::ElementSet(name.to_string()), ids.len()),
-                );
-                set_list(
-                    ui,
-                    "Surfaces",
-                    &mesh.surfaces,
-                    selection,
-                    |name, surface| (Selection::Surface(name.to_string()), surface_size(surface)),
-                );
-            });
-        egui::CollapsingHeader::new("Ergebnisse")
-            .default_open(model.results.is_some())
-            .show(ui, |ui| match &mut model.results {
-                Some(view) => {
-                    if results_tree(ui, view) {
-                        self.results_changed = true;
-                    }
-                }
-                None => {
-                    ui.weak(
-                        "Keine Ergebnisse geladen.\nEine .frd-Datei öffnen, um sie anzuzeigen.",
-                    );
+                for line in &self.output {
+                    ui.monospace(line);
                 }
             });
-        for (index, visible) in visibility_changes {
+    }
+
+    fn model_tree(&mut self, ui: &mut egui::Ui, view: TreeView) {
+        if self.model.is_none() && view != TreeView::Geometry {
+            ui.weak("Kein Modell geladen.\nDatei > Öffnen (Strg+O) oder eine .inp- oder .frd-Datei ins Fenster ziehen.");
+            ui.separator();
+        }
+        let response = tree::show(ui, view, self.model.as_mut(), &mut self.tree);
+        for (index, visible) in response.visibility {
             self.viewport.set_part_visible(index, visible);
         }
+        if let (Some((field, component)), Some(results)) = (
+            response.component,
+            self.model.as_mut().and_then(|m| m.results.as_mut()),
+        ) {
+            results.field = field;
+            results.component = component;
+            self.results_changed = true;
+        }
+        if let Some(item) = response.open {
+            self.dialog = Some(item);
+        }
+    }
+
+    /// PrePoMax-style properties dialog of the double-clicked tree item.
+    fn properties_window(&mut self, ctx: &egui::Context) {
+        let Some(item) = self.dialog.clone() else {
+            return;
+        };
+        let mut open = true;
+        let mut close = false;
+        egui::Window::new(properties::title(self.model.as_ref(), &item))
+            .id(egui::Id::new("properties window"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                properties::show(ui, self.model.as_ref(), &item);
+                ui.add_space(8.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    close = ui.button("Schließen").clicked();
+                });
+            });
+        if !open || close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.dialog = None;
+        }
+    }
+
+    /// Removes the model and its results, like PrePoMax's File > New.
+    fn close_model(&mut self) {
+        if let Some(model) = self.model.take() {
+            self.output
+                .push(format!("{} geschlossen", model.file_name()));
+        }
+        self.tree.selected = None;
+        self.dialog = None;
+        self.viewport.set_parts(&[]);
+        self.update_contour();
     }
 
     /// Rebuilds the scene after the result selection or deformation changed.
@@ -398,259 +518,108 @@ impl Workbench {
         self.update_contour();
     }
 
+    /// Contour settings and annotations of the 3D view for the current result.
     fn update_contour(&mut self) {
-        let view = self.model.as_ref().and_then(|m| m.results.as_ref());
-        self.viewport.options.contour_levels =
-            view.filter(|v| v.current().is_some()).map(|v| v.levels);
-        self.viewport.legend = view.and_then(ResultsView::legend);
-    }
-
-    fn properties(&self, ui: &mut egui::Ui) {
         let Some(model) = &self.model else {
-            ui.weak("Kein Modell geladen");
+            self.viewport.options.contour_levels = None;
+            self.viewport.overlay = Overlay::default();
             return;
         };
-        let mesh = &model.mesh;
-        egui::Grid::new("properties")
-            .num_columns(2)
-            .striped(true)
-            .show(ui, |ui| {
-                let mut row = |key: &str, value: String| {
-                    ui.label(key);
-                    ui.label(value);
-                    ui.end_row();
-                };
-                match &self.selection {
-                    None => {
-                        row("Datei", model.path.display().to_string());
-                        row("Knoten", mesh.node_count().to_string());
-                        row("Elemente", mesh.element_count().to_string());
-                        row("Parts", model.parts.len().to_string());
-                        if let Some(view) = &model.results {
-                            result_properties(&mut row, mesh, view);
-                        }
-                    }
-                    Some(Selection::Part(index)) => {
-                        let part = &model.parts[*index];
-                        row("Part", part.name.clone());
-                        row("Elemente", part.element_count.to_string());
-                        row("Knoten", part.node_count.to_string());
-                        for (type_name, count) in &part.element_types {
-                            row("Elementtyp", format!("{type_name} ({count})"));
-                        }
-                        row("Sichtbar", if part.visible { "ja" } else { "nein" }.into());
-                    }
-                    Some(Selection::NodeSet(name)) => {
-                        row("Knotenset", name.clone());
-                        row(
-                            "Knoten",
-                            mesh.node_sets.get(name).map_or(0, Vec::len).to_string(),
-                        );
-                    }
-                    Some(Selection::ElementSet(name)) => {
-                        row("Elementset", name.clone());
-                        row(
-                            "Elemente",
-                            mesh.element_sets.get(name).map_or(0, Vec::len).to_string(),
-                        );
-                    }
-                    Some(Selection::Surface(name)) => {
-                        row("Surface", name.clone());
-                        match mesh.surfaces.get(name) {
-                            Some(plx_mesh::SurfaceDefinition::ElementFaces(faces)) => {
-                                row("Typ", "Elementflächen".into());
-                                row("Flächen", faces.len().to_string());
-                            }
-                            Some(plx_mesh::SurfaceDefinition::Nodes(nodes)) => {
-                                row("Typ", "Knoten".into());
-                                row("Knoten", nodes.len().to_string());
-                            }
-                            None => {}
-                        }
-                    }
-                }
-            });
+        let view = model.results.as_ref();
+        self.viewport.options.contour_levels =
+            view.filter(|v| v.current().is_some()).map(|v| v.levels);
+        self.viewport.overlay = Overlay {
+            legend: view.and_then(ResultsView::legend),
+            status: view.map_or_else(Vec::new, |v| v.status_lines(&model.file_name())),
+            maximum: view
+                .and_then(ResultsView::maximum)
+                .and_then(|(index, value)| {
+                    Some(Marker {
+                        position: model.node_position(index)?,
+                        text: format!(
+                            "Max: {}\nNode id: {}",
+                            format_legend_value(value),
+                            model.mesh.node_ids()[index]
+                        ),
+                    })
+                }),
+            global_origin: Some(model.global_origin()),
+        };
     }
 }
 
-/// Result tree: increment choice, fields with their components, deformation and colour bands.
-/// Returns true when anything that affects the scene changed.
-fn results_tree(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
+/// PrePoMax's results tool bar: deformation, colour bands and the increment with its
+/// navigation buttons. Returns true when anything that affects the scene changed.
+fn results_tool_bar(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
     let mut changed = false;
-    let mut increment = view.increment;
-    let selected = view
-        .current_increment()
-        .map(ResultsView::increment_label)
-        .unwrap_or_default();
-    egui::ComboBox::from_id_salt("increment")
-        .selected_text(selected)
-        .show_ui(ui, |ui| {
-            for (index, inc) in view.increments.iter().enumerate() {
-                ui.selectable_value(&mut increment, index, ResultsView::increment_label(inc));
-            }
-        });
-    if increment != view.increment {
-        view.select_increment(increment);
-        changed = true;
-    }
-
-    let mut pick = None;
-    if let Some(inc) = view.current_increment() {
-        for (f, field) in inc.fields.iter().enumerate() {
-            egui::CollapsingHeader::new(&field.name)
-                .id_salt(("field", &field.name))
-                .default_open(f == view.field)
-                .show(ui, |ui| {
-                    for (c, component) in field.components.iter().enumerate() {
-                        let active = f == view.field && c == view.component;
-                        if ui.selectable_label(active, &component.name).clicked() && !active {
-                            pick = Some((f, c));
-                        }
-                    }
-                });
-        }
-    }
-    if let Some((field, component)) = pick {
-        view.field = field;
-        view.component = component;
-        changed = true;
-    }
-
-    ui.separator();
     ui.horizontal(|ui| {
         ui.label("Verformung");
         let before = view.deformation;
         egui::ComboBox::from_id_salt("deformation")
             .selected_text(view.deformation.label())
+            .width(150.0)
             .show_ui(ui, |ui| {
                 for choice in Deformation::CHOICES {
                     ui.selectable_value(&mut view.deformation, choice, choice.label());
                 }
             });
         changed |= view.deformation != before;
-    });
-    if view.deformation == Deformation::UserDefined {
-        ui.horizontal(|ui| {
-            ui.label("Faktor");
-            changed |= ui
-                .add(egui::DragValue::new(&mut view.user_scale).speed(0.1))
-                .changed();
-        });
-    }
-    ui.horizontal(|ui| {
+        ui.label("Faktor");
+        let user = view.deformation == Deformation::UserDefined;
+        let mut factor = if user { view.user_scale } else { view.scale() };
+        let response = ui.add_enabled(
+            user,
+            egui::DragValue::new(&mut factor).speed(0.1).max_decimals(4),
+        );
+        if user && response.changed() {
+            view.user_scale = factor;
+            changed = true;
+        }
+        changed |= ui
+            .checkbox(&mut view.show_undeformed, "Unverformt zeigen")
+            .changed();
+        ui.separator();
         ui.label("Farbstufen");
         changed |= ui
             .add(egui::DragValue::new(&mut view.levels).range(2..=plx_render::contour::MAX_LEVELS))
             .changed();
+        ui.separator();
+
+        ui.label("Schritt, Inkrement");
+        let mut increment = view.increment;
+        let selected = view
+            .current_increment()
+            .map(ResultsView::increment_label)
+            .unwrap_or_default();
+        egui::ComboBox::from_id_salt("increment")
+            .selected_text(selected)
+            .width(70.0)
+            .show_ui(ui, |ui| {
+                for (index, inc) in view.increments.iter().enumerate() {
+                    ui.selectable_value(&mut increment, index, ResultsView::increment_label(inc));
+                }
+            });
+        ui.spacing_mut().item_spacing.x = 1.0;
+        let last = view.increments.len().saturating_sub(1);
+        let current = view.increment;
+        for (icon, tooltip, target) in [
+            (Icon::First, "Erstes Inkrement", 0),
+            (
+                Icon::Previous,
+                "Vorheriges Inkrement",
+                current.saturating_sub(1),
+            ),
+            (Icon::Next, "Nächstes Inkrement", (current + 1).min(last)),
+            (Icon::Last, "Letztes Inkrement", last),
+        ] {
+            if icons::button(ui, icon, tooltip, target != current, false).clicked() {
+                increment = target;
+            }
+        }
+        if increment != view.increment {
+            view.select_increment(increment);
+            changed = true;
+        }
     });
     changed
-}
-
-fn result_properties(
-    row: &mut impl FnMut(&str, String),
-    mesh: &plx_mesh::FeMesh,
-    view: &ResultsView,
-) {
-    let Some((field, component)) = view.current() else {
-        return;
-    };
-    row("Ergebnis", format!("{}: {}", field.name, component.name));
-    let extreme = |pick_max: bool| {
-        component
-            .values
-            .iter()
-            .enumerate()
-            .filter(|(_, v)| v.is_finite())
-            .reduce(|a, b| {
-                let better = if pick_max { b.1 > a.1 } else { b.1 < a.1 };
-                if better { b } else { a }
-            })
-    };
-    for (label, pick_max) in [("Maximum", true), ("Minimum", false)] {
-        if let Some((index, value)) = extreme(pick_max) {
-            row(
-                label,
-                format!(
-                    "{} (Knoten {})",
-                    format_value(*value),
-                    mesh.node_ids()[index]
-                ),
-            );
-        }
-    }
-    row("Verformungsfaktor", format_value(view.scale()));
-}
-
-fn surface_size(surface: &plx_mesh::SurfaceDefinition) -> usize {
-    match surface {
-        plx_mesh::SurfaceDefinition::ElementFaces(faces) => faces.len(),
-        plx_mesh::SurfaceDefinition::Nodes(nodes) => nodes.len(),
-    }
-}
-
-fn set_list<T>(
-    ui: &mut egui::Ui,
-    title: &str,
-    sets: &std::collections::BTreeMap<String, T>,
-    selection: &mut Option<Selection>,
-    describe: impl Fn(&str, &T) -> (Selection, usize),
-) {
-    if sets.is_empty() {
-        return;
-    }
-    egui::CollapsingHeader::new(format!("{title} ({})", sets.len())).show(ui, |ui| {
-        for (name, set) in sets {
-            let (item, size) = describe(name, set);
-            if ui
-                .selectable_label(*selection == Some(item.clone()), format!("{name} ({size})"))
-                .clicked()
-            {
-                *selection = Some(item);
-            }
-        }
-    });
-}
-
-impl TabViewer for Workbench {
-    type Tab = Tab;
-
-    fn id(&mut self, tab: &mut Tab) -> egui::Id {
-        egui::Id::new(*tab)
-    }
-
-    fn title(&mut self, tab: &mut Tab) -> egui::WidgetText {
-        tab.title().into()
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Tab) {
-        match tab {
-            Tab::ModelTree => self.model_tree(ui),
-            Tab::Properties => self.properties(ui),
-            Tab::Viewport => {
-                if let Some(command) = self.viewport.ui(ui) {
-                    self.view_command = Some(command);
-                }
-            }
-            Tab::Output => {
-                egui::ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for line in &self.output {
-                            ui.monospace(line);
-                        }
-                    });
-            }
-        }
-    }
-
-    fn scroll_bars(&self, tab: &Tab) -> [bool; 2] {
-        match tab {
-            Tab::Viewport => [false, false],
-            _ => [true, true],
-        }
-    }
-
-    fn clear_background(&self, tab: &Tab) -> bool {
-        *tab != Tab::Viewport
-    }
 }

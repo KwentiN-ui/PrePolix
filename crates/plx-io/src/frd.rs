@@ -28,6 +28,9 @@ pub struct FrdImport {
     pub increments: Vec<Increment>,
     /// Material names by CalculiX material number.
     pub materials: BTreeMap<i32, String>,
+    /// Date and time of the analysis as CalculiX writes them (`1UDATE`, `1UTIME`).
+    pub date: Option<String>,
+    pub time: Option<String>,
     pub warnings: Vec<String>,
 }
 
@@ -73,6 +76,10 @@ impl<'a> Reader<'a> {
         while let Some(line) = self.next_line() {
             if line.starts_with("    1UMAT") {
                 self.material(&line);
+            } else if let Some(date) = line.strip_prefix("    1UDATE") {
+                self.import.date = Some(date.trim().to_string()).filter(|d| !d.is_empty());
+            } else if let Some(time) = line.strip_prefix("    1UTIME") {
+                self.import.time = Some(time.trim().to_string()).filter(|t| !t.is_empty());
             } else if line.starts_with("    2C") {
                 self.nodes(&line)?;
             } else if line.starts_with("    3C") {

@@ -3,28 +3,33 @@ use std::collections::HashMap;
 use glam::DVec3;
 use plx_mesh::{PartSkin, SkinFace, face_normal};
 
-use crate::contour::{NO_VALUE, srgb_to_linear};
+use crate::contour::NO_VALUE;
 
 use crate::mesh::{RenderMesh, Vertex};
 
-const FEATURE_EDGE_COLOR: [f32; 3] = [0.0, 0.0, 0.0];
-const MESH_EDGE_COLOR: [f32; 3] = [0.08, 0.08, 0.1];
+const EDGE_COLOR: [f32; 3] = [0.0, 0.0, 0.0];
+/// Opacities of PrePoMax's edge actors; line vertices carry them in [`Vertex::scalar`].
+pub const FEATURE_EDGE_OPACITY: f32 = 0.7;
+pub const MESH_EDGE_OPACITY: f32 = 0.4;
+pub const WIREFRAME_OPACITY: f32 = 0.5;
 
-/// Default part colors in the spirit of PrePoMax, as sRGB.
-const PART_COLORS_SRGB: [[u8; 3]; 8] = [
-    [148, 182, 214],
-    [214, 170, 120],
-    [150, 200, 150],
-    [210, 150, 170],
-    [190, 180, 220],
-    [220, 210, 140],
-    [140, 200, 200],
-    [200, 160, 140],
+/// PrePoMax's default part colours (System.Drawing names), cycled by part index.
+const PART_COLORS_SRGB: [[u8; 3]; 10] = [
+    [245, 245, 220], // Beige
+    [143, 188, 143], // DarkSeaGreen
+    [240, 230, 140], // Khaki
+    [70, 130, 180],  // SteelBlue
+    [222, 184, 135], // BurlyWood
+    [176, 196, 222], // LightSteelBlue
+    [255, 228, 225], // MistyRose
+    [233, 150, 122], // DarkSalmon
+    [189, 183, 107], // DarkKhaki
+    [255, 222, 173], // NavajoWhite
 ];
 
-/// Linear RGB color for the n-th part.
+/// sRGB colour of the n-th part; the viewport shades in display space like VTK.
 pub fn part_color(index: usize) -> [f32; 3] {
-    PART_COLORS_SRGB[index % PART_COLORS_SRGB.len()].map(|c| srgb_to_linear(c as f32 / 255.0))
+    PART_COLORS_SRGB[index % PART_COLORS_SRGB.len()].map(|c| c as f32 / 255.0)
 }
 
 /// Builds the GPU-ready geometry of one part from node coordinates (undeformed or deformed).
@@ -61,11 +66,11 @@ pub fn part_render_mesh(
             .extend(face_triangles(face).iter().map(|&local| base + local));
     }
 
-    let line_vertex = |node: usize, color: [f32; 3]| Vertex {
+    let line_vertex = |node: usize, color: [f32; 3], opacity: f32| Vertex {
         position: position(node),
         normal: [0.0; 3],
         color,
-        scalar: NO_VALUE,
+        scalar: opacity,
     };
     for edge in &skin.edges {
         let segments: &[[usize; 2]] = match edge.mid {
@@ -78,21 +83,48 @@ pub fn part_render_mesh(
             } else {
                 &mut render.mesh_edges
             };
-            let color = if edge.feature {
-                FEATURE_EDGE_COLOR
+            let opacity = if edge.feature {
+                FEATURE_EDGE_OPACITY
             } else {
-                MESH_EDGE_COLOR
+                MESH_EDGE_OPACITY
             };
-            target.extend([line_vertex(a, color), line_vertex(b, color)]);
+            target.extend([
+                line_vertex(a, EDGE_COLOR, opacity),
+                line_vertex(b, EDGE_COLOR, opacity),
+            ]);
         }
     }
     let line_color = color.map(|c| c * 0.5);
     for &[a, b] in &skin.lines {
-        render
-            .feature_edges
-            .extend([line_vertex(a, line_color), line_vertex(b, line_color)]);
+        render.feature_edges.extend([
+            line_vertex(a, line_color, 1.0),
+            line_vertex(b, line_color, 1.0),
+        ]);
     }
     render
+}
+
+/// Feature edges of a part as translucent black lines, PrePoMax's wireframe of the undeformed
+/// shape behind deformed results.
+pub fn wireframe_edges(coords: &[[f64; 3]], skin: &PartSkin, origin: DVec3) -> Vec<Vertex> {
+    let vertex = |node: usize| Vertex {
+        position: (DVec3::from(coords[node]) - origin).as_vec3().to_array(),
+        normal: [0.0; 3],
+        color: EDGE_COLOR,
+        scalar: WIREFRAME_OPACITY,
+    };
+    let mut lines = Vec::new();
+    for edge in skin.edges.iter().filter(|e| e.feature) {
+        let nodes: &[usize] = match edge.mid {
+            Some(mid) => &[edge.a, mid, mid, edge.b],
+            None => &[edge.a, edge.b],
+        };
+        lines.extend(nodes.iter().map(|&n| vertex(n)));
+    }
+    for &[a, b] in &skin.lines {
+        lines.extend([vertex(a), vertex(b)]);
+    }
+    lines
 }
 
 /// Per face, one normal for each of its corner and mid nodes: the area-weighted average of the

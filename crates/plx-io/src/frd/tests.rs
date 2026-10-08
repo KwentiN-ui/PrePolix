@@ -25,6 +25,8 @@ fn reads_ascii_mesh_and_results() {
     assert_eq!(import.mesh.parts.len(), 1);
     assert_eq!(import.mesh.parts[0].name, "STEEL");
     assert_eq!(import.mesh.node(99), Some([100.0, 10.0, 10.0]));
+    assert_eq!(import.date.as_deref(), Some("08.october.2026"));
+    assert_eq!(import.time.as_deref(), Some("18:16:41"));
 
     assert_eq!(import.increments.len(), 1);
     let increment = &import.increments[0];
