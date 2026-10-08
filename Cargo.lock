@@ -2463,6 +2463,7 @@ version = "0.1.0"
 dependencies = [
  "plx-core",
  "plx-mesh",
+ "serde",
 ]
 
 [[package]]
