@@ -26,6 +26,8 @@ egui_dock = "0.21"
 env_logger = "0.11"
 glam = { version = "0.34", features = ["bytemuck"] }
 log = "0.4"
+rfd = "0.17"
+thiserror = "2"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

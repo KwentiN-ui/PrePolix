@@ -52,7 +52,7 @@ impl Camera {
 
     /// Direction the light travels in world space: a headlight slightly above and left of the eye.
     pub fn light_direction(&self) -> Vec3 {
-        self.rotation * Vec3::new(0.35, -0.5, -1.0).normalize()
+        self.rotation * Vec3::new(0.25, -0.35, -1.0).normalize()
     }
 
     pub fn view_proj(&self, aspect: f32) -> Mat4 {

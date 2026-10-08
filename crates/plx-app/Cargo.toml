@@ -18,10 +18,10 @@ egui_dock.workspace = true
 env_logger.workspace = true
 glam.workspace = true
 log.workspace = true
-plx-core.workspace = true
+plx-io.workspace = true
 plx-mesh.workspace = true
-plx-model.workspace = true
 plx-render.workspace = true
+rfd.workspace = true
 
 [lints]
 workspace = true

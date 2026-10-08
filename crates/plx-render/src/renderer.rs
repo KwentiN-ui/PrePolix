@@ -4,13 +4,13 @@ use wgpu::util::DeviceExt;
 use crate::camera::Camera;
 use crate::mesh::{RenderMesh, Vertex};
 
-pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SAMPLE_COUNT: u32 = 4;
 
 /// Background gradient in the style of PrePoMax (linear RGB).
-const BACKGROUND_TOP: [f32; 4] = [0.30, 0.42, 0.62, 1.0];
-const BACKGROUND_BOTTOM: [f32; 4] = [0.92, 0.94, 0.97, 1.0];
+const BACKGROUND_TOP: [f32; 4] = [0.073, 0.147, 0.343, 1.0];
+const BACKGROUND_BOTTOM: [f32; 4] = [0.83, 0.87, 0.93, 1.0];
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -21,12 +21,30 @@ struct Globals {
     background_bottom: [f32; 4],
 }
 
+/// A vertex or index buffer with its element count; `None` when there is nothing to draw.
+struct GpuBuffer {
+    buffer: wgpu::Buffer,
+    count: u32,
+}
+
 struct GpuMesh {
-    vertices: wgpu::Buffer,
-    triangles: wgpu::Buffer,
-    triangle_count: u32,
-    edges: wgpu::Buffer,
-    edge_count: u32,
+    vertices: Option<GpuBuffer>,
+    triangles: Option<GpuBuffer>,
+    feature_edges: Option<GpuBuffer>,
+    mesh_edges: Option<GpuBuffer>,
+    visible: bool,
+}
+
+/// What the viewport draws besides the shaded surfaces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayOptions {
+    pub mesh_edges: bool,
+}
+
+impl Default for DisplayOptions {
+    fn default() -> Self {
+        Self { mesh_edges: true }
+    }
 }
 
 struct Targets {
@@ -44,7 +62,7 @@ pub struct ViewportRenderer {
     background_pipeline: wgpu::RenderPipeline,
     surface_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
-    mesh: Option<GpuMesh>,
+    parts: Vec<GpuMesh>,
     targets: Targets,
 }
 
@@ -172,38 +190,60 @@ impl ViewportRenderer {
             background_pipeline,
             surface_pipeline,
             edge_pipeline,
-            mesh: None,
+            parts: Vec::new(),
             targets: Targets::new(device, 1, 1),
         }
     }
 
-    pub fn set_mesh(&mut self, device: &wgpu::Device, mesh: &RenderMesh) {
-        let buffer = |label: &str, contents: &[u8], usage: wgpu::BufferUsages| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents,
-                usage,
+    /// Replaces the scene with one mesh per part; all parts start visible.
+    pub fn set_parts(&mut self, device: &wgpu::Device, parts: &[RenderMesh]) {
+        let buffer = |label: &str, contents: &[u8], count: usize, usage: wgpu::BufferUsages| {
+            (count > 0).then(|| GpuBuffer {
+                buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents,
+                    usage,
+                }),
+                count: count as u32,
             })
         };
-        self.mesh = Some(GpuMesh {
-            vertices: buffer(
-                "mesh vertices",
-                bytemuck::cast_slice(&mesh.vertices),
-                wgpu::BufferUsages::VERTEX,
-            ),
-            triangles: buffer(
-                "mesh triangles",
-                bytemuck::cast_slice(&mesh.triangles),
-                wgpu::BufferUsages::INDEX,
-            ),
-            triangle_count: mesh.triangles.len() as u32,
-            edges: buffer(
-                "mesh edges",
-                bytemuck::cast_slice(&mesh.edges),
-                wgpu::BufferUsages::INDEX,
-            ),
-            edge_count: mesh.edges.len() as u32,
-        });
+        let vertex = wgpu::BufferUsages::VERTEX;
+        self.parts = parts
+            .iter()
+            .map(|mesh| GpuMesh {
+                vertices: buffer(
+                    "part vertices",
+                    bytemuck::cast_slice(&mesh.vertices),
+                    mesh.vertices.len(),
+                    vertex,
+                ),
+                triangles: buffer(
+                    "part triangles",
+                    bytemuck::cast_slice(&mesh.triangles),
+                    mesh.triangles.len(),
+                    wgpu::BufferUsages::INDEX,
+                ),
+                feature_edges: buffer(
+                    "part feature edges",
+                    bytemuck::cast_slice(&mesh.feature_edges),
+                    mesh.feature_edges.len(),
+                    vertex,
+                ),
+                mesh_edges: buffer(
+                    "part mesh edges",
+                    bytemuck::cast_slice(&mesh.mesh_edges),
+                    mesh.mesh_edges.len(),
+                    vertex,
+                ),
+                visible: true,
+            })
+            .collect();
+    }
+
+    pub fn set_part_visible(&mut self, index: usize, visible: bool) {
+        if let Some(part) = self.parts.get_mut(index) {
+            part.visible = visible;
+        }
     }
 
     /// Recreates the render targets if the size changed; returns true when it did.
@@ -221,7 +261,13 @@ impl ViewportRenderer {
         &self.targets.resolve_view
     }
 
-    pub fn render(&self, device: &wgpu::Device, queue: &wgpu::Queue, camera: &Camera) {
+    pub fn render(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        camera: &Camera,
+        options: DisplayOptions,
+    ) {
         let aspect = self.targets.width as f32 / self.targets.height as f32;
         let globals = Globals {
             view_proj: camera.view_proj(aspect).to_cols_array_2d(),
@@ -261,14 +307,25 @@ impl ViewportRenderer {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_pipeline(&self.background_pipeline);
             pass.draw(0..3, 0..1);
-            if let Some(mesh) = &self.mesh {
-                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-                pass.set_pipeline(&self.surface_pipeline);
-                pass.set_index_buffer(mesh.triangles.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.triangle_count, 0, 0..1);
-                pass.set_pipeline(&self.edge_pipeline);
-                pass.set_index_buffer(mesh.edges.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.edge_count, 0, 0..1);
+            let visible = || self.parts.iter().filter(|p| p.visible);
+            pass.set_pipeline(&self.surface_pipeline);
+            for part in visible() {
+                if let (Some(vertices), Some(triangles)) = (&part.vertices, &part.triangles) {
+                    pass.set_vertex_buffer(0, vertices.buffer.slice(..));
+                    pass.set_index_buffer(triangles.buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..triangles.count, 0, 0..1);
+                }
+            }
+            pass.set_pipeline(&self.edge_pipeline);
+            for part in visible() {
+                let mesh_edges = part.mesh_edges.as_ref().filter(|_| options.mesh_edges);
+                for lines in [part.feature_edges.as_ref(), mesh_edges]
+                    .into_iter()
+                    .flatten()
+                {
+                    pass.set_vertex_buffer(0, lines.buffer.slice(..));
+                    pass.draw(0..lines.count, 0..1);
+                }
             }
         }
         queue.submit([encoder.finish()]);

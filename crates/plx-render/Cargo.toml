@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 bytemuck.workspace = true
 glam.workspace = true
+plx-mesh.workspace = true
 wgpu = { version = "30", default-features = false, features = ["wgsl"] }
 
 [lints]

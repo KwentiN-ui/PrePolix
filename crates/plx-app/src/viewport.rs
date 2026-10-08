@@ -2,7 +2,7 @@ use egui::{Color32, PointerButton, Rect, Sense, Ui, pos2};
 use egui_wgpu::RenderState;
 use glam::Vec3;
 use plx_render::wgpu::FilterMode;
-use plx_render::{Camera, RenderMesh, ViewportRenderer};
+use plx_render::{Camera, DisplayOptions, RenderMesh, ViewportRenderer};
 
 const ZOOM_PER_SCROLL_POINT: f32 = 0.002;
 
@@ -14,19 +14,20 @@ pub struct Viewport {
     renderer: ViewportRenderer,
     texture: egui::TextureId,
     camera: Camera,
-    bounds: (Vec3, Vec3),
+    pub options: DisplayOptions,
+}
+
+/// Camera requests from toolbar, menu or tree, applied by the owner of the model bounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewCommand {
+    Fit,
+    Isometric,
+    Front,
 }
 
 impl Viewport {
     pub fn new(render_state: RenderState) -> Self {
-        let mut renderer = ViewportRenderer::new(&render_state.device);
-        let mesh = RenderMesh::demo_box(Vec3::new(2.0, 1.0, 0.5), [0.55, 0.70, 0.85]);
-        renderer.set_mesh(&render_state.device, &mesh);
-        let bounds = mesh
-            .bounds()
-            .unwrap_or((Vec3::splat(-1.0), Vec3::splat(1.0)));
-        let mut camera = Camera::default();
-        camera.fit(bounds.0, bounds.1);
+        let renderer = ViewportRenderer::new(&render_state.device);
         let texture = render_state.renderer.write().register_native_texture(
             &render_state.device,
             renderer.color_view(),
@@ -36,22 +37,46 @@ impl Viewport {
             render_state,
             renderer,
             texture,
-            camera,
-            bounds,
+            camera: Camera::default(),
+            options: DisplayOptions::default(),
         }
     }
 
-    pub fn ui(&mut self, ui: &mut Ui) {
+    pub fn set_parts(&mut self, parts: &[RenderMesh]) {
+        self.renderer.set_parts(&self.render_state.device, parts);
+    }
+
+    pub fn set_part_visible(&mut self, index: usize, visible: bool) {
+        self.renderer.set_part_visible(index, visible);
+    }
+
+    pub fn apply(&mut self, command: ViewCommand, bounds: Option<(Vec3, Vec3)>) {
+        match command {
+            ViewCommand::Fit => {
+                if let Some((min, max)) = bounds {
+                    self.camera.fit(min, max);
+                }
+            }
+            ViewCommand::Isometric => self.camera.set_isometric(),
+            ViewCommand::Front => self.camera.set_front(),
+        }
+    }
+
+    /// Draws the toolbar and the scene; returns a camera command the user asked for.
+    pub fn ui(&mut self, ui: &mut Ui) -> Option<ViewCommand> {
+        let mut command = None;
         ui.horizontal(|ui| {
             if ui.button("Einpassen").clicked() {
-                self.camera.fit(self.bounds.0, self.bounds.1);
+                command = Some(ViewCommand::Fit);
             }
             if ui.button("Isometrisch").clicked() {
-                self.camera.set_isometric();
+                command = Some(ViewCommand::Isometric);
             }
             if ui.button("Vorne").clicked() {
-                self.camera.set_front();
+                command = Some(ViewCommand::Front);
             }
+            ui.separator();
+            ui.checkbox(&mut self.options.mesh_edges, "Netz");
         });
 
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
@@ -71,7 +96,7 @@ impl Viewport {
             }
         }
         if response.double_clicked() {
-            self.camera.fit(self.bounds.0, self.bounds.1);
+            command = Some(ViewCommand::Fit);
         }
 
         let pixels_per_point = ui.ctx().pixels_per_point();
@@ -90,12 +115,13 @@ impl Viewport {
                 );
         }
         self.renderer
-            .render(device, &self.render_state.queue, &self.camera);
+            .render(device, &self.render_state.queue, &self.camera, self.options);
         ui.painter().image(
             self.texture,
             rect,
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
             Color32::WHITE,
         );
+        command
     }
 }

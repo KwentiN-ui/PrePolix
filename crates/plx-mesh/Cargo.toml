@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 plx-core.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true
