@@ -59,7 +59,7 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
 
 #[cfg(test)]
 mod tests {
-    use plx_model::{Material, Step};
+    use plx_model::{Material, Step, UserKeyword};
 
     use super::*;
     use crate::inp::read_inp;
@@ -78,6 +78,11 @@ mod tests {
             }],
             sections: Vec::new(),
             steps: vec![Step::new_static("Step-1")],
+            user_keywords: vec![UserKeyword {
+                position: vec![14, 0],
+                text: "*Amplitude, Name=A\n0, 0, 1, 1".into(),
+                active: false,
+            }],
         };
         let dir = std::env::temp_dir().join(format!("plx-project-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

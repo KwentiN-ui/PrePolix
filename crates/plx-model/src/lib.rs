@@ -30,6 +30,23 @@ pub struct FeModel {
     pub materials: Vec<Material>,
     pub sections: Vec<Section>,
     pub steps: Vec<Step>,
+    /// CalculiX keywords the user added to the input file in the keyword editor, in the order
+    /// they appear in it. They cover what the model cannot express yet.
+    #[serde(default)]
+    pub user_keywords: Vec<UserKeyword>,
+}
+
+/// Lines of the user's own written into the input file at a fixed place, like PrePoMax's
+/// `CalculixUserKeyword`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UserKeyword {
+    /// Place in the keyword tree of the input file: the index of each enclosing keyword among
+    /// its siblings, then the index the keyword is inserted at. Keywords are inserted in list
+    /// order, so the indices count the user keywords before it as well.
+    pub position: Vec<usize>,
+    pub text: String,
+    /// An inactive keyword is written commented out.
+    pub active: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

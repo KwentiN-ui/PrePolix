@@ -11,9 +11,12 @@ use std::path::{Path, PathBuf};
 
 use plx_mesh::{Element, ElementId, ElementShape, FeMesh, NodeId, Part, SurfaceDefinition};
 
-pub use write::{WriteError, write_inp};
+pub use write::{
+    Keyword, KeywordKind, WriteError, insert_user_keywords, model_keywords, user_keywords,
+    write_inp, write_keywords,
+};
 
-use lines::{Keyword, SourceLine, fields, is_keyword, parse_f64};
+use lines::{Keyword as KeywordLine, SourceLine, fields, is_keyword, parse_f64};
 
 #[derive(Debug, thiserror::Error)]
 pub enum InpError {
@@ -104,7 +107,7 @@ impl Reader {
         for line in lines {
             if is_keyword(&line.text) {
                 self.finish(&block, line)?;
-                block = self.start(Keyword::parse(&line.text), line)?;
+                block = self.start(KeywordLine::parse(&line.text), line)?;
             } else {
                 self.data(&mut block, line)?;
             }
@@ -124,7 +127,7 @@ impl Reader {
         }
     }
 
-    fn start(&mut self, keyword: Keyword, line: &SourceLine) -> Result<Block, InpError> {
+    fn start(&mut self, keyword: KeywordLine, line: &SourceLine) -> Result<Block, InpError> {
         let required = |key: &str| {
             keyword
                 .param(key)
