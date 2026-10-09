@@ -18,6 +18,7 @@ const TEXT: Color32 = Color32::BLACK;
 /// Legend band height; PrePoMax's boxes are a third wider than high.
 const BAND_HEIGHT: f32 = 18.0;
 const SCALE_BAR_WIDTH: f32 = 400.0;
+const TRIAD_PICK_RADIUS: f32 = 9.0;
 const SCALE_BAR_HEIGHT: f32 = 8.0;
 const SCALE_BAR_FIELDS: usize = 5;
 const STATUS_PADDING: f32 = 5.0;
@@ -69,8 +70,16 @@ pub fn project(camera: &Camera, rect: Rect, point: Vec3) -> Pos2 {
     )
 }
 
-pub fn draw(ui: &Ui, rect: Rect, camera: &Camera, overlay: &Overlay, offsets: &mut LabelOffsets) {
+/// Draws the annotations; returns the axis direction clicked in the corner triad, if any.
+pub fn draw(
+    ui: &Ui,
+    rect: Rect,
+    camera: &Camera,
+    overlay: &Overlay,
+    offsets: &mut LabelOffsets,
+) -> Option<Vec3> {
     let painter = ui.painter_at(rect);
+    let mut clicked_axis = None;
     if let Some(origin) = overlay.global_origin {
         let center = project(camera, rect, origin);
         if rect.contains(center) {
@@ -96,6 +105,7 @@ pub fn draw(ui: &Ui, rect: Rect, camera: &Camera, overlay: &Overlay, offsets: &m
     if overlay.show_view_triad {
         let corner = rect.right_bottom() - vec2(24.0 + 45.0, 24.0 + 45.0);
         triad(&painter, camera, corner, 45.0, true);
+        clicked_axis = triad_buttons(ui, &painter, camera, corner, 45.0);
     }
     for (marker, offset, id) in [
         (&overlay.minimum, &mut offsets.minimum, "minimum label"),
@@ -112,6 +122,47 @@ pub fn draw(ui: &Ui, rect: Rect, camera: &Camera, overlay: &Overlay, offsets: &m
     if !overlay.status.is_empty() {
         draw_status(ui, &painter, rect, &overlay.status, &mut offsets.status);
     }
+    clicked_axis
+}
+
+/// Makes the ends of the corner triad clickable: an axis tip, or the end of its faint negative
+/// part, sets the view to look down that direction.
+fn triad_buttons(
+    ui: &Ui,
+    painter: &Painter,
+    camera: &Camera,
+    center: Pos2,
+    length: f32,
+) -> Option<Vec3> {
+    let screen = |axis: Vec3| vec2(axis.dot(camera.right()), -axis.dot(camera.up()));
+    let mut ends = Vec::new();
+    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+        let v = screen(axis);
+        // Axes pointing at the viewer collapse onto the centre and cannot be told apart.
+        if v.length() < 0.2 {
+            continue;
+        }
+        ends.push((axis, center + v * (length + 4.0)));
+        ends.push((-axis, center - v * length * 2.0 / 3.0));
+    }
+    let pointer = ui.input(|i| i.pointer.hover_pos());
+    // Nearest end under the pointer; ends towards the viewer win ties.
+    let hovered = pointer.and_then(|pointer| {
+        ends.iter()
+            .filter(|(_, end)| end.distance(pointer) < TRIAD_PICK_RADIUS)
+            .min_by(|a, b| {
+                let key =
+                    |(axis, end): &(Vec3, Pos2)| end.distance(pointer) + axis.dot(camera.forward());
+                key(a).total_cmp(&key(b))
+            })
+            .copied()
+    });
+    let (axis, end) = hovered?;
+    let area = Rect::from_center_size(end, Vec2::splat(2.0 * TRIAD_PICK_RADIUS));
+    let response = ui.interact(area, ui.id().with("triad axis"), Sense::click());
+    ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    painter.circle_stroke(end, 7.0, Stroke::new(1.5, Color32::from_rgb(255, 160, 0)));
+    response.clicked().then_some(axis)
 }
 
 /// Places a draggable label: its default position plus the user's offset, kept inside the
