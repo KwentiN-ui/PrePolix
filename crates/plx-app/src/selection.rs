@@ -261,6 +261,28 @@ impl Picker {
         if !self.select_by.allowed(target) {
             self.select_by = SelectBy::Geometry;
         }
+        self.show(ctx, anchor, target, can_undo, false)
+    }
+
+    /// The selection window of a region of whole parts: as in PrePoMax only the part mode
+    /// is enabled, the mode chosen for other regions stays.
+    pub fn parts_window(
+        &mut self,
+        ctx: &egui::Context,
+        anchor: egui::Rect,
+        can_undo: bool,
+    ) -> Option<PickerAction> {
+        self.show(ctx, anchor, Target::Faces, can_undo, true)
+    }
+
+    fn show(
+        &mut self,
+        ctx: &egui::Context,
+        anchor: egui::Rect,
+        target: Target,
+        can_undo: bool,
+        parts: bool,
+    ) -> Option<PickerAction> {
         let mut action = None;
         // egui's own constraint uses a default size before the first layout and pins the
         // window there; keep it on screen with its real size instead. It follows the dialog,
@@ -290,11 +312,15 @@ impl Picker {
                         ui.vertical(|ui| {
                             ui.strong("Geometriebasiert");
                             for mode in GEOMETRY_MODES {
-                                self.mode_row(ui, mode, target);
+                                if parts {
+                                    self.part_mode_row(ui, mode);
+                                } else {
+                                    self.mode_row(ui, mode, target);
+                                }
                             }
                         });
                     });
-                    if self.expanded {
+                    if self.expanded && !parts {
                         ui.group(|ui| {
                             ui.vertical(|ui| {
                                 ui.strong("Netzbasiert");
@@ -345,7 +371,7 @@ impl Picker {
                     if ui.button("Löschen").clicked() {
                         action = Some(PickerAction::Clear);
                     }
-                    let mesh = !self.select_by.is_geometry();
+                    let mesh = parts || !self.select_by.is_geometry();
                     if ui.add_enabled(mesh, egui::Button::new("Alle")).clicked() {
                         action = Some(PickerAction::All);
                     }
@@ -356,7 +382,7 @@ impl Picker {
                         action = Some(PickerAction::Invert);
                     }
                     let more = if self.expanded { "Weniger" } else { "Mehr" };
-                    if ui.button(more).clicked() {
+                    if !parts && ui.button(more).clicked() {
                         self.expanded = !self.expanded;
                         if !self.expanded && !self.select_by.is_geometry() {
                             self.select_by = SelectBy::Geometry;
@@ -368,6 +394,20 @@ impl Picker {
                 ui.weak("Mittlere Maustaste: drehen, mit Umschalt verschieben");
             });
         action
+    }
+
+    /// A mode of the parts window: only the part mode is enabled, and always chosen.
+    fn part_mode_row(&self, ui: &mut egui::Ui, mode: SelectBy) {
+        let part = mode == SelectBy::GeometryPart;
+        ui.add_enabled_ui(part, |ui| {
+            ui.horizontal(|ui| {
+                let _ = ui.radio(part, mode.label(Target::Faces));
+                if mode.angle_mode() {
+                    let mut angle = self.angle;
+                    ui.add_enabled(false, numeric::drag_value(&mut angle).suffix(" °"));
+                }
+            });
+        });
     }
 
     fn mode_row(&mut self, ui: &mut egui::Ui, mode: SelectBy, target: Target) {
@@ -597,6 +637,145 @@ impl Picker {
                 )
             }
         }
+    }
+}
+
+/// Whole parts picked in the 3D view, for regions of parts and mesh setup items. As for
+/// other selections a click replaces the picked parts, Shift adds and Ctrl removes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PartPicks {
+    history: History<String>,
+}
+
+impl PartPicks {
+    pub fn from_names(names: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            history: History::from_items(names),
+        }
+    }
+
+    pub fn names(&self) -> BTreeSet<String> {
+        self.history.items()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names().is_empty()
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    pub fn clear(&mut self) {
+        self.history.clear();
+    }
+
+    /// A click on the part of the hit, or into empty space.
+    pub fn click(&mut self, model: &Model, hit: Option<&Hit>, operation: Operation) {
+        match hit.and_then(|hit| model.parts.get(hit.part)) {
+            Some(part) => (self.history).push(operation, BTreeSet::from([part.name.clone()])),
+            // PrePoMax clears the selection on a plain click into empty space.
+            None if operation == Operation::Replace => self.clear(),
+            None => {}
+        }
+    }
+
+    /// The visible parts inside a selection box, or crossing it when dragged to the left.
+    pub fn box_select(&mut self, model: &Model, area: &BoxSelect, operation: Operation) {
+        let names = (0..model.parts.len())
+            .filter(|&p| model.parts[p].visible && part_in_box(model, p, area))
+            .map(|p| model.parts[p].name.clone())
+            .collect();
+        self.history.push(operation, names);
+    }
+
+    /// Applies a button of the selection window.
+    pub fn action(&mut self, model: &Model, action: PickerAction) {
+        let visible = || {
+            (model.parts.iter())
+                .filter(|p| p.visible)
+                .map(|p| p.name.clone())
+        };
+        match action {
+            PickerAction::Undo => self.history.undo(),
+            PickerAction::Clear => self.clear(),
+            PickerAction::All => self.history.push(Operation::Replace, visible().collect()),
+            PickerAction::Invert => {
+                let picked = self.names();
+                let others = visible().filter(|n| !picked.contains(n)).collect();
+                self.history.push(Operation::Replace, others);
+            }
+            PickerAction::Ids(..) => {}
+        }
+    }
+
+    /// The outline of the part under the mouse.
+    pub fn preview(model: &Model, hit: &Hit) -> Preview {
+        let target = if hit.line {
+            Target::Nodes
+        } else if model.is_plane() {
+            Target::Edges
+        } else {
+            Target::Faces
+        };
+        let picker = Picker {
+            select_by: SelectBy::Part,
+            ..Picker::default()
+        };
+        preview(model, &picker.pick(model, hit, target, 0.0))
+    }
+
+    /// The row of the dialog: the "..." button, the picked parts and a button to clear
+    /// them. `active` tells whether clicks in the 3D view pick parts for this row; returns
+    /// whether the user wants them to.
+    pub fn ui(&mut self, ui: &mut egui::Ui, active: bool) -> bool {
+        let mut wanted = false;
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                wanted = crate::setup::pick_button(ui, active);
+                let names: Vec<String> = self.names().into_iter().collect();
+                let label = match names.len() {
+                    0 => "Leer".to_string(),
+                    1..=3 => names.join(", "),
+                    n => format!("{n} Parts"),
+                };
+                let response = ui.label(label);
+                if names.len() > 3 {
+                    response.on_hover_text(names.join("\n"));
+                }
+                if ui.button("Auswahl löschen").clicked() {
+                    self.clear();
+                }
+            });
+            ui.weak("Parts im 3D-Fenster anklicken.");
+        });
+        wanted
+    }
+}
+
+/// Whether the part lies inside the box, or crosses it for a box dragged to the left.
+fn part_in_box(model: &Model, part: usize, area: &BoxSelect) -> bool {
+    let mesh = &model.mesh;
+    let picker = MeshPicker::new(model, part);
+    let elements = mesh.elements();
+    let mut nodes: Vec<usize> = (0..picker.faces().len())
+        .flat_map(|f| picker.face_nodes(f))
+        .collect();
+    nodes.extend(
+        (model.skin(part).line_elements.iter())
+            .flat_map(|&e| elements[e].nodes.iter())
+            .filter_map(|&id| mesh.node_index(id)),
+    );
+    if nodes.is_empty() {
+        return false;
+    }
+    let mut inside = nodes
+        .into_iter()
+        .map(|n| area.contains(model.render_position(n)));
+    if area.crossing {
+        inside.any(|i| i)
+    } else {
+        inside.all(|i| i)
     }
 }
 
@@ -993,6 +1172,49 @@ mod tests {
             Items::Nodes(nodes) => nodes,
             other => panic!("{other:?} instead of nodes"),
         }
+    }
+
+    #[test]
+    fn part_picks_take_whole_parts_like_any_selection() {
+        let (model, hit) = beam_hit(95.0, 5.0);
+        let name = model.parts[0].name.clone();
+        let mut parts = PartPicks::default();
+        parts.click(&model, Some(&hit), Operation::Replace);
+        assert_eq!(parts.names(), BTreeSet::from([name.clone()]));
+        // Ctrl removes, a plain click into empty space clears.
+        parts.click(&model, Some(&hit), Operation::Subtract);
+        assert!(parts.is_empty());
+        parts.click(&model, Some(&hit), Operation::Add);
+        parts.click(&model, None, Operation::Add);
+        assert!(!parts.is_empty(), "only a plain click clears");
+        parts.click(&model, None, Operation::Replace);
+        assert!(parts.is_empty());
+        // The buttons of the selection window.
+        parts.action(&model, PickerAction::All);
+        assert_eq!(parts.names().len(), 1);
+        parts.action(&model, PickerAction::Invert);
+        assert!(parts.is_empty());
+        parts.click(&model, Some(&hit), Operation::Add);
+        parts.action(&model, PickerAction::Undo);
+        assert!(parts.is_empty());
+        // The preview outlines the whole part.
+        assert!(!PartPicks::preview(&model, &hit).lines.is_empty());
+
+        // A box over half of the beam takes it only when dragged to the left.
+        let area = |crossing| BoxSelect {
+            view_proj: glam::Mat4::from_translation(Vec3::new(0.0, 0.0, 0.5))
+                * glam::Mat4::from_scale(Vec3::new(1.0 / 60.0, 1.0 / 60.0, -0.005)),
+            min: glam::Vec2::new(-0.0001, -1.0),
+            max: glam::Vec2::new(1.0, 1.0),
+            crossing,
+            shift: false,
+            ctrl: false,
+        };
+        let mut parts = PartPicks::default();
+        parts.box_select(&model, &area(false), Operation::Replace);
+        assert!(parts.is_empty());
+        parts.box_select(&model, &area(true), Operation::Replace);
+        assert_eq!(parts.names(), BTreeSet::from([name]));
     }
 
     #[test]

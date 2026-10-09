@@ -20,7 +20,7 @@ use crate::constraint_dialog::ConstraintDraft;
 use crate::contacts::{self, MasterSlave};
 use crate::model::{Highlight, Hit, Model};
 use crate::numeric;
-use crate::selection::{History, Items, Operation, Picker, PickerAction, Target};
+use crate::selection::{History, Items, Operation, PartPicks, Picker, PickerAction, Target};
 use crate::tree::TreeItem;
 use crate::viewport::{BoxSelect, Preview};
 
@@ -84,7 +84,7 @@ pub(crate) struct RegionDraft {
     /// Picks of CAD entities on a mesh generated from geometry. Mixed with picks of nodes or
     /// faces they turn into those, so only one of the histories is in use at a time.
     geometry: History<CadEntity>,
-    parts: BTreeSet<String>,
+    parts: PartPicks,
     set: String,
 }
 
@@ -110,7 +110,7 @@ impl RegionDraft {
             nodes: History::default(),
             faces: History::default(),
             geometry: History::default(),
-            parts: BTreeSet::new(),
+            parts: PartPicks::default(),
             set: String::new(),
         }
     }
@@ -125,7 +125,7 @@ impl RegionDraft {
         match region {
             Region::Parts(parts) => {
                 draft.source = Source::Parts;
-                draft.parts = parts.iter().cloned().collect();
+                draft.parts = PartPicks::from_names(parts.iter().cloned());
             }
             Region::Nodes(nodes) => draft.nodes = History::from_items(nodes.iter().copied()),
             Region::Faces(faces) if target != Target::Nodes => {
@@ -158,7 +158,7 @@ impl RegionDraft {
                     Region::Faces(self.faces.items().into_iter().collect())
                 }
             },
-            Source::Parts => Region::Parts(self.parts.iter().cloned().collect()),
+            Source::Parts => Region::Parts(self.parts.names().into_iter().collect()),
             Source::NodeSet => Region::NodeSet(self.set.clone()),
             Source::ElementSet => Region::ElementSet(self.set.clone()),
             Source::Surface => Region::Surface(self.set.clone()),
@@ -192,16 +192,7 @@ impl RegionDraft {
         operation: Operation,
     ) {
         match self.source {
-            Source::Parts => {
-                if let Some((hit, _)) = pick {
-                    let name = model.parts[hit.part].name.clone();
-                    if operation == Operation::Subtract {
-                        self.parts.remove(&name);
-                    } else {
-                        self.parts.insert(name);
-                    }
-                }
-            }
+            Source::Parts => self.parts.click(model, pick.map(|(hit, _)| hit), operation),
             Source::Selection => match pick {
                 Some((hit, precision)) => {
                     let items = picker.pick(model, hit, self.target, precision);
@@ -273,11 +264,42 @@ impl RegionDraft {
     }
 
     pub(crate) fn can_undo(&self) -> bool {
-        self.geometry.can_undo() || self.ids_can_undo()
+        match self.source {
+            Source::Parts => self.parts.can_undo(),
+            _ => self.geometry.can_undo() || self.ids_can_undo(),
+        }
+    }
+
+    /// Whether clicks in the 3D view pick for this region, with the selection window open.
+    pub(crate) fn picks(&self) -> bool {
+        matches!(self.source, Source::Selection | Source::Parts)
+    }
+
+    /// The selection window next to the dialog `anchor` while this region is picked;
+    /// regions of parts only pick whole parts.
+    pub(crate) fn picker_window(
+        &mut self,
+        ctx: &egui::Context,
+        anchor: egui::Rect,
+        picker: &mut Picker,
+        model: &Model,
+    ) {
+        let can_undo = self.can_undo();
+        let action = match self.source {
+            Source::Selection => picker.window(ctx, anchor, self.target, can_undo),
+            Source::Parts => picker.parts_window(ctx, anchor, can_undo),
+            _ => None,
+        };
+        if let Some(action) = action {
+            self.action(model, action);
+        }
     }
 
     /// Applies a button of the selection window.
     pub(crate) fn action(&mut self, model: &Model, action: PickerAction) {
+        if self.source == Source::Parts {
+            return self.parts.action(model, action);
+        }
         match action {
             PickerAction::Undo if self.geometry.can_undo() => return self.geometry.undo(),
             PickerAction::Undo | PickerAction::Clear => {}
@@ -403,22 +425,7 @@ impl RegionDraft {
                     });
                     ui.weak("Im Fenster \"Auswahl\" wählen, was ein Klick auswählt.");
                 }
-                Source::Parts => {
-                    ui.horizontal(|ui| {
-                        wanted |= pick_button(ui, active);
-                        ui.weak("Ein Klick auf ein Part im 3D-Fenster wählt es ebenfalls.");
-                    });
-                    for part in &model.parts {
-                        let mut checked = self.parts.contains(&part.name);
-                        if ui.checkbox(&mut checked, &part.name).changed() {
-                            if checked {
-                                self.parts.insert(part.name.clone());
-                            } else {
-                                self.parts.remove(&part.name);
-                            }
-                        }
-                    }
-                }
+                Source::Parts => wanted |= self.parts.ui(ui, active),
                 Source::NodeSet | Source::ElementSet | Source::Surface => {
                     let names: Vec<&String> = match self.source {
                         Source::NodeSet => model.mesh.node_sets.keys().collect(),
@@ -454,9 +461,13 @@ impl RegionDraft {
         area: &BoxSelect,
         operation: Operation,
     ) {
-        if self.source == Source::Selection {
-            let items = picker.pick_box(model, area, self.target);
-            self.take(&model.mesh, items, operation);
+        match self.source {
+            Source::Selection => {
+                let items = picker.pick_box(model, area, self.target);
+                self.take(&model.mesh, items, operation);
+            }
+            Source::Parts => self.parts.box_select(model, area, operation),
+            _ => {}
         }
     }
 
@@ -468,10 +479,13 @@ impl RegionDraft {
         hit: &Hit,
         precision: f32,
     ) -> Preview {
-        if self.source != Source::Selection {
-            return Preview::default();
+        match self.source {
+            Source::Selection => {
+                crate::selection::preview(model, &picker.pick(model, hit, self.target, precision))
+            }
+            Source::Parts => PartPicks::preview(model, hit),
+            _ => Preview::default(),
         }
-        crate::selection::preview(model, &picker.pick(model, hit, self.target, precision))
     }
 }
 
@@ -965,8 +979,7 @@ impl Editor {
 
     /// Whether clicks in the 3D view pick for this dialog.
     pub fn picks(&self) -> bool {
-        self.region()
-            .is_some_and(|r| matches!(r.source, Source::Selection | Source::Parts))
+        self.region().is_some_and(RegionDraft::picks)
     }
 
     fn region(&self) -> Option<&RegionDraft> {
@@ -983,27 +996,16 @@ impl Editor {
 
     /// A selection box dragged in the 3D view.
     pub fn box_select(&mut self, model: &Model, area: &BoxSelect, operation: Operation) {
-        if let Some(r) = draft_region_mut(&mut self.draft)
-            && r.source == Source::Selection
-        {
-            let items = self.picker.pick_box(model, area, r.target);
-            r.take(&model.mesh, items, operation);
+        if let Some(r) = draft_region_mut(&mut self.draft) {
+            r.box_select(model, &self.picker, area, operation);
         }
     }
 
     /// What a click at the hit would select, for the hover preview.
     pub fn preview(&self, model: &Model, hit: &Hit, precision: f32) -> Preview {
-        match self.region() {
-            Some(region) if region.source == Source::Selection => {
-                let items = self.picker.pick(model, hit, region.target, precision);
-                crate::selection::preview(model, &items)
-            }
-            _ => Preview::default(),
-        }
-    }
-
-    fn region_mut(&mut self) -> Option<&mut RegionDraft> {
-        draft_region_mut(&mut self.draft)
+        self.region()
+            .map(|r| r.preview(model, &self.picker, hit, precision))
+            .unwrap_or_default()
     }
 
     /// The region being edited, for the 3D view.
@@ -1053,16 +1055,9 @@ impl Editor {
                 });
             });
         if let Some(window) = window
-            && let Some(region) = self.region()
-            && region.source == Source::Selection
+            && let Some(region) = draft_region_mut(&mut self.draft)
         {
-            let (target, can_undo) = (region.target, region.can_undo());
-            let action = self
-                .picker
-                .window(ctx, window.response.rect, target, can_undo);
-            if let (Some(action), Some(region)) = (action, self.region_mut()) {
-                region.action(model, action);
-            }
+            region.picker_window(ctx, window.response.rect, &mut self.picker, model);
         }
         if !open {
             result = EditorResult::Cancel;
@@ -2316,7 +2311,7 @@ mod tests {
         assert!(editor.validate(&fe).is_err(), "empty region");
         if let Draft::InitialCondition(_, region) = &mut editor.draft {
             region.source = Source::Parts;
-            region.parts.insert("A".into());
+            region.parts = PartPicks::from_names(["A".to_string()]);
         }
         assert_eq!(editor.validate(&fe), Ok(()));
         editor.apply(&mut fe);
