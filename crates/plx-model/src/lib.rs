@@ -12,6 +12,7 @@ mod contact;
 pub mod convert;
 mod features;
 mod geometry;
+mod history;
 pub mod library;
 mod properties;
 mod region;
@@ -33,6 +34,7 @@ pub use features::{
 pub use geometry::{
     Algorithm2d, Algorithm3d, Geometry, MeshSetupItem, MeshSetupKind, MeshingParameters,
 };
+pub use history::{HistoryKind, HistoryOutput, Totals};
 pub use library::MaterialLibrary;
 pub use properties::{ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
@@ -123,6 +125,7 @@ impl FeModel {
             .chain(self.steps.iter().flat_map(|step| {
                 (step.boundary_conditions.iter().map(|b| &b.region))
                     .chain(step.loads.iter().map(|l| &l.region))
+                    .chain(step.history_outputs.iter().filter_map(|h| h.kind.region()))
             }))
     }
 
@@ -151,6 +154,7 @@ impl FeModel {
             .chain(self.steps.iter_mut().flat_map(|step| {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
+                    .chain((step.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
             }))
     }
 
@@ -167,6 +171,17 @@ impl FeModel {
                 if reference.as_deref() == Some(old) {
                     *reference = Some(new.to_string());
                 }
+            }
+        }
+    }
+
+    /// Follows a renamed contact pair: contact history outputs keep referring to it.
+    pub fn rename_contact_pair(&mut self, old: &str, new: &str) {
+        for output in self.steps.iter_mut().flat_map(|s| &mut s.history_outputs) {
+            if let HistoryKind::Contact { pair } = &mut output.kind
+                && pair == old
+            {
+                *pair = new.to_string();
             }
         }
     }
@@ -190,6 +205,7 @@ impl FeModel {
             .chain(self.steps.iter_mut().flat_map(|step| {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
+                    .chain((step.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
             }));
         for region in regions {
             match region {
@@ -268,6 +284,9 @@ pub struct Step {
     pub boundary_conditions: Vec<BoundaryCondition>,
     pub loads: Vec<Load>,
     pub field_outputs: Vec<FieldOutput>,
+    /// Values printed into the `.dat` file; steps saved before they existed have none.
+    #[serde(default)]
+    pub history_outputs: Vec<HistoryOutput>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -489,6 +508,7 @@ impl Step {
             kind: StepKind::Static(StaticStep::default()),
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
+            history_outputs: Vec::new(),
             field_outputs: FieldOutput::defaults(),
         }
     }
@@ -501,6 +521,7 @@ impl Step {
             kind: StepKind::Frequency(FrequencyStep::default()),
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
+            history_outputs: Vec::new(),
             field_outputs: FieldOutput::frequency_defaults(),
         }
     }
@@ -513,6 +534,7 @@ impl Step {
             kind: StepKind::HeatTransfer(HeatTransferStep::default()),
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
+            history_outputs: Vec::new(),
             field_outputs: FieldOutput::heat_transfer_defaults(),
         }
     }
@@ -525,6 +547,7 @@ impl Step {
             kind: StepKind::CoupledTempDisp(HeatTransferStep::default()),
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
+            history_outputs: Vec::new(),
             field_outputs: FieldOutput::coupled_defaults(),
         }
     }
@@ -700,7 +723,7 @@ impl FieldOutput {
 }
 
 /// Items of projects saved before they could be deactivated are active.
-fn active() -> bool {
+pub(crate) fn active() -> bool {
     true
 }
 

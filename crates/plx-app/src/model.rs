@@ -281,6 +281,23 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
         view.time = time;
         view
     });
+    // History outputs CalculiX printed next to the results, as PrePoMax reads them.
+    if let Some(view) = &mut model.results {
+        let dat = ["dat", "DAT"]
+            .map(|e| path.with_extension(e))
+            .into_iter()
+            .find(|p| p.is_file());
+        if let Some(dat) = dat {
+            match plx_io::dat::read_dat(&dat) {
+                Ok(import) => {
+                    let warnings = view.set_file_history(import.sets, &model.mesh);
+                    model.warnings.extend(import.warnings);
+                    model.warnings.extend(warnings);
+                }
+                Err(error) => model.warnings.push(format!("{}: {error}", dat.display())),
+            }
+        }
+    }
     // A project without a mesh yet opens on its geometry.
     let render_meshes = match &geometry_view {
         Some(view) if model.mesh.element_count() == 0 => view.render_meshes(),

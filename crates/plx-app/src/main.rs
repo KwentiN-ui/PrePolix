@@ -39,6 +39,7 @@ mod transformation_dialog;
 mod tree;
 mod tree_icons;
 mod viewport;
+mod xy_plot;
 
 fn main() -> eframe::Result {
     env_logger::init();
