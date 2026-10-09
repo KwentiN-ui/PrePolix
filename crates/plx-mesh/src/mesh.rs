@@ -1,8 +1,9 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::element::ElementShape;
+use crate::fast_map::FastMap;
 
 pub type NodeId = u32;
 pub type ElementId = u32;
@@ -51,9 +52,9 @@ pub enum MeshError {
 pub struct FeMesh {
     node_ids: Vec<NodeId>,
     coords: Vec<[f64; 3]>,
-    node_lookup: HashMap<NodeId, usize>,
+    node_lookup: FastMap<NodeId, usize>,
     elements: Vec<Element>,
-    element_lookup: HashMap<ElementId, usize>,
+    element_lookup: FastMap<ElementId, usize>,
     pub node_sets: BTreeMap<String, Vec<NodeId>>,
     pub element_sets: BTreeMap<String, Vec<ElementId>>,
     pub surfaces: BTreeMap<String, SurfaceDefinition>,

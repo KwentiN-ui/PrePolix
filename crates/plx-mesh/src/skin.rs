@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use crate::element::ElementFamily;
+use crate::element::{ElementFamily, ElementShape};
+use crate::fast_map::FastMap;
 use crate::mesh::{FeMesh, Part};
 
 /// A visible element face. Node references are indices into [`FeMesh::coords`].
@@ -44,21 +45,20 @@ pub struct PartSkin {
 /// Elements that reference undefined nodes are skipped.
 pub fn extract_part_skin(mesh: &FeMesh, part: &Part, feature_angle_deg: f64) -> PartSkin {
     let mut skin = PartSkin::default();
-    let mut solid_faces: HashMap<[usize; 4], Option<SkinFace>> = HashMap::new();
+    // Faces of solid elements by sorted corner nodes: the first element and face seen, and
+    // whether a second element shares the face. Only unshared faces are built afterwards.
+    let mut solid_faces: FastMap<[usize; 4], (usize, usize, bool)> =
+        FastMap::with_capacity_and_hasher(part.elements.len() * 3, Default::default());
+    let mut nodes = Vec::new();
 
     for &element_id in &part.elements {
         let Some(element_index) = mesh.element_index(element_id) else {
             continue;
         };
         let element = &mesh.elements()[element_index];
-        let Some(nodes) = element
-            .nodes
-            .iter()
-            .map(|&id| mesh.node_index(id))
-            .collect::<Option<Vec<_>>>()
-        else {
+        if !node_indices(mesh, element, &mut nodes) {
             continue;
-        };
+        }
         let shape = element.shape;
         if shape.family() == ElementFamily::Line {
             skin.lines.extend(
@@ -70,35 +70,63 @@ pub fn extract_part_skin(mesh: &FeMesh, part: &Part, feature_angle_deg: f64) -> 
             continue;
         }
         for (face_index, topology) in shape.faces().iter().enumerate() {
-            let face = SkinFace {
-                element: element_index,
-                face: face_index,
-                corners: topology.corners.iter().map(|&i| nodes[i]).collect(),
-                mids: if shape.is_quadratic() {
-                    topology.mids.iter().map(|&i| nodes[i]).collect()
-                } else {
-                    Vec::new()
-                },
-                region: 0,
-            };
             if shape.family() == ElementFamily::Surface {
-                skin.faces.push(face);
+                skin.faces
+                    .push(skin_face(element_index, face_index, shape, &nodes));
                 continue;
             }
             let mut key = [usize::MAX; 4];
-            key[..face.corners.len()].copy_from_slice(&face.corners);
+            for (k, &corner) in topology.corners.iter().enumerate() {
+                key[k] = nodes[corner];
+            }
             key.sort_unstable();
             solid_faces
                 .entry(key)
-                .and_modify(|seen| *seen = None)
-                .or_insert(Some(face));
+                .and_modify(|seen| seen.2 = true)
+                .or_insert((element_index, face_index, false));
         }
     }
-    let mut outer: Vec<SkinFace> = solid_faces.into_values().flatten().collect();
-    outer.sort_by_key(|f| (f.element, f.face));
-    skin.faces.extend(outer);
+    let mut outer: Vec<(usize, usize)> = solid_faces
+        .into_values()
+        .filter(|&(.., shared)| !shared)
+        .map(|(element, face, _)| (element, face))
+        .collect();
+    outer.sort_unstable();
+    for (element_index, face_index) in outer {
+        let element = &mesh.elements()[element_index];
+        node_indices(mesh, element, &mut nodes);
+        skin.faces
+            .push(skin_face(element_index, face_index, element.shape, &nodes));
+    }
     skin.edges = collect_edges(mesh.coords(), &mut skin.faces, feature_angle_deg);
     skin
+}
+
+/// Node indices of the element's nodes; false if one is undefined.
+fn node_indices(mesh: &FeMesh, element: &crate::Element, nodes: &mut Vec<usize>) -> bool {
+    nodes.clear();
+    for &id in &element.nodes {
+        match mesh.node_index(id) {
+            Some(index) => nodes.push(index),
+            None => return false,
+        }
+    }
+    true
+}
+
+fn skin_face(element: usize, face: usize, shape: ElementShape, nodes: &[usize]) -> SkinFace {
+    let topology = &shape.faces()[face];
+    SkinFace {
+        element,
+        face,
+        corners: topology.corners.iter().map(|&i| nodes[i]).collect(),
+        mids: if shape.is_quadratic() {
+            topology.mids.iter().map(|&i| nodes[i]).collect()
+        } else {
+            Vec::new()
+        },
+        region: 0,
+    }
 }
 
 struct EdgeAccumulator {
@@ -125,7 +153,8 @@ fn collect_edges(
         .map(|f| face_normal(coords, &f.corners))
         .collect();
     let mut order = Vec::new();
-    let mut edges: HashMap<(usize, usize), EdgeAccumulator> = HashMap::new();
+    let mut edges: FastMap<(usize, usize), EdgeAccumulator> =
+        FastMap::with_capacity_and_hasher(faces.len() * 2, Default::default());
     for (face_index, face) in faces.iter().enumerate() {
         let n = face.corners.len();
         for i in 0..n {
@@ -191,7 +220,7 @@ const MAX_NOISE_FOLD_DEG: f64 = 60.0;
 /// meshes of curved surfaces otherwise break into small patches whose outlines clutter the view.
 fn merge_tiny_patches(
     coords: &[[f64; 3]],
-    edges: &HashMap<(usize, usize), EdgeAccumulator>,
+    edges: &FastMap<(usize, usize), EdgeAccumulator>,
     normals: &[[f64; 3]],
     patches: &mut UnionFind,
 ) {
