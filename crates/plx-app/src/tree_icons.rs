@@ -23,6 +23,8 @@ pub enum TreeIcon {
     Shell,
     Wire,
     Hidden,
+    /// A deactivated item, PrePoMax's `Unactive.ico`: a switch turned off.
+    Inactive,
     Material,
     Section,
     Constraints,
@@ -72,6 +74,7 @@ fn pixmap(icon: TreeIcon) -> &'static Pixmap {
         TreeIcon::Shell => &SHELL,
         TreeIcon::Wire => &WIRE,
         TreeIcon::Hidden => &HIDDEN,
+        TreeIcon::Inactive => &INACTIVE,
         TreeIcon::Material => &MATERIAL,
         TreeIcon::Section => &SECTION,
         TreeIcon::Constraints => &CONSTRAINTS,
@@ -510,6 +513,44 @@ const WIRE: Pixmap = Pixmap {
 };
 
 /// Hide.ico
+const INACTIVE: Pixmap = Pixmap {
+    colors: &[
+        [0, 0, 0, 88],
+        [0, 0, 0, 220],
+        [0, 0, 0, 255],
+        [0, 0, 0, 110],
+        [165, 165, 165, 255],
+        [208, 208, 208, 255],
+        [185, 185, 185, 255],
+        [200, 90, 90, 255],
+        [200, 45, 45, 255],
+        [215, 146, 146, 255],
+        [255, 255, 255, 255],
+        [200, 0, 0, 255],
+        [255, 0, 0, 255],
+        [225, 170, 170, 255],
+        [246, 246, 246, 255],
+    ],
+    rows: [
+        "................",
+        "................",
+        "................",
+        "................",
+        "................",
+        ".ABCCCCCCCCCCBA.",
+        "DCEFFFFFFFFFFECD",
+        "CGFHIJKKKKKKKKGC",
+        "CFLMMMNKKKKKKKOC",
+        "CFLMMMNKKKKKKKOC",
+        "CFLMMMNKKKKKKKOC",
+        "CGFHIJKKKKKKKKGC",
+        "DCEFFFFFFFFFFECD",
+        ".ABCCCCCCCCCCBA.",
+        "................",
+        "................",
+    ],
+};
+
 const HIDDEN: Pixmap = Pixmap {
     colors: &[
         [90, 90, 90, 107],
@@ -1428,6 +1469,7 @@ mod tests {
             TreeIcon::Shell,
             TreeIcon::Wire,
             TreeIcon::Hidden,
+            TreeIcon::Inactive,
             TreeIcon::Material,
             TreeIcon::Section,
             TreeIcon::Constraints,

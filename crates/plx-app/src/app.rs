@@ -892,6 +892,9 @@ impl Workbench {
             self.tree.selected = None;
             self.editor = None;
         }
+        if let (Some(item), Some(model)) = (response.toggle_active, self.model.as_mut()) {
+            crate::setup::toggle_active(&mut model.fe, &item);
+        }
         if let Some(action) = response.analysis {
             self.analysis_action(action);
         }
@@ -2212,9 +2215,10 @@ impl Workbench {
             })
         };
         let is_selected = |item: TreeItem| edited.is_none() && selected == Some(&item);
+        // Like PrePoMax, deactivated items have no symbols; the edited one is drawn anyway.
         let mut items = Vec::new();
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
-            if !replaced(false, i) {
+            if step.active && bc.active && !replaced(false, i) {
                 items.push(symbols::Item {
                     kind: symbols::Kind::Boundary(bc.kind),
                     region: bc.region.clone(),
@@ -2223,7 +2227,7 @@ impl Workbench {
             }
         }
         for (i, load) in step.loads.iter().enumerate() {
-            if !replaced(true, i) {
+            if step.active && load.active && !replaced(true, i) {
                 items.push(symbols::Item {
                     kind: symbols::Kind::Load(load.kind),
                     region: load.region.clone(),

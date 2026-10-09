@@ -103,8 +103,8 @@ pub fn write_inp(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<String
 }
 
 /// The input file for PrePoMax's "Check Model": every step's procedure is replaced by
-/// `*No analysis`, so that CalculiX only reads and checks the model. A model without steps
-/// gets PrePoMax's `CheckModel` step.
+/// `*No analysis`, so that CalculiX only reads and checks the model. A model without active
+/// steps gets PrePoMax's `CheckModel` step.
 pub fn write_check_inp(
     mesh: &FeMesh,
     model: &FeModel,
@@ -116,14 +116,15 @@ pub fn write_check_inp(
         .iter_mut()
         .find(|k| matches!(&k.kind, KeywordKind::Title(name) if name == "Steps"))
     {
-        for step in &mut steps.children {
+        // A deactivated step stays a comment.
+        for (step, _) in (steps.children.iter_mut().zip(&model.steps)).filter(|(_, s)| s.active) {
             if let Some(procedure) =
                 (step.children.first_mut()).and_then(|header| header.children.first_mut())
             {
                 *procedure = no_analysis();
             }
         }
-        if steps.children.is_empty() {
+        if !model.steps.iter().any(|s| s.active) {
             let end = Keyword::title("End step", vec![Keyword::generated("*End step\n".into())]);
             let header = Keyword::parent("*Step\n".into(), vec![no_analysis(), end]);
             steps
@@ -537,13 +538,23 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError
 
 /// A step as PrePoMax structures it: the step title holds `*Step`, which holds the procedure
 /// and a title for each kind of item, down to the one holding `*End step`.
+///
+/// Like PrePoMax, a deactivated step or item keeps its place in the file as a comment
+/// (`** Name: Fixed-1: Deactivated`), and nothing of it is written, not even its sets.
 fn write_step(sets: &mut Sets, step: &Step) -> Result<Keyword, WriteError> {
+    if !step.active {
+        return Ok(deactivated_step(step));
+    }
     let (header, procedure) = match &step.kind {
         StepKind::Static(settings) => static_step(settings),
         StepKind::Frequency(settings) => frequency_step(settings),
     };
     let mut boundaries = vec![Keyword::generated("*Boundary, op=New\n".into())];
     for bc in &step.boundary_conditions {
+        if !bc.active {
+            boundaries.push(deactivated(&bc.name));
+            continue;
+        }
         let set = sets.node_set(&bc.name, &bc.region)?;
         let mut out = format!("** Name: {}\n*Boundary\n", bc.name);
         match bc.kind {
@@ -570,6 +581,10 @@ fn write_step(sets: &mut Sets, step: &Step) -> Result<Keyword, WriteError> {
         &[]
     };
     for load in step_loads {
+        if !load.active {
+            loads.push(deactivated(&load.name));
+            continue;
+        }
         let mut out = format!("** Name: {}\n", load.name);
         match load.kind {
             LoadKind::ConcentratedForce(force) => {
@@ -622,6 +637,50 @@ fn write_step(sets: &mut Sets, step: &Step) -> Result<Keyword, WriteError> {
         &step.name,
         vec![Keyword::parent(header, contents)],
     ))
+}
+
+/// Comment that stands for a deactivated item, PrePoMax's `CalDeactivated`.
+fn deactivated(name: &str) -> Keyword {
+    Keyword::generated(format!("** Name: {name}: Deactivated\n"))
+}
+
+/// A deactivated step as PrePoMax writes it: the titles of the step with a comment for the
+/// step, its procedure and each of its items, but no keyword CalculiX would read.
+fn deactivated_step(step: &Step) -> Keyword {
+    let procedure = match step.kind {
+        StepKind::Static(_) => "StaticStep",
+        StepKind::Frequency(_) => "FrequencyStep",
+    };
+    fn all<'a>(names: impl Iterator<Item = &'a str>) -> Vec<Keyword> {
+        names.map(deactivated).collect()
+    }
+    let loads = if step.kind.supports_loads() {
+        all(step.loads.iter().map(|l| l.name.as_str()))
+    } else {
+        Vec::new()
+    };
+    let contents = vec![
+        deactivated(procedure),
+        Keyword::title(
+            "Boundary conditions",
+            all(step.boundary_conditions.iter().map(|b| b.name.as_str())),
+        ),
+        Keyword::title("Loads", loads),
+        Keyword::title("Defined fields", Vec::new()),
+        Keyword::title("History outputs", Vec::new()),
+        Keyword::title(
+            "Field outputs",
+            all(step.field_outputs.iter().map(|f| f.name.as_str())),
+        ),
+        Keyword::title("End step", vec![deactivated(&step.name)]),
+    ];
+    Keyword::title(
+        &step.name,
+        vec![Keyword::parent(
+            format!("** Name: {}: Deactivated\n", step.name),
+            contents,
+        )],
+    )
 }
 
 /// Equivalent nodal forces of a total force spread evenly over element faces, the way

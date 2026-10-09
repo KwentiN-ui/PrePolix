@@ -87,6 +87,8 @@ pub struct TreeResponse {
     /// Create a new item from a container's context menu or by double-clicking it.
     pub create: Option<NewItem>,
     pub delete: Option<TreeItem>,
+    /// Activate a deactivated step, boundary condition or load, or deactivate an active one.
+    pub toggle_active: Option<TreeItem>,
     /// An entry of the analysis' context menu, or the monitor by double click.
     pub analysis: Option<AnalysisAction>,
     /// Open the material library.
@@ -169,6 +171,18 @@ pub(crate) fn row_label(
 /// Text colour of invalid items and of the containers holding them, Windows' red as in
 /// PrePoMax.
 const INVALID: Color32 = Color32::from_rgb(255, 0, 0);
+
+/// Text colour of deactivated items, PrePoMax's gray.
+const INACTIVE: Color32 = Color32::from_rgb(128, 128, 128);
+
+/// Items that can be deactivated, as far as prepolix has them; PrePoMax also deactivates
+/// materials, constraints, contacts and outputs.
+fn can_deactivate(item: &TreeItem) -> bool {
+    matches!(
+        item,
+        TreeItem::Step(_) | TreeItem::BoundaryCondition(..) | TreeItem::Load(..)
+    )
+}
 
 /// Warning sign next to an invalid item, PrePoMax's warning icon.
 fn warning_sign(ui: &mut Ui) -> Response {
@@ -376,6 +390,8 @@ struct Tree<'a> {
     /// Containers that cannot take items, with the reason, such as the loads of a frequency
     /// step.
     closed: HashMap<TreeItem, &'static str>,
+    /// Deactivated items, shown gray with PrePoMax's switch icon.
+    inactive: HashSet<TreeItem>,
 }
 
 impl Tree<'_> {
@@ -390,7 +406,13 @@ impl Tree<'_> {
     fn label(&mut self, ui: &mut Ui, item: TreeItem, text: impl Into<WidgetText>) -> Response {
         let reason = self.invalid.get(&item).cloned();
         let red = reason.is_some() || self.holds_invalid.contains(&item);
-        let mut response = row_label(ui, self.is_selected(&item), red.then_some(INVALID), text);
+        let inactive = self.inactive.contains(&item);
+        let color = if red {
+            Some(INVALID)
+        } else {
+            inactive.then_some(INACTIVE)
+        };
+        let mut response = row_label(ui, self.is_selected(&item), color, text);
         if let Some(reason) = reason {
             warning_sign(ui).on_hover_text(&reason);
             response = response.on_hover_text(reason);
@@ -478,6 +500,18 @@ impl Tree<'_> {
                     if ui.button("Bearbeiten …").clicked() {
                         self.response.open = Some(item.clone());
                     }
+                    if can_deactivate(&item) {
+                        ui.separator();
+                        let label = if inactive {
+                            "Aktivieren"
+                        } else {
+                            "Deaktivieren"
+                        };
+                        if ui.button(label).clicked() {
+                            self.response.toggle_active = Some(item.clone());
+                        }
+                        ui.separator();
+                    }
                     let deletable = !matches!(item, TreeItem::FieldOutput(..));
                     if deletable && ui.button("Löschen").clicked() {
                         self.response.delete = Some(item.clone());
@@ -520,6 +554,9 @@ impl Tree<'_> {
 
     /// PrePoMax's image of a node; containers without an own image get the dotted line.
     fn icon(&self, item: &TreeItem, open: bool) -> TreeIcon {
+        if self.inactive.contains(item) {
+            return TreeIcon::Inactive;
+        }
         let dots = if open {
             TreeIcon::DotsOpen
         } else {
@@ -593,10 +630,20 @@ impl Tree<'_> {
                 ui.add_space(2.0);
                 changed
             });
-            let (rect, _) =
-                ui.allocate_exact_size(Vec2::splat(tree_icons::SIZE), egui::Sense::hover());
+            // As in PrePoMax, clicking the switch of a deactivated item activates it.
+            let inactive = self.inactive.contains(&item);
+            let sense = if inactive {
+                egui::Sense::click()
+            } else {
+                egui::Sense::hover()
+            };
+            let (rect, icon_response) =
+                ui.allocate_exact_size(Vec2::splat(tree_icons::SIZE), sense);
             if ui.is_rect_visible(rect) {
                 tree_icons::paint(ui.painter(), rect.min, icon);
+            }
+            if inactive && icon_response.on_hover_text("Aktivieren").clicked() {
+                self.response.toggle_active = Some(item.clone());
             }
             ui.add_space(3.0);
             let response = self.label(ui, item, text);
@@ -840,6 +887,7 @@ pub fn show(
         invalid: HashMap::new(),
         holds_invalid: HashSet::new(),
         closed: HashMap::new(),
+        inactive: HashSet::new(),
     };
     let expanding = tree.state.expand.clone();
     egui::ScrollArea::both()
@@ -877,6 +925,17 @@ pub fn show(
         tree.state.expand = None;
     }
     tree.state.reveal = false;
+    // Like PrePoMax, the space bar switches the selected item on or off; here only while the
+    // pointer is over the tree, so that typing elsewhere never does.
+    if let Some((selected_view, item)) = &tree.state.selected
+        && *selected_view == view
+        && can_deactivate(item)
+        && ui.rect_contains_pointer(ui.max_rect())
+        && !ui.ctx().text_edit_focused()
+        && ui.input(|i| i.key_pressed(egui::Key::Space))
+    {
+        tree.response.toggle_active = Some(item.clone());
+    }
     tree.response
 }
 
@@ -926,6 +985,17 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
         let text = counted("Steps", fe.steps.len());
         tree.branch(ui, steps, text, true, |tree, ui| {
             for (s, step) in fe.steps.iter().enumerate() {
+                if !step.active {
+                    tree.inactive.insert(TreeItem::Step(s));
+                }
+                for (i, _) in
+                    (step.boundary_conditions.iter().enumerate()).filter(|(_, b)| !b.active)
+                {
+                    tree.inactive.insert(TreeItem::BoundaryCondition(s, i));
+                }
+                for (i, _) in (step.loads.iter().enumerate()).filter(|(_, l)| !l.active) {
+                    tree.inactive.insert(TreeItem::Load(s, i));
+                }
                 if !step.kind.supports_loads() {
                     tree.closed.insert(
                         TreeItem::StepGroup(s, "Loads"),

@@ -880,11 +880,13 @@ mod tests {
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
             name: "Fix".into(),
+            active: true,
             region: Region::Nodes(fixed),
             kind: BoundaryKind::Fixed,
         });
         step.boundary_conditions.push(BoundaryCondition {
             name: "Pull".into(),
+            active: true,
             region: Region::Nodes(pulled),
             kind: BoundaryKind::Displacement([Some(0.1), None, None, None, None, None]),
         });
