@@ -615,7 +615,8 @@ impl Workbench {
             TreeView::Results => self.results.get_mut(self.current_result),
             _ => self.model.as_mut(),
         };
-        let response = tree::show(ui, view, shown, &mut self.tree);
+        let job = self.analysis.as_ref().map(Analysis::status);
+        let response = tree::show(ui, view, shown, job, &mut self.tree);
         for (index, visible) in response.visibility {
             self.viewport.set_part_visible(index, visible);
         }

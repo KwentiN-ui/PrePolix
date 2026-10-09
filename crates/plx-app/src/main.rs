@@ -18,6 +18,7 @@ mod setup;
 mod solver_check;
 mod style;
 mod tree;
+mod tree_icons;
 mod viewport;
 
 fn main() -> eframe::Result {
@@ -64,6 +65,7 @@ mod tests {
             ("solver_check.rs", include_str!("solver_check.rs")),
             ("style.rs", include_str!("style.rs")),
             ("tree.rs", include_str!("tree.rs")),
+            ("tree_icons.rs", include_str!("tree_icons.rs")),
             ("viewport.rs", include_str!("viewport.rs")),
         ];
         for (file, text) in sources {
