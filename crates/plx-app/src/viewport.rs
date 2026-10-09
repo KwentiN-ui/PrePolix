@@ -21,6 +21,8 @@ pub struct Viewport {
     pub options: DisplayOptions,
     /// Legend, information block and markers drawn over the scene.
     pub overlay: Overlay,
+    /// Boundary condition and load symbols, under the annotations.
+    pub symbols: Vec<crate::symbols::Symbol>,
     /// Where the user dragged the labels.
     pub labels: LabelOffsets,
     /// A dialog picks in the 3D view: the left button selects and draws selection boxes.
@@ -200,6 +202,7 @@ impl Viewport {
             camera: Camera::default(),
             options: DisplayOptions::default(),
             overlay: Overlay::default(),
+            symbols: Vec::new(),
             labels: LabelOffsets::default(),
             selecting: false,
             preview: Preview::default(),
@@ -381,6 +384,7 @@ impl Viewport {
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
             Color32::WHITE,
         );
+        crate::symbols::draw(&painter, rect, &self.camera, &self.symbols);
         overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels);
         if let Some(gizmo) = &self.gizmo {
             self.gizmo_state.draw(&painter, gizmo, &self.camera, rect);

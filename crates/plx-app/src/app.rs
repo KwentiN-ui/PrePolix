@@ -21,6 +21,7 @@ use crate::section::{SectionDialog, SectionResult, SectionView};
 use crate::selection::Operation;
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::setup::{Editor, EditorResult, NewItem};
+use crate::symbols;
 use crate::tree::{self, TreeItem, TreeResponse, TreeState, TreeView};
 use crate::viewport::{Axis, BoxSelect, Click, ViewCommand, Viewport};
 use plx_render::RenderMesh;
@@ -83,6 +84,8 @@ struct Workbench {
     section_dialog: Option<SectionDialog>,
     /// The section view shown in the scene of the given version, to rebuild it on changes.
     section_shown: Option<(u64, SectionView)>,
+    /// The boundary conditions and loads, with the shown parts, whose symbols are drawn.
+    symbols_shown: Option<(Vec<symbols::Item>, Vec<bool>)>,
 }
 
 pub struct PrepolixApp {
@@ -142,6 +145,7 @@ impl PrepolixApp {
                 section: None,
                 section_dialog: None,
                 section_shown: None,
+                symbols_shown: None,
             },
             load_events: channel(),
             loading: None,
@@ -517,6 +521,7 @@ impl eframe::App for PrepolixApp {
             self.open_path(path, &ctx);
         }
         self.workbench.update_highlight();
+        self.workbench.update_symbols(&ctx);
         self.workbench.settings_window(&ctx);
         self.workbench.rebuild_if_results_changed();
         self.workbench.update_section();
@@ -607,6 +612,7 @@ impl Workbench {
                     self.highlighted = None;
                     self.set_tree_view(TreeView::FeModel);
                     self.model = Some(model);
+                    self.symbols_shown = None;
                 }
                 self.frame_cache.clear();
                 self.viewport.set_parts(&render_meshes);
@@ -1602,6 +1608,83 @@ impl Workbench {
             model.highlight = highlight;
             self.results_changed |= !on_results;
         }
+    }
+
+    /// Draws the symbols of the boundary conditions and loads of one step in the FE model,
+    /// as PrePoMax does for the step chosen to show: the step of the edited or selected
+    /// item, else the last step. The selected or edited item is drawn in red.
+    fn update_symbols(&mut self, ctx: &egui::Context) {
+        let items = self.symbol_items();
+        let shown = (self.model.as_ref())
+            .map(|m| m.parts.iter().map(|p| p.visible).collect())
+            .unwrap_or_default();
+        let key = (items, shown);
+        if self.symbols_shown.as_ref() == Some(&key) {
+            return;
+        }
+        self.viewport.symbols = (self.model.as_ref())
+            .filter(|_| !key.0.is_empty())
+            .map(|model| symbols::build(model, &key.0))
+            .unwrap_or_default();
+        self.symbols_shown = Some(key);
+        ctx.request_repaint();
+    }
+
+    fn symbol_items(&self) -> Vec<symbols::Item> {
+        let Some(model) = self
+            .model
+            .as_ref()
+            .filter(|_| self.tree_view == TreeView::FeModel)
+        else {
+            return Vec::new();
+        };
+        let edited = self.editor.as_ref().and_then(Editor::step_item);
+        let selected = match &self.tree.selected {
+            Some((TreeView::FeModel, item)) => Some(item),
+            _ => None,
+        };
+        let step_of = |item: &TreeItem| match *item {
+            TreeItem::Step(s)
+            | TreeItem::StepGroup(s, _)
+            | TreeItem::BoundaryCondition(s, _)
+            | TreeItem::Load(s, _)
+            | TreeItem::FieldOutput(s, _) => Some(s),
+            _ => None,
+        };
+        let index = (edited.as_ref().map(|(s, ..)| *s))
+            .or_else(|| selected.and_then(step_of))
+            .or_else(|| model.fe.steps.len().checked_sub(1));
+        let Some((index, step)) = index.and_then(|i| Some((i, model.fe.steps.get(i)?))) else {
+            return Vec::new();
+        };
+        // The edited item replaces its saved version.
+        let replaced = |load: bool, i: usize| {
+            edited.as_ref().is_some_and(|(_, edited_index, item)| {
+                *edited_index == Some(i) && matches!(item.kind, symbols::Kind::Load(_)) == load
+            })
+        };
+        let is_selected = |item: TreeItem| edited.is_none() && selected == Some(&item);
+        let mut items = Vec::new();
+        for (i, bc) in step.boundary_conditions.iter().enumerate() {
+            if !replaced(false, i) {
+                items.push(symbols::Item {
+                    kind: symbols::Kind::Boundary(bc.kind),
+                    region: bc.region.clone(),
+                    selected: is_selected(TreeItem::BoundaryCondition(index, i)),
+                });
+            }
+        }
+        for (i, load) in step.loads.iter().enumerate() {
+            if !replaced(true, i) {
+                items.push(symbols::Item {
+                    kind: symbols::Kind::Load(load.kind),
+                    region: load.region.clone(),
+                    selected: is_selected(TreeItem::Load(index, i)),
+                });
+            }
+        }
+        items.extend(edited.map(|(_, _, item)| item));
+        items
     }
 
     fn section_picks(&self) -> bool {

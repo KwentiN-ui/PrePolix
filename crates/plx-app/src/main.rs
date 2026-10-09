@@ -22,6 +22,7 @@ mod settings;
 mod setup;
 mod solver_check;
 mod style;
+mod symbols;
 mod tree;
 mod tree_icons;
 mod viewport;

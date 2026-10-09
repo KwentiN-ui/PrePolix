@@ -559,6 +559,22 @@ impl Editor {
         format!("{kind} {action}: {name}")
     }
 
+    /// The boundary condition or load being edited as it would be applied: its step, its
+    /// index (`None` for a new one) and the symbol item, for the 3D view.
+    pub fn step_item(&self) -> Option<(usize, Option<usize>, crate::symbols::Item)> {
+        let (step, kind, region) = match &self.draft {
+            Draft::BoundaryCondition(s, bc, r) => (*s, crate::symbols::Kind::Boundary(bc.kind), r),
+            Draft::Load(s, load, r) => (*s, crate::symbols::Kind::Load(load.kind), r),
+            _ => return None,
+        };
+        let item = crate::symbols::Item {
+            kind,
+            region: region.region(),
+            selected: true,
+        };
+        Some((step, self.index, item))
+    }
+
     /// Whether clicks in the 3D view pick for this dialog.
     pub fn picks(&self) -> bool {
         self.region()
