@@ -35,7 +35,7 @@ Wie in PrePoMax:
 | Kontextmenü | rechte Taste |
 | Einpassen | Doppelklick |
 
-Die Standardansichten folgen PrePoMax: Y zeigt nach oben. "Vertikal" stellt die Achse senkrecht, die der Bildschirm-Hochrichtung am nächsten liegt, "Achse senkrecht" (Menü Ansicht oder Rechtsklick) stellt X, Y oder Z nach oben und schaut senkrecht auf die nächstgelegene Koordinatenebene, und "Isometrisch, Achse oben" zeigt die isometrische Ansicht mit X, Y oder Z nach oben.
+Die Standardansichten folgen PrePoMax: Y zeigt nach oben. "Vertikal" stellt die Achse senkrecht, die der Bildschirm-Hochrichtung am nächsten liegt, "Ansicht senkrecht zu" (Menü Ansicht oder Rechtsklick) schaut entlang X, Y oder Z auf die Ebene, deren Normale die Achse ist, und "Isometrisch, Achse oben" zeigt die isometrische Ansicht mit X, Y oder Z nach oben.
 
 ## Was schon geht
 

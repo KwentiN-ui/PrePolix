@@ -122,8 +122,8 @@ pub enum ViewCommand {
     View(StandardView),
     /// Turns the closest global axis straight up.
     Vertical,
-    /// Turns the given global axis straight up, looking square onto a global plane.
-    VerticalAxis(Axis),
+    /// Looks down the given global axis onto the plane it is normal to.
+    AxisView(Axis),
     /// Isometric view with the given global axis up.
     IsometricAxis(Axis),
 }
@@ -230,7 +230,7 @@ impl Viewport {
             }
             ViewCommand::View(view) => self.camera.set_view(view),
             ViewCommand::Vertical => self.camera.set_vertical_view(),
-            ViewCommand::VerticalAxis(axis) => self.camera.set_vertical_axis(axis.vector()),
+            ViewCommand::AxisView(axis) => self.camera.set_axis_view(axis.vector()),
             ViewCommand::IsometricAxis(axis) => self.camera.set_isometric_axis(axis.vector()),
         }
     }
@@ -290,10 +290,10 @@ impl Viewport {
             if ui.button("Vertikal").clicked() {
                 result.command = Some(ViewCommand::Vertical);
             }
-            ui.menu_button("Achse senkrecht", |ui| {
+            ui.menu_button("Ansicht senkrecht zu", |ui| {
                 for axis in Axis::ALL {
                     if ui.button(axis.label()).clicked() {
-                        result.command = Some(ViewCommand::VerticalAxis(axis));
+                        result.command = Some(ViewCommand::AxisView(axis));
                     }
                 }
             });

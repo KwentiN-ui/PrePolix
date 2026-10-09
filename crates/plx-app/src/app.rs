@@ -227,10 +227,10 @@ impl PrepolixApp {
                 if ui.button("Vertikal").clicked() {
                     self.workbench.view_command = Some(ViewCommand::Vertical);
                 }
-                ui.menu_button("Achse senkrecht", |ui| {
+                ui.menu_button("Ansicht senkrecht zu", |ui| {
                     for axis in Axis::ALL {
                         if ui.button(axis.label()).clicked() {
-                            self.workbench.view_command = Some(ViewCommand::VerticalAxis(axis));
+                            self.workbench.view_command = Some(ViewCommand::AxisView(axis));
                         }
                     }
                 });
