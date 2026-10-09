@@ -13,7 +13,7 @@ use plx_render::{
     wireframe_edges,
 };
 
-use crate::results::ResultsView;
+use crate::results::{Deformation, ResultsView};
 
 /// Angle between neighbouring faces above which their common edge counts as a feature edge
 /// and the shading across it stays sharp.
@@ -162,6 +162,11 @@ pub fn load(path: &Path) -> Result<LoadedModel, String> {
     }
     let results = increments.map(|(increments, date, time)| {
         let mut view = ResultsView::new(increments, mesh.bounds());
+        // Several parts usually mean contact, where an exaggerated deformation shows parts
+        // penetrating each other; true scale is less confusing there.
+        if mesh.parts.len() > 1 {
+            view.deformation = Deformation::TrueScale;
+        }
         view.date = date;
         view.time = time;
         view
@@ -558,6 +563,28 @@ mod tests {
                 .iter()
                 .all(|v| v.scalar >= 0.0)
         );
+    }
+
+    #[test]
+    fn multi_part_results_open_in_true_scale() {
+        let single = load(&testdata("kragbalken_c3d8.frd")).unwrap().model;
+        assert_eq!(
+            single.results.unwrap().deformation,
+            Deformation::Automatic(1.0)
+        );
+        // Give the first element another material, which makes it a second part.
+        let text = std::fs::read_to_string(testdata("kragbalken_c3d8.frd")).unwrap();
+        let text = text.replacen(
+            " -1         1    1    0    1",
+            " -1         1    1    0    2",
+            1,
+        );
+        let path = std::env::temp_dir().join("prepolix_test_zwei_parts.frd");
+        std::fs::write(&path, text).unwrap();
+        let multi = load(&path).unwrap().model;
+        std::fs::remove_file(&path).ok();
+        assert_eq!(multi.parts.len(), 2);
+        assert_eq!(multi.results.unwrap().deformation, Deformation::TrueScale);
     }
 
     #[test]
