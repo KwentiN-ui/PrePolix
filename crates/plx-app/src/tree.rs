@@ -85,8 +85,8 @@ pub struct TreeResponse {
     /// Create a new item from a container's context menu or by double-clicking it.
     pub create: Option<NewItem>,
     pub delete: Option<TreeItem>,
-    /// Run the analysis.
-    pub run: bool,
+    /// An entry of the analysis' context menu, or the monitor by double click.
+    pub analysis: Option<AnalysisAction>,
     /// Open the material library.
     pub material_library: bool,
     /// Open the meshing parameters of the geometry.
@@ -95,6 +95,26 @@ pub struct TreeResponse {
     pub generate_mesh: bool,
     /// Evaluate the hot spots with the current results.
     pub evaluate_hot_spots: bool,
+}
+
+/// What the user asked of the analysis, PrePoMax's analysis context menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnalysisAction {
+    /// Edit the job: executable, work directory and threads, which are settings here.
+    Edit,
+    Run,
+    CheckModel,
+    Monitor,
+    Results,
+    Kill,
+}
+
+/// What the tree shows of the analysis job.
+#[derive(Clone, Copy, Debug)]
+pub struct JobState {
+    pub status: JobStatus,
+    /// A results file is there to be opened.
+    pub results: bool,
 }
 
 /// Tree label with a fixed size: highlight and hover frame are painted over the same area, so
@@ -325,8 +345,8 @@ struct Tree<'a> {
     view: TreeView,
     state: &'a mut TreeState,
     response: TreeResponse,
-    /// Status of the analysis job, shown as the icon of the analysis.
-    job: Option<JobStatus>,
+    /// The analysis job: its status is the icon of the analysis.
+    job: Option<JobState>,
     /// Rows of the open branches, innermost last, for the connector lines.
     levels: Vec<Vec<Row>>,
     /// Inside an item being expanded or collapsed: the state all branches take.
@@ -388,7 +408,11 @@ impl Tree<'_> {
                 }
             });
         }
-        if response.double_clicked() {
+        if response.double_clicked() && item == TreeItem::Analysis {
+            // Unlike PrePoMax, which edits the job, a double click reopens the monitor: the
+            // job settings are global settings here.
+            self.response.analysis = Some(AnalysisAction::Monitor);
+        } else if response.double_clicked() {
             match creates {
                 // PrePoMax creates an item when its container is double-clicked.
                 Some(kind) => self.response.create = Some(kind),
@@ -402,7 +426,10 @@ impl Tree<'_> {
                 item,
                 TreeItem::ResultFieldOutput(_) | TreeItem::HistorySet(_)
             );
-        if creates.is_some() || editable || item == TreeItem::Analysis {
+        if item == TreeItem::Analysis {
+            response.context_menu(|ui| self.analysis_menu(ui));
+        }
+        if creates.is_some() || editable {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 if let Some(kind) = creates
@@ -440,12 +467,39 @@ impl Tree<'_> {
                         self.response.delete = Some(item.clone());
                     }
                 }
-                if item == TreeItem::Analysis && ui.button("Starten").clicked() {
-                    self.response.run = true;
-                }
             });
         }
         response
+    }
+
+    /// PrePoMax's context menu of an analysis. Duplicating and deleting are shown but
+    /// disabled, as there is one analysis only.
+    fn analysis_menu(&mut self, ui: &mut Ui) {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        let running = self.job.is_some_and(|j| j.status == JobStatus::Running);
+        let results = self.job.is_some_and(|j| j.results) && !running;
+        let single = "Es gibt nur eine Analyse.";
+        let mut action = |ui: &mut Ui, enabled: bool, text: &str, action: AnalysisAction| {
+            if ui.add_enabled(enabled, egui::Button::new(text)).clicked() {
+                self.response.analysis = Some(action);
+            }
+        };
+        action(ui, true, "Bearbeiten …", AnalysisAction::Edit);
+        ui.add_enabled(false, egui::Button::new("Duplizieren"))
+            .on_disabled_hover_text(single);
+        ui.separator();
+        action(ui, !running, "Starten", AnalysisAction::Run);
+        action(ui, !running, "Modell prüfen", AnalysisAction::CheckModel);
+        action(ui, self.job.is_some(), "Monitor", AnalysisAction::Monitor);
+        action(ui, results, "Ergebnisse", AnalysisAction::Results);
+        action(ui, running, "Abbrechen", AnalysisAction::Kill);
+        ui.separator();
+        // An analysis has no children, as in PrePoMax the entries are there all the same.
+        ui.add_enabled(false, egui::Button::new("Alle aufklappen"));
+        ui.add_enabled(false, egui::Button::new("Alle zuklappen"));
+        ui.separator();
+        ui.add_enabled(false, egui::Button::new("Löschen"))
+            .on_disabled_hover_text(single);
     }
 
     /// PrePoMax's image of a node; containers without an own image get the dotted line.
@@ -488,7 +542,7 @@ impl Tree<'_> {
             TreeItem::StepGroup(_, "Defined Fields") => TreeIcon::DefinedField,
             TreeItem::Group("Analyses") => TreeIcon::Analysis,
             TreeItem::Group(HOT_SPOTS) => TreeIcon::HotSpot,
-            TreeItem::Analysis => match self.job {
+            TreeItem::Analysis => match self.job.map(|j| j.status) {
                 Some(JobStatus::Running) => TreeIcon::Running,
                 Some(JobStatus::Completed) => TreeIcon::Finished,
                 Some(JobStatus::FailedWithResults) => TreeIcon::Warning,
@@ -754,7 +808,7 @@ pub fn show(
     ui: &mut Ui,
     view: TreeView,
     model: Option<&mut Model>,
-    job: Option<JobStatus>,
+    job: Option<JobState>,
     state: &mut TreeState,
 ) -> TreeResponse {
     let mut tree = Tree {

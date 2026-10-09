@@ -277,6 +277,14 @@ impl SettingsWindow {
         }
     }
 
+    /// The window opened at `page`.
+    pub fn with_page(settings: &Settings, page: Page) -> Self {
+        Self {
+            page,
+            ..Self::new(settings)
+        }
+    }
+
     pub fn show(&mut self, ctx: &egui::Context) -> WindowResult {
         let mut open = true;
         let mut result = WindowResult::Open;
