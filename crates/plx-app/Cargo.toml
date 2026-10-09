@@ -20,6 +20,7 @@ log.workspace = true
 plx-io.workspace = true
 plx-job.workspace = true
 plx-mesh.workspace = true
+plx-mesher.workspace = true
 plx-model.workspace = true
 plx-render.workspace = true
 plx-results.workspace = true

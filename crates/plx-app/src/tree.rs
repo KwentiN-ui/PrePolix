@@ -74,6 +74,10 @@ pub struct TreeResponse {
     pub run: bool,
     /// Open the material library.
     pub material_library: bool,
+    /// Open the meshing parameters of the geometry.
+    pub mesh_setup: bool,
+    /// Mesh the geometry.
+    pub generate_mesh: bool,
 }
 
 /// Tree label with a fixed size: highlight and hover frame are painted over the same area, so
@@ -178,6 +182,25 @@ impl Tree<'_> {
             self.state.selected = Some((self.view, item.clone()));
         }
         let creates = creates(&item);
+        let meshing = self.view == TreeView::Geometry
+            && matches!(
+                item,
+                TreeItem::Group("Mesh Setup") | TreeItem::Group("Parts")
+            );
+        if response.double_clicked() && item == TreeItem::Group("Mesh Setup") {
+            self.response.mesh_setup = true;
+        }
+        if meshing {
+            response.context_menu(|ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                if ui.button("Netzparameter …").clicked() {
+                    self.response.mesh_setup = true;
+                }
+                if ui.button("Netz erzeugen").clicked() {
+                    self.response.generate_mesh = true;
+                }
+            });
+        }
         if response.double_clicked() {
             match creates {
                 // PrePoMax creates an item when its container is double-clicked.
@@ -284,6 +307,33 @@ impl Tree<'_> {
         }
     }
 
+    /// Parts with visibility and colour; of the mesh, or of the geometry.
+    fn parts(&mut self, ui: &mut Ui, model: &mut Model) {
+        let parts = counted("Parts", model.parts.len());
+        self.branch(ui, TreeItem::Group("Parts"), parts, true, |tree, ui| {
+            for (index, part) in model.parts.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add_space(ui.spacing().icon_width + ui.spacing().icon_spacing);
+                    if ui.checkbox(&mut part.visible, "").changed() {
+                        tree.response.visibility.push((index, part.visible));
+                    }
+                    let (swatch, _) =
+                        ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    let [r, g, b] = part.color.map(|c| (c * 255.0).round() as u8);
+                    ui.painter()
+                        .rect_filled(swatch, 0.0, egui::Color32::from_rgb(r, g, b));
+                    ui.painter().rect_stroke(
+                        swatch,
+                        0.0,
+                        egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
+                        egui::StrokeKind::Inside,
+                    );
+                    tree.label(ui, TreeItem::Part(index), &part.name);
+                });
+            }
+        });
+    }
+
     /// Mesh with parts and sets; shared by the FE Model and Results trees.
     fn mesh(&mut self, ui: &mut Ui, model: Option<&mut Model>) {
         let Some(model) = model else {
@@ -295,29 +345,7 @@ impl Tree<'_> {
             return;
         };
         self.branch(ui, TreeItem::Mesh, "Mesh", true, |tree, ui| {
-            let parts = counted("Parts", model.parts.len());
-            tree.branch(ui, TreeItem::Group("Parts"), parts, true, |tree, ui| {
-                for (index, part) in model.parts.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.add_space(ui.spacing().icon_width + ui.spacing().icon_spacing);
-                        if ui.checkbox(&mut part.visible, "").changed() {
-                            tree.response.visibility.push((index, part.visible));
-                        }
-                        let (swatch, _) =
-                            ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                        let [r, g, b] = part.color.map(|c| (c * 255.0).round() as u8);
-                        ui.painter()
-                            .rect_filled(swatch, 0.0, egui::Color32::from_rgb(r, g, b));
-                        ui.painter().rect_stroke(
-                            swatch,
-                            0.0,
-                            egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
-                            egui::StrokeKind::Inside,
-                        );
-                        tree.label(ui, TreeItem::Part(index), &part.name);
-                    });
-                }
-            });
+            tree.parts(ui, model);
             let mesh = &model.mesh;
             let sets: [(&'static str, Vec<TreeItem>); 3] = [
                 (
@@ -419,7 +447,12 @@ pub fn show(
         .auto_shrink([false, false])
         .show(ui, |ui| match view {
             TreeView::Geometry => {
-                tree.leaf(ui, TreeItem::Group("Parts"), "Parts");
+                match model {
+                    Some(model) => tree.parts(ui, model),
+                    None => {
+                        tree.leaf(ui, TreeItem::Group("Parts"), "Parts");
+                    }
+                }
                 tree.leaf(ui, TreeItem::Group("Mesh Setup"), "Mesh Setup");
             }
             TreeView::FeModel => fe_model(&mut tree, ui, model),

@@ -110,6 +110,7 @@ PrePoMax trennt Geometriekern (OCC im NetGenMesher) und Mesher. Für den Anfang 
 - Es liefert Topologie (Volumen, Flächen, Kanten, Punkte mit stabilen Tags), die wir für die Geometrie-Selektion im Viewport brauchen, und eine Tessellierung für die Anzeige.
 - Es vernetzt Tet (1. und 2. Ordnung, inklusive Netgen-Optimierer), Hex/Transfinite, Extrusion; lokale Netzgrößen pro Fläche/Kante.
 - Gmsh bietet ein offizielles SDK (`libgmsh.so` / `gmsh.dll` + `gmshc.h`) für Linux und Windows. Wir schreiben einen dünnen eigenen FFI-Layer über die stabile C-API (bestehende Crates wie `gmsh-sys` sind veraltet) und laden die Bibliothek zur Laufzeit (`libloading`), damit prepolix auch ohne Gmsh startet.
+- Umgesetzt (Oktober 2026): Die offizielle Bibliothek kommt aus dem PyPI-Paket von Gmsh (`scripts/fetch_gmsh.py`, Linux und Windows, OCC/Netgen/TetGen eingebaut) und wird neben der Binary ausgeliefert. Lizenzen: Gmsh GPL-2.0-or-later mit OCC-Ausnahme, OCCT LGPL-2.1 – beides verträglich mit GPL-3.0. `opencascade-rs` ist für Import und Vernetzung nicht nötig und würde OCCT aus den Quellen bauen; es bleibt eine Option für spätere CAD-Operationen.
 - Lizenz: GPL-2.0-or-later mit Ausnahme, passt zu einem GPL-3-Projekt.
 
 Später, für PrePoMax-Parität bei CAD-Operationen (Defeaturing, Flächen splitten, Shell↔Solid, Solids verschmelzen):

@@ -20,6 +20,21 @@ cargo run --release -- testdata/wuerfel_c3d10.inp
 cargo run --release -- testdata/kragbalken_c3d8.frd
 ```
 
+### Gmsh für Geometrie-Import und Vernetzung
+
+STEP-, IGES- und BREP-Dateien importiert und vernetzt prepolix mit [Gmsh](https://gmsh.info/), das OpenCASCADE, Netgen und TetGen mitbringt. Gmsh wird nicht mitkompiliert, sondern zur Laufzeit als Bibliothek geladen; ohne sie startet prepolix normal, nur Import und Vernetzung fehlen. Für die Entwicklung holt ein Skript die offizielle Bibliothek (Gmsh 4.15, aus dem PyPI-Paket von Gmsh) nach `target/gmsh`, wo Debug-Builds und Tests sie finden:
+
+```sh
+python3 scripts/fetch_gmsh.py                        # Linux
+python3 scripts/fetch_gmsh.py --platform windows     # Windows
+```
+
+Für eine Weitergabe gehören `libgmsh.so.4.15` bzw. `gmsh-4.15.dll` und `GMSH-LICENSE.txt` neben die ausführbare Datei. Alternativ lässt sich unter *Werkzeuge → Einstellungen → Gmsh* der Pfad zu einer vorhandenen Bibliothek angeben und testen. Unter Linux braucht die Gmsh-Bibliothek zusätzlich `libGLU` und `libXft`.
+
+```sh
+cargo run --release -- testdata/platte_mit_loch.step
+```
+
 Unter Linux braucht das Programm zur Laufzeit `libxkbcommon-x11` (X11) bzw. `libxkbcommon` (Wayland) sowie einen Vulkan- oder OpenGL-Treiber. Die meisten Desktop-Installationen bringen das bereits mit.
 
 ## Bedienung der 3D-Ansicht
@@ -45,7 +60,9 @@ Die Standardansichten folgen PrePoMax: Y zeigt nach oben. "Vertikal" stellt die 
 - `.frd`-Ergebnisse lesen (ASCII und binär): Netz, Materialien als Parts, alle Steps und Inkremente inklusive Eigenformen. Komponenten heißen wie in PrePoMax (`U1`, `S11`, …); ergänzt werden Verschiebungsbetrag `ALL`, `MISES`, `TRESCA`, Hauptspannungen und Vergleichsdehnung.
 - Ergebnisanzeige wie in PrePoMax: Konturplot in 9 Farbstufen (Regenbogen, einstellbar), Legende, Min/Max mit Knoten, verformte Darstellung mit automatischem, echtem oder eigenem Faktor.
 
-Beispielmodelle liegen in [testdata/](testdata/), erzeugt von `testdata/erzeugen.py`. Die Modelle mit Step lassen sich direkt mit `ccx` rechnen; zwei Ergebnisdateien (`*.frd`) liegen bei.
+- Geometrie importieren (STEP, IGES, BREP) und mit Tetraedern 1. oder 2. Ordnung vernetzen, ein Part pro Volumenkörper. Die Geometrie wird im Projekt gespeichert, das Netz lässt sich mit anderen Netzparametern neu erzeugen.
+
+Beispielmodelle liegen in [testdata/](testdata/), erzeugt von `testdata/erzeugen.py`; die STEP-Dateien stammen aus Gmsh. Die Modelle mit Step lassen sich direkt mit `ccx` rechnen; zwei Ergebnisdateien (`*.frd`) liegen bei.
 
 ## Aufbau
 
@@ -56,7 +73,7 @@ Beispielmodelle liegen in [testdata/](testdata/), erzeugt von `testdata/erzeugen
 | `plx-model` | FE-Modell: Materialien, Sections, Steps, Randbedingungen, Lasten, Commands |
 | `plx-io` | Dateiformate: CalculiX `.inp`/`.frd`/`.dat` und weitere |
 | `plx-results` | Ergebnis-Datenmodell und abgeleitete Größen |
-| `plx-mesher` | Anbindung externer Vernetzer (Gmsh) |
+| `plx-mesher` | Geometrie-Import und Vernetzung mit Gmsh (zur Laufzeit geladen) |
 | `plx-job` | Start und Überwachung von CalculiX |
 | `plx-render` | wgpu-Renderer und Kamera |
 | `plx-app` | Oberfläche (egui), ausführbares Programm `prepolix` |
@@ -66,6 +83,8 @@ Die unteren Crates kennen keine Oberfläche und lassen sich einzeln testen (`car
 ## Lizenz
 
 GPL-3.0-or-later, siehe [LICENSE](LICENSE).
+
+Gmsh steht unter der GPL-2.0-or-later mit einer Ausnahme für OpenCASCADE, Netgen und METIS, OpenCASCADE unter der LGPL-2.1 mit Ausnahme; beides ist mit der GPL-3.0 verträglich. Wer prepolix mit der Gmsh-Bibliothek weitergibt, legt `GMSH-LICENSE.txt` bei und verweist auf die Quellen: Gmsh unter <https://gitlab.onelab.info/gmsh/gmsh> (Tag `gmsh_4_15_2`), OpenCASCADE unter <https://github.com/Open-Cascade-SAS/OCCT>.
 
 Die mitgelieferte Schrift Noto Sans (`crates/plx-app/assets/fonts`, auf Latein, Griechisch und
 gängige Symbole reduziert) steht unter der SIL Open Font License 1.1, siehe
