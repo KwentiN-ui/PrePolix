@@ -5,8 +5,10 @@
 //! input file; node and element sets that CalculiX needs for them are derived when the input
 //! file is written, so the user never has to define sets by hand.
 
+pub mod library;
 mod region;
 
+pub use library::MaterialLibrary;
 pub use region::Region;
 
 use serde::{Deserialize, Serialize};

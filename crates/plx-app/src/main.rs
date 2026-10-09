@@ -5,10 +5,13 @@ mod animation;
 mod app;
 mod icons;
 mod keywords;
+mod material_library;
 mod model;
+mod numeric;
 mod overlay;
 mod properties;
 mod results;
+mod screenshot;
 mod selection;
 mod settings;
 mod setup;
@@ -50,6 +53,7 @@ mod tests {
             ("app.rs", include_str!("app.rs")),
             ("icons.rs", include_str!("icons.rs")),
             ("keywords.rs", include_str!("keywords.rs")),
+            ("material_library.rs", include_str!("material_library.rs")),
             ("main.rs", include_str!("main.rs")),
             ("model.rs", include_str!("model.rs")),
             ("overlay.rs", include_str!("overlay.rs")),
