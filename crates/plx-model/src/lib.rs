@@ -5,12 +5,12 @@
 //! input file; node and element sets that CalculiX needs for them are derived when the input
 //! file is written, so the user never has to define sets by hand.
 
+mod checks;
 mod constraint;
 mod contact;
 pub mod convert;
 mod features;
 mod geometry;
-mod hot_spot;
 pub mod library;
 mod properties;
 mod region;
@@ -18,6 +18,7 @@ mod section;
 pub mod units;
 mod validity;
 
+pub use checks::{Finding, MeshCheck, Problem, Severity, diagnose_solver_output};
 pub use constraint::{CompressionOnly, PointSpring, SurfaceSpring, SurfaceToSurfaceSpring};
 pub use contact::{
     Constraint, ContactMethod, ContactPair, DEFAULT_SURFACE_COLOR, Friction, GapConductance,
@@ -30,7 +31,6 @@ pub use features::{
 pub use geometry::{
     Algorithm2d, Algorithm3d, Geometry, MeshSetupItem, MeshSetupKind, MeshingParameters,
 };
-pub use hot_spot::{Extrapolation, HotSpot, HotSpotComponent, extrapolation_weights};
 pub use library::MaterialLibrary;
 pub use properties::{ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
@@ -82,9 +82,6 @@ pub struct FeModel {
     /// they appear in it. They cover what the model cannot express yet.
     #[serde(default)]
     pub user_keywords: Vec<UserKeyword>,
-    /// Hot spot stress evaluations, done on the results; not part of the input file.
-    #[serde(default)]
-    pub hot_spots: Vec<HotSpot>,
     /// PrePoMax's features: points and coordinate systems other items refer to by name.
     #[serde(default)]
     pub reference_points: Vec<ReferencePoint>,
@@ -113,7 +110,7 @@ impl FeModel {
     }
 
     /// Every region of the model: of sections, constraints, contact pairs, boundary
-    /// conditions, loads and hot spots.
+    /// conditions and loads.
     pub fn regions(&self) -> impl Iterator<Item = &Region> {
         (self.sections.iter().map(|s| &s.region))
             .chain(self.constraints.iter().flat_map(Constraint::regions))
@@ -122,7 +119,6 @@ impl FeModel {
                 (step.boundary_conditions.iter().map(|b| &b.region))
                     .chain(step.loads.iter().map(|l| &l.region))
             }))
-            .chain(self.hot_spots.iter().map(|h| &h.toe))
     }
 
     /// Follows Gmsh's new numbers of the CAD entities after a geometry part was deleted:
@@ -151,7 +147,6 @@ impl FeModel {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
             }))
-            .chain(self.hot_spots.iter_mut().map(|h| &mut h.toe))
     }
 
     /// Follows a renamed part: regions on the part, or on the element set an input file

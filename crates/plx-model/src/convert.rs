@@ -125,12 +125,6 @@ impl FeModel {
                 }
             }
         }
-        for hot_spot in &mut self.hot_spots {
-            c.value(&mut hot_spot.thickness, Quantity::Length);
-            if let crate::Extrapolation::Custom(distances) = &mut hot_spot.extrapolation {
-                c.all(distances, Quantity::Length);
-            }
-        }
         if !self.user_keywords.is_empty() {
             notes.push(
                 "Eigene Keywords des Keyword-Editors wurden nicht umgerechnet; bitte prüfen."

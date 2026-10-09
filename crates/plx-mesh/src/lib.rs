@@ -4,6 +4,7 @@ mod cad;
 mod contact_search;
 mod element;
 mod fast_map;
+mod jacobian;
 mod mesh;
 mod skin;
 

@@ -733,3 +733,83 @@ fn a_deleted_mesh_part_takes_its_elements_and_nodes() {
     assert!(smaller.missing_nodes().is_empty());
     assert!(smaller.node_count() < whole.node_count());
 }
+
+#[test]
+fn added_files_keep_the_old_parts_with_names_sizes_and_faces() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
+    // After a deletion the remaining block is SOLID-2 and has a local mesh size.
+    let file = TempFile::with_contents("brep", &geometry.brep).unwrap();
+    let second = with_gmsh(|gmsh| {
+        gmsh.import_shapes(&file.0)?;
+        let volumes = gmsh.entities(3)?;
+        Ok(*gmsh.adjacencies(3, volumes[1])?.1.last().unwrap())
+    })
+    .unwrap();
+    geometry.mesh_items.push(MeshSetupItem {
+        name: "Local_Mesh_Size-1".into(),
+        kind: MeshSetupKind::LocalMeshSize {
+            faces: vec![second],
+            edges: Vec::new(),
+            size: 1.0,
+        },
+    });
+    let (geometry, tags) = delete_part_renumbered(&geometry, "SOLID-1").unwrap();
+    let geometry = geometry.unwrap();
+    let MeshSetupKind::LocalMeshSize { faces, .. } = &geometry.mesh_items[0].kind else {
+        unreachable!()
+    };
+    let face = faces[0];
+    assert_eq!(tags[&CadEntity::Face(second)], CadEntity::Face(face));
+
+    // A mesh part of the model is called SOLID-1, so the plate gets the next free name.
+    let taken = ["SOLID-1".to_string()];
+    let paths = [testdata("platte_mit_loch.step")];
+    let addition = add_cad_files(Some(&geometry), &paths, UnitSystem::MmTonSC, &taken).unwrap();
+    let combined = &addition.import.geometry;
+    assert_eq!(addition.added, ["SOLID-3"]);
+    let mut names = part_names(combined).unwrap();
+    names.sort();
+    assert_eq!(names, ["SOLID-2", "SOLID-3"]);
+    assert_eq!(addition.import.display.solids, 2);
+    assert_eq!(combined.source, "zwei_bloecke.step, platte_mit_loch.step");
+    assert_eq!(combined.meshing, geometry.meshing);
+    // Every old face is found again, the local mesh size follows its face.
+    let old_faces = with_gmsh(|gmsh| {
+        let file = TempFile::with_contents("brep", &geometry.brep)?;
+        gmsh.import_shapes(&file.0)?;
+        gmsh.entities(2)
+    })
+    .unwrap();
+    for tag in &old_faces {
+        assert!(addition.renumbered.contains_key(&CadEntity::Face(*tag)));
+    }
+    let MeshSetupKind::LocalMeshSize { faces, .. } = &combined.mesh_items[0].kind else {
+        unreachable!()
+    };
+    assert_eq!(
+        addition.renumbered[&CadEntity::Face(face)],
+        CadEntity::Face(faces[0])
+    );
+    // The same block imported again lies on the old one but is a new part.
+    let again = [testdata("zwei_bloecke.step")];
+    let addition = add_cad_files(Some(combined), &again, UnitSystem::MmTonSC, &[]).unwrap();
+    let mut names = part_names(&addition.import.geometry).unwrap();
+    names.sort();
+    assert_eq!(names, ["SOLID-1", "SOLID-2", "SOLID-3", "SOLID-4"]);
+    assert_eq!(addition.added, ["SOLID-1", "SOLID-4"]);
+
+    // Into a model with a mesh but no geometry, the new parts avoid the mesh's names.
+    let taken = ["SOLID-1".to_string(), "SOLID-2".to_string()];
+    let addition = add_cad_files(None, &again, UnitSystem::MmTonSC, &taken).unwrap();
+    assert_eq!(addition.added, ["SOLID-3", "SOLID-4"]);
+    assert_eq!(
+        part_names(&addition.import.geometry).unwrap(),
+        addition.added
+    );
+    assert!(addition.renumbered.is_empty());
+}
