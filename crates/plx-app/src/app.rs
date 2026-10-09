@@ -212,7 +212,14 @@ impl PrepolixApp {
             loading: None,
         };
         // Every file on the command line is opened in turn, e.g. a model and its results.
-        let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+        let mut paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+        // Without files on the command line, the project open at the last exit is reopened.
+        if paths.is_empty() {
+            let last: Option<PathBuf> = cc
+                .storage
+                .and_then(|s| eframe::get_value(s, LAST_PROJECT_KEY));
+            paths.extend(last.filter(|path| path.is_file()));
+        }
         if !paths.is_empty() {
             let (sender, ctx) = (app.load_events.0.clone(), cc.egui_ctx.clone());
             let units = app.workbench.import_units();
@@ -636,9 +643,13 @@ const STANDARD_VIEWS: [(StandardView, &str); 7] = [
     (StandardView::Isometric, "Isometrisch"),
 ];
 
+/// Storage key of the project file open at exit, reopened at the next start.
+const LAST_PROJECT_KEY: &str = "last_project";
+
 impl eframe::App for PrepolixApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, settings::STORAGE_KEY, &self.workbench.settings);
+        eframe::set_value(storage, LAST_PROJECT_KEY, &self.workbench.last_project());
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1999,6 +2010,15 @@ impl Workbench {
         {
             self.open_results = Some(path);
         }
+    }
+
+    /// The project file of the open model, if it was opened from or saved to one that exists.
+    /// Unsaved models and models from input or result files are not reopened at the next start.
+    fn last_project(&self) -> Option<PathBuf> {
+        self.model
+            .as_ref()
+            .filter(|model| model.is_project() && model.path.is_file())
+            .map(|model| model.path.clone())
     }
 
     /// Saves mesh and FE model as a project, to the project file it came from, or to a file
