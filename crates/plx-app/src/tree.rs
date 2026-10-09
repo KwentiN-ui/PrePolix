@@ -90,6 +90,7 @@ pub struct TreeResponse {
     pub open: Option<TreeItem>,
     /// Create a new item from a container's context menu or by double-clicking it.
     pub create: Option<NewItem>,
+    /// Delete an item, by its context menu or the Delete key; the app asks first.
     pub delete: Option<TreeItem>,
     /// Activate a deactivated step, boundary condition or load, or deactivate an active one.
     pub toggle_active: Option<TreeItem>,
@@ -276,6 +277,17 @@ fn has_properties(item: &TreeItem) -> bool {
 }
 
 /// Items of the FE model that have an edit dialog.
+/// Items the context menu and the Delete key remove; a step's field outputs are not, nor
+/// the parts of results.
+fn deletable(view: TreeView, item: &TreeItem) -> bool {
+    (is_fe_item(item) && !matches!(item, TreeItem::FieldOutput(..)))
+        || (matches!(item, TreeItem::Part(_)) && view != TreeView::Results)
+        || matches!(
+            item,
+            TreeItem::ResultFieldOutput(_) | TreeItem::HistorySet(_) | TreeItem::MeshItem(_)
+        )
+}
+
 fn is_fe_item(item: &TreeItem) -> bool {
     matches!(
         item,
@@ -333,6 +345,26 @@ fn dotted(mesh: &mut Mesh, ppp: f32, a: Pos2, b: Pos2) {
 }
 
 /// The plus and minus box of the classic Windows tree view, on whole pixels.
+/// Whether `item` lies in the branch `branch`, which opens to reveal it.
+fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
+    use TreeItem::*;
+    match branch {
+        Model => !matches!(item, Model),
+        Mesh | Group("Parts") => matches!(item, Part(_)),
+        Group("Constraints") => matches!(item, Constraint(_)),
+        Group("Contacts") => matches!(
+            item,
+            SurfaceInteraction(_)
+                | ContactPair(_)
+                | Group("Surface Interactions")
+                | Group("Contact Pairs")
+        ),
+        Group("Surface Interactions") => matches!(item, SurfaceInteraction(_)),
+        Group("Contact Pairs") => matches!(item, ContactPair(_)),
+        _ => false,
+    }
+}
+
 fn expander(ui: &mut Ui, openness: f32, response: &Response) {
     let ppp = ui.pixels_per_point();
     let snap = |v: f32| (v * ppp).floor() / ppp;
@@ -382,11 +414,11 @@ pub fn part_menu(
     ui: &mut Ui,
     index: usize,
     visible: bool,
-    geometry: bool,
+    view: TreeView,
     response: &mut TreeResponse,
 ) {
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-    if geometry {
+    if view == TreeView::Geometry {
         if ui.button("Netz erzeugen").clicked() {
             response.mesh_part = Some(index);
         }
@@ -398,6 +430,12 @@ pub fn part_menu(
     let label = if visible { "Ausblenden" } else { "Einblenden" };
     if ui.button(label).clicked() {
         response.visibility.push((index, !visible));
+    }
+    if deletable(view, &TreeItem::Part(index)) {
+        ui.separator();
+        if ui.button("Löschen").clicked() {
+            response.delete = Some(TreeItem::Part(index));
+        }
     }
 }
 
@@ -554,8 +592,7 @@ impl Tree<'_> {
                         }
                         ui.separator();
                     }
-                    let deletable = !matches!(item, TreeItem::FieldOutput(..));
-                    if deletable && ui.button("Löschen").clicked() {
+                    if deletable(self.view, &item) && ui.button("Löschen").clicked() {
                         self.response.delete = Some(item.clone());
                     }
                 }
@@ -724,13 +761,12 @@ impl Tree<'_> {
         {
             self.forced_open = Some(*open);
         }
-        let revealing_part = self.state.reveal
-            && matches!(&self.state.selected, Some((view, TreeItem::Part(_))) if *view == self.view);
-        if revealing_part
-            && matches!(
-                item,
-                TreeItem::Model | TreeItem::Mesh | TreeItem::Group("Parts")
-            )
+        let revealing = (self.state.reveal)
+            .then_some(self.state.selected.as_ref())
+            .flatten()
+            .filter(|(view, _)| *view == self.view);
+        if let Some((_, selected)) = revealing
+            && contains(&item, selected)
         {
             state.set_open(true);
         }
@@ -806,9 +842,9 @@ impl Tree<'_> {
                 if changed {
                     tree.response.visibility.push((index, part.visible));
                 }
-                let geometry = tree.view == TreeView::Geometry;
+                let view = tree.view;
                 response.context_menu(|ui| {
-                    part_menu(ui, index, part.visible, geometry, &mut tree.response);
+                    part_menu(ui, index, part.visible, view, &mut tree.response);
                 });
             }
         });
@@ -977,6 +1013,16 @@ pub fn show(
         && ui.input(|i| i.key_pressed(egui::Key::Space))
     {
         tree.response.toggle_active = Some(item.clone());
+    }
+    // Like PrePoMax, the Delete key deletes the selected item, after the same question as the
+    // context menu. The selection may come from the 3D view, so the pointer can be anywhere.
+    if let Some((selected_view, item)) = &tree.state.selected
+        && *selected_view == view
+        && deletable(view, item)
+        && !ui.ctx().text_edit_focused()
+        && ui.input(|i| i.key_pressed(egui::Key::Delete))
+    {
+        tree.response.delete = Some(item.clone());
     }
     tree.response
 }
@@ -1204,6 +1250,24 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revealed_items_open_their_branches() {
+        let pair = TreeItem::ContactPair(0);
+        for branch in [
+            TreeItem::Model,
+            TreeItem::Group("Contacts"),
+            TreeItem::Group("Contact Pairs"),
+        ] {
+            assert!(contains(&branch, &pair), "{branch:?}");
+        }
+        assert!(!contains(&TreeItem::Group("Constraints"), &pair));
+        assert!(contains(
+            &TreeItem::Group("Constraints"),
+            &TreeItem::Constraint(1)
+        ));
+        assert!(contains(&TreeItem::Group("Parts"), &TreeItem::Part(2)));
+    }
 
     #[test]
     fn containers_have_no_properties_dialog() {

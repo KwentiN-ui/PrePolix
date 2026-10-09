@@ -47,6 +47,8 @@ struct Row {
     adjust: bool,
     distance: f64,
     selected: bool,
+    /// The pair is created on OK.
+    checked: bool,
 }
 
 impl Row {
@@ -140,6 +142,7 @@ impl ContactSearchDialog {
         self.rows = items
             .into_iter()
             .map(|item| Row {
+                checked: !item.unresolved,
                 name: item.name(),
                 item,
                 kind: self.kind,
@@ -292,6 +295,8 @@ impl ContactSearchDialog {
             .inner_margin(4.0)
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
+                // Solid scroll bars take their own space instead of covering the last row.
+                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
                 egui::ScrollArea::both().show(ui, |ui| {
                     ui.vertical(|ui| self.rows_grid(ui));
                 });
@@ -305,12 +310,28 @@ impl ContactSearchDialog {
         let text_color = ui.visuals().selection.stroke.color;
         egui::Grid::new("contact pairs")
             .striped(true)
-            .min_col_width(60.0)
+            .min_col_width(16.0)
+            .spacing([12.0, 4.0])
             .with_row_color(move |row, _| {
                 let index = row.checked_sub(1)?;
                 selected.get(index).copied().filter(|&s| s).map(|_| fill)
             })
             .show(ui, |ui| {
+                // The header's checkbox checks or unchecks all pairs.
+                let resolved = || self.rows.iter().filter(|r| !r.item.unresolved);
+                let mut all = resolved().count() > 0 && resolved().all(|r| r.checked);
+                let any = resolved().any(|r| r.checked);
+                let partial = any && !all;
+                let header = egui::Checkbox::new(&mut all, "").indeterminate(partial);
+                if ui
+                    .add(header)
+                    .on_hover_text("Alle Kontaktpaare an- oder abwählen")
+                    .changed()
+                {
+                    for row in self.rows.iter_mut().filter(|r| !r.item.unresolved) {
+                        row.checked = all;
+                    }
+                }
                 for title in [
                     "Name",
                     "Geometry",
@@ -325,7 +346,18 @@ impl ContactSearchDialog {
                 ui.end_row();
                 let mut clicked = None;
                 let mut menu = None;
+                let mut toggled = None;
                 for (i, row) in self.rows.iter().enumerate() {
+                    let mut checked = row.checked;
+                    let checkbox = ui
+                        .add_enabled(
+                            !row.item.unresolved,
+                            egui::Checkbox::without_text(&mut checked),
+                        )
+                        .on_hover_text("Beim OK erstellen");
+                    if checkbox.changed() {
+                        toggled = Some((i, checked));
+                    }
                     let contact = row.kind == PairType::Contact;
                     let cells = [
                         row.name.clone(),
@@ -364,6 +396,9 @@ impl ContactSearchDialog {
                         response.context_menu(|ui| menu = self.row_menu(ui));
                     }
                     ui.end_row();
+                }
+                if let Some((i, checked)) = toggled {
+                    self.rows[i].checked = checked;
                 }
                 if let Some(i) = clicked {
                     let (shift, ctrl) =
@@ -561,7 +596,7 @@ impl ContactSearchDialog {
             taken.push(name.clone());
             name
         };
-        for row in self.rows.iter().filter(|r| !r.item.unresolved) {
+        for row in (self.rows.iter()).filter(|r| r.checked && !r.item.unresolved) {
             let master = Region::Faces(surface_faces(&model.mesh, model.skins(), &row.item.master));
             let slave = Region::Faces(surface_faces(&model.mesh, model.skins(), &row.item.slave));
             match row.kind {

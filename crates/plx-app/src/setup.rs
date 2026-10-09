@@ -482,8 +482,7 @@ enum Draft {
     FieldOutput(usize, FieldOutput),
     HotSpot(HotSpot, RegionDraft, HotSpotText),
     Constraint(ConstraintDraft),
-    /// The interaction with the index of the model whose properties are shown.
-    SurfaceInteraction(SurfaceInteraction, usize),
+    SurfaceInteraction(SurfaceInteraction, contacts::InteractionView),
     ContactPair(ContactPair, MasterSlave),
 }
 
@@ -748,13 +747,12 @@ impl Editor {
             NewItem::Constraint => Draft::Constraint(ConstraintDraft::new(fe)),
             NewItem::SurfaceInteraction => {
                 let existing = names(&fe.surface_interactions, |s| &s.name);
-                Draft::SurfaceInteraction(
-                    SurfaceInteraction {
-                        name: next_name("Surface_Interaction", existing),
-                        properties: Vec::new(),
-                    },
-                    0,
-                )
+                let interaction = SurfaceInteraction {
+                    name: next_name("Surface_Interaction", existing),
+                    properties: Vec::new(),
+                };
+                let view = contacts::InteractionView::new(&interaction);
+                Draft::SurfaceInteraction(interaction, view)
             }
             NewItem::ContactPair => {
                 let existing = names(&fe.contact_pairs, |c| &c.name);
@@ -817,10 +815,11 @@ impl Editor {
                 Draft::Constraint(ConstraintDraft::edit(fe.constraints.get(i)?, mesh)),
                 i,
             ),
-            TreeItem::SurfaceInteraction(i) => (
-                Draft::SurfaceInteraction(fe.surface_interactions.get(i)?.clone(), 0),
-                i,
-            ),
+            TreeItem::SurfaceInteraction(i) => {
+                let interaction = fe.surface_interactions.get(i)?.clone();
+                let view = contacts::InteractionView::new(&interaction);
+                (Draft::SurfaceInteraction(interaction, view), i)
+            }
             TreeItem::ContactPair(i) => {
                 let pair = fe.contact_pairs.get(i)?.clone();
                 let regions = MasterSlave::from_regions(&pair.master, &pair.slave, mesh);
@@ -951,10 +950,14 @@ impl Editor {
             .pivot(egui::Align2::LEFT_TOP)
             .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
             .show(ctx, |ui| {
-                egui::Grid::new("item form")
-                    .num_columns(2)
-                    .spacing([12.0, 6.0])
-                    .show(ui, |ui| self.form(ui, model));
+                if let Draft::SurfaceInteraction(interaction, view) = &mut self.draft {
+                    contacts::interaction_dialog(ui, interaction, view, model.fe.properties.units);
+                } else {
+                    egui::Grid::new("item form")
+                        .num_columns(2)
+                        .spacing([12.0, 6.0])
+                        .show(ui, |ui| self.form(ui, model));
+                }
                 if let Some(error) = &self.error {
                     ui.colored_label(egui::Color32::from_rgb(200, 0, 0), error);
                 }
@@ -1228,10 +1231,8 @@ impl Editor {
                 hot_spot_form(ui, model, hot_spot, region, text)
             }
             Draft::Constraint(c) => c.form(ui, model, &taken, self.index.is_none()),
-            Draft::SurfaceInteraction(interaction, selected) => {
-                name_row(ui, &mut interaction.name);
-                contacts::interaction_form(ui, interaction, selected, units);
-            }
+            // Laid out by its own dialog, see show.
+            Draft::SurfaceInteraction(..) => {}
             Draft::ContactPair(pair, regions) => {
                 name_row(ui, &mut pair.name);
                 contacts::contact_pair_form(ui, model, pair, regions);
@@ -1333,6 +1334,22 @@ impl Editor {
     }
 
     /// Copies the draft into the model.
+    /// The tree item a new constraint, surface interaction or contact pair gets once
+    /// applied to `fe`, to show it in the tree.
+    pub fn new_interaction_item(&self, fe: &FeModel) -> Option<TreeItem> {
+        if self.index.is_some() {
+            return None;
+        }
+        match self.draft {
+            Draft::Constraint(_) => Some(TreeItem::Constraint(fe.constraints.len())),
+            Draft::SurfaceInteraction(..) => {
+                Some(TreeItem::SurfaceInteraction(fe.surface_interactions.len()))
+            }
+            Draft::ContactPair(..) => Some(TreeItem::ContactPair(fe.contact_pairs.len())),
+            _ => None,
+        }
+    }
+
     pub fn apply(self, fe: &mut FeModel) {
         fn put<T>(items: &mut Vec<T>, index: Option<usize>, item: T) {
             match index.and_then(|i| items.get_mut(i)) {
