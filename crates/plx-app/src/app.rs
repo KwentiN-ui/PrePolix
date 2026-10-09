@@ -22,6 +22,7 @@ use crate::section::{SectionDialog, SectionResult, SectionView};
 use crate::selection::Operation;
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::setup::{Editor, EditorResult, NewItem};
+use crate::sound::{self, ModeSound};
 use crate::tree::{self, TreeItem, TreeResponse, TreeState, TreeView};
 use crate::viewport::{Axis, BoxSelect, Click, ViewCommand, Viewport};
 use plx_render::RenderMesh;
@@ -84,6 +85,12 @@ struct Workbench {
     /// Results file the user asked to open; read by the app on a worker thread.
     open_results: Option<PathBuf>,
     screenshot: Screenshot,
+    /// Hot spot whose paths are shown in the FE model, edited or selected, with the paths.
+    hot_spot_preview: Option<(plx_model::HotSpot, Vec<Vec<glam::Vec3>>)>,
+    /// The table of hot spot values is open on the Results tab.
+    hot_spot_window: bool,
+    /// Audio output of the sound window, opened when it first plays.
+    audio: Option<sound::Player>,
     /// The section view, while it is on; it cuts whatever the 3D view shows.
     section: Option<SectionView>,
     section_dialog: Option<SectionDialog>,
@@ -150,6 +157,9 @@ impl PrepolixApp {
                 analysis: None,
                 open_results: None,
                 screenshot: Screenshot::default(),
+                hot_spot_preview: None,
+                hot_spot_window: false,
+                audio: None,
                 section: None,
                 section_dialog: None,
                 section_shown: None,
@@ -278,10 +288,10 @@ impl PrepolixApp {
                 if ui.button("Vertikal").clicked() {
                     self.workbench.view_command = Some(ViewCommand::Vertical);
                 }
-                ui.menu_button("Achse senkrecht", |ui| {
+                ui.menu_button("Ansicht senkrecht zu", |ui| {
                     for axis in Axis::ALL {
                         if ui.button(axis.label()).clicked() {
-                            self.workbench.view_command = Some(ViewCommand::VerticalAxis(axis));
+                            self.workbench.view_command = Some(ViewCommand::AxisView(axis));
                         }
                     }
                 });
@@ -516,6 +526,7 @@ impl eframe::App for PrepolixApp {
             self.workbench.results_tool_bar(ui);
         });
         self.workbench.animate(&ctx);
+        self.workbench.play_sound(&ctx);
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         // PrePoMax's fixed layout: tree on the left over the full height, 3D view with the
         // output below it; only the separators move.
@@ -591,6 +602,8 @@ impl eframe::App for PrepolixApp {
             self.open_path(path, &ctx);
         }
         self.workbench.update_highlight();
+        self.workbench.update_hot_spot_preview();
+        self.workbench.hot_spot_window(&ctx);
         self.workbench.settings_window(&ctx);
         self.workbench.rebuild_if_results_changed();
         self.workbench.update_section();
@@ -686,6 +699,8 @@ impl Workbench {
                             self.current_result = self.results.len() - 1;
                         }
                     }
+                    // Results of the FE model get its hot spots evaluated right away.
+                    self.evaluate_hot_spots(true);
                 } else {
                     self.tree.selected = None;
                     self.editor = None;
@@ -858,6 +873,115 @@ impl Workbench {
         if response.generate_mesh {
             self.generate_mesh(ctx);
         }
+        if response.evaluate_hot_spots {
+            self.evaluate_hot_spots(false);
+        }
+    }
+
+    /// Evaluates the hot spots of the FE model on the current results file, writes the values
+    /// next to it and opens the table. `automatic` skips the messages when there is nothing
+    /// to evaluate.
+    fn evaluate_hot_spots(&mut self, automatic: bool) {
+        let fe = self.model.as_ref().filter(|m| !m.fe.hot_spots.is_empty());
+        let results = self.results.get_mut(self.current_result);
+        let (Some(fe), Some(results)) = (fe, results) else {
+            if !automatic {
+                self.output.push(
+                    "Hot Spots: erst Hot Spots im FE-Modell definieren und Ergebnisse öffnen."
+                        .into(),
+                );
+            }
+            return;
+        };
+        match crate::hot_spots::evaluate(fe, results) {
+            Ok(reports) => {
+                let file = match crate::hot_spots::write(&results.path, &reports) {
+                    Ok(file) => {
+                        self.output
+                            .push(format!("Hot Spots ausgewertet: {}", file.display()));
+                        Some(file)
+                    }
+                    Err(error) => {
+                        self.output.push(error);
+                        None
+                    }
+                };
+                self.output.extend(crate::hot_spots::summary(&reports));
+                for report in &reports {
+                    self.output
+                        .extend(report.warnings.iter().map(|w| format!("Warnung: {w}")));
+                }
+                results.hot_spots = Some(crate::hot_spots::Evaluation { reports, file });
+                self.hot_spot_window = true;
+                self.set_tree_view(TreeView::Results);
+                self.update_contour();
+            }
+            Err(error) => {
+                if !automatic || !fe.fe.hot_spots.is_empty() {
+                    self.output
+                        .push(format!("Hot Spots nicht ausgewertet: {error}"));
+                }
+            }
+        }
+    }
+
+    /// The table of hot spot values of the shown results file.
+    fn hot_spot_window(&mut self, ctx: &egui::Context) {
+        if !self.hot_spot_window || self.tree_view != TreeView::Results {
+            return;
+        }
+        let Some(model) = self.results.get(self.current_result) else {
+            return;
+        };
+        let Some(evaluation) = &model.hot_spots else {
+            return;
+        };
+        let step = (model.results.as_ref())
+            .and_then(ResultsView::current_increment)
+            .map(|i| (i.step, i.increment));
+        if !crate::hot_spots::window(ctx, evaluation, step) {
+            self.hot_spot_window = false;
+            self.update_contour();
+        }
+    }
+
+    /// Shows the paths of the hot spot being edited or selected in the FE model.
+    fn update_hot_spot_preview(&mut self) {
+        let wanted = match (&self.editor, &self.tree.selected) {
+            _ if self.tree_view == TreeView::Results => None,
+            (Some(editor), _) => editor.hot_spot(),
+            (None, Some((TreeView::FeModel, TreeItem::HotSpot(i)))) => self
+                .model
+                .as_ref()
+                .and_then(|m| m.fe.hot_spots.get(*i).cloned()),
+            _ => None,
+        };
+        if wanted.as_ref() == self.hot_spot_preview.as_ref().map(|(h, _)| h) {
+            return;
+        }
+        let paths = match (&wanted, &self.model) {
+            (Some(hot_spot), Some(model)) => crate::hot_spots::preview(model, hot_spot),
+            _ => Vec::new(),
+        };
+        self.hot_spot_preview = wanted.map(|h| (h, paths));
+        self.viewport.overlay.paths = self.overlay_paths();
+    }
+
+    /// Hot spot paths drawn over the 3D view: of the evaluated results while their table is
+    /// open, otherwise of the hot spot edited or selected in the FE model.
+    fn overlay_paths(&self) -> Vec<Vec<glam::Vec3>> {
+        if self.tree_view == TreeView::Results {
+            let model = self.results.get(self.current_result);
+            return match model.and_then(|m| Some((m, m.hot_spots.as_ref()?))) {
+                Some((model, evaluation)) if self.hot_spot_window => {
+                    crate::hot_spots::result_paths(model, evaluation)
+                }
+                _ => Vec::new(),
+            };
+        }
+        self.hot_spot_preview
+            .as_ref()
+            .map_or_else(Vec::new, |(_, paths)| paths.clone())
     }
 
     /// The FE model, which can be set up.
@@ -992,6 +1116,27 @@ impl Workbench {
     /// PrePoMax's Results menu.
     fn results_menu(&mut self, ui: &mut egui::Ui) {
         let any = !self.results.is_empty();
+        let hot_spots = self
+            .model
+            .as_ref()
+            .is_some_and(|m| !m.fe.hot_spots.is_empty());
+        if ui
+            .add_enabled(any && hot_spots, egui::Button::new("Hot Spots auswerten"))
+            .clicked()
+        {
+            self.evaluate_hot_spots(false);
+        }
+        let evaluated =
+            (self.results.get(self.current_result)).is_some_and(|m| m.hot_spots.is_some());
+        if ui
+            .add_enabled(evaluated, egui::Button::new("Hot-Spot-Tabelle"))
+            .clicked()
+        {
+            self.hot_spot_window = true;
+            self.set_tree_view(TreeView::Results);
+            self.update_contour();
+        }
+        ui.separator();
         if ui
             .add_enabled(any, egui::Button::new("Aktuelle Ergebnisse schließen"))
             .clicked()
@@ -1199,6 +1344,7 @@ impl Workbench {
                 "Last erstellen …",
                 last_step.is_some(),
             ),
+            (NewItem::HotSpot, "Hot Spot erstellen …", true),
         ] {
             if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
                 kind = Some(item);
@@ -2041,6 +2187,77 @@ impl Workbench {
         }
     }
 
+    /// Shows the sound window of the shown results and drives its audio output.
+    fn play_sound(&mut self, ctx: &egui::Context) {
+        let model = match self.tree_view {
+            TreeView::Results => self.results.get_mut(self.current_result),
+            _ => self.model.as_mut(),
+        };
+        let Some(view) = model.and_then(|m| m.results.as_mut()) else {
+            self.audio = None;
+            return;
+        };
+        let shown = view.increment;
+        let Some(sound) = &mut view.sound else {
+            // Closing the window releases the audio device.
+            self.audio = None;
+            return;
+        };
+        let playing = self.audio.as_ref().is_some_and(|a| a.synth().sounding());
+        let actions = sound::window(ctx, sound, shown, playing);
+        if actions.play {
+            if self.audio.is_none() {
+                match sound::Player::open() {
+                    Ok(player) => self.audio = Some(player),
+                    Err(error) => sound.message = Some(error),
+                }
+            }
+            if let Some(audio) = &self.audio {
+                audio.synth().start(sound.tones());
+                sound.message = None;
+            }
+        }
+        if let Some(audio) = &self.audio {
+            if actions.stop {
+                audio.synth().stop();
+            } else if actions.changed && playing {
+                audio.synth().update(sound.tones());
+            }
+        }
+        if actions.export {
+            let picked = rfd::FileDialog::new()
+                .set_title("Klang speichern")
+                .add_filter("WAV-Datei (*.wav)", &["wav"])
+                .set_file_name(format!("Moden-Step-{}.wav", sound.step))
+                .save_file();
+            if let Some(mut path) = picked {
+                if path.extension().is_none() {
+                    path.set_extension("wav");
+                }
+                let data = sound::wav(sound.tones(), sound.export_seconds());
+                match std::fs::write(&path, data) {
+                    Ok(()) => self.output.push(format!("{} gespeichert", path.display())),
+                    Err(error) => sound.message = Some(format!("Nicht gespeichert: {error}")),
+                }
+            }
+        }
+        if playing || actions.play {
+            // The play button turns back when a struck sound has died away.
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if let Some(increment) = actions.show
+            && view.animation.is_none()
+            && increment != view.increment
+        {
+            view.select_increment(increment);
+            self.results_changed = true;
+        }
+        if actions.close {
+            view.sound = None;
+            self.audio = None;
+        }
+    }
+
     /// Rebuilds the scene after the result selection or deformation changed.
     fn rebuild_if_results_changed(&mut self) {
         let frame_only = !self.results_changed && self.frame_changed;
@@ -2132,6 +2349,7 @@ impl Workbench {
             nodes: (model.highlight.nodes.iter())
                 .filter_map(|&id| model.node_position(model.mesh.node_index(id)?))
                 .collect(),
+            paths: self.overlay_paths(),
         };
     }
 }
@@ -2218,6 +2436,18 @@ fn results_tool_bar(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
                 view.start_animation(AnimationKind::ScaleFactor);
             }
             changed = true;
+        }
+        // Only modes of a frequency step have a sound; otherwise the button is greyed out.
+        let sounding = view.sound.is_some();
+        let is_mode = view
+            .current_increment()
+            .is_some_and(|i| i.kind == plx_results::AnalysisKind::Frequency);
+        let tip = "Klang der Eigenformen";
+        if icons::button(ui, Icon::Sound, tip, sounding || is_mode, sounding).clicked() {
+            view.sound = match view.sound {
+                Some(_) => None,
+                None => ModeSound::new(&view.increments, view.increment),
+            };
         }
     });
     changed

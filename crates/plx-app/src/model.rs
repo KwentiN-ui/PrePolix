@@ -60,6 +60,8 @@ pub struct Model {
     pub geometry: Option<Geometry>,
     /// The display of CAD geometry rather than a mesh: element edges are not drawn.
     is_geometry: bool,
+    /// Hot spot values of a results file, evaluated with the hot spots of the FE model.
+    pub hot_spots: Option<crate::hot_spots::Evaluation>,
     /// Faces and parts drawn in the highlight colour.
     pub highlight: Highlight,
     /// The section view plane in render coordinates; picking ignores what it cuts off.
@@ -259,6 +261,7 @@ impl Model {
             fe: FeModel::default(),
             geometry: None,
             is_geometry: false,
+            hot_spots: None,
             highlight: Highlight::default(),
             clip: None,
             origin,
@@ -611,6 +614,11 @@ impl Model {
         Some((p - self.origin).as_vec3())
     }
 
+    /// A point given in model coordinates, in render coordinates.
+    pub fn to_render(&self, point: [f64; 3]) -> Vec3 {
+        (DVec3::from(point) - self.origin).as_vec3()
+    }
+
     /// The global origin in render coordinates.
     pub fn global_origin(&self) -> Vec3 {
         (-self.origin).as_vec3()
@@ -892,6 +900,7 @@ mod tests {
             }],
             steps: vec![step],
             user_keywords: Vec::new(),
+            ..FeModel::default()
         };
         let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Platte").unwrap();
         let dir = std::env::temp_dir().join(format!("prepolix-ccx-{}", std::process::id()));

@@ -11,6 +11,7 @@ name = "prepolix"
 path = "src/main.rs"
 
 [dependencies]
+cpal.workspace = true
 eframe.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true

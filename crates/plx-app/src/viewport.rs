@@ -128,10 +128,10 @@ pub fn view_menu(ui: &mut Ui) -> Option<ViewCommand> {
     if ui.button("Vertikal").clicked() {
         command = Some(ViewCommand::Vertical);
     }
-    ui.menu_button("Achse senkrecht", |ui| {
+    ui.menu_button("Ansicht senkrecht zu", |ui| {
         for axis in Axis::ALL {
             if ui.button(axis.label()).clicked() {
-                command = Some(ViewCommand::VerticalAxis(axis));
+                command = Some(ViewCommand::AxisView(axis));
             }
         }
     });
@@ -152,8 +152,8 @@ pub enum ViewCommand {
     View(StandardView),
     /// Turns the closest global axis straight up.
     Vertical,
-    /// Turns the given global axis straight up, looking square onto a global plane.
-    VerticalAxis(Axis),
+    /// Looks down the given global axis onto the plane it is normal to.
+    AxisView(Axis),
     /// Isometric view with the given global axis up.
     IsometricAxis(Axis),
 }
@@ -260,7 +260,7 @@ impl Viewport {
             }
             ViewCommand::View(view) => self.camera.set_view(view),
             ViewCommand::Vertical => self.camera.set_vertical_view(),
-            ViewCommand::VerticalAxis(axis) => self.camera.set_vertical_axis(axis.vector()),
+            ViewCommand::AxisView(axis) => self.camera.set_axis_view(axis.vector()),
             ViewCommand::IsometricAxis(axis) => self.camera.set_isometric_axis(axis.vector()),
         }
     }
@@ -381,7 +381,10 @@ impl Viewport {
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
             Color32::WHITE,
         );
-        overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels);
+        if let Some(axis) = overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels) {
+            self.camera.set_axis_view(axis);
+            ui.ctx().request_repaint();
+        }
         if let Some(gizmo) = &self.gizmo {
             self.gizmo_state.draw(&painter, gizmo, &self.camera, rect);
         }

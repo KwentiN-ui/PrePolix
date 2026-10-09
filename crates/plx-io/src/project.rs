@@ -65,7 +65,7 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
 
 #[cfg(test)]
 mod tests {
-    use plx_model::{Material, MeshSetup, Step, UserKeyword};
+    use plx_model::{Extrapolation, HotSpot, Material, MeshSetup, Region, Step, UserKeyword};
 
     use super::*;
     use crate::inp::read_inp;
@@ -88,6 +88,11 @@ mod tests {
                 position: vec![14, 0],
                 text: "*Amplitude, Name=A\n0, 0, 1, 1".into(),
                 active: false,
+            }],
+            hot_spots: vec![HotSpot {
+                toe: Region::Nodes(vec![3, 7]),
+                extrapolation: Extrapolation::Custom(vec![2.0, 6.0]),
+                ..HotSpot::new("Hot_Spot-1")
             }],
         };
         let dir = std::env::temp_dir().join(format!("plx-project-{}", std::process::id()));

@@ -32,16 +32,17 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       # Gmsh for the geometry and meshing tests, fetched once and cached; its library needs
-      # GLU and Xft.
+      # GLU and Xft; ALSA headers are for the audio output (cpal).
       - uses: actions/cache@v4
         with:
           path: ~/gmsh
           key: gmsh-${{ hashFiles('scripts/fetch_gmsh.py') }}
-      - name: Gmsh
+      - name: Gmsh und Systembibliotheken
         run: |
           [ -f ~/gmsh/libgmsh.so.4.15 ] || python3 scripts/fetch_gmsh.py --dest ~/gmsh
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends libglu1-mesa libxft2
+          sudo apt-get install -y -qq --no-install-recommends libglu1-mesa libxft2 \
+            libasound2-dev
           echo "PREPOLIX_GMSH=$HOME/gmsh/libgmsh.so.4.15" >> "$GITHUB_ENV"
           echo "PREPOLIX_REQUIRE_GMSH=1" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check

@@ -93,6 +93,33 @@ def block_c3d20r():
     write("block_c3d20r.inp", text)
 
 
+def cantilever_c3d20r():
+    """Kragbalken 100 x 10 x 10 aus C3D20R, Querlast am Ende auf alle Knoten verteilt.
+
+    Biegespannung oben nach Balkentheorie: S11 = F (100 - x) * 5 / 833.3 = 0.6 (100 - x).
+    """
+    nx, ny, nz = 20, 2, 2
+    ids, nodes = grid(nx, ny, nz, (100.0, 10.0, 10.0), 2)
+    elements = []
+    for k, j, i in itertools.product(range(nz), range(ny), range(nx)):
+        i2, j2, k2 = 2 * i, 2 * j, 2 * k
+        corners = [(i2, j2, k2), (i2 + 2, j2, k2), (i2 + 2, j2 + 2, k2), (i2, j2 + 2, k2)]
+        corners += [(a, b, k2 + 2) for a, b, _ in corners]
+        mid = lambda p, q: tuple((a + b) // 2 for a, b in zip(p, q))
+        edges = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
+        pts = corners + [mid(corners[a], corners[b]) for a, b in edges]
+        numbers = [len(elements) + 1] + [ids[p] for p in pts]
+        first, rest = numbers[:16], numbers[16:]
+        elements.append(", ".join(map(str, first)) + ",\n" + ", ".join(map(str, rest)))
+    tip = [nid for key, nid in ids.items() if key[0] == 2 * nx]
+    text = "*HEADING\nKragbalken aus C3D20R-Elementen\n*NODE, NSET=NALL\n" + "\n".join(nodes) + "\n"
+    text += "*ELEMENT, TYPE=C3D20R, ELSET=EALL\n" + "\n".join(elements) + "\n"
+    text += node_set("FIX", ids, lambda p: p[0] == 0)
+    text += node_set("TIP", ids, lambda p: p[0] == 2 * nx)
+    text += STEEL_STEP.format(load=f"TIP, 3, {-100.0 / len(tip):.10g}")
+    write("kragbalken_c3d20r.inp", text)
+
+
 def tets_c3d10():
     """Würfelgitter, jeder Würfel in 6 Tetraeder entlang der Raumdiagonale zerlegt."""
     nx, ny, nz = 3, 3, 3
@@ -156,6 +183,7 @@ def mixed_parts():
 
 if __name__ == "__main__":
     cantilever_c3d8()
+    cantilever_c3d20r()
     block_c3d20r()
     tets_c3d10()
     mixed_parts()
