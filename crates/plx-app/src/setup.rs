@@ -474,6 +474,7 @@ impl Editor {
                     step,
                     BoundaryCondition {
                         name: next_name(FIXED, existing),
+                        active: true,
                         region: Region::Nodes(Vec::new()),
                         kind: BoundaryKind::Fixed,
                     },
@@ -489,6 +490,7 @@ impl Editor {
                     step,
                     Load {
                         name: next_name(FORCE, existing),
+                        active: true,
                         region: Region::Nodes(Vec::new()),
                         kind: LoadKind::ConcentratedForce([0.0; 3]),
                     },
@@ -944,13 +946,22 @@ impl Editor {
                     fe.steps.push(step);
                 }
             },
+            // Switching an item on or off while its dialog is open is kept.
             Draft::BoundaryCondition(s, mut bc, region) => {
                 bc.region = region.region();
-                put(&mut fe.steps[s].boundary_conditions, index, bc);
+                let list = &mut fe.steps[s].boundary_conditions;
+                if let Some(existing) = index.and_then(|i| list.get(i)) {
+                    bc.active = existing.active;
+                }
+                put(list, index, bc);
             }
             Draft::Load(s, mut load, region) => {
                 load.region = region.region();
-                put(&mut fe.steps[s].loads, index, load);
+                let list = &mut fe.steps[s].loads;
+                if let Some(existing) = index.and_then(|i| list.get(i)) {
+                    load.active = existing.active;
+                }
+                put(list, index, load);
             }
             Draft::FieldOutput(s, output) => put(&mut fe.steps[s].field_outputs, index, output),
             Draft::HotSpot(mut hot_spot, region, _) => {
@@ -985,6 +996,22 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::HotSpot(i) => remove(&mut fe.hot_spots, i),
         _ => false,
     }
+}
+
+/// Activates a deactivated step, boundary condition or load, or deactivates an active one,
+/// like PrePoMax's Activate and Deactivate; returns false for other items.
+pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
+    let active = match *item {
+        TreeItem::Step(s) => fe.steps.get_mut(s).map(|st| &mut st.active),
+        TreeItem::BoundaryCondition(s, i) => (fe.steps.get_mut(s))
+            .and_then(|st| st.boundary_conditions.get_mut(i))
+            .map(|b| &mut b.active),
+        TreeItem::Load(s, i) => (fe.steps.get_mut(s))
+            .and_then(|st| st.loads.get_mut(i))
+            .map(|l| &mut l.active),
+        _ => None,
+    };
+    active.map(|a| *a = !*a).is_some()
 }
 
 /// Region of an item, for highlighting it when it is selected in the tree.
@@ -1443,11 +1470,13 @@ mod tests {
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
         fe.steps[0].boundary_conditions.push(BoundaryCondition {
             name: "Fixed-1".into(),
+            active: true,
             region: Region::NodeSet("FIX".into()),
             kind: BoundaryKind::Fixed,
         });
         fe.steps[0].loads.push(Load {
             name: "Pressure-1".into(),
+            active: true,
             region: Region::Surface("TOP".into()),
             kind: LoadKind::Pressure(1.0),
         });
@@ -1493,6 +1522,37 @@ mod tests {
         settings.nlgeom = true;
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
         assert!(matches!(&fe.steps[2].kind, StepKind::Static(s) if s.nlgeom));
+    }
+
+    #[test]
+    fn steps_bcs_and_loads_are_switched_off_and_on() {
+        let mut fe = FeModel::default();
+        Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
+        fe.steps[0].boundary_conditions.push(BoundaryCondition {
+            name: "Fixed-1".into(),
+            active: true,
+            region: Region::NodeSet("FIX".into()),
+            kind: BoundaryKind::Fixed,
+        });
+        let bc = TreeItem::BoundaryCondition(0, 0);
+        let editor = Editor::edit(&bc, &fe, &FeMesh::default()).unwrap();
+        assert!(toggle_active(&mut fe, &bc));
+        assert!(!fe.steps[0].boundary_conditions[0].active);
+        // A dialog opened before keeps the switch as it is now.
+        editor.apply(&mut fe);
+        assert!(!fe.steps[0].boundary_conditions[0].active);
+        assert!(toggle_active(&mut fe, &TreeItem::Step(0)));
+        let editor = Editor::edit(&TreeItem::Step(0), &fe, &FeMesh::default()).unwrap();
+        editor.apply(&mut fe);
+        assert!(!fe.steps[0].active);
+        // A new step takes the items of the last one as they are, like PrePoMax's copies.
+        Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
+        assert!(fe.steps[1].active);
+        assert!(!fe.steps[1].boundary_conditions[0].active);
+        assert!(toggle_active(&mut fe, &bc));
+        assert!(fe.steps[0].boundary_conditions[0].active);
+        assert!(!toggle_active(&mut fe, &TreeItem::Load(0, 0)));
+        assert!(!toggle_active(&mut fe, &TreeItem::Material(0)));
     }
 
     #[test]

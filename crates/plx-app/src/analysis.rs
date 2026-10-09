@@ -42,6 +42,9 @@ impl Analysis {
                     .into(),
             );
         }
+        if !model.fe.steps.iter().any(|s| s.active) {
+            return Err("Analyse nicht gestartet: Alle Steps sind deaktiviert.".into());
+        }
         let heading = format!("prepolix: {}", model.file_name());
         let mut fe = model.fe.clone();
         fe.resolve_default_solver(default_solver);

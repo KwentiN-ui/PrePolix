@@ -134,6 +134,7 @@ mod tests {
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
             name: "Fixed-1".into(),
+            active: true,
             region: Region::NodeSet("FIX".into()),
             kind: BoundaryKind::Fixed,
         });

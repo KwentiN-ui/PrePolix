@@ -123,6 +123,9 @@ pub struct Section {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Step {
     pub name: String,
+    /// A deactivated step is written to the input file as a comment only, as in PrePoMax.
+    #[serde(default = "active")]
+    pub active: bool,
     pub kind: StepKind,
     pub boundary_conditions: Vec<BoundaryCondition>,
     pub loads: Vec<Load>,
@@ -277,6 +280,7 @@ impl Step {
     pub fn new_static(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            active: true,
             kind: StepKind::Static(StaticStep::default()),
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
@@ -288,6 +292,7 @@ impl Step {
     pub fn new_frequency(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            active: true,
             kind: StepKind::Frequency(FrequencyStep::default()),
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
@@ -299,6 +304,9 @@ impl Step {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BoundaryCondition {
     pub name: String,
+    /// A deactivated boundary condition is left out of the input file and the 3D view.
+    #[serde(default = "active")]
+    pub active: bool,
     pub region: Region,
     pub kind: BoundaryKind,
 }
@@ -314,6 +322,9 @@ pub enum BoundaryKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Load {
     pub name: String,
+    /// A deactivated load is left out of the input file and the 3D view.
+    #[serde(default = "active")]
+    pub active: bool,
     pub region: Region,
     pub kind: LoadKind,
 }
@@ -372,6 +383,11 @@ impl FieldOutput {
     }
 }
 
+/// Items of projects saved before they could be deactivated are active.
+fn active() -> bool {
+    true
+}
+
 /// Next free default name such as "Material-2": PrePoMax numbers new items per kind.
 pub fn next_name<'a>(prefix: &str, existing: impl IntoIterator<Item = &'a str>) -> String {
     let existing: Vec<&str> = existing.into_iter().collect();
@@ -396,11 +412,13 @@ mod tests {
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
             name: "Fixed-1".into(),
+            active: true,
             region: Region::ElementSet("A".into()),
             kind: BoundaryKind::Fixed,
         });
         step.loads.push(Load {
             name: "Pressure-1".into(),
+            active: true,
             region: Region::Surface("A".into()),
             kind: LoadKind::Pressure(1.0),
         });

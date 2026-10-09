@@ -24,6 +24,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
     let mut step = Step::new_static("Step-1");
     step.boundary_conditions.push(BoundaryCondition {
         name: "Fixed-1".into(),
+        active: true,
         region: Region::NodeSet("FIX".into()),
         kind: BoundaryKind::Fixed,
     });
@@ -52,6 +53,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
 fn tip_force() -> Load {
     Load {
         name: "Force-1".into(),
+        active: true,
         region: Region::Nodes(vec![99]),
         kind: LoadKind::ConcentratedForce([0.0, 0.0, -100.0]),
     }
@@ -117,6 +119,7 @@ fn the_chosen_solver_is_written_with_the_procedure() {
 fn picked_faces_become_one_element_set_per_face_number() {
     let load = Load {
         name: "Pressure 1".into(),
+        active: true,
         region: Region::Faces(vec![(10, 4), (20, 4), (1, 6)]),
         kind: LoadKind::Pressure(2.5),
     };
@@ -137,6 +140,7 @@ fn picked_faces_become_one_element_set_per_face_number() {
 fn empty_regions_and_unknown_materials_are_errors() {
     let (mesh, mut model) = cantilever(Load {
         name: "Force-1".into(),
+        active: true,
         region: Region::Nodes(Vec::new()),
         kind: LoadKind::ConcentratedForce([1.0, 0.0, 0.0]),
     });
@@ -202,6 +206,7 @@ fn calculix_reproduces_the_reference_cantilever() {
 fn calculix_pressure_on_a_surface_balances_the_reactions() {
     let load = Load {
         name: "Pressure-1".into(),
+        active: true,
         region: Region::Surface("TIP".into()),
         kind: LoadKind::Pressure(2.0),
     };
@@ -223,6 +228,7 @@ fn calculix_reads_quadratic_elements_over_two_lines() {
     const FORCE: [f64; 3] = [0.0, -500.0, 0.0];
     let load = Load {
         name: "Force-1".into(),
+        active: true,
         region: Region::Nodes(vec![NODE]),
         kind: LoadKind::ConcentratedForce(FORCE),
     };
@@ -289,6 +295,7 @@ fn surface_traction_spreads_the_total_force_by_area() {
 fn calculix_balances_a_surface_traction() {
     let load = Load {
         name: "Surface_Traction-1".into(),
+        active: true,
         region: Region::Surface("TIP".into()),
         kind: LoadKind::SurfaceTraction([0.0, -80.0, 0.0]),
     };
@@ -463,4 +470,58 @@ fn calculix_finds_the_bending_frequency_of_the_cantilever() {
             "{mode} Hz vs. {euler} Hz"
         );
     }
+}
+
+#[test]
+fn deactivated_items_are_left_out_as_comments() {
+    let (mesh, mut model) = cantilever(tip_force());
+    model.steps[0].loads.push(Load {
+        name: "Empty-1".into(),
+        active: false,
+        // Not even an empty region stops the export of a deactivated item.
+        region: Region::Nodes(Vec::new()),
+        kind: LoadKind::ConcentratedForce([1.0, 0.0, 0.0]),
+    });
+    model.steps[0].loads[0].active = false;
+    model.steps[0].boundary_conditions[0].active = false;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Boundary, op=New\n** Name: Fixed-1: Deactivated\n",
+        "*Cload, op=New\n*Dload, op=New\n** Name: Force-1: Deactivated\n** Name: Empty-1: Deactivated\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in\n{text}");
+    }
+    assert!(!text.contains("FIX, 1, 6, 0"), "{text}");
+    assert!(!text.contains("_Force-1"), "{text}");
+}
+
+#[test]
+fn a_deactivated_step_is_written_as_comments_only() {
+    let (mesh, mut model) = frequency_analysis();
+    model.steps[0].active = false;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let step = &text[text.find("** Step-1").unwrap()..text.find("** Step-2").unwrap()];
+    for line in [
+        "** Name: Step-1: Deactivated\n** Name: StaticStep: Deactivated\n",
+        "** Name: Fixed-1: Deactivated\n",
+        "** Name: Force-1: Deactivated\n",
+        "** Name: NF-Output-1: Deactivated\n",
+    ] {
+        assert!(step.contains(line), "missing {line:?} in\n{step}");
+    }
+    let keywords = step
+        .lines()
+        .filter(|l| l.starts_with('*') && !l.starts_with("**"));
+    assert_eq!(keywords.count(), 0, "{step}");
+    // The node set of the load in the deactivated step is not written either.
+    assert!(!text.contains("_Force-1"), "{text}");
+    // CalculiX runs the remaining frequency step alone.
+    let Some(frd) = run_ccx("deaktiviert", &text) else {
+        return;
+    };
+    assert!(
+        (frd.increments.iter()).all(|i| i.kind == plx_results::AnalysisKind::Frequency),
+        "{:?}",
+        frd.increments.len()
+    );
 }

@@ -287,11 +287,13 @@ fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
     let mut step = Step::new_static("Step-1");
     step.boundary_conditions.push(BoundaryCondition {
         name: "Fixed-1".into(),
+        active: true,
         region: Region::Nodes(nodes_where(mesh, |p| p[0] == 0.0)),
         kind: BoundaryKind::Fixed,
     });
     step.loads.push(Load {
         name: "Load-1".into(),
+        active: true,
         region,
         kind: load,
     });

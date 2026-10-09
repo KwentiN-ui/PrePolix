@@ -123,4 +123,14 @@ mod tests {
         ));
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn steps_of_older_projects_are_active() {
+        let mut step = Step::new_static("Step-1");
+        step.active = false;
+        let text = ron::to_string(&step).unwrap();
+        assert!(text.contains("active:false,"), "{text}");
+        let older: Step = ron::from_str(&text.replace("active:false,", "")).unwrap();
+        assert!(older.active);
+    }
 }
