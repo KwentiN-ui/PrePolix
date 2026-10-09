@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use plx_model::{
-    BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, Elastic, EquationSolver, Load,
-    Material, NodeTie, Section, SectionKind, UserKeyword,
+    BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, DynamicStep, Elastic,
+    EquationSolver, Load, Material, NodeTie, Section, SectionKind, UserKeyword,
 };
 
 use super::*;
@@ -517,6 +517,132 @@ fn calculix_finds_the_bending_frequency_of_the_cantilever() {
             "{mode} Hz vs. {euler} Hz"
         );
     }
+}
+
+/// The cantilever with a dynamic step of the given duration, increments of `increment`,
+/// the tip force applied at once (a stepped amplitude) and the given damping.
+fn dynamic_cantilever(
+    duration: f64,
+    increment: f64,
+    damping: Option<plx_model::RayleighDamping>,
+) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = analysis("kragbalken_c3d20r.inp", tip_force());
+    model
+        .amplitudes
+        .push(amplitude("Stepped", vec![[0.0, 1.0], [1.0, 1.0]]));
+    let step = &mut model.steps[0];
+    step.loads[0].amplitude = Some("Stepped".into());
+    step.field_outputs = FieldOutput::dynamic_defaults();
+    step.kind = StepKind::Dynamic(DynamicStep {
+        increments: StaticStep {
+            incrementation: Incrementation::Direct,
+            initial_increment: increment,
+            time_period: duration,
+            ..StaticStep::default()
+        },
+        damping,
+        ..DynamicStep::default()
+    });
+    (mesh, model)
+}
+
+#[test]
+fn a_dynamic_step_is_written_like_prepomax_does() {
+    let damping = plx_model::RayleighDamping {
+        alpha: 0.0,
+        beta: 4e-5,
+    };
+    let (mesh, mut model) = dynamic_cantilever(1.5e-3, 2.5e-5, Some(damping));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Step, Inc=100\n*Dynamic, Direct\n0.000025, 0.0015\n*Damping, Alpha=0, Beta=0.00004\n",
+        "*Cload, Amplitude=Stepped\n",
+        "*Node file\nRF, U, V\n",
+        "*El file\nS, E, ENER, NOE\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in\n{text}");
+    }
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.damping = None;
+    settings.alpha = -0.1;
+    settings.procedure = plx_model::DynamicProcedure::Explicit;
+    settings.increments.nlgeom = true;
+    settings.increments.incrementation = Incrementation::Automatic;
+    settings.increments.solver = EquationSolver::Spooles;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains(
+            "*Step, Nlgeom, Inc=100\n*Dynamic, Solver=Spooles, Alpha=-0.1, Explicit=3\n\
+             0.000025, 0.0015, 0.00001, 1.00000000E30\n"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("*Damping"), "{text}");
+    model.steps[0].active = false;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("** Name: DynamicStep: Deactivated\n"),
+        "{text}"
+    );
+}
+
+/// The tip deflection over time of a dynamic increment: (time, U3 at node 99).
+fn tip_history(frd: &FrdImport) -> Vec<(f64, f64)> {
+    let index = frd.mesh.node_index(99).unwrap();
+    (frd.increments.iter())
+        .filter(|i| i.kind == plx_results::AnalysisKind::Dynamic)
+        .map(|i| {
+            let u3 = i.field("DISP").unwrap().component("U3").unwrap().values[index];
+            (i.value, f64::from(u3))
+        })
+        .collect()
+}
+
+/// A force applied at once makes the cantilever swing about its static deflection: the
+/// first trough is twice the static deflection, half a period of the first mode after the
+/// start. Stiffness-proportional damping with a ratio of 0.1 lowers the trough to about
+/// 1 + e^(-0.1 pi) = 1.73 times the static deflection.
+#[test]
+fn calculix_swings_the_cantilever_about_its_static_deflection() {
+    let (mesh, reference) = analysis("kragbalken_c3d20r.inp", tip_force());
+    let Some(frd) = run_ccx(
+        "dynamik_statisch",
+        &write_inp(&mesh, &reference, "").unwrap(),
+    ) else {
+        return;
+    };
+    let static_u3 = node_value(&frd, "DISP", "U3", 99);
+    assert!(static_u3 < 0.0, "{static_u3}");
+    // 60 increments over 1.25 periods of the 810 Hz bending mode.
+    let (mesh, model) = dynamic_cantilever(1.5e-3, 2.5e-5, None);
+    let frd = run_ccx("dynamik", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let history = tip_history(&frd);
+    assert_eq!(history.len(), 60, "{history:?}");
+    let (trough_time, trough) = (history.iter().copied())
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .unwrap();
+    let ratio = trough / static_u3;
+    assert!((1.8..2.1).contains(&ratio), "trough {ratio} x static");
+    let half_period = 0.5 / 810.0;
+    assert!(
+        (trough_time - half_period).abs() < 0.15 * half_period,
+        "trough at {trough_time} s, expected {half_period} s"
+    );
+    let omega = 2.0 * std::f64::consts::PI * 810.0;
+    let damping = plx_model::RayleighDamping {
+        alpha: 0.0,
+        beta: 2.0 * 0.1 / omega,
+    };
+    let (mesh, model) = dynamic_cantilever(1.5e-3, 2.5e-5, Some(damping));
+    let frd = run_ccx("dynamik_gedaempft", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let damped = (tip_history(&frd).iter()).map(|h| h.1).fold(0.0, f64::min);
+    let damped_ratio = damped / static_u3;
+    assert!(
+        (1.55..1.9).contains(&damped_ratio) && damped_ratio < ratio - 0.08,
+        "damped trough {damped_ratio} x static, undamped {ratio}"
+    );
 }
 
 #[test]

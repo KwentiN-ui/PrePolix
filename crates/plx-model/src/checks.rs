@@ -113,9 +113,9 @@ impl Problem {
                  Steifigkeit; CalculiX bricht mit \"no elastic constants were assigned\" ab."
             }
             Problem::NoDensity => {
-                "Ein Frequency Step und eine instationäre Wärmeübertragung brauchen die \
-                 Masse des Modells. Ohne Dichte bricht CalculiX mit \"no density was \
-                 assigned\" ab."
+                "Ein Frequency Step, ein Dynamic Step und eine instationäre \
+                 Wärmeübertragung brauchen die Masse des Modells. Ohne Dichte bricht \
+                 CalculiX mit \"no density was assigned\" ab."
             }
             Problem::NoConductivity => {
                 "Eine Wärmeübertragung braucht die Wärmeleitfähigkeit jedes Materials. \
@@ -485,7 +485,9 @@ impl FeModel {
             StepKind::HeatTransfer(h) | StepKind::CoupledTempDisp(h) => !h.steady_state,
             _ => false,
         });
-        let frequency = active().any(|s| matches!(s.kind, StepKind::Frequency(_)));
+        // Eigenfrequencies and inertia need the mass.
+        let frequency =
+            active().any(|s| matches!(s.kind, StepKind::Frequency(_) | StepKind::Dynamic(_)));
         for (i, material) in self.materials.iter().enumerate() {
             if !self.sections.iter().any(|s| s.material == material.name) {
                 continue;

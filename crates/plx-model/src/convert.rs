@@ -91,6 +91,13 @@ impl FeModel {
                     c.option(&mut f.lower_frequency, Quantity::Frequency);
                     c.option(&mut f.upper_frequency, Quantity::Frequency);
                 }
+                StepKind::Dynamic(d) => {
+                    d.increments.convert_units(&c);
+                    if let Some(damping) = &mut d.damping {
+                        c.value(&mut damping.alpha, Quantity::Frequency);
+                        c.value(&mut damping.beta, Quantity::Time);
+                    }
+                }
             }
             for bc in &mut step.boundary_conditions {
                 match &mut bc.kind {

@@ -10,11 +10,11 @@ use egui::Ui;
 use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
     Amplitude, BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, BoundaryKind,
-    Constraint, ContactPair, Elastic, EquationSolver, FeModel, FieldOutput, FrequencyStep,
-    HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
-    InitialConditionKind, Load, LoadKind, Material, ModelSpace, NodeTie, OutputKind, Quantity,
-    Region, Section, SectionKind, StaticStep, Step, StepKind, SurfaceInteraction, UnitSystem,
-    next_name,
+    Constraint, ContactPair, DynamicProcedure, DynamicStep, Elastic, EquationSolver, FeModel,
+    FieldOutput, FrequencyStep, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
+    InitialCondition, InitialConditionKind, Load, LoadKind, Material, ModelSpace, NodeTie,
+    OutputKind, Quantity, Region, Section, SectionKind, StaticStep, Step, StepKind,
+    SurfaceInteraction, UnitSystem, next_name,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row};
@@ -1417,7 +1417,7 @@ impl Editor {
             Draft::FieldOutput(_, output) => {
                 name_row(ui, &mut output.name);
                 let choices: &[&str] = match output.kind {
-                    OutputKind::Node => &["RF", "U", "NT", "RFL"],
+                    OutputKind::Node => &["RF", "U", "V", "NT", "RFL"],
                     OutputKind::Element => &["S", "E", "ME", "PEEQ", "ENER", "HFL"],
                 };
                 ui.label("Variablen");
@@ -1552,6 +1552,11 @@ impl Editor {
                 StepKind::Frequency(settings) => validate_frequency_step(settings)?,
                 StepKind::HeatTransfer(settings) | StepKind::CoupledTempDisp(settings) => {
                     validate_heat_transfer_step(settings)?
+                }
+                StepKind::Dynamic(settings) => {
+                    if let Some(problem) = settings.problem() {
+                        return Err(problem);
+                    }
                 }
                 StepKind::Static(_) => {}
             }
@@ -2191,7 +2196,7 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
 
 /// The step kinds of the dialog: label, the kind with its settings and its default field
 /// outputs, in PrePoMax's order.
-fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 4] {
+fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 5] {
     let heat = HeatTransferStep::default();
     [
         (
@@ -2203,6 +2208,11 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 4] {
             FREQUENCY_LABEL,
             StepKind::Frequency(FrequencyStep::default()),
             FieldOutput::frequency_defaults(),
+        ),
+        (
+            DYNAMIC_LABEL,
+            StepKind::Dynamic(DynamicStep::default()),
+            FieldOutput::dynamic_defaults(),
         ),
         (
             HEAT_TRANSFER_LABEL,
@@ -2219,6 +2229,7 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 4] {
 
 const STATIC_LABEL: &str = "Statisch (Static)";
 const FREQUENCY_LABEL: &str = "Eigenfrequenzen (Frequency)";
+const DYNAMIC_LABEL: &str = "Dynamic (time integration)";
 const HEAT_TRANSFER_LABEL: &str = "Wärmeübertragung (Heat Transfer)";
 const COUPLED_LABEL: &str = "Thermomechanisch gekoppelt (Coupled Temp-Disp)";
 
@@ -2226,6 +2237,7 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
     match kind {
         StepKind::Static(_) => STATIC_LABEL,
         StepKind::Frequency(_) => FREQUENCY_LABEL,
+        StepKind::Dynamic(_) => DYNAMIC_LABEL,
         StepKind::HeatTransfer(_) => HEAT_TRANSFER_LABEL,
         StepKind::CoupledTempDisp(_) => COUPLED_LABEL,
     }
@@ -2257,6 +2269,7 @@ fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
     match &mut step.kind {
         StepKind::Static(settings) => static_form(ui, settings, units),
         StepKind::Frequency(settings) => frequency_form(ui, settings, units),
+        StepKind::Dynamic(settings) => dynamic_form(ui, settings, units),
         StepKind::HeatTransfer(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::CoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, true),
     }
@@ -2292,6 +2305,56 @@ fn heat_transfer_form(
         ui.weak("Instationär: Materialien brauchen Dichte und spezifische Wärmekapazität.");
         ui.end_row();
     }
+}
+
+/// Settings of a dynamic step: the time integration, then the increments as in a static
+/// step, then the Rayleigh damping.
+fn dynamic_form(ui: &mut Ui, settings: &mut DynamicStep, units: UnitSystem) {
+    ui.label("Procedure");
+    egui::ComboBox::from_id_salt("dynamic procedure")
+        .selected_text(settings.procedure.label())
+        .show_ui(ui, |ui| {
+            for choice in DynamicProcedure::ALL {
+                ui.selectable_value(&mut settings.procedure, choice, choice.label());
+            }
+        });
+    ui.end_row();
+    ui.label("Alpha (HHT)");
+    ui.add(
+        numeric::drag_value(&mut settings.alpha)
+            .range(-1.0 / 3.0..=0.0)
+            .speed(0.01)
+            .max_decimals(4),
+    );
+    ui.end_row();
+    ui.label("");
+    ui.weak("Numerical damping of the time integration, -1/3 to 0; -0.05 is the default.");
+    ui.end_row();
+    increments_form(ui, &mut settings.increments, units, true);
+    let mut damped = settings.damping.is_some();
+    ui.label("");
+    ui.checkbox(&mut damped, "Rayleigh damping");
+    ui.end_row();
+    let mut damping = settings.damping.unwrap_or_default();
+    ui.label("    Alpha (mass)");
+    ui.add_enabled(
+        damped,
+        numeric::physical(&mut damping.alpha, units, Quantity::Frequency),
+    );
+    ui.end_row();
+    ui.label("    Beta (stiffness)");
+    ui.add_enabled(
+        damped,
+        numeric::physical(&mut damping.beta, units, Quantity::Time),
+    );
+    ui.end_row();
+    ui.label("");
+    ui.weak("Damping ratio zeta at circular frequency omega: alpha = 2 zeta omega,");
+    ui.end_row();
+    ui.label("");
+    ui.weak("beta = 2 zeta / omega. Loads need a stepped amplitude to act at once.");
+    ui.end_row();
+    settings.damping = damped.then_some(damping);
 }
 
 fn validate_heat_transfer_step(settings: &HeatTransferStep) -> Result<(), String> {

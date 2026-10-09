@@ -11,10 +11,10 @@ use std::fmt::Write as _;
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
-    Amplitude, AmplitudeTime, BoundaryKind, Constraint, ContactMethod, ContactPair, FeModel,
-    FieldOutput, FrequencyStep, GapConductance, HeatTransferStep, HistoryKind, HistoryOutput,
-    Incrementation, InitialConditionKind, InteractionProperty, LoadKind, ModelSpace, NodeTie,
-    OutputKind, Region, Section, SectionKind, StaticStep, Step, StepKind, SurfaceBehavior,
+    Amplitude, AmplitudeTime, BoundaryKind, Constraint, ContactMethod, ContactPair, DynamicStep,
+    FeModel, FieldOutput, FrequencyStep, GapConductance, HeatTransferStep, HistoryKind,
+    HistoryOutput, Incrementation, InitialConditionKind, InteractionProperty, LoadKind, ModelSpace,
+    NodeTie, OutputKind, Region, Section, SectionKind, StaticStep, Step, StepKind, SurfaceBehavior,
     SurfaceInteraction, Totals, UserKeyword, line_tangent,
 };
 
@@ -1196,6 +1196,7 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         StepKind::CoupledTempDisp(settings) => {
             heat_transfer_step(settings, "*Coupled temperature-displacement", true)
         }
+        StepKind::Dynamic(settings) => dynamic_step(settings),
     };
     let mut boundaries = vec![Keyword::generated("*Boundary, op=New\n".into())];
     for bc in &step.boundary_conditions {
@@ -1384,6 +1385,7 @@ fn deactivated_step(step: &Step) -> Keyword {
         StepKind::Frequency(_) => "FrequencyStep",
         StepKind::HeatTransfer(_) => "HeatTransferStep",
         StepKind::CoupledTempDisp(_) => "CoupledTempDispStep",
+        StepKind::Dynamic(_) => "DynamicStep",
     };
     fn all<'a>(names: impl Iterator<Item = &'a str>) -> Vec<Keyword> {
         names.map(deactivated).collect()
@@ -1546,6 +1548,33 @@ fn heat_transfer_step(
         let _ = write!(keyword, ", Deltmx={}", number(deltmx));
     }
     incremented_step(increments, keyword, coupled && increments.nlgeom)
+}
+
+/// The `*Step` line and the procedure keyword of a dynamic step, as PrePoMax's
+/// `CalDynamicStep` and `CalDamping` write them: the Rayleigh damping follows the
+/// procedure in the step, where CalculiX applies it to the whole model.
+fn dynamic_step(settings: &DynamicStep) -> (String, String) {
+    let mut keyword = String::from("*Dynamic");
+    if let Some(solver) = settings.increments.solver.keyword() {
+        let _ = write!(keyword, ", Solver={solver}");
+    }
+    if settings.alpha != -0.05 {
+        let _ = write!(keyword, ", Alpha={}", number(settings.alpha));
+    }
+    if let Some(explicit) = settings.procedure.keyword() {
+        let _ = write!(keyword, ", Explicit={explicit}");
+    }
+    let (header, mut procedure) =
+        incremented_step(&settings.increments, keyword, settings.increments.nlgeom);
+    if let Some(damping) = &settings.damping {
+        let _ = writeln!(
+            procedure,
+            "*Damping, Alpha={}, Beta={}",
+            number(damping.alpha),
+            number(damping.beta)
+        );
+    }
+    (header, procedure)
 }
 
 /// The `*Step` line and the procedure with its increments, for steps with a time period.

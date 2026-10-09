@@ -337,6 +337,8 @@ pub enum StepKind {
     /// Temperatures and displacements solved together
     /// (`*COUPLED TEMPERATURE-DISPLACEMENT`).
     CoupledTempDisp(HeatTransferStep),
+    /// Displacements over time with inertia and damping (`*DYNAMIC`).
+    Dynamic(DynamicStep),
 }
 
 impl StepKind {
@@ -347,6 +349,7 @@ impl StepKind {
             StepKind::HeatTransfer(settings) | StepKind::CoupledTempDisp(settings) => {
                 &mut settings.increments.solver
             }
+            StepKind::Dynamic(settings) => &mut settings.increments.solver,
         }
     }
 
@@ -524,6 +527,115 @@ pub struct FrequencyStep {
     pub solver: EquationSolver,
 }
 
+/// Settings of a `*DYNAMIC` step, with PrePoMax's defaults; like PrePoMax's `DynamicStep` it
+/// extends the static step by the time integration and the damping.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DynamicStep {
+    /// Increments, time period, geometric nonlinearity and solver as in a static step.
+    pub increments: StaticStep,
+    /// Numerical damping of the Hilber-Hughes-Taylor integration (`ALPHA=`), between -1/3
+    /// and 0; CalculiX's default is -0.05.
+    pub alpha: f64,
+    /// Implicit or explicit integration of the structure and the fluid (`EXPLICIT=`).
+    pub procedure: DynamicProcedure,
+    /// Rayleigh damping of the whole model, written as `*DAMPING` in the step like PrePoMax
+    /// does; `None` leaves the model undamped.
+    pub damping: Option<RayleighDamping>,
+}
+
+impl Default for DynamicStep {
+    fn default() -> Self {
+        Self {
+            increments: StaticStep {
+                incrementation: Incrementation::Automatic,
+                initial_increment: 0.01,
+                ..StaticStep::default()
+            },
+            alpha: -0.05,
+            procedure: DynamicProcedure::Implicit,
+            damping: None,
+        }
+    }
+}
+
+impl DynamicStep {
+    /// What is wrong with the settings, if anything.
+    pub fn problem(&self) -> Option<String> {
+        if !(-1.0 / 3.0..=0.0).contains(&self.alpha) {
+            return Some("Alpha must lie between -1/3 and 0.".into());
+        }
+        if self.increments.incrementation == Incrementation::Default {
+            return Some("A dynamic step needs its time period and increments.".into());
+        }
+        if self.increments.time_period <= 0.0 || self.increments.initial_increment <= 0.0 {
+            return Some(
+                "The time period and the initial increment must be greater than 0.".into(),
+            );
+        }
+        if let Some(damping) = &self.damping
+            && (damping.alpha < 0.0 || damping.beta < 0.0)
+        {
+            return Some("The damping coefficients cannot be negative.".into());
+        }
+        None
+    }
+}
+
+/// How a dynamic step integrates over time, CalculiX's `EXPLICIT` parameter of `*DYNAMIC`:
+/// the structure and, with fluids, the fluid.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DynamicProcedure {
+    /// Implicit for both, the default; unconditionally stable.
+    #[default]
+    Implicit,
+    /// Implicit structure, explicit fluid (`EXPLICIT=1`).
+    ImplicitExplicit,
+    /// Explicit structure, implicit fluid (`EXPLICIT=2`).
+    ExplicitImplicit,
+    /// Explicit for both (`EXPLICIT=3`); needs increments below the stability limit.
+    Explicit,
+}
+
+impl DynamicProcedure {
+    pub const ALL: [DynamicProcedure; 4] = [
+        DynamicProcedure::Implicit,
+        DynamicProcedure::ImplicitExplicit,
+        DynamicProcedure::ExplicitImplicit,
+        DynamicProcedure::Explicit,
+    ];
+
+    /// The value of `EXPLICIT=`; `None` for the implicit default.
+    pub fn keyword(self) -> Option<u8> {
+        match self {
+            DynamicProcedure::Implicit => None,
+            DynamicProcedure::ImplicitExplicit => Some(1),
+            DynamicProcedure::ExplicitImplicit => Some(2),
+            DynamicProcedure::Explicit => Some(3),
+        }
+    }
+
+    /// Name in the GUI, as PrePoMax labels the procedures.
+    pub fn label(self) -> &'static str {
+        match self {
+            DynamicProcedure::Implicit => "Implicit / Implicit",
+            DynamicProcedure::ImplicitExplicit => "Implicit / Explicit",
+            DynamicProcedure::ExplicitImplicit => "Explicit / Implicit",
+            DynamicProcedure::Explicit => "Explicit / Explicit",
+        }
+    }
+}
+
+/// Rayleigh damping: the damping matrix is `alpha` times the mass plus `beta` times the
+/// stiffness matrix. For a damping ratio zeta at the circular frequency omega,
+/// `alpha = 2 zeta omega` (mass) or `beta = 2 zeta / omega` (stiffness).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RayleighDamping {
+    /// Mass-proportional coefficient, in 1 / time.
+    pub alpha: f64,
+    /// Stiffness-proportional coefficient, in time.
+    pub beta: f64,
+}
+
 impl Default for FrequencyStep {
     fn default() -> Self {
         Self {
@@ -574,6 +686,19 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             field_outputs: FieldOutput::heat_transfer_defaults(),
+        }
+    }
+
+    /// A dynamic step with PrePoMax's default field outputs.
+    pub fn new_dynamic(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            active: true,
+            kind: StepKind::Dynamic(DynamicStep::default()),
+            boundary_conditions: Vec::new(),
+            loads: Vec::new(),
+            history_outputs: Vec::new(),
+            field_outputs: FieldOutput::dynamic_defaults(),
         }
     }
 
@@ -748,6 +873,14 @@ impl FieldOutput {
         let mut outputs = Self::defaults();
         outputs[0].variables = vec!["NT".into(), "RFL".into()];
         outputs[1].variables = vec!["HFL".into()];
+        outputs
+    }
+
+    /// Field outputs PrePoMax adds to a new dynamic step: velocities and energies too.
+    pub fn dynamic_defaults() -> Vec<Self> {
+        let mut outputs = Self::defaults();
+        outputs[0].variables = ["RF", "U", "V"].map(String::from).to_vec();
+        outputs[1].variables = ["S", "E", "ENER"].map(String::from).to_vec();
         outputs
     }
 
