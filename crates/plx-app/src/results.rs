@@ -1,6 +1,9 @@
 use plx_render::contour::DEFAULT_LEVELS;
 
 use crate::animation::{Animation, AnimationKind, ColorLimits};
+use plx_mesh::FeMesh;
+use plx_results::field_output::{self, FieldOutput};
+use plx_results::history_output::{self, HistoryOutput, HistorySet};
 use plx_results::{AnalysisKind, Component, Field, Increment};
 
 /// How the deformed shape is scaled, as in PrePoMax's results toolbar.
@@ -52,6 +55,12 @@ pub struct ResultsView {
     pub time: Option<String>,
     /// Running animation, if the animation window is open.
     pub animation: Option<Animation>,
+    /// Field outputs the user derived from the results, in the order they are computed.
+    pub field_outputs: Vec<FieldOutput>,
+    /// History outputs the user derived, in the order they are computed.
+    pub history_outputs: Vec<HistoryOutput>,
+    /// Data of the history outputs that could be computed, by name.
+    pub history: Vec<HistorySet>,
     /// Characteristic model size for the automatic scale (PrePoMax: cube root of the bounding
     /// box volume, square root of the area for flat models).
     model_size: f64,
@@ -79,6 +88,9 @@ impl ResultsView {
             date: None,
             time: None,
             animation: None,
+            field_outputs: Vec::new(),
+            history_outputs: Vec::new(),
+            history: Vec::new(),
             model_size: bounds.map_or(1.0, model_size),
         };
         view.increment = view.default_increment();
@@ -132,6 +144,137 @@ impl ResultsView {
         }
     }
 
+    /// Index of the derived field output that computes the given field.
+    pub fn field_output_index(&self, field: usize) -> Option<usize> {
+        let name = &self.current_increment()?.fields.get(field)?.name;
+        self.field_outputs.iter().position(|o| o.name == *name)
+    }
+
+    /// Creates (`index` is `None`) or replaces a derived field output and computes it. The
+    /// outputs after it are computed again, as they may use it; their failures are returned.
+    pub fn set_field_output(
+        &mut self,
+        index: Option<usize>,
+        output: FieldOutput,
+        mesh: &FeMesh,
+    ) -> Result<Vec<String>, String> {
+        let shown = self.shown_names();
+        field_output::compute(&output, &mut self.increments, mesh)?;
+        let at = match index.filter(|&i| i < self.field_outputs.len()) {
+            Some(i) => {
+                let old = std::mem::replace(&mut self.field_outputs[i], output);
+                if old.name != self.field_outputs[i].name {
+                    field_output::remove(&old.name, &mut self.increments);
+                }
+                i
+            }
+            None => {
+                self.field_outputs.push(output);
+                self.field_outputs.len() - 1
+            }
+        };
+        let mut warnings = self.recompute_from(at + 1, mesh);
+        warnings.extend(self.recompute_history(mesh));
+        self.restore_selection(shown);
+        Ok(warnings)
+    }
+
+    /// Deletes a derived field output and its field.
+    pub fn remove_field_output(&mut self, index: usize, mesh: &FeMesh) -> Vec<String> {
+        if index >= self.field_outputs.len() {
+            return Vec::new();
+        }
+        let shown = self.shown_names();
+        let output = self.field_outputs.remove(index);
+        field_output::remove(&output.name, &mut self.increments);
+        let mut warnings = self.recompute_from(index, mesh);
+        warnings.extend(self.recompute_history(mesh));
+        self.restore_selection(shown);
+        warnings
+    }
+
+    /// Computes the outputs from `start` on again; one that fails loses its field.
+    fn recompute_from(&mut self, start: usize, mesh: &FeMesh) -> Vec<String> {
+        let mut warnings = Vec::new();
+        for output in self.field_outputs.iter().skip(start) {
+            if let Err(error) = field_output::compute(output, &mut self.increments, mesh) {
+                field_output::remove(&output.name, &mut self.increments);
+                warnings.push(format!("{}: {error}", output.name));
+            }
+        }
+        warnings
+    }
+
+    fn shown_names(&self) -> Option<(String, String)> {
+        self.current()
+            .map(|(f, c)| (f.name.clone(), c.name.clone()))
+    }
+
+    /// Shows the field and component by name again after fields were added or removed.
+    fn restore_selection(&mut self, names: Option<(String, String)>) {
+        let found = names.and_then(|(field, component)| {
+            let fields = &self.current_increment()?.fields;
+            let f = fields.iter().position(|f| f.name == field)?;
+            let c = fields[f]
+                .components
+                .iter()
+                .position(|c| c.name == component);
+            Some((f, c.unwrap_or(0)))
+        });
+        (self.field, self.component) = found.unwrap_or((0, 0));
+    }
+
+    /// Creates (`index` is `None`) or replaces a history output and computes it; the history
+    /// outputs after it are computed again. Their failures are returned.
+    pub fn set_history_output(
+        &mut self,
+        index: Option<usize>,
+        output: HistoryOutput,
+        mesh: &FeMesh,
+    ) -> Result<Vec<String>, String> {
+        let at = index.filter(|&i| i < self.history_outputs.len());
+        // An equation sees the outputs before it.
+        let before = at.unwrap_or(self.history_outputs.len());
+        let earlier: Vec<HistorySet> = (self.history.iter())
+            .filter(|set| (self.history_outputs[..before].iter()).any(|o| o.name == set.name))
+            .cloned()
+            .collect();
+        history_output::compute(&output, &self.increments, mesh, &earlier)?;
+        match at {
+            Some(i) => self.history_outputs[i] = output,
+            None => self.history_outputs.push(output),
+        }
+        Ok(self.recompute_history(mesh))
+    }
+
+    pub fn remove_history_output(&mut self, index: usize, mesh: &FeMesh) -> Vec<String> {
+        if index >= self.history_outputs.len() {
+            return Vec::new();
+        }
+        self.history_outputs.remove(index);
+        self.recompute_history(mesh)
+    }
+
+    /// Computes all history outputs again, in order; failures leave an output without data.
+    pub fn recompute_history(&mut self, mesh: &FeMesh) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let mut sets = Vec::new();
+        for output in &self.history_outputs {
+            match history_output::compute(output, &self.increments, mesh, &sets) {
+                Ok(set) => sets.push(set),
+                Err(error) => warnings.push(format!("{}: {error}", output.name)),
+            }
+        }
+        self.history = sets;
+        warnings
+    }
+
+    /// Index of the history output of a computed set.
+    pub fn history_output_index(&self, set: usize) -> Option<usize> {
+        let name = &self.history.get(set)?.name;
+        self.history_outputs.iter().position(|o| o.name == *name)
+    }
+
     /// Entry of the increment list, "step, increment" as in PrePoMax's results toolbar.
     pub fn increment_label(increment: &Increment) -> String {
         format!("{}, {}", increment.step, increment.increment)
@@ -167,16 +310,9 @@ impl ResultsView {
         lines
     }
 
-    /// Node index and value of the largest value of the shown component.
+    /// Node index and value of the largest value on screen, animation frame included.
     pub fn maximum(&self) -> Option<(usize, f32)> {
-        let (_, component) = self.current()?;
-        component
-            .values
-            .iter()
-            .copied()
-            .enumerate()
-            .filter(|(_, v)| v.is_finite())
-            .reduce(|a, b| if b.1 > a.1 { b } else { a })
+        self.extreme(|a, b| b > a)
     }
 
     /// Displacement scale factor for the current increment and deformation setting.
@@ -211,9 +347,19 @@ impl ResultsView {
         }
     }
 
-    /// Factor on deformation and values of the shown animation frame; 1 without animation.
+    /// Factor on the deformation of the shown animation frame; 1 without animation.
     pub fn amplitude(&self) -> f32 {
         self.animation.as_ref().map_or(1.0, Animation::amplitude)
+    }
+
+    /// Factor on the shown values: the deformation factor, without its sign for magnitudes and
+    /// equivalent values, which stay positive while a mode shape swings (as in PrePoMax).
+    pub fn value_amplitude(&self) -> f32 {
+        let amplitude = self.amplitude();
+        match self.current() {
+            Some((_, component)) if component.is_invariant() => amplitude.abs(),
+            _ => amplitude,
+        }
     }
 
     /// Opens an animation of the given kind over the step of the shown increment.
@@ -224,10 +370,13 @@ impl ResultsView {
             .map_or(self.increment, |a| a.start_increment);
         self.select_increment(start);
         let step = self.current_increment().map(|i| i.step);
+        let modal = self
+            .current_increment()
+            .is_some_and(|i| matches!(i.kind, AnalysisKind::Frequency | AnalysisKind::Buckling));
         let increments = (0..self.increments.len())
             .filter(|&i| Some(self.increments[i].step) == step)
             .collect();
-        self.animation = Some(Animation::new(kind, increments, start));
+        self.animation = Some(Animation::new(kind, increments, start, modal));
         self.show_animation_frame();
     }
 
@@ -256,8 +405,15 @@ impl ResultsView {
         };
         match (animation.kind, animation.limits) {
             (AnimationKind::ScaleFactor, ColorLimits::CurrentFrame) => {
-                let a = animation.amplitude();
-                Some((a * min, a * max))
+                // A negative factor swaps the ends.
+                let (a, b) = (self.value_amplitude() * min, self.value_amplitude() * max);
+                Some((a.min(b), a.max(b)))
+            }
+            // A mode shape swings every value between minus and plus its full size.
+            (AnimationKind::ScaleFactor, ColorLimits::AllFrames)
+                if animation.modal && !component.is_invariant() =>
+            {
+                Some((min.min(-max), max.max(-min)))
             }
             // Scaling runs every value from zero to its full size.
             (AnimationKind::ScaleFactor, ColorLimits::AllFrames) => {
@@ -278,16 +434,21 @@ impl ResultsView {
         }
     }
 
-    /// Node index and value of the smallest value of the shown component.
+    /// Node index and value of the smallest value on screen, animation frame included.
     pub fn minimum(&self) -> Option<(usize, f32)> {
+        self.extreme(|a, b| b < a)
+    }
+
+    fn extreme(&self, better: impl Fn(f32, f32) -> bool) -> Option<(usize, f32)> {
         let (_, component) = self.current()?;
+        let amplitude = self.value_amplitude();
         component
             .values
             .iter()
-            .copied()
+            .map(|v| v * amplitude)
             .enumerate()
             .filter(|(_, v)| v.is_finite())
-            .reduce(|a, b| if b.1 < a.1 { b } else { a })
+            .reduce(|a, b| if better(a.1, b.1) { b } else { a })
     }
 
     pub fn legend(&self) -> Option<Legend> {
@@ -295,9 +456,15 @@ impl ResultsView {
         let (min, max) = self.value_range()?;
         // PrePoMax writes names with blanks instead of underscores and dashes.
         let name = |n: &str| n.replace(['_', '-'], " ");
+        let unit = (self.field_outputs.iter())
+            .find(|o| o.name == field.name)
+            .and_then(FieldOutput::unit)
+            .filter(|u| !u.trim().is_empty() && u.trim() != "/")
+            .map(|u| format!("\nUnit: {}", u.trim()))
+            .unwrap_or_default();
         Some(Legend {
             title: format!(
-                "{}: {}\nAutomatic",
+                "{}: {}{unit}\nAutomatic",
                 name(&field.name),
                 name(&component.name)
             ),
@@ -464,6 +631,32 @@ mod tests {
         view.stop_animation();
         assert_eq!(view.increment, 0);
         assert_eq!(view.amplitude(), 1.0);
+    }
+
+    #[test]
+    fn mode_shape_animation_swings_signed_values_but_not_magnitudes() {
+        let mode = [[0.0, 0.0, 1.0], [0.0, 0.0, 3.0]];
+        let mut view = ResultsView::new(
+            vec![increment(1, 1, AnalysisKind::Frequency, &mode)],
+            Some(([0.0; 3], [10.0; 3])),
+        );
+        view.component = 3; // U3
+        view.start_animation(AnimationKind::ScaleFactor);
+        let animation = view.animation.as_mut().unwrap();
+        assert!(animation.modal);
+        animation.go_to(0);
+        assert_eq!(view.amplitude(), -1.0);
+        assert_eq!(view.legend().map(|l| (l.min, l.max)), Some((-3.0, -1.0)));
+        assert_eq!(view.maximum(), Some((0, -1.0)));
+        assert_eq!(view.minimum(), Some((1, -3.0)));
+        view.animation.as_mut().unwrap().limits = ColorLimits::AllFrames;
+        assert_eq!(view.legend().map(|l| (l.min, l.max)), Some((-3.0, 3.0)));
+
+        view.component = 0; // ALL stays positive
+        assert_eq!(view.value_amplitude(), 1.0);
+        assert_eq!(view.legend().map(|l| (l.min, l.max)), Some((0.0, 3.0)));
+        view.animation.as_mut().unwrap().limits = ColorLimits::CurrentFrame;
+        assert_eq!(view.legend().map(|l| (l.min, l.max)), Some((1.0, 3.0)));
     }
 
     #[test]

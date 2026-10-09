@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 use egui::Ui;
 use plx_mesh::{ElementId, FeMesh, NodeId};
 use plx_model::{
-    BoundaryCondition, BoundaryKind, Elastic, FeModel, FieldOutput, Incrementation, Load, LoadKind,
-    Material, OutputKind, Region, Section, Step, StepKind, next_name,
+    BoundaryCondition, BoundaryKind, Elastic, EquationSolver, FeModel, FieldOutput, Incrementation,
+    Load, LoadKind, Material, OutputKind, Region, Section, Step, StepKind, next_name,
 };
 
 use crate::model::{Highlight, Hit, Model};
@@ -27,11 +27,15 @@ pub enum NewItem {
     Step,
     BoundaryCondition(usize),
     Load(usize),
+    /// A field output derived from results, created in the Results tree.
+    ResultFieldOutput,
+    /// A history output derived from results, created in the Results tree.
+    ResultHistoryOutput,
 }
 
 /// How a region is given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Source {
+pub(crate) enum Source {
     /// Picked in the 3D view.
     Selection,
     Parts,
@@ -54,23 +58,25 @@ impl Source {
 
 /// A region while it is edited in a dialog.
 #[derive(Clone, Debug, PartialEq)]
-struct RegionDraft {
+pub(crate) struct RegionDraft {
     sources: &'static [Source],
-    source: Source,
+    pub(crate) source: Source,
     /// Whether picks select nodes or element faces.
-    target: Target,
+    pub(crate) target: Target,
     nodes: History<NodeId>,
     faces: History<(ElementId, u8)>,
     parts: BTreeSet<String>,
     set: String,
 }
 
-const NODE_SOURCES: &[Source] = &[Source::Selection, Source::NodeSet, Source::Surface];
-const FACE_SOURCES: &[Source] = &[Source::Selection, Source::Surface];
-const ELEMENT_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet];
+pub(crate) const NODE_SOURCES: &[Source] = &[Source::Selection, Source::NodeSet, Source::Surface];
+pub(crate) const FACE_SOURCES: &[Source] = &[Source::Selection, Source::Surface];
+/// Solid elements: whole parts, element sets or the elements of picked faces.
+pub(crate) const SOLID_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet, Source::Selection];
+pub(crate) const ELEMENT_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet];
 
 impl RegionDraft {
-    fn new(sources: &'static [Source], target: Target) -> Self {
+    pub(crate) fn new(sources: &'static [Source], target: Target) -> Self {
         Self {
             sources,
             source: sources[0],
@@ -82,7 +88,7 @@ impl RegionDraft {
         }
     }
 
-    fn from_region(
+    pub(crate) fn from_region(
         region: &Region,
         sources: &'static [Source],
         target: Target,
@@ -111,7 +117,7 @@ impl RegionDraft {
         draft
     }
 
-    fn region(&self) -> Region {
+    pub(crate) fn region(&self) -> Region {
         match self.source {
             Source::Selection => match self.target {
                 Target::Nodes => Region::Nodes(self.nodes.items().into_iter().collect()),
@@ -124,7 +130,7 @@ impl RegionDraft {
         }
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         match self.source {
             Source::Selection => match self.target {
                 Target::Nodes => self.nodes.items().is_empty(),
@@ -135,14 +141,14 @@ impl RegionDraft {
         }
     }
 
-    fn count(&self) -> usize {
+    pub(crate) fn count(&self) -> usize {
         match self.target {
             Target::Nodes => self.nodes.items().len(),
             Target::Faces => self.faces.items().len(),
         }
     }
 
-    fn click(
+    pub(crate) fn click(
         &mut self,
         model: &Model,
         picker: &Picker,
@@ -172,19 +178,19 @@ impl RegionDraft {
         }
     }
 
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.nodes.clear();
         self.faces.clear();
     }
 
-    fn take(&mut self, items: Items, operation: Operation) {
+    pub(crate) fn take(&mut self, items: Items, operation: Operation) {
         match items {
             Items::Nodes(nodes) => self.nodes.push(operation, nodes),
             Items::Faces(faces) => self.faces.push(operation, faces),
         }
     }
 
-    fn can_undo(&self) -> bool {
+    pub(crate) fn can_undo(&self) -> bool {
         match self.target {
             Target::Nodes => self.nodes.can_undo(),
             Target::Faces => self.faces.can_undo(),
@@ -192,7 +198,7 @@ impl RegionDraft {
     }
 
     /// Applies a button of the selection window.
-    fn action(&mut self, model: &Model, action: PickerAction) {
+    pub(crate) fn action(&mut self, model: &Model, action: PickerAction) {
         match (action, self.target) {
             (PickerAction::Undo, Target::Nodes) => self.nodes.undo(),
             (PickerAction::Undo, Target::Faces) => self.faces.undo(),
@@ -235,7 +241,7 @@ impl RegionDraft {
         }
     }
 
-    fn ui(&mut self, ui: &mut Ui, model: &Model) {
+    pub(crate) fn ui(&mut self, ui: &mut Ui, model: &Model) {
         ui.label("Region");
         ui.vertical(|ui| {
             egui::ComboBox::from_id_salt("region source")
@@ -301,8 +307,35 @@ impl RegionDraft {
         ui.end_row();
     }
 
-    fn highlight(&self, model: &Model) -> Highlight {
+    pub(crate) fn highlight(&self, model: &Model) -> Highlight {
         region_highlight(model, &self.region())
+    }
+
+    /// A selection box dragged in the 3D view.
+    pub(crate) fn box_select(
+        &mut self,
+        model: &Model,
+        picker: &Picker,
+        area: &BoxSelect,
+        operation: Operation,
+    ) {
+        if self.source == Source::Selection {
+            self.take(picker.pick_box(model, area, self.target), operation);
+        }
+    }
+
+    /// What a click at the hit would select, for the hover preview.
+    pub(crate) fn preview(
+        &self,
+        model: &Model,
+        picker: &Picker,
+        hit: &Hit,
+        precision: f32,
+    ) -> Preview {
+        if self.source != Source::Selection {
+            return Preview::default();
+        }
+        crate::selection::preview(model, &picker.pick(model, hit, self.target, precision))
     }
 }
 
@@ -457,6 +490,7 @@ impl Editor {
                     region,
                 )
             }
+            NewItem::ResultFieldOutput | NewItem::ResultHistoryOutput => return None,
         };
         Some(Self {
             draft,
@@ -938,6 +972,15 @@ fn step_form(ui: &mut Ui, step: &mut Step) {
     ui.label("");
     ui.checkbox(&mut settings.nlgeom, "Geometrisch nichtlinear (Nlgeom)");
     ui.end_row();
+    ui.label("Gleichungslöser");
+    egui::ComboBox::from_id_salt("equation solver")
+        .selected_text(solver_label(settings.solver))
+        .show_ui(ui, |ui| {
+            for choice in EquationSolver::ALL {
+                ui.selectable_value(&mut settings.solver, choice, solver_label(choice));
+            }
+        });
+    ui.end_row();
     ui.label("Inkrementierung");
     egui::ComboBox::from_id_salt("incrementation")
         .selected_text(incrementation_label(settings.incrementation))
@@ -969,6 +1012,17 @@ fn step_form(ui: &mut Ui, step: &mut Step) {
         ui.label(label);
         ui.add_enabled(enabled, number(value));
         ui.end_row();
+    }
+}
+
+fn solver_label(solver: EquationSolver) -> &'static str {
+    match solver {
+        EquationSolver::Default => "Standard (Pardiso, falls vorhanden)",
+        EquationSolver::Pardiso => "Pardiso",
+        EquationSolver::Spooles => "Spooles",
+        EquationSolver::PaStiX => "PaStiX",
+        EquationSolver::IterativeScaling => "Iterative scaling",
+        EquationSolver::IterativeCholesky => "Iterative Cholesky",
     }
 }
 

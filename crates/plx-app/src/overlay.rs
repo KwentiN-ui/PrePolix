@@ -1,7 +1,7 @@
 //! Annotations drawn over the 3D view in PrePoMax's layout: legend top left, information block
 //! top right, scale bar bottom centre, axis triad bottom right, plus markers at the minimum and
-//! maximum and a triad at the global origin. Legend, information block and markers can be
-//! dragged within the view.
+//! maximum and a triad at the global origin. Legend, information block, scale bar and markers
+//! can be dragged within the view.
 
 use egui::{
     Align2, Color32, CursorIcon, FontId, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
@@ -50,6 +50,7 @@ pub struct Marker {
 pub struct LabelOffsets {
     pub legend: Vec2,
     pub status: Vec2,
+    pub scale_bar: Vec2,
     /// Box position relative to the marked point, once dragged.
     pub maximum: Option<Vec2>,
     pub minimum: Option<Vec2>,
@@ -90,7 +91,7 @@ pub fn draw(ui: &Ui, rect: Rect, camera: &Camera, overlay: &Overlay, offsets: &m
         );
     }
     if overlay.show_scale_bar {
-        draw_scale_bar(&painter, rect, camera);
+        draw_scale_bar(ui, &painter, rect, camera, &mut offsets.scale_bar);
     }
     if overlay.show_view_triad {
         let corner = rect.right_bottom() - vec2(24.0 + 45.0, 24.0 + 45.0);
@@ -212,14 +213,35 @@ fn draw_status(ui: &Ui, painter: &Painter, rect: Rect, lines: &[String], offset:
     }
 }
 
-/// Bar of five alternating fields whose total length is a round number of model units.
-fn draw_scale_bar(painter: &Painter, rect: Rect, camera: &Camera) {
+/// Bar of five alternating fields whose total length is a round number of model units, by
+/// default centred at the bottom; dragging it moves the bar together with its labels.
+fn draw_scale_bar(ui: &Ui, painter: &Painter, rect: Rect, camera: &Camera, offset: &mut Vec2) {
     let world_per_point = camera.pixel_size(rect.width(), rect.height());
     let Some((length, width)) = scale_bar_length(world_per_point) else {
         return;
     };
-    let left = rect.center().x - width * 0.5;
-    let top = rect.bottom() - MARGIN - SCALE_BAR_HEIGHT;
+    let labels: Vec<_> = (0..=SCALE_BAR_FIELDS)
+        .map(|i| {
+            let value = length * i as f32 / SCALE_BAR_FIELDS as f32;
+            painter.layout_no_wrap(format_value(value), font(), TEXT)
+        })
+        .collect();
+    // The outer labels are centred on the bar ends and stick out by half their width.
+    let overhang =
+        |galley: Option<&std::sync::Arc<egui::Galley>>| galley.map_or(0.0, |g| g.size().x * 0.5);
+    let (left_overhang, right_overhang) = (overhang(labels.first()), overhang(labels.last()));
+    let label_height = labels.first().map_or(0.0, |g| g.size().y);
+    let size = vec2(
+        left_overhang + width + right_overhang,
+        label_height + 3.0 + SCALE_BAR_HEIGHT,
+    );
+    let default = pos2(
+        rect.center().x - width * 0.5 - left_overhang,
+        rect.bottom() - MARGIN - size.y,
+    );
+    let frame = drag_label(ui, rect, "scale bar", default, size, offset);
+    let left = frame.left() + left_overhang;
+    let top = frame.bottom() - SCALE_BAR_HEIGHT;
     let field = width / SCALE_BAR_FIELDS as f32;
     for i in 0..SCALE_BAR_FIELDS {
         let cell = Rect::from_min_size(
@@ -229,15 +251,9 @@ fn draw_scale_bar(painter: &Painter, rect: Rect, camera: &Camera) {
         let fill = if i % 2 == 0 { TEXT } else { Color32::WHITE };
         painter.rect(cell, 0.0, fill, Stroke::new(1.0, TEXT), StrokeKind::Middle);
     }
-    for i in 0..=SCALE_BAR_FIELDS {
-        let value = length * i as f32 / SCALE_BAR_FIELDS as f32;
-        painter.text(
-            pos2(left + i as f32 * field, top - 3.0),
-            Align2::CENTER_BOTTOM,
-            format_value(value),
-            font(),
-            TEXT,
-        );
+    for (i, galley) in labels.into_iter().enumerate() {
+        let x = left + i as f32 * field - galley.size().x * 0.5;
+        painter.galley(pos2(x, frame.top()), galley, TEXT);
     }
 }
 

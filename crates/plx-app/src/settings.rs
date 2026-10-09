@@ -2,6 +2,7 @@
 //! data directory (Linux `~/.local/share/prepolix`, Windows `%APPDATA%\prepolix\data`).
 
 use crate::numeric;
+use plx_model::EquationSolver;
 use serde::{Deserialize, Serialize};
 
 /// Key of the settings in eframe's storage.
@@ -73,6 +74,15 @@ pub struct Solver {
     pub threads: u32,
     /// Where analyses run; empty for the default, see [`default_work_dir`].
     pub work_dir: String,
+    /// Optional solvers found in the executable; probed again when it changes.
+    pub detected: Option<DetectedSolvers>,
+}
+
+/// Result of [`crate::solver_check::available_solvers`] for one executable.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DetectedSolvers {
+    pub executable: String,
+    pub solvers: Vec<EquationSolver>,
 }
 
 impl Default for Solver {
@@ -81,6 +91,7 @@ impl Default for Solver {
             executable: "ccx".into(),
             threads: 1,
             work_dir: String::new(),
+            detected: None,
         }
     }
 }
@@ -91,6 +102,32 @@ impl Solver {
             "" => default_work_dir(),
             dir => std::path::PathBuf::from(dir),
         }
+    }
+
+    /// The solver for steps left at [`EquationSolver::Default`]: Pardiso if the executable
+    /// has it, otherwise CalculiX's own choice. The executable is probed the first time.
+    pub fn default_solver(&mut self) -> EquationSolver {
+        if self.solvers().is_none()
+            && let Some(solvers) =
+                crate::solver_check::available_solvers(&self.job_solver(), &self.work_dir())
+        {
+            self.detected = Some(DetectedSolvers {
+                executable: self.executable.clone(),
+                solvers,
+            });
+        }
+        match self.solvers() {
+            Some(solvers) if solvers.contains(&EquationSolver::Pardiso) => EquationSolver::Pardiso,
+            _ => EquationSolver::Default,
+        }
+    }
+
+    /// The detected solvers, if they belong to the current executable.
+    pub fn solvers(&self) -> Option<&[EquationSolver]> {
+        self.detected
+            .as_ref()
+            .filter(|d| d.executable == self.executable)
+            .map(|d| d.solvers.as_slice())
     }
 
     pub fn job_solver(&self) -> plx_job::Solver {
@@ -114,6 +151,17 @@ impl Gmsh {
         Some(clean_path(&self.library))
             .filter(|p| !p.is_empty())
             .map(std::path::PathBuf::from)
+    }
+}
+
+fn solvers_text(solvers: Option<&[EquationSolver]>) -> String {
+    match solvers {
+        None => "noch nicht geprüft".into(),
+        Some([]) => "kein direkter Löser gefunden".into(),
+        Some(solvers) => {
+            let names: Vec<_> = solvers.iter().filter_map(|s| s.keyword()).collect();
+            names.join(", ")
+        }
     }
 }
 
@@ -204,7 +252,7 @@ enum GmshCheck {
 enum SolverCheck {
     #[default]
     NotRun,
-    Running(std::sync::mpsc::Receiver<Vec<crate::solver_check::CheckResult>>),
+    Running(std::sync::mpsc::Receiver<crate::solver_check::Report>),
     Done(Vec<crate::solver_check::CheckResult>),
 }
 
@@ -332,6 +380,10 @@ impl SettingsWindow {
                                 .hint_text(self.default_work_dir.as_str()),
                         );
                         ui.end_row();
+                        ui.label("Gleichungslöser");
+                        ui.label(solvers_text(solver.solvers()))
+                            .on_hover_text("Steps mit Standard-Löser rechnen mit Pardiso, wenn CalculiX es enthält. Geprüft beim ersten Rechnen und mit \"CalculiX testen\".");
+                        ui.end_row();
                     });
                 ui.add_space(8.0);
                 self.solver_check_ui(ui);
@@ -433,16 +485,22 @@ impl SettingsWindow {
     /// Button and results of the CalculiX self test, run with the settings in the window.
     fn solver_check_ui(&mut self, ui: &mut egui::Ui) {
         if let SolverCheck::Running(receiver) = &self.solver_check
-            && let Ok(results) = receiver.try_recv()
+            && let Ok(report) = receiver.try_recv()
         {
-            self.solver_check = SolverCheck::Done(results);
+            if let Some(solvers) = report.solvers {
+                self.draft.solver.detected = Some(DetectedSolvers {
+                    executable: self.draft.solver.executable.clone(),
+                    solvers,
+                });
+            }
+            self.solver_check = SolverCheck::Done(report.checks);
         }
         let running = matches!(self.solver_check, SolverCheck::Running(_));
         ui.horizontal(|ui| {
             let button = ui
                 .add_enabled(!running, egui::Button::new("CalculiX testen"))
                 .on_hover_text(
-                    "Startet das Programm und rechnet kleine Kragbalken, deren Ergebnisse mit der Balkentheorie verglichen werden.",
+                    "Startet das Programm und rechnet kleine Kragbalken, deren Ergebnisse mit der Balkentheorie verglichen werden, und prüft, welche Gleichungslöser vorhanden sind.",
                 );
             if button.clicked() {
                 let (sender, receiver) = std::sync::mpsc::channel();

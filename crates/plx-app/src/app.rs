@@ -5,20 +5,24 @@ use plx_render::StandardView;
 
 use crate::analysis::{Analysis, MonitorEvent};
 use crate::animation::{AnimationKind, ColorLimits, Playback};
+use crate::field_output_dialog::{DialogAction, FieldOutputDialog};
+use crate::history_output_dialog::HistoryOutputDialog;
+use crate::history_table::HistoryTable;
 use crate::icons::{self, Icon};
 use crate::keywords::KeywordEditor;
 use crate::material_library::{LibraryResult, MaterialLibraryEditor};
 use crate::meshing::{MeshSetupResult, MeshSetupWindow, MeshingJob};
-use crate::model::{self, LoadedModel, Model};
+use crate::model::{self, Highlight, LoadedModel, Model};
 use crate::numeric;
 use crate::overlay::{Marker, Overlay};
 use crate::properties;
 use crate::results::{Deformation, ResultsView, format_legend_value};
 use crate::screenshot::{self, Screenshot};
+use crate::section::{SectionDialog, SectionResult, SectionView};
 use crate::selection::Operation;
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::setup::{Editor, EditorResult, NewItem};
-use crate::tree::{self, TreeItem, TreeState, TreeView};
+use crate::tree::{self, TreeItem, TreeResponse, TreeState, TreeView};
 use crate::viewport::{Axis, BoxSelect, Click, ViewCommand, Viewport};
 use plx_render::RenderMesh;
 
@@ -48,6 +52,10 @@ struct Workbench {
     tree: TreeState,
     /// Item whose properties window is open.
     dialog: Option<TreeItem>,
+    /// Name typed in the properties window of a part, with why it cannot be taken.
+    part_name: (String, Option<String>),
+    /// Part the open context menu of the 3D view belongs to.
+    menu_part: Option<usize>,
     /// Which of the three trees is shown.
     tree_view: TreeView,
     output: Vec<String>,
@@ -64,12 +72,23 @@ struct Workbench {
     keyword_editor: Option<KeywordEditor>,
     /// Open material library editor.
     material_library: Option<MaterialLibraryEditor>,
+    /// Open dialog creating or editing a field output derived from the shown results.
+    field_output_dialog: Option<FieldOutputDialog>,
+    /// Open dialog creating or editing a history output of the shown results.
+    history_dialog: Option<HistoryOutputDialog>,
+    /// Open table of a history output component.
+    history_table: Option<HistoryTable>,
     /// The tree selection whose region is highlighted.
     highlighted: Option<(TreeView, TreeItem)>,
     analysis: Option<Analysis>,
     /// Results file the user asked to open; read by the app on a worker thread.
     open_results: Option<PathBuf>,
     screenshot: Screenshot,
+    /// The section view, while it is on; it cuts whatever the 3D view shows.
+    section: Option<SectionView>,
+    section_dialog: Option<SectionDialog>,
+    /// The section view shown in the scene of the given version, to rebuild it on changes.
+    section_shown: Option<(u64, SectionView)>,
 }
 
 pub struct PrepolixApp {
@@ -113,6 +132,8 @@ impl PrepolixApp {
                 parked_camera: None,
                 tree: TreeState::default(),
                 dialog: None,
+                part_name: Default::default(),
+                menu_part: None,
                 tree_view: TreeView::FeModel,
                 output,
                 view_command: None,
@@ -122,10 +143,16 @@ impl PrepolixApp {
                 editor: None,
                 keyword_editor: None,
                 material_library: None,
+                field_output_dialog: None,
+                history_dialog: None,
+                history_table: None,
                 highlighted: None,
                 analysis: None,
                 open_results: None,
                 screenshot: Screenshot::default(),
+                section: None,
+                section_dialog: None,
+                section_shown: None,
             },
             load_events: channel(),
             loading: None,
@@ -258,11 +285,34 @@ impl PrepolixApp {
                         }
                     }
                 });
+                ui.menu_button("Isometrisch, Achse oben", |ui| {
+                    for axis in Axis::ALL {
+                        if ui.button(axis.label()).clicked() {
+                            self.workbench.view_command = Some(ViewCommand::IsometricAxis(axis));
+                        }
+                    }
+                });
                 ui.separator();
                 ui.checkbox(
                     &mut self.workbench.viewport.options.mesh_edges,
                     "Netzkanten",
                 );
+                ui.separator();
+                let has_model = self.workbench.shown().is_some();
+                if ui
+                    .add_enabled(has_model, egui::Button::new("Schnittansicht …"))
+                    .clicked()
+                {
+                    self.workbench.open_section_dialog();
+                }
+                let active = self.workbench.section.is_some();
+                if ui
+                    .add_enabled(active, egui::Button::new("Schnittansicht aus"))
+                    .clicked()
+                {
+                    self.workbench.section = None;
+                    self.workbench.section_dialog = None;
+                }
             });
             ui.menu_button("Geometrie", |ui| {
                 let import = egui::Button::new("Importieren …");
@@ -295,6 +345,10 @@ impl PrepolixApp {
             let can_open = self.loading.is_none();
             if icons::button(ui, Icon::Open, "Öffnen (Strg+O)", can_open, false).clicked() {
                 self.open_dialog(ui.ctx());
+            }
+            let import = "Geometrie importieren (STEP, IGES, BREP)";
+            if icons::button(ui, Icon::Import, import, can_open, false).clicked() {
+                self.import_dialog(ui.ctx());
             }
             let can_save = self.workbench.setup_model().is_some();
             if icons::button(ui, Icon::Save, "Speichern (Strg+S)", can_save, false).clicked() {
@@ -331,6 +385,13 @@ impl PrepolixApp {
             }
             if icons::button(ui, Icon::MeshEdges, "Netzkanten", true, mesh).clicked() {
                 options.mesh_edges = true;
+            }
+            ui.separator();
+            let shown = self.workbench.shown().is_some();
+            let sectioned =
+                self.workbench.section.is_some() || self.workbench.section_dialog.is_some();
+            if icons::button(ui, Icon::SectionView, "Schnittansicht", shown, sectioned).clicked() {
+                self.workbench.open_section_dialog();
             }
         });
     }
@@ -449,10 +510,10 @@ impl eframe::App for PrepolixApp {
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
         egui::Panel::top("tools").show(ui, |ui| {
             self.tool_bar(ui);
-            if self.workbench.tree_view == TreeView::Results && !self.workbench.results.is_empty() {
-                ui.separator();
-                self.workbench.results_tool_bar(ui);
-            }
+            // Like PrePoMax, the results row stays in place and is greyed out outside the
+            // Results tab, so the 3D view does not jump when switching tabs.
+            ui.separator();
+            self.workbench.results_tool_bar(ui);
         });
         self.workbench.animate(&ctx);
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
@@ -481,13 +542,26 @@ impl eframe::App for PrepolixApp {
             .frame(pane.inner_margin(4))
             .show(ui, |ui| self.workbench.output(ui));
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            self.workbench.viewport.selecting = self.workbench.picking();
+            self.workbench.viewport.selecting =
+                self.workbench.picking() || self.workbench.section_picks();
+            self.workbench.viewport.gizmo =
+                match (&self.workbench.section_dialog, self.workbench.shown()) {
+                    (Some(dialog), Some(model)) => Some(dialog.gizmo(model)),
+                    _ => None,
+                };
             let response = self.workbench.viewport.ui(ui);
+            if let (Some(drag), Some(dialog)) = (response.gizmo, &mut self.workbench.section_dialog)
+            {
+                dialog.drag(drag);
+            }
             if let Some(command) = response.command {
                 self.workbench.view_command = Some(command);
             }
             if let Some(click) = response.click {
                 self.workbench.click(click);
+            }
+            if let Some(view) = &response.response {
+                self.workbench.viewport_menu(view, response.secondary_click);
             }
             if let Some(area) = response.box_select {
                 self.workbench.box_select(&area);
@@ -504,10 +578,14 @@ impl eframe::App for PrepolixApp {
             .update(&ctx, view, &mut workbench.output);
         self.workbench.properties_window(&ctx);
         self.workbench.editor_window(&ctx);
+        self.workbench.section_window(&ctx);
         self.workbench.keyword_editor_window(&ctx);
         self.workbench.material_library_window(&ctx);
         self.workbench.mesh_setup_window(&ctx);
         self.workbench.poll_meshing();
+        self.workbench.field_output_window(&ctx);
+        self.workbench.history_output_window(&ctx);
+        self.workbench.history_table_window(&ctx);
         self.workbench.run_analysis(&ctx);
         if let Some(path) = self.workbench.open_results.take() {
             self.open_path(path, &ctx);
@@ -515,6 +593,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.update_highlight();
         self.workbench.settings_window(&ctx);
         self.workbench.rebuild_if_results_changed();
+        self.workbench.update_section();
 
         if let Some(command) = self.workbench.view_command.take() {
             let bounds = self.workbench.shown().and_then(Model::visible_bounds);
@@ -586,6 +665,8 @@ impl Workbench {
                     ));
                 }
                 self.dialog = None;
+                self.field_output_dialog = None;
+                self.close_history_windows();
                 self.viewport.labels = Default::default();
                 if let Some(view) = &model.results {
                     // A results file joins the results collection and leaves the FE model
@@ -711,8 +792,17 @@ impl Workbench {
             TreeView::Geometry => self.geometry.as_mut(),
             TreeView::FeModel => self.model.as_mut(),
         };
-        let response = tree::show(ui, view, shown, &mut self.tree);
+        let job = self.analysis.as_ref().map(Analysis::status);
+        let response = tree::show(ui, view, shown, job, &mut self.tree);
+        self.tree_response(ui.ctx(), view, response);
+    }
+
+    /// Acts on what the user picked in the tree or in a part's context menu in the 3D view.
+    fn tree_response(&mut self, ctx: &egui::Context, view: TreeView, response: TreeResponse) {
         for (index, visible) in response.visibility {
+            if let Some(part) = self.shown_mut().and_then(|m| m.parts.get_mut(index)) {
+                part.visible = visible;
+            }
             self.viewport.set_part_visible(index, visible);
         }
         if let (Some((field, component)), Some(results)) =
@@ -722,7 +812,21 @@ impl Workbench {
             results.component = component;
             self.results_changed = true;
         }
-        if let Some(item) = response.open {
+        if let Some(TreeItem::Part(index)) = response.open {
+            let name = self.shown().and_then(|m| m.parts.get(index));
+            self.part_name = (name.map(|p| p.name.clone()).unwrap_or_default(), None);
+            self.dialog = Some(TreeItem::Part(index));
+        } else if let Some(TreeItem::ResultFieldOutput(field)) = response.open {
+            self.edit_field_output(field);
+        } else if let Some(TreeItem::HistorySet(set)) = response.open {
+            self.edit_history_output(set);
+        } else if let Some(TreeItem::HistoryComponent(set, field, component)) = response.open {
+            self.history_table = Some(HistoryTable {
+                set,
+                field,
+                component,
+            });
+        } else if let Some(item) = response.open {
             let model = self.model.as_ref().filter(|_| view != TreeView::Results);
             match model.and_then(|m| Editor::edit(&item, &m.fe, &m.mesh)) {
                 Some(editor) => self.editor = Some(editor),
@@ -732,7 +836,11 @@ impl Workbench {
         if let Some(kind) = response.create {
             self.create(kind);
         }
-        if let (Some(item), Some(model)) = (response.delete, self.model.as_mut())
+        if let Some(TreeItem::ResultFieldOutput(field)) = response.delete {
+            self.delete_field_output(field);
+        } else if let Some(TreeItem::HistorySet(set)) = response.delete {
+            self.delete_history_output(set);
+        } else if let (Some(item), Some(model)) = (response.delete, self.model.as_mut())
             && crate::setup::delete(&mut model.fe, &item)
         {
             self.tree.selected = None;
@@ -748,7 +856,7 @@ impl Workbench {
             self.open_mesh_setup();
         }
         if response.generate_mesh {
-            self.generate_mesh(ui.ctx());
+            self.generate_mesh(ctx);
         }
     }
 
@@ -782,9 +890,27 @@ impl Workbench {
         self.shown_mut()?.results.as_mut()
     }
 
-    /// Whether clicks in the 3D view pick for an open dialog; only on the FE model.
+    /// Whether clicks in the 3D view pick for an open dialog: an item dialog of the FE model
+    /// or a history output dialog of the results.
     fn picking(&self) -> bool {
-        self.tree_view == TreeView::FeModel && self.editor.as_ref().is_some_and(Editor::picks)
+        match self.tree_view {
+            TreeView::Results => self
+                .history_dialog
+                .as_ref()
+                .is_some_and(HistoryOutputDialog::picks),
+            TreeView::FeModel => self.editor.as_ref().is_some_and(Editor::picks),
+            TreeView::Geometry => false,
+        }
+    }
+
+    /// The results shown on the Results tab.
+    fn shown_results_view(&self) -> Option<&ResultsView> {
+        self.results.get(self.current_result)?.results.as_ref()
+    }
+
+    fn close_history_windows(&mut self) {
+        self.history_dialog = None;
+        self.history_table = None;
     }
 
     /// Switches the tree tab. The Results tab is a workspace of its own, as in PrePoMax: the
@@ -831,6 +957,8 @@ impl Workbench {
                 ));
             }
             self.dialog = None;
+            self.field_output_dialog = None;
+            self.close_history_windows();
             self.viewport.labels = Default::default();
             self.results_changed = true;
         }
@@ -852,6 +980,8 @@ impl Workbench {
         self.current_result = self
             .current_result
             .min(self.results.len().saturating_sub(1));
+        self.field_output_dialog = None;
+        self.close_history_windows();
         if self.tree_view == TreeView::Results {
             self.dialog = None;
             self.tree.selected = None;
@@ -879,6 +1009,11 @@ impl Workbench {
     /// The results row of the tool bar: PrePoMax's Result box with all opened results
     /// files, then the controls of the shown result.
     fn results_tool_bar(&mut self, ui: &mut egui::Ui) {
+        let enabled = self.tree_view == TreeView::Results && !self.results.is_empty();
+        ui.add_enabled_ui(enabled, |ui| self.results_tool_bar_row(ui, enabled));
+    }
+
+    fn results_tool_bar_row(&mut self, ui: &mut egui::Ui, enabled: bool) {
         ui.horizontal(|ui| {
             ui.label("Ergebnis");
             let mut selected = self.current_result;
@@ -899,15 +1034,34 @@ impl Workbench {
                 .on_hover_text(current.unwrap_or_default());
             self.select_result(selected);
             ui.separator();
-            if let Some(view) = self.shown_results_mut()
-                && results_tool_bar(ui, view)
-            {
+            // Greyed out, the row shows the current results file, or empty controls.
+            let mut placeholder = None;
+            let view = match self.results.get_mut(self.current_result) {
+                Some(model) => model.results.as_mut(),
+                None => None,
+            }
+            .unwrap_or_else(|| placeholder.insert(ResultsView::new(Vec::new(), None)));
+            if results_tool_bar(ui, view) && enabled {
                 self.results_changed = true;
             }
         });
     }
 
     fn create(&mut self, kind: NewItem) {
+        if kind == NewItem::ResultHistoryOutput {
+            if let Some(view) = self.shown_results_view() {
+                self.history_dialog = Some(HistoryOutputDialog::create(view));
+            }
+            return;
+        }
+        if kind == NewItem::ResultFieldOutput {
+            if let Some(model) = self.results.get(self.current_result)
+                && let Some(view) = &model.results
+            {
+                self.field_output_dialog = Some(FieldOutputDialog::create(view, &model.mesh));
+            }
+            return;
+        }
         if let Some(model) = self.setup_model() {
             self.editor = Editor::create(kind, &model.fe);
             self.set_tree_view(TreeView::FeModel);
@@ -1155,6 +1309,10 @@ impl Workbench {
         if self.analysis.as_ref().is_some_and(Analysis::is_running) {
             return;
         }
+        if self.setup_model().is_none() {
+            return;
+        }
+        let default_solver = self.settings.solver.default_solver();
         let Some(model) = self.setup_model() else {
             return;
         };
@@ -1163,7 +1321,7 @@ impl Workbench {
                 .push("Das Modell hat noch kein Netz: Netz > Netz erzeugen".into());
             return;
         }
-        match Analysis::start(&self.settings.solver, model) {
+        match Analysis::start(&self.settings.solver, model, default_solver) {
             Ok(analysis) => {
                 self.output.push(format!(
                     "Analyse gestartet: {}",
@@ -1234,11 +1392,17 @@ impl Workbench {
 
     /// Writes the input file of the set-up model to a file the user picks.
     fn export_inp(&mut self) {
+        if self.setup_model().is_none() {
+            return;
+        }
+        let default_solver = self.settings.solver.default_solver();
         let Some(model) = self.setup_model() else {
             return;
         };
         let heading = format!("prepolix: {}", model.file_name());
-        let text = match plx_io::inp::write_inp(&model.mesh, &model.fe, &heading) {
+        let mut fe = model.fe.clone();
+        fe.resolve_default_solver(default_solver);
+        let text = match plx_io::inp::write_inp(&model.mesh, &fe, &heading) {
             Ok(text) => text,
             Err(error) => {
                 self.output.push(format!("Export nicht möglich: {error}"));
@@ -1258,9 +1422,52 @@ impl Workbench {
         }
     }
 
-    /// A click in the 3D view picks for the open dialog.
+    /// A click in the 3D view picks for the open dialog. Without one, a click on a part
+    /// selects it in the tree, as in PrePoMax, and a click into empty space clears the tree
+    /// selection and with it the highlighted region.
     fn click(&mut self, click: Click) {
+        if let Some(dialog) = &mut self.section_dialog
+            && dialog.picks()
+        {
+            let model = match self.tree_view {
+                TreeView::Results => self.results.get(self.current_result),
+                TreeView::Geometry => self.geometry.as_ref(),
+                TreeView::FeModel => self.model.as_ref(),
+            };
+            if let Some(model) = model {
+                let hit = model.pick(click.origin, click.direction);
+                dialog.click(
+                    model,
+                    hit.as_ref().map(|h| (h, click.precision_at(h.point))),
+                );
+            }
+            return;
+        }
         if !self.picking() {
+            let hit = self
+                .shown()
+                .and_then(|model| model.pick(click.origin, click.direction));
+            match hit {
+                Some(hit) => self.select_part(hit.part),
+                // On the Results tab the tree shows the current field, which stays.
+                None if self.tree_view != TreeView::Results => self.tree.selected = None,
+                None if matches!(self.tree.selected, Some((_, TreeItem::Part(_)))) => {
+                    self.tree.selected = None;
+                }
+                None => {}
+            }
+            return;
+        }
+        if self.tree_view == TreeView::Results {
+            if let (Some(dialog), Some(model)) = (
+                &mut self.history_dialog,
+                self.results.get(self.current_result),
+            ) {
+                let hit = model.pick(click.origin, click.direction);
+                let pick = hit.as_ref().map(|hit| (hit, click.precision_at(hit.point)));
+                let operation = Operation::from_modifiers(click.shift, click.ctrl);
+                dialog.click(model, pick, operation);
+            }
             return;
         }
         let (Some(editor), Some(model)) = (&mut self.editor, &self.model) else {
@@ -1275,8 +1482,62 @@ impl Workbench {
         );
     }
 
+    /// Selects a part clicked in the 3D view in the tree shown, the FE model's on the
+    /// Geometry tab, which has no mesh parts.
+    fn select_part(&mut self, index: usize) {
+        let view = match self.tree_view {
+            TreeView::Results => TreeView::Results,
+            _ => TreeView::FeModel,
+        };
+        self.tree.selected = Some((view, TreeItem::Part(index)));
+        self.tree.reveal = true;
+    }
+
+    /// The context menu of the 3D view: on a part it starts with the part's menu from the
+    /// tree, so it makes no difference where the part is right-clicked.
+    fn viewport_menu(&mut self, response: &egui::Response, right_click: Option<Click>) {
+        if let Some(click) = right_click {
+            self.menu_part = None;
+            if !self.picking() {
+                self.menu_part = (self.shown())
+                    .and_then(|model| model.pick(click.origin, click.direction))
+                    .map(|hit| hit.part);
+            }
+            if let Some(part) = self.menu_part {
+                self.select_part(part);
+            }
+        }
+        let part = (self.menu_part)
+            .and_then(|index| Some((index, self.shown()?.parts.get(index)?.visible)));
+        let mut tree_response = TreeResponse::default();
+        let mut command = None;
+        response.context_menu(|ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            if let Some((index, visible)) = part {
+                tree::part_menu(ui, index, visible, &mut tree_response);
+                ui.separator();
+            }
+            command = crate::viewport::view_menu(ui);
+        });
+        if command.is_some() {
+            self.view_command = command;
+        }
+        let view = self.tree_view;
+        self.tree_response(&response.ctx, view, tree_response);
+    }
+
     fn box_select(&mut self, area: &BoxSelect) {
-        if !self.picking() {
+        if !self.picking() || self.section_picks() {
+            return;
+        }
+        let operation = Operation::from_modifiers(area.shift, area.ctrl);
+        if self.tree_view == TreeView::Results {
+            if let (Some(dialog), Some(model)) = (
+                &mut self.history_dialog,
+                self.results.get(self.current_result),
+            ) {
+                dialog.box_select(model, area, operation);
+            }
             return;
         }
         if let (Some(editor), Some(model)) = (&mut self.editor, &self.model) {
@@ -1290,7 +1551,29 @@ impl Workbench {
 
     /// Shows what a click would select where the mouse rests.
     fn hover(&mut self, hover: Option<Click>) {
+        if let (Some(dialog), Some(model)) = (&self.section_dialog, self.shown())
+            && dialog.picks()
+        {
+            self.viewport.preview = hover
+                .and_then(|click| {
+                    let hit = model.pick(click.origin, click.direction)?;
+                    Some(dialog.preview(model, &hit, click.precision_at(hit.point)))
+                })
+                .unwrap_or_default();
+            return;
+        }
         let hover = hover.filter(|_| self.picking());
+        if self.tree_view == TreeView::Results {
+            let shown = (self.history_dialog.as_ref()).zip(self.results.get(self.current_result));
+            self.viewport.preview = match (hover, shown) {
+                (Some(click), Some((dialog, model))) => model
+                    .pick(click.origin, click.direction)
+                    .map(|hit| dialog.preview(model, &hit, click.precision_at(hit.point)))
+                    .unwrap_or_default(),
+                _ => Default::default(),
+            };
+            return;
+        }
         let preview = match (hover, &self.editor, &self.model) {
             (Some(click), Some(editor), Some(model)) => model
                 .pick(click.origin, click.direction)
@@ -1299,6 +1582,179 @@ impl Workbench {
             _ => Default::default(),
         };
         self.viewport.preview = preview;
+    }
+
+    /// Opens the dialog of the derived field output that computes the given field.
+    fn edit_field_output(&mut self, field: usize) {
+        let Some(model) = self.results.get(self.current_result) else {
+            return;
+        };
+        let Some(view) = &model.results else { return };
+        if let Some(index) = view.field_output_index(field) {
+            self.field_output_dialog = FieldOutputDialog::edit(view, &model.mesh, index);
+        }
+    }
+
+    fn delete_field_output(&mut self, field: usize) {
+        let Some(model) = self.results.get_mut(self.current_result) else {
+            return;
+        };
+        let Some(view) = &mut model.results else {
+            return;
+        };
+        let Some(index) = view.field_output_index(field) else {
+            return;
+        };
+        let name = view.field_outputs[index].name.clone();
+        let warnings = view.remove_field_output(index, &model.mesh);
+        self.output.push(format!("Feldausgabe {name} gelöscht"));
+        for warning in warnings {
+            self.output.push(format!("Warnung: {warning}"));
+        }
+        self.tree.selected = None;
+        self.field_output_dialog = None;
+        self.close_history_windows();
+        self.results_changed = true;
+    }
+
+    fn field_output_window(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.field_output_dialog else {
+            return;
+        };
+        let (output, next) = match dialog.show(ctx) {
+            DialogAction::Open => return,
+            DialogAction::Cancel => {
+                self.field_output_dialog = None;
+                return;
+            }
+            DialogAction::Ok { output, next } => (output, next),
+        };
+        let Some(model) = self.results.get_mut(self.current_result) else {
+            self.field_output_dialog = None;
+            return;
+        };
+        let Some(view) = &mut model.results else {
+            return;
+        };
+        let name = output.name.clone();
+        let edit = dialog.edit;
+        match view.set_field_output(edit, output, &model.mesh) {
+            Ok(warnings) => {
+                let verb = if edit.is_some() {
+                    "geändert"
+                } else {
+                    "erstellt"
+                };
+                self.output.push(format!("Feldausgabe {name} {verb}"));
+                for warning in warnings {
+                    self.output.push(format!("Warnung: {warning}"));
+                }
+                // PrePoMax shows a new field output right away.
+                if edit.is_none()
+                    && let Some(field) = (view.current_increment())
+                        .and_then(|i| i.fields.iter().position(|f| f.name == name))
+                {
+                    view.field = field;
+                    view.component = 0;
+                    self.tree.selected = Some((TreeView::Results, TreeItem::Component(field, 0)));
+                }
+                self.results_changed = true;
+                if next {
+                    dialog.next(&name);
+                } else {
+                    self.field_output_dialog = None;
+                }
+            }
+            Err(error) => dialog.error = Some(error),
+        }
+    }
+
+    fn edit_history_output(&mut self, set: usize) {
+        let Some(model) = self.results.get(self.current_result) else {
+            return;
+        };
+        let Some(view) = &model.results else { return };
+        if let Some(index) = view.history_output_index(set) {
+            self.history_dialog = HistoryOutputDialog::edit(view, &model.mesh, index);
+        }
+    }
+
+    fn delete_history_output(&mut self, set: usize) {
+        let Some(model) = self.results.get_mut(self.current_result) else {
+            return;
+        };
+        let Some(view) = &mut model.results else {
+            return;
+        };
+        let Some(index) = view.history_output_index(set) else {
+            return;
+        };
+        let name = view.history_outputs[index].name.clone();
+        let warnings = view.remove_history_output(index, &model.mesh);
+        self.output.push(format!("History-Ausgabe {name} gelöscht"));
+        for warning in warnings {
+            self.output.push(format!("Warnung: {warning}"));
+        }
+        self.tree.selected = None;
+        self.close_history_windows();
+    }
+
+    fn history_output_window(&mut self, ctx: &egui::Context) {
+        let (Some(dialog), Some(model)) = (
+            &mut self.history_dialog,
+            self.results.get_mut(self.current_result),
+        ) else {
+            return;
+        };
+        let (output, next) = match dialog.show(ctx, model) {
+            DialogAction::Open => return,
+            DialogAction::Cancel => {
+                self.history_dialog = None;
+                return;
+            }
+            DialogAction::Ok { output, next } => (output, next),
+        };
+        let Some(view) = &mut model.results else {
+            return;
+        };
+        let edit = dialog.edit;
+        match view.set_history_output(edit, output.clone(), &model.mesh) {
+            Ok(warnings) => {
+                let verb = if edit.is_some() {
+                    "geändert"
+                } else {
+                    "erstellt"
+                };
+                self.output
+                    .push(format!("History-Ausgabe {} {verb}", output.name));
+                for warning in warnings {
+                    self.output.push(format!("Warnung: {warning}"));
+                }
+                // The table may show another component now.
+                self.history_table = None;
+                if next {
+                    dialog.next(&output, view);
+                } else {
+                    self.history_dialog = None;
+                }
+            }
+            Err(error) => dialog.error = Some(error),
+        }
+    }
+
+    fn history_table_window(&mut self, ctx: &egui::Context) {
+        let (Some(table), Some(view)) = (self.history_table, self.shown_results_view()) else {
+            return;
+        };
+        let kind = view
+            .current_increment()
+            .map_or(plx_results::AnalysisKind::Static, |i| i.kind);
+        let unit = (view.history.get(table.set))
+            .and_then(|set| view.history_outputs.iter().find(|o| o.name == set.name))
+            .and_then(|o| o.unit());
+        if !table.show(ctx, &view.history, kind, unit) {
+            self.history_table = None;
+        }
     }
 
     fn editor_window(&mut self, ctx: &egui::Context) {
@@ -1320,12 +1776,34 @@ impl Workbench {
         }
     }
 
-    /// Highlights the region of the open dialog, or of the item selected in the tree.
+    /// Highlights the region of the open dialog, or of the item selected in the tree; a
+    /// selected part is outlined in the FE model and in the results alike.
     fn update_highlight(&mut self) {
+        let on_results = self.tree_view == TreeView::Results;
+        // The current results show the region of an open history output dialog, else the
+        // part selected in the Results tree.
+        let current = self.current_result;
+        for (index, model) in self.results.iter_mut().enumerate() {
+            let dialog = (self.history_dialog.as_ref()).filter(|_| on_results && index == current);
+            let highlight = match (dialog, &self.tree.selected) {
+                (Some(dialog), _) => dialog.highlight(model),
+                (None, Some((TreeView::Results, TreeItem::Part(part)))) if index == current => {
+                    Highlight::part(*part)
+                }
+                _ => Highlight::default(),
+            };
+            if highlight != model.highlight {
+                model.highlight = highlight;
+                self.results_changed |= on_results && index == current;
+            }
+        }
         let Some(model) = &mut self.model else {
             return;
         };
-        let highlight = if let Some(editor) = &self.editor {
+        let highlight = if let Some(dialog) = &self.section_dialog {
+            self.highlighted = None;
+            dialog.highlight()
+        } else if let Some(editor) = &self.editor {
             editor.highlight(model)
         } else {
             if self.highlighted == self.tree.selected {
@@ -1333,6 +1811,7 @@ impl Workbench {
             }
             self.highlighted = self.tree.selected.clone();
             match &self.tree.selected {
+                Some((TreeView::FeModel, TreeItem::Part(part))) => Highlight::part(*part),
                 Some((TreeView::FeModel, item)) => crate::setup::item_region(&model.fe, item)
                     .map(|region| crate::setup::region_highlight(model, region))
                     .unwrap_or_default(),
@@ -1341,8 +1820,84 @@ impl Workbench {
         };
         if highlight != model.highlight {
             model.highlight = highlight;
-            self.results_changed = true;
+            self.results_changed |= !on_results;
         }
+    }
+
+    fn section_picks(&self) -> bool {
+        self.section_dialog
+            .as_ref()
+            .is_some_and(SectionDialog::picks)
+    }
+
+    /// Opens the section view dialog on the current section, or on a new one facing away
+    /// from the viewer.
+    fn open_section_dialog(&mut self) {
+        if self.section_dialog.is_some() {
+            return;
+        }
+        if let Some(model) = self.shown() {
+            let forward = self.viewport.camera().forward().as_dvec3();
+            let dialog = SectionDialog::new(self.section.clone(), model, forward);
+            self.section_dialog = Some(dialog);
+        }
+    }
+
+    fn section_window(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.section_dialog.take() else {
+            return;
+        };
+        let Some(model) = self.shown() else {
+            return;
+        };
+        match dialog.show(ctx, model) {
+            SectionResult::Open => {
+                self.section_dialog = Some(dialog);
+                return;
+            }
+            SectionResult::Ok => self.section = Some(dialog.draft),
+            SectionResult::Cancel => self.section = dialog.before,
+            SectionResult::Disable => self.section = None,
+        }
+        self.viewport.preview = Default::default();
+    }
+
+    /// Cuts the scene at the section plane being edited or shown, when it or the scene
+    /// changed.
+    fn update_section(&mut self) {
+        let wanted = self
+            .section_dialog
+            .as_ref()
+            .map(|d| &d.draft)
+            .or(self.section.as_ref())
+            .map(|s| (self.viewport.scene_version(), s.clone()));
+        if wanted == self.section_shown {
+            return;
+        }
+        // Only the model in view is cut; picking in the others sees everything.
+        let models = self.model.iter_mut().chain(&mut self.geometry);
+        for model in models.chain(&mut self.results) {
+            model.clip = None;
+        }
+        let shown = match self.tree_view {
+            TreeView::Results => self.results.get_mut(self.current_result),
+            TreeView::Geometry => self.geometry.as_mut(),
+            TreeView::FeModel => self.model.as_mut(),
+        };
+        match (shown, &wanted) {
+            (Some(model), Some((_, section))) => {
+                // The model origin is the centre of its bounds, where a principal plane's
+                // manipulator sits.
+                let anchor = section.anchor(model.origin());
+                let normal = section.normal();
+                let clip = plx_render::clip_plane(anchor, normal, model.origin());
+                let faces = model.section_meshes(anchor, normal, section.lighten);
+                model.clip = Some(clip);
+                self.viewport.set_section(Some((clip, &faces)));
+            }
+            _ => self.viewport.set_section(None),
+        }
+        self.section_shown = wanted;
     }
 
     fn settings_window(&mut self, ctx: &egui::Context) {
@@ -1378,7 +1933,18 @@ impl Workbench {
         };
         let mut open = true;
         let mut close = false;
-        egui::Window::new(properties::title(self.shown(), &item))
+        let mut accept = false;
+        let part = match item {
+            TreeItem::Part(index) => Some(index),
+            _ => None,
+        };
+        // The model by its fields, so the window can edit the typed name alongside.
+        let shown = match self.tree_view {
+            TreeView::Results => self.results.get(self.current_result),
+            TreeView::Geometry => self.geometry.as_ref(),
+            TreeView::FeModel => self.model.as_ref(),
+        };
+        egui::Window::new(properties::title(shown, &item))
             .id(egui::Id::new("properties window"))
             .open(&mut open)
             .collapsible(false)
@@ -1386,12 +1952,35 @@ impl Workbench {
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
-                properties::show(ui, self.shown(), &item);
+                let (name, error) = &mut self.part_name;
+                let name = part.map(|_| name);
+                properties::show(ui, shown, &item, name);
+                if let Some(error) = error.as_ref().filter(|_| part.is_some()) {
+                    ui.add_space(4.0);
+                    ui.colored_label(egui::Color32::from_rgb(200, 0, 0), error);
+                }
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    close = ui.button("Schließen").clicked();
+                    if part.is_some() {
+                        close = ui.button("Abbrechen").clicked();
+                        accept = ui.button("OK").clicked();
+                    } else {
+                        close = ui.button("Schließen").clicked();
+                    }
                 });
             });
+        accept |= part.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Enter));
+        if let (true, Some(index)) = (accept, part) {
+            let name = self.part_name.0.clone();
+            let renamed = match self.shown_mut() {
+                Some(model) => model.rename_part(index, &name),
+                None => Ok(()),
+            };
+            match renamed {
+                Ok(()) => close = true,
+                Err(error) => self.part_name.1 = Some(error),
+            }
+        }
         if !open || close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.dialog = None;
         }
@@ -1409,6 +1998,8 @@ impl Workbench {
         self.close_results(true);
         self.tree.selected = None;
         self.dialog = None;
+        self.section = None;
+        self.section_dialog = None;
         self.editor = None;
         self.highlighted = None;
         self.parked_camera = None;
@@ -1515,7 +2106,6 @@ impl Workbench {
         let (graphics, post) = (&self.settings.graphics, &self.settings.post);
         let marker = |label: &str, extreme: Option<(usize, f32)>| {
             let (index, value) = extreme?;
-            let value = value * view.map_or(1.0, ResultsView::amplitude);
             Some(Marker {
                 position: model.node_position(index)?,
                 text: format!(

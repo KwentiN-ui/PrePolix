@@ -10,6 +10,10 @@ struct Globals {
     edge: vec4<f32>,
     // x: number of contour bands, 0 to show part colours.
     contour: vec4<f32>,
+    // Section view plane: unit normal in xyz, normal · point in w.
+    clip: vec4<f32>,
+    // x: 1 while the section view is on, y: tolerance behind the plane in world units.
+    clip_options: vec4<f32>,
     palette: array<vec4<f32>, 24>,
 };
 
@@ -49,7 +53,14 @@ struct SurfaceOut {
     @location(0) normal: vec3<f32>,
     @location(1) color: vec3<f32>,
     @location(2) scalar: f32,
+    @location(3) world: vec3<f32>,
 };
+
+// Everything on the cut-off side of the section plane is not drawn.
+fn clipped(world: vec3<f32>) -> bool {
+    return globals.clip_options.x > 0.0
+        && dot(globals.clip.xyz, world) - globals.clip.w < -globals.clip_options.y;
+}
 
 // Colour without a result value: light grey, like PrePoMax's NaN colour.
 const NO_VALUE_COLOR: vec3<f32> = vec3<f32>(0.75, 0.75, 0.75);
@@ -68,6 +79,7 @@ fn vs_surface(in: SurfaceIn) -> SurfaceOut {
     out.normal = in.normal;
     out.color = in.color;
     out.scalar = in.scalar;
+    out.world = in.position;
     return out;
 }
 
@@ -83,6 +95,9 @@ fn contour_color(t: f32) -> vec3<f32> {
 
 @fragment
 fn fs_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if clipped(in.world) {
+        discard;
+    }
     var color = in.color;
     if globals.contour.x > 0.0 {
         color = contour_color(in.scalar);
@@ -108,6 +123,7 @@ fn fs_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0
 struct EdgeOut {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) world: vec3<f32>,
 };
 
 // Edges lie exactly on surface triangles; pulling them slightly towards the viewer keeps them from
@@ -120,10 +136,52 @@ fn vs_edge(in: SurfaceIn) -> EdgeOut {
     out.position.z -= globals.edge.x * out.position.w;
     // Line vertices carry their opacity in the scalar slot.
     out.color = vec4<f32>(in.color, in.scalar);
+    out.world = in.position;
+    return out;
+}
+
+// One corner of the quad of a wide line segment from `a` to `b`; corners 0 and 2 lie at `a`,
+// 1 and 3 at `b`, on either side of the line, drawn as triangles 0-1-2 and 2-1-3.
+@vertex
+fn vs_wide_edge(
+    @builtin(vertex_index) index: u32,
+    @location(0) a: vec3<f32>,
+    @location(1) color: vec3<f32>,
+    @location(2) b: vec3<f32>,
+) -> EdgeOut {
+    let corner = array<u32, 6>(0u, 1u, 2u, 2u, 1u, 3u)[index];
+    var ends = array<vec4<f32>, 2>(
+        globals.view_proj * vec4<f32>(a, 1.0),
+        globals.view_proj * vec4<f32>(b, 1.0),
+    );
+    let size = globals.edge.yz;
+    let screen_a = ends[0].xy / ends[0].w * size;
+    let screen_b = ends[1].xy / ends[1].w * size;
+    var along = screen_b - screen_a;
+    if length(along) < 1e-6 {
+        along = vec2<f32>(1.0, 0.0);
+    }
+    along = normalize(along);
+    let across = vec2<f32>(-along.y, along.x);
+    let end = corner & 1u;
+    let side = f32(corner >> 1u) * 2.0 - 1.0;
+    let forward = f32(end) * 2.0 - 1.0;
+    // Half the width to each side and beyond each end, so that segments join without gaps;
+    // NDC spans two units across the target.
+    let offset = (across * side + along * forward) * globals.edge.w / size;
+    var out: EdgeOut;
+    out.position = ends[end];
+    out.position.z -= globals.edge.x * out.position.w;
+    out.position = vec4<f32>(out.position.xy + offset * out.position.w, out.position.zw);
+    out.color = vec4<f32>(color, 1.0);
+    out.world = select(a, b, end == 1u);
     return out;
 }
 
 @fragment
 fn fs_edge(in: EdgeOut) -> @location(0) vec4<f32> {
+    if clipped(in.world) {
+        discard;
+    }
     return in.color;
 }

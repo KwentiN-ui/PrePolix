@@ -666,17 +666,21 @@ fn static_step(settings: &StaticStep) -> (String, String) {
         let _ = write!(header, ", Inc={}", settings.max_increments);
     }
     header.push('\n');
+    let mut keyword = String::from("*Static");
+    if let Some(solver) = settings.solver.keyword() {
+        let _ = write!(keyword, ", Solver={solver}");
+    }
     let procedure = match settings.incrementation {
-        Incrementation::Default => "*Static\n".to_owned(),
+        Incrementation::Default => format!("{keyword}\n"),
         Incrementation::Automatic => format!(
-            "*Static\n{}, {}, {}, {}\n",
+            "{keyword}\n{}, {}, {}, {}\n",
             number(settings.initial_increment),
             number(settings.time_period),
             number(settings.min_increment),
             number(settings.max_increment)
         ),
         Incrementation::Direct => format!(
-            "*Static, Direct\n{}, {}\n",
+            "{keyword}, Direct\n{}, {}\n",
             number(settings.initial_increment),
             number(settings.time_period)
         ),

@@ -2,8 +2,9 @@ use egui::{Color32, PointerButton, Pos2, Rect, Sense, Ui, pos2};
 use egui_wgpu::RenderState;
 use glam::{Mat4, Vec2, Vec3};
 use plx_render::wgpu::FilterMode;
-use plx_render::{Camera, DisplayOptions, RenderMesh, StandardView, ViewportRenderer};
+use plx_render::{Camera, ClipPlane, DisplayOptions, RenderMesh, StandardView, ViewportRenderer};
 
+use crate::gizmo::{GizmoDrag, GizmoState, PlaneGizmo};
 use crate::overlay::{self, LabelOffsets, Overlay};
 
 const ZOOM_PER_SCROLL_POINT: f32 = 0.002;
@@ -34,6 +35,11 @@ pub struct Viewport {
     hovered: Option<Pos2>,
     /// Where the view was drawn last, in points.
     pub rect: Rect,
+    /// The section plane being edited, with its manipulator.
+    pub gizmo: Option<PlaneGizmo>,
+    gizmo_state: GizmoState,
+    /// Counts scene replacements; section faces have to be rebuilt for each new scene.
+    scene_version: u64,
 }
 
 /// Lines and points in render coordinates drawn as the hover preview.
@@ -105,6 +111,38 @@ pub struct ViewportResponse {
     pub box_select: Option<BoxSelect>,
     /// The mouse came to rest over the scene (`Some(ray)`) or left it (`Some(None)`).
     pub hover: Option<Option<Click>>,
+    /// A right click, which opens the context menu; the owner adds what was clicked on.
+    pub secondary_click: Option<Click>,
+    /// The view's response, for the owner's context menu.
+    pub response: Option<egui::Response>,
+    /// The section plane manipulator was dragged.
+    pub gizmo: Option<GizmoDrag>,
+}
+
+/// The view entries of the 3D view's context menu.
+pub fn view_menu(ui: &mut Ui) -> Option<ViewCommand> {
+    let mut command = None;
+    if ui.button("Einpassen").clicked() {
+        command = Some(ViewCommand::Fit);
+    }
+    if ui.button("Vertikal").clicked() {
+        command = Some(ViewCommand::Vertical);
+    }
+    ui.menu_button("Achse senkrecht", |ui| {
+        for axis in Axis::ALL {
+            if ui.button(axis.label()).clicked() {
+                command = Some(ViewCommand::VerticalAxis(axis));
+            }
+        }
+    });
+    ui.menu_button("Isometrisch, Achse oben", |ui| {
+        for axis in Axis::ALL {
+            if ui.button(axis.label()).clicked() {
+                command = Some(ViewCommand::IsometricAxis(axis));
+            }
+        }
+    });
+    command
 }
 
 /// Camera requests from toolbar, menu or tree, applied by the owner of the model bounds.
@@ -114,8 +152,10 @@ pub enum ViewCommand {
     View(StandardView),
     /// Turns the closest global axis straight up.
     Vertical,
-    /// Turns the given global axis straight up.
+    /// Turns the given global axis straight up, looking square onto a global plane.
     VerticalAxis(Axis),
+    /// Isometric view with the given global axis up.
+    IsometricAxis(Axis),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,11 +207,39 @@ impl Viewport {
             resting: None,
             hovered: None,
             rect: Rect::NOTHING,
+            gizmo: None,
+            gizmo_state: GizmoState::default(),
+            scene_version: 0,
+        }
+    }
+
+    pub fn camera(&self) -> &Camera {
+        &self.camera
+    }
+
+    /// Cuts the scene at the section plane and shows the section faces of the parts, or shows
+    /// the whole scene again.
+    pub fn set_section(&mut self, section: Option<(ClipPlane, &[RenderMesh])>) {
+        let device = &self.render_state.device;
+        match section {
+            Some((clip, faces)) => {
+                self.renderer.set_clip_plane(Some(clip));
+                self.renderer.set_sections(device, faces);
+            }
+            None => {
+                self.renderer.set_clip_plane(None);
+                self.renderer.set_sections(device, &[]);
+            }
         }
     }
 
     pub fn set_parts(&mut self, parts: &[RenderMesh]) {
         self.renderer.set_parts(&self.render_state.device, parts);
+        self.scene_version += 1;
+    }
+
+    pub fn scene_version(&self) -> u64 {
+        self.scene_version
     }
 
     /// Exchanges the camera, so the FE model and the results each keep their own view.
@@ -193,6 +261,7 @@ impl Viewport {
             ViewCommand::View(view) => self.camera.set_view(view),
             ViewCommand::Vertical => self.camera.set_vertical_view(),
             ViewCommand::VerticalAxis(axis) => self.camera.set_vertical_axis(axis.vector()),
+            ViewCommand::IsometricAxis(axis) => self.camera.set_isometric_axis(axis.vector()),
         }
     }
 
@@ -202,6 +271,11 @@ impl Viewport {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         self.rect = rect;
         let delta = response.drag_delta();
+        // The section plane manipulator takes left drags that start on one of its handles.
+        result.gizmo =
+            self.gizmo_state
+                .interact(self.gizmo.as_ref(), &self.camera, rect, &response);
+        let free = !self.gizmo_state.dragging();
         let modifiers = ui.input(|i| i.modifiers);
         let ctrl = modifiers.ctrl || modifiers.command;
         // PrePoMax's mouse: the middle button rotates, with Shift it pans and with Ctrl it zooms;
@@ -216,7 +290,7 @@ impl Viewport {
                 self.camera.orbit(delta.x, delta.y);
             }
         }
-        if self.selecting && response.drag_started_by(PointerButton::Primary) {
+        if free && self.selecting && response.drag_started_by(PointerButton::Primary) {
             self.box_start = response.interact_pointer_pos();
         }
         if !self.selecting {
@@ -239,24 +313,15 @@ impl Viewport {
                 );
             }
         }
-        response.context_menu(|ui| {
-            if ui.button("Einpassen").clicked() {
-                result.command = Some(ViewCommand::Fit);
-            }
-            if ui.button("Vertikal").clicked() {
-                result.command = Some(ViewCommand::Vertical);
-            }
-            ui.menu_button("Achse senkrecht", |ui| {
-                for axis in Axis::ALL {
-                    if ui.button(axis.label()).clicked() {
-                        result.command = Some(ViewCommand::VerticalAxis(axis));
-                    }
-                }
-            });
-        });
+        if response.secondary_clicked()
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            result.secondary_click = Some(self.click_at(rect, pointer, modifiers));
+        }
         if response.double_clicked() {
             result.command = Some(ViewCommand::Fit);
         } else if response.clicked()
+            && !self.gizmo_state.hovered()
             && let Some(pointer) = response.interact_pointer_pos()
         {
             result.click = Some(self.click_at(rect, pointer, modifiers));
@@ -290,6 +355,7 @@ impl Viewport {
             }
         }
         result.hover = self.hover(ui, rect, &response);
+        result.response = Some(response);
 
         let pixels_per_point = ui.ctx().pixels_per_point();
         let width = (rect.width() * pixels_per_point).round() as u32;
@@ -316,12 +382,28 @@ impl Viewport {
             Color32::WHITE,
         );
         overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels);
+        if let Some(gizmo) = &self.gizmo {
+            self.gizmo_state.draw(&painter, gizmo, &self.camera, rect);
+        }
         if self.selecting {
             let to_screen = |p: Vec3| overlay::project(&self.camera, rect, p);
-            let stroke = egui::Stroke::new(2.0, PREVIEW_COLOR);
+            // One mesh of plain quads: large patches have tens of thousands of edges, which
+            // egui's anti-aliased line segments would make slow to draw every frame.
+            let mut lines = egui::Mesh::default();
             for [a, b] in &self.preview.lines {
-                painter.line_segment([to_screen(*a), to_screen(*b)], stroke);
+                let (a, b) = (to_screen(*a), to_screen(*b));
+                if a == b {
+                    continue;
+                }
+                let side = (b - a).normalized().rot90();
+                let index = lines.vertices.len() as u32;
+                for corner in [a + side, b + side, b - side, a - side] {
+                    lines.colored_vertex(corner, PREVIEW_COLOR);
+                }
+                lines.add_triangle(index, index + 1, index + 2);
+                lines.add_triangle(index, index + 2, index + 3);
             }
+            painter.add(lines);
             for &point in &self.preview.points {
                 painter.rect_filled(
                     Rect::from_center_size(to_screen(point), egui::vec2(7.0, 7.0)),
@@ -381,9 +463,11 @@ impl Viewport {
 
     /// Reports the pointer once it has rested over the scene, and when it leaves.
     fn hover(&mut self, ui: &Ui, rect: Rect, response: &egui::Response) -> Option<Option<Click>> {
+        // No preview while a button is held, e.g. while the camera turns.
+        let pressed = ui.input(|i| i.pointer.any_down());
         let pointer = response
             .hover_pos()
-            .filter(|_| self.selecting && self.box_start.is_none());
+            .filter(|_| self.selecting && self.box_start.is_none() && !pressed);
         let Some(pointer) = pointer else {
             self.resting = None;
             return self.hovered.take().map(|_| None);

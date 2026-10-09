@@ -8,10 +8,12 @@
 mod geometry;
 pub mod library;
 mod region;
+mod validity;
 
 pub use geometry::{Geometry, MeshSetup};
 pub use library::MaterialLibrary;
 pub use region::Region;
+pub use validity::{Invalid, ModelItem};
 
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +43,41 @@ pub struct FeModel {
     /// they appear in it. They cover what the model cannot express yet.
     #[serde(default)]
     pub user_keywords: Vec<UserKeyword>,
+}
+
+impl FeModel {
+    /// Replaces [`EquationSolver::Default`] in all steps by `solver`, the solver the
+    /// installed CalculiX should use by default.
+    pub fn resolve_default_solver(&mut self, solver: EquationSolver) {
+        for step in &mut self.steps {
+            let StepKind::Static(settings) = &mut step.kind;
+            if settings.solver == EquationSolver::Default {
+                settings.solver = solver;
+            }
+        }
+    }
+
+    /// Follows a renamed part: regions on the part, or on the element set an input file
+    /// defines for it, keep pointing at it.
+    pub fn rename_part(&mut self, old: &str, new: &str) {
+        let regions = (self.sections.iter_mut().map(|s| &mut s.region)).chain(
+            self.steps.iter_mut().flat_map(|step| {
+                (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
+                    .chain(step.loads.iter_mut().map(|l| &mut l.region))
+            }),
+        );
+        for region in regions {
+            match region {
+                Region::Parts(names) => {
+                    for name in names.iter_mut().filter(|n| n.as_str() == old) {
+                        *name = new.to_string();
+                    }
+                }
+                Region::ElementSet(name) if name == old => *name = new.to_string(),
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Lines of the user's own written into the input file at a fixed place, like PrePoMax's
@@ -104,6 +141,43 @@ pub enum Incrementation {
     Direct,
 }
 
+/// Equation solver of a step (`SOLVER=`), PrePoMax's choices.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EquationSolver {
+    /// Pardiso where the CalculiX build has it, otherwise CalculiX's own default; resolved
+    /// before the input file is written, see [`FeModel::resolve_default_solver`].
+    #[default]
+    Default,
+    Pardiso,
+    Spooles,
+    PaStiX,
+    IterativeScaling,
+    IterativeCholesky,
+}
+
+impl EquationSolver {
+    pub const ALL: [EquationSolver; 6] = [
+        EquationSolver::Default,
+        EquationSolver::Pardiso,
+        EquationSolver::Spooles,
+        EquationSolver::PaStiX,
+        EquationSolver::IterativeScaling,
+        EquationSolver::IterativeCholesky,
+    ];
+
+    /// The value of `SOLVER=` in the input file; `None` leaves the choice to CalculiX.
+    pub fn keyword(self) -> Option<&'static str> {
+        match self {
+            EquationSolver::Default => None,
+            EquationSolver::Pardiso => Some("Pardiso"),
+            EquationSolver::Spooles => Some("Spooles"),
+            EquationSolver::PaStiX => Some("PaStiX"),
+            EquationSolver::IterativeScaling => Some("Iterative scaling"),
+            EquationSolver::IterativeCholesky => Some("Iterative Cholesky"),
+        }
+    }
+}
+
 /// Settings of a `*STATIC` step, with PrePoMax's defaults.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StaticStep {
@@ -116,6 +190,9 @@ pub struct StaticStep {
     pub time_period: f64,
     pub min_increment: f64,
     pub max_increment: f64,
+    /// Missing in projects saved before the solver could be chosen.
+    #[serde(default)]
+    pub solver: EquationSolver,
 }
 
 impl Default for StaticStep {
@@ -128,6 +205,7 @@ impl Default for StaticStep {
             time_period: 1.0,
             min_increment: 1e-5,
             max_increment: 1e30,
+            solver: EquationSolver::Default,
         }
     }
 }
@@ -223,6 +301,39 @@ pub fn next_name<'a>(prefix: &str, existing: impl IntoIterator<Item = &'a str>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regions_follow_renamed_parts() {
+        let mut model = FeModel::default();
+        model.sections.push(Section {
+            name: "Section-1".into(),
+            material: "Steel".into(),
+            region: Region::Parts(vec!["A".into(), "B".into()]),
+        });
+        let mut step = Step::new_static("Step-1");
+        step.boundary_conditions.push(BoundaryCondition {
+            name: "Fixed-1".into(),
+            region: Region::ElementSet("A".into()),
+            kind: BoundaryKind::Fixed,
+        });
+        step.loads.push(Load {
+            name: "Pressure-1".into(),
+            region: Region::Surface("A".into()),
+            kind: LoadKind::Pressure(1.0),
+        });
+        model.steps.push(step);
+        model.rename_part("A", "C");
+        assert_eq!(
+            model.sections[0].region,
+            Region::Parts(vec!["C".into(), "B".into()])
+        );
+        let step = &model.steps[0];
+        assert_eq!(
+            step.boundary_conditions[0].region,
+            Region::ElementSet("C".into())
+        );
+        assert_eq!(step.loads[0].region, Region::Surface("A".into()));
+    }
 
     #[test]
     fn default_names_count_up_per_kind() {

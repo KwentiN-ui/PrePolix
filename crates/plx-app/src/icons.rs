@@ -16,6 +16,8 @@ const ACCENT: Color32 = Color32::from_rgb(70, 140, 215);
 pub enum Icon {
     New,
     Open,
+    /// Import of geometry: an arrow pointing into a sheet.
+    Import,
     Save,
     Fit,
     /// Standard view; the cube face looked at is highlighted.
@@ -36,10 +38,14 @@ pub enum Icon {
     Arrow(Vec2),
     /// Camera: screenshot of the 3D view.
     Screenshot,
+    /// Half a cube with its cut face, for the section view.
+    SectionView,
 }
 
 /// Flat toolbar button in the Windows style: frame only while hovered or checked.
 pub fn button(ui: &mut Ui, icon: Icon, tooltip: &str, enabled: bool, checked: bool) -> Response {
+    // Inside a disabled area, e.g. the greyed-out results row, the icon is greyed out too.
+    let enabled = enabled && ui.is_enabled();
     let sense = if enabled {
         Sense::click()
     } else {
@@ -166,6 +172,33 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
                 OUTLINE,
             );
         }
+        Icon::Import => {
+            polygon(
+                shapes,
+                vec![
+                    p(5.5, 1.5),
+                    p(11.0, 1.5),
+                    p(14.5, 5.0),
+                    p(14.5, 14.5),
+                    p(5.5, 14.5),
+                ],
+                Color32::WHITE,
+                OUTLINE,
+            );
+            line(
+                shapes,
+                &[p(11.0, 1.5), p(11.0, 5.0), p(14.5, 5.0)],
+                1.0,
+                OUTLINE,
+            );
+            line(shapes, &[p(1.0, 9.0), p(7.0, 9.0)], 2.0, ACCENT);
+            polygon(
+                shapes,
+                vec![p(11.0, 9.0), p(6.5, 5.5), p(6.5, 12.5)],
+                ACCENT,
+                ACCENT,
+            );
+        }
         Icon::Open => {
             let back = Color32::from_rgb(230, 170, 40);
             let front = Color32::from_rgb(255, 206, 84);
@@ -246,6 +279,7 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
         Icon::View(view) => cube(shapes, r, Some(view), false),
         Icon::FeatureEdges => cube(shapes, r, None, false),
         Icon::MeshEdges => cube(shapes, r, None, true),
+        Icon::SectionView => section_cube(shapes, r),
         Icon::Animate => {
             let green = Color32::from_rgb(40, 150, 60);
             polygon(
@@ -334,6 +368,54 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
 }
 
 /// Isometric unit cube; x to the lower right, z to the lower left, y up.
+/// The cube of the view icons cut in half, its section face in the accent colour inside the
+/// outline of the cutting plane.
+fn section_cube(shapes: &mut Vec<Shape>, r: Rect) {
+    let c = r.center() + vec2(0.0, 0.5);
+    let s = 6.2 * 1.25;
+    let project = |[x, y, z]: [f32; 3]| {
+        let (x, y, z) = (x - 0.5, y - 0.5, z - 0.5);
+        c + vec2((x - z) * 0.866 * s, ((x + z) * 0.5 - y) * s)
+    };
+    let cut = 0.55;
+    let quad = |corners: [[f32; 3]; 4]| corners.map(project).to_vec();
+    let plane_color = Color32::from_rgb(0, 120, 215);
+    // The cutting plane, slightly larger than the cube.
+    let plane = quad([
+        [cut, -0.15, -0.15],
+        [cut, 1.15, -0.15],
+        [cut, 1.15, 1.15],
+        [cut, -0.15, 1.15],
+    ]);
+    let mut outline = plane.clone();
+    outline.push(plane[0]);
+    line(shapes, &outline, 1.0, plane_color);
+    let front = quad([
+        [0.0, 0.0, 1.0],
+        [cut, 0.0, 1.0],
+        [cut, 1.0, 1.0],
+        [0.0, 1.0, 1.0],
+    ]);
+    let top = quad([
+        [0.0, 1.0, 0.0],
+        [cut, 1.0, 0.0],
+        [cut, 1.0, 1.0],
+        [0.0, 1.0, 1.0],
+    ]);
+    let section = quad([
+        [cut, 0.0, 0.0],
+        [cut, 1.0, 0.0],
+        [cut, 1.0, 1.0],
+        [cut, 0.0, 1.0],
+    ]);
+    for (points, fill) in [(front, FACE), (top, FACE), (section, ACCENT)] {
+        polygon(shapes, points.clone(), fill, Color32::TRANSPARENT);
+        let mut closed = points.clone();
+        closed.push(points[0]);
+        line(shapes, &closed, 1.0, OUTLINE);
+    }
+}
+
 fn cube(shapes: &mut Vec<Shape>, r: Rect, view: Option<ViewIcon>, grid: bool) {
     let c = r.center() + vec2(0.0, 0.5);
     let s = 6.2;

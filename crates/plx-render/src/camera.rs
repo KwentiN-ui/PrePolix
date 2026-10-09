@@ -177,15 +177,28 @@ impl Camera {
         self.orient(self.forward(), up);
     }
 
-    /// PrePoMax's "Vertical axis": makes a global axis point up on the screen. A view along the
-    /// axis first turns to look from the side that is up on the screen.
+    /// Makes a global axis point straight up and looks square onto the closest global plane
+    /// containing it, so the view runs along the global axis nearest to the current one.
     pub fn set_vertical_axis(&mut self, axis: Vec3) {
         let axis = axis.normalize();
-        let mut forward = self.forward();
-        if forward.dot(axis).abs() > 0.999 {
-            forward = -closest_axis(self.up());
+        let mut forward = self.forward() - axis * self.forward().dot(axis);
+        if forward.length_squared() < 1e-6 {
+            // Looking along the axis: look from the side that is up on the screen.
+            forward = -(self.up() - axis * self.up().dot(axis));
         }
-        self.orient(forward, axis);
+        self.orient(closest_axis(forward), axis);
+    }
+
+    /// Isometric view with a global axis pointing up on the screen, seen from above along the
+    /// space diagonal nearest to the current viewing direction.
+    pub fn set_isometric_axis(&mut self, axis: Vec3) {
+        let axis = axis.normalize();
+        let eye = -self.forward();
+        let sign = |c: f32| if c < 0.0 { -1.0 } else { 1.0 };
+        let mut diagonal = Vec3::new(sign(eye.x), sign(eye.y), sign(eye.z));
+        // From above: the component along the axis is positive.
+        diagonal += axis * (axis.dot(diagonal).abs() - axis.dot(diagonal));
+        self.orient(-diagonal.normalize(), axis);
     }
 
     /// Looks along `forward` with `up` made perpendicular to it.
@@ -354,8 +367,13 @@ mod tests {
     fn vertical_axis_puts_z_up() {
         let mut camera = Camera::default();
         camera.set_vertical_axis(Vec3::Z);
-        assert!(camera.right().dot(Vec3::Z).abs() < EPS);
-        assert!(camera.up().z > 0.0);
+        assert!((camera.up() - Vec3::Z).length() < EPS);
+        // The default isometric view looks along -X, -Y and -Z alike; X wins the tie.
+        assert!(
+            (camera.forward() - Vec3::NEG_X).length() < EPS,
+            "{:?}",
+            camera.forward()
+        );
         // From the front the view looks along Z, so it turns to look from above the screen.
         camera.set_view(StandardView::Front);
         camera.set_vertical_axis(Vec3::Z);
@@ -380,5 +398,19 @@ mod tests {
             (before.truncate() - after.truncate()).length() < EPS,
             "{before} {after}"
         );
+    }
+
+    #[test]
+    fn isometric_axis_looks_along_a_diagonal_from_above() {
+        let mut camera = Camera::default();
+        camera.set_view(StandardView::Bottom);
+        camera.orbit(30.0, 0.0);
+        camera.set_isometric_axis(Vec3::Z);
+        assert!(camera.right().dot(Vec3::Z).abs() < EPS);
+        assert!(camera.up().z > 0.0);
+        let f = camera.forward();
+        let third = 1.0 / 3.0_f32.sqrt();
+        assert!((f.abs() - Vec3::splat(third)).length() < EPS, "{f:?}");
+        assert!(f.z < 0.0, "{f:?}");
     }
 }

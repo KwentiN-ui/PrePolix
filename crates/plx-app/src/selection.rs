@@ -5,7 +5,7 @@
 //! As in PrePoMax a click without modifier replaces the selection, Shift adds, Ctrl removes
 //! and Shift+Ctrl keeps the intersection. A click into empty space clears the selection.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use glam::{DVec3, Vec3};
 use plx_mesh::{ElementId, NodeId, SkinFace, face_normal};
@@ -230,12 +230,26 @@ impl Picker {
             self.select_by = SelectBy::Geometry;
         }
         let mut action = None;
+        // egui's own constraint uses a default size before the first layout and pins the
+        // window there; keep it on screen with its real size instead.
+        let id = egui::Id::new("selection window");
+        let width = egui::AreaState::load(ctx, id)
+            .and_then(|s| s.size)
+            .map_or(350.0, |s| s.x);
+        let screen = ctx.content_rect();
+        let pos = egui::pos2(
+            (anchor.right() + 8.0)
+                .min(screen.right() - width)
+                .max(screen.left()),
+            anchor.top(),
+        );
         egui::Window::new("Auswahl")
-            .id(egui::Id::new("selection window"))
+            .id(id)
+            .constrain(false)
             .collapsible(false)
             .resizable(false)
             .title_bar(true)
-            .current_pos(anchor.right_top() + egui::vec2(8.0, 0.0))
+            .current_pos(pos)
             .show(ctx, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.group(|ui| {
@@ -494,18 +508,20 @@ pub fn preview(model: &Model, items: &Items) -> Preview {
                 .collect();
         }
         Items::Faces(faces) => {
+            // An edge between two picked faces is drawn once.
+            let mut edges = HashSet::new();
             for (part, skin) in (0..model.parts.len()).map(|p| (p, model.skin(p))) {
                 let picker = MeshPicker::new(model, part);
                 for (index, face) in skin.faces.iter().enumerate() {
                     if faces.contains(&picker.face_id(index)) {
-                        preview
-                            .lines
-                            .extend(corner_edges(&face.corners).map(|(a, b)| {
-                                [model.render_position(a), model.render_position(b)]
-                            }));
+                        edges
+                            .extend(corner_edges(&face.corners).map(|(a, b)| (a.min(b), a.max(b))));
                     }
                 }
             }
+            preview.lines = (edges.into_iter())
+                .map(|(a, b)| [model.render_position(a), model.render_position(b)])
+                .collect();
         }
     }
     preview
