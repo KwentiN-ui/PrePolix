@@ -33,6 +33,8 @@ pub enum NewItem {
     ResultFieldOutput,
     /// A history output derived from results, created in the Results tree.
     ResultHistoryOutput,
+    /// An item of the geometry's mesh setup, created in the Geometry tree.
+    MeshSetupItem,
 }
 
 /// How a region is given.
@@ -505,7 +507,9 @@ impl Editor {
                     },
                 )
             }
-            NewItem::ResultFieldOutput | NewItem::ResultHistoryOutput => return None,
+            NewItem::ResultFieldOutput | NewItem::ResultHistoryOutput | NewItem::MeshSetupItem => {
+                return None;
+            }
         };
         Some(Self {
             draft,

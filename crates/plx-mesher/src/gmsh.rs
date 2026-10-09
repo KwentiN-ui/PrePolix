@@ -334,6 +334,44 @@ impl Gmsh {
         self.synchronize()
     }
 
+    /// Removes entities given as (dimension, tag) with what bounds them and nothing else
+    /// uses.
+    pub fn remove(&self, entities: &[(i32, i32)]) -> Result<(), GmshError> {
+        let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
+        self.call(|e| unsafe { (self.api.occ_remove)(flat.as_ptr(), flat.len(), 1, e) })?;
+        self.synchronize()
+    }
+
+    /// Adds a mesh size field of a type such as `Constant` or `Min`; returns its tag.
+    pub fn add_field(&self, kind: &str) -> Result<i32, GmshError> {
+        let kind = c_string(kind)?;
+        let mut tag = 0;
+        self.call(|e| tag = unsafe { (self.api.field_add)(kind.as_ptr(), -1, e) })?;
+        Ok(tag)
+    }
+
+    pub fn set_field_number(&self, field: i32, option: &str, value: f64) -> Result<(), GmshError> {
+        let option = c_string(option)?;
+        self.call(|e| unsafe { (self.api.field_set_number)(field, option.as_ptr(), value, e) })
+    }
+
+    pub fn set_field_numbers(
+        &self,
+        field: i32,
+        option: &str,
+        values: &[f64],
+    ) -> Result<(), GmshError> {
+        let option = c_string(option)?;
+        self.call(|e| unsafe {
+            (self.api.field_set_numbers)(field, option.as_ptr(), values.as_ptr(), values.len(), e);
+        })
+    }
+
+    /// Makes the field the element size everywhere, combined with the other size limits.
+    pub fn set_background_field(&self, field: i32) -> Result<(), GmshError> {
+        self.call(|e| unsafe { (self.api.field_set_as_background)(field, e) })
+    }
+
     fn synchronize(&self) -> Result<(), GmshError> {
         self.call(|e| unsafe { (self.api.occ_synchronize)(e) })
     }

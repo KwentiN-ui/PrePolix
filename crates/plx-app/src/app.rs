@@ -11,7 +11,9 @@ use crate::history_table::HistoryTable;
 use crate::icons::{self, Icon};
 use crate::keywords::KeywordEditor;
 use crate::material_library::{LibraryResult, MaterialLibraryEditor};
-use crate::meshing::{MeshSetupResult, MeshSetupWindow, MeshingJob};
+use crate::meshing::{
+    MeshItemEditor, MeshItemResult, MeshSetupResult, MeshSetupWindow, MeshingJob,
+};
 use crate::model::{self, Highlight, LoadedModel, Model};
 use crate::numeric;
 use crate::overlay::{Marker, Overlay};
@@ -42,8 +44,10 @@ struct Workbench {
     model: Option<Model>,
     /// The CAD geometry of the FE model as shown on the Geometry tab.
     geometry: Option<Model>,
-    /// Open meshing parameters window.
+    /// Open window of the default meshing parameters.
     mesh_setup: Option<MeshSetupWindow>,
+    /// Open dialog of a mesh setup item.
+    mesh_item_editor: Option<MeshItemEditor>,
     meshing: Option<MeshingJob>,
     /// The results workspace: every results file opened in this session, PrePoMax's results
     /// collection. One of them is shown on the Results tab.
@@ -136,6 +140,7 @@ impl PrepolixApp {
                 model: None,
                 geometry: None,
                 mesh_setup: None,
+                mesh_item_editor: None,
                 meshing: None,
                 results: Vec::new(),
                 current_result: 0,
@@ -597,6 +602,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.keyword_editor_window(&ctx);
         self.workbench.material_library_window(&ctx);
         self.workbench.mesh_setup_window(&ctx);
+        self.workbench.mesh_item_window(&ctx);
         self.workbench.poll_meshing();
         self.workbench.field_output_window(&ctx);
         self.workbench.history_output_window(&ctx);
@@ -711,6 +717,7 @@ impl Workbench {
                     self.editor = None;
                     self.highlighted = None;
                     self.mesh_setup = None;
+                    self.mesh_item_editor = None;
                     self.meshing = None;
                     // A model without a mesh yet opens on the Geometry tab.
                     let view = if geometry_view.is_some() && model.mesh.element_count() == 0 {
@@ -808,6 +815,10 @@ impl Workbench {
             ui.weak(format!("{text}.\n{hint}"));
             ui.separator();
         }
+        let mesh_items: Vec<String> = (self.model.as_ref())
+            .and_then(|m| m.geometry.as_ref())
+            .map(|g| g.mesh_items.iter().map(|i| i.name.clone()).collect())
+            .unwrap_or_default();
         let shown = match view {
             TreeView::Results => self.results.get_mut(self.current_result),
             TreeView::Geometry => self.geometry.as_mut(),
@@ -817,7 +828,7 @@ impl Workbench {
             status: a.status(),
             results: a.results().is_some(),
         });
-        let response = tree::show(ui, view, shown, job, &mut self.tree);
+        let response = tree::show(ui, view, shown, &mesh_items, job, &mut self.tree);
         self.tree_response(ui.ctx(), view, response);
     }
 
@@ -850,6 +861,9 @@ impl Workbench {
                 field,
                 component,
             });
+        } else if let Some(TreeItem::MeshItem(index)) = response.open {
+            let geometry = self.model.as_ref().and_then(|m| m.geometry.as_ref());
+            self.mesh_item_editor = geometry.and_then(|g| MeshItemEditor::edit(g, index));
         } else if let Some(item) = response.open {
             let model = self.model.as_ref().filter(|_| view != TreeView::Results);
             match model.and_then(|m| Editor::edit(&item, &m.fe, &m.mesh)) {
@@ -864,6 +878,14 @@ impl Workbench {
             self.delete_field_output(field);
         } else if let Some(TreeItem::HistorySet(set)) = response.delete {
             self.delete_history_output(set);
+        } else if let Some(TreeItem::MeshItem(index)) = response.delete {
+            if let Some(geometry) = self.model.as_mut().and_then(|m| m.geometry.as_mut())
+                && index < geometry.mesh_items.len()
+            {
+                geometry.mesh_items.remove(index);
+                self.tree.selected = None;
+                self.mesh_item_editor = None;
+            }
         } else if let (Some(item), Some(model)) = (response.delete, self.model.as_mut())
             && crate::setup::delete(&mut model.fe, &item)
         {
@@ -876,11 +898,17 @@ impl Workbench {
         if response.material_library {
             self.open_material_library();
         }
-        if response.mesh_setup {
+        if response.mesh_defaults {
             self.open_mesh_setup();
         }
         if response.generate_mesh {
-            self.generate_mesh(ctx);
+            self.generate_mesh(ctx, None);
+        }
+        if let Some(index) = response.mesh_part {
+            let name = (self.geometry.as_ref()).and_then(|g| g.parts.get(index));
+            if let Some(name) = name.map(|p| p.name.clone()) {
+                self.generate_mesh(ctx, Some(vec![name]));
+            }
         }
         if response.evaluate_hot_spots {
             self.evaluate_hot_spots(false);
@@ -1032,7 +1060,9 @@ impl Workbench {
                 .as_ref()
                 .is_some_and(HistoryOutputDialog::picks),
             TreeView::FeModel => self.editor.as_ref().is_some_and(Editor::picks),
-            TreeView::Geometry => false,
+            TreeView::Geometry => {
+                (self.mesh_item_editor.as_ref()).is_some_and(MeshItemEditor::picks)
+            }
         }
     }
 
@@ -1208,6 +1238,13 @@ impl Workbench {
             }
             return;
         }
+        if kind == NewItem::MeshSetupItem {
+            if let Some(geometry) = self.model.as_ref().and_then(|m| m.geometry.as_ref()) {
+                self.mesh_item_editor = Some(MeshItemEditor::create(geometry));
+                self.set_tree_view(TreeView::Geometry);
+            }
+            return;
+        }
         if kind == NewItem::ResultFieldOutput {
             if let Some(model) = self.results.get(self.current_result)
                 && let Some(view) = &model.results
@@ -1222,25 +1259,29 @@ impl Workbench {
         }
     }
 
-    /// PrePoMax's Mesh menu: meshing parameters and mesh generation for the geometry.
+    /// PrePoMax's Mesh menu: the mesh setup and mesh generation for the geometry.
     fn mesh_menu(&mut self, ui: &mut egui::Ui) {
         let has_geometry = self.model.as_ref().is_some_and(|m| m.geometry.is_some());
         if !has_geometry {
             ui.label("Zuerst eine Geometrie importieren");
             return;
         }
-        if ui.button("Netzparameter …").clicked() {
+        if ui.button("Mesh-Setup-Eintrag erstellen …").clicked() {
+            self.create(NewItem::MeshSetupItem);
+        }
+        if ui.button("Standard-Netzparameter …").clicked() {
             self.open_mesh_setup();
         }
-        let mesh = egui::Button::new("Netz erzeugen");
+        ui.separator();
+        let mesh = egui::Button::new("Alle Parts vernetzen");
         if ui.add_enabled(self.meshing.is_none(), mesh).clicked() {
-            self.generate_mesh(ui.ctx());
+            self.generate_mesh(ui.ctx(), None);
         }
     }
 
     fn open_mesh_setup(&mut self) {
         if let Some(geometry) = self.model.as_ref().and_then(|m| m.geometry.as_ref()) {
-            self.mesh_setup = Some(MeshSetupWindow::new(&geometry.mesh_setup));
+            self.mesh_setup = Some(MeshSetupWindow::new(&geometry.meshing));
         }
     }
 
@@ -1258,30 +1299,58 @@ impl Workbench {
         if let (Some(setup), Some(geometry)) =
             (setup, self.model.as_mut().and_then(|m| m.geometry.as_mut()))
         {
-            geometry.mesh_setup = setup;
+            geometry.meshing = setup;
         }
         if mesh {
-            self.generate_mesh(ctx);
+            self.generate_mesh(ctx, None);
         }
     }
 
-    /// Meshes the geometry on a worker thread; [`Self::poll_meshing`] takes the result.
-    fn generate_mesh(&mut self, ctx: &egui::Context) {
+    /// The dialog of a mesh setup item; OK stores the item in the geometry.
+    fn mesh_item_window(&mut self, ctx: &egui::Context) {
+        let (Some(editor), Some(geometry)) = (
+            &mut self.mesh_item_editor,
+            self.model.as_mut().and_then(|m| m.geometry.as_mut()),
+        ) else {
+            self.mesh_item_editor = None;
+            return;
+        };
+        match editor.show(ctx, geometry, self.geometry.as_ref()) {
+            MeshItemResult::Open => return,
+            MeshItemResult::Cancel => {}
+            MeshItemResult::Ok(index, item) => {
+                let index = match index.filter(|&i| i < geometry.mesh_items.len()) {
+                    Some(index) => {
+                        geometry.mesh_items[index] = item;
+                        index
+                    }
+                    None => {
+                        geometry.mesh_items.push(item);
+                        geometry.mesh_items.len() - 1
+                    }
+                };
+                self.tree.selected = Some((TreeView::Geometry, TreeItem::MeshItem(index)));
+            }
+        }
+        self.mesh_item_editor = None;
+        self.viewport.preview = Default::default();
+    }
+
+    /// Meshes the named parts of the geometry, or all with `None`, on a worker thread;
+    /// [`Self::poll_meshing`] takes the result.
+    fn generate_mesh(&mut self, ctx: &egui::Context, parts: Option<Vec<String>>) {
         if self.meshing.is_some() {
             return;
         }
         let Some(geometry) = self.model.as_ref().and_then(|m| m.geometry.clone()) else {
             return;
         };
-        let setup = &geometry.mesh_setup;
-        self.output.push(format!(
-            "Vernetze {} (Elementgröße {} bis {}, {}. Ordnung) …",
-            geometry.source,
-            setup.min_size,
-            setup.max_size,
-            if setup.second_order { 2 } else { 1 }
-        ));
-        self.meshing = Some(MeshingJob::start(geometry, ctx));
+        let what = match &parts {
+            Some(parts) => parts.join(", "),
+            None => geometry.source.clone(),
+        };
+        self.output.push(format!("Vernetze {what} …"));
+        self.meshing = Some(MeshingJob::start(geometry, parts, ctx));
     }
 
     fn poll_meshing(&mut self) {
@@ -1294,15 +1363,35 @@ impl Workbench {
         };
         match result {
             Ok(generated) => {
-                for warning in &generated.warnings {
-                    self.output.push(format!("Gmsh: {warning}"));
-                }
                 let had_mesh = model.mesh.element_count() > 0;
-                model.set_mesh(generated.mesh);
+                let mut mesh = model.mesh.clone();
+                for part in generated.meshes {
+                    for warning in &part.warnings {
+                        self.output.push(format!("Gmsh: {warning}"));
+                    }
+                    for p in &part.mesh.parts {
+                        let parameters = model.geometry.as_ref().map(|g| g.parameters(&p.name));
+                        self.output.push(format!(
+                            "{}: {} Elemente ({}. Ordnung, Elementgröße {} bis {})",
+                            p.name,
+                            p.elements.len(),
+                            if parameters.is_some_and(|s| s.second_order) {
+                                2
+                            } else {
+                                1
+                            },
+                            parameters.map_or(0.0, |s| s.min_size),
+                            parameters.map_or(0.0, |s| s.max_size),
+                        ));
+                    }
+                    mesh = plx_mesher::merge_part(&mesh, part.mesh);
+                }
+                model.set_mesh(mesh);
                 if had_mesh && picks_mesh_entities(&model.fe) {
                     self.output.push(
-                        "Hinweis: Ausgewählte Knoten und Elementflächen beziehen sich noch auf \
-                         das alte Netz und müssen neu ausgewählt werden"
+                        "Hinweis: Ausgewählte Knoten und Elementflächen eines neu vernetzten \
+                         Parts beziehen sich noch auf das alte Netz und müssen neu ausgewählt \
+                         werden"
                             .into(),
                     );
                 }
@@ -1314,9 +1403,12 @@ impl Workbench {
                     started.map_or(0, |s| s.elapsed().as_millis())
                 ));
                 self.highlighted = None;
+                self.mesh_item_editor = None;
                 self.set_tree_view(TreeView::FeModel);
                 self.results_changed = true;
-                self.view_command = Some(ViewCommand::Fit);
+                if !had_mesh {
+                    self.view_command = Some(ViewCommand::Fit);
+                }
             }
             Err(error) => self
                 .output
@@ -1667,6 +1759,18 @@ impl Workbench {
             }
             return;
         }
+        if self.tree_view == TreeView::Geometry {
+            if let (Some(editor), Some(view)) = (&mut self.mesh_item_editor, &self.geometry) {
+                let hit = view.pick(click.origin, click.direction);
+                let pick = hit.as_ref().map(|hit| (hit, click.precision_at(hit.point)));
+                editor.click(
+                    view,
+                    pick,
+                    Operation::from_modifiers(click.shift, click.ctrl),
+                );
+            }
+            return;
+        }
         let (Some(editor), Some(model)) = (&mut self.editor, &self.model) else {
             return;
         };
@@ -1679,13 +1783,9 @@ impl Workbench {
         );
     }
 
-    /// Selects a part clicked in the 3D view in the tree shown, the FE model's on the
-    /// Geometry tab, which has no mesh parts.
+    /// Selects a part clicked in the 3D view in the tree shown.
     fn select_part(&mut self, index: usize) {
-        let view = match self.tree_view {
-            TreeView::Results => TreeView::Results,
-            _ => TreeView::FeModel,
-        };
+        let view = self.tree_view;
         self.tree.selected = Some((view, TreeItem::Part(index)));
         self.tree.reveal = true;
     }
@@ -1711,7 +1811,8 @@ impl Workbench {
         response.context_menu(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             if let Some((index, visible)) = part {
-                tree::part_menu(ui, index, visible, &mut tree_response);
+                let geometry = self.tree_view == TreeView::Geometry;
+                tree::part_menu(ui, index, visible, geometry, &mut tree_response);
                 ui.separator();
             }
             command = crate::viewport::view_menu(ui);
@@ -1766,6 +1867,17 @@ impl Workbench {
                 (Some(click), Some((dialog, model))) => model
                     .pick(click.origin, click.direction)
                     .map(|hit| dialog.preview(model, &hit, click.precision_at(hit.point)))
+                    .unwrap_or_default(),
+                _ => Default::default(),
+            };
+            return;
+        }
+        if self.tree_view == TreeView::Geometry {
+            let shown = (self.mesh_item_editor.as_ref()).zip(self.geometry.as_ref());
+            self.viewport.preview = match (hover, shown) {
+                (Some(click), Some((editor, view))) => view
+                    .pick(click.origin, click.direction)
+                    .map(|hit| editor.preview(view, &hit, click.precision_at(hit.point)))
                     .unwrap_or_default(),
                 _ => Default::default(),
             };
@@ -1994,6 +2106,7 @@ impl Workbench {
                 self.results_changed |= on_results && index == current;
             }
         }
+        self.update_geometry_highlight();
         let Some(model) = &mut self.model else {
             return;
         };
@@ -2018,6 +2131,30 @@ impl Workbench {
         if highlight != model.highlight {
             model.highlight = highlight;
             self.results_changed |= !on_results;
+        }
+    }
+
+    /// The geometry shows the item of an open mesh setup dialog, else the selected part or
+    /// mesh setup item.
+    fn update_geometry_highlight(&mut self) {
+        let Some(view) = &mut self.geometry else {
+            return;
+        };
+        let items = (self.model.as_ref())
+            .and_then(|m| m.geometry.as_ref())
+            .map_or(&[][..], |g| g.mesh_items.as_slice());
+        let highlight = match (&self.mesh_item_editor, &self.tree.selected) {
+            (Some(editor), _) => editor.highlight(view),
+            (None, Some((TreeView::Geometry, TreeItem::Part(part)))) => Highlight::part(*part),
+            (None, Some((TreeView::Geometry, TreeItem::MeshItem(index)))) => items
+                .get(*index)
+                .map(|item| crate::meshing::item_highlight(view, &item.kind))
+                .unwrap_or_default(),
+            _ => Highlight::default(),
+        };
+        if highlight != view.highlight {
+            view.highlight = highlight;
+            self.results_changed |= self.tree_view == TreeView::Geometry;
         }
     }
 
@@ -2208,8 +2345,9 @@ impl Workbench {
         let mut open = true;
         let mut close = false;
         let mut accept = false;
+        // Parts of the geometry keep their names, which the mesh setup refers to.
         let part = match item {
-            TreeItem::Part(index) => Some(index),
+            TreeItem::Part(index) if self.tree_view != TreeView::Geometry => Some(index),
             _ => None,
         };
         // The model by its fields, so the window can edit the typed name alongside.
@@ -2268,6 +2406,7 @@ impl Workbench {
         }
         self.geometry = None;
         self.mesh_setup = None;
+        self.mesh_item_editor = None;
         self.meshing = None;
         self.close_results(true);
         self.tree.selected = None;

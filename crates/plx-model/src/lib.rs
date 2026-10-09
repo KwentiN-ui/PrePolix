@@ -11,7 +11,9 @@ pub mod library;
 mod region;
 mod validity;
 
-pub use geometry::{Geometry, MeshSetup};
+pub use geometry::{
+    Algorithm2d, Algorithm3d, Geometry, MeshSetupItem, MeshSetupKind, MeshingParameters,
+};
 pub use hot_spot::{Extrapolation, HotSpot, HotSpotComponent, extrapolation_weights};
 pub use library::MaterialLibrary;
 pub use region::Region;
