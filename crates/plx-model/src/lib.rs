@@ -286,6 +286,95 @@ pub struct Material {
     /// Thermal expansion (`*EXPANSION`), for thermal strains.
     #[serde(default)]
     pub expansion: Option<Expansion>,
+    /// Rate-independent plasticity (`*PLASTIC`) with a tabular hardening curve.
+    #[serde(default)]
+    pub plastic: Option<Plastic>,
+}
+
+/// How the yield surface grows with plastic strain (`*PLASTIC, HARDENING=`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Hardening {
+    #[default]
+    Isotropic,
+    Kinematic,
+    Combined,
+}
+
+impl Hardening {
+    pub const ALL: [Hardening; 3] = [
+        Hardening::Isotropic,
+        Hardening::Kinematic,
+        Hardening::Combined,
+    ];
+
+    /// The value of CalculiX's `HARDENING` parameter.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Hardening::Isotropic => "Isotropic",
+            Hardening::Kinematic => "Kinematic",
+            Hardening::Combined => "Combined",
+        }
+    }
+}
+
+/// One point of the hardening curve: the yield stress at a plastic strain, valid at a
+/// temperature. CalculiX interpolates between the points and keeps the last stress beyond
+/// them; rows at different temperatures are interpolated in temperature.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlasticPoint {
+    pub stress: f64,
+    pub plastic_strain: f64,
+    pub temperature: f64,
+}
+
+/// Von Mises plasticity with a tabular hardening curve, like PrePoMax's `Plastic` material
+/// property.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Plastic {
+    pub hardening: Hardening,
+    /// Rows in the order CalculiX wants them: by temperature, then by plastic strain,
+    /// the first row of every temperature at plastic strain 0.
+    pub points: Vec<PlasticPoint>,
+}
+
+impl Default for Plastic {
+    /// An ideally plastic material has one row; the yield stress is still to be entered.
+    fn default() -> Self {
+        Self {
+            hardening: Hardening::Isotropic,
+            points: vec![PlasticPoint {
+                stress: 0.0,
+                plastic_strain: 0.0,
+                temperature: 0.0,
+            }],
+        }
+    }
+}
+
+impl Plastic {
+    /// The first row of each temperature must start at plastic strain 0 and the plastic
+    /// strain must grow within a temperature; otherwise CalculiX stops with an error or
+    /// interpolates nonsense. Returns the number of the first offending row.
+    pub fn invalid_row(&self) -> Option<usize> {
+        if self.points.is_empty() {
+            return Some(0);
+        }
+        let mut previous: Option<&PlasticPoint> = None;
+        for (i, point) in self.points.iter().enumerate() {
+            let new_temperature = previous.is_none_or(|p| p.temperature != point.temperature);
+            let ok = if new_temperature {
+                point.plastic_strain == 0.0 && point.stress > 0.0
+            } else {
+                previous.is_some_and(|p| point.plastic_strain > p.plastic_strain)
+                    && point.stress > 0.0
+            };
+            if !ok {
+                return Some(i);
+            }
+            previous = Some(point);
+        }
+        None
+    }
 }
 
 /// Linear isotropic thermal expansion.
