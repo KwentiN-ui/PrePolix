@@ -25,6 +25,7 @@ egui-wgpu = "0.36"
 env_logger = "0.11"
 glam = { version = "0.34", features = ["bytemuck"] }
 log = "0.4"
+png = "0.18"
 rfd = "0.17"
 ron = "0.12"
 serde = { version = "1", features = ["derive"] }

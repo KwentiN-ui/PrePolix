@@ -6,10 +6,13 @@ mod app;
 mod gizmo;
 mod icons;
 mod keywords;
+mod material_library;
 mod model;
+mod numeric;
 mod overlay;
 mod properties;
 mod results;
+mod screenshot;
 mod section;
 mod selection;
 mod settings;
@@ -17,6 +20,7 @@ mod setup;
 mod solver_check;
 mod style;
 mod tree;
+mod tree_icons;
 mod viewport;
 
 fn main() -> eframe::Result {
@@ -51,6 +55,7 @@ mod tests {
             ("app.rs", include_str!("app.rs")),
             ("icons.rs", include_str!("icons.rs")),
             ("keywords.rs", include_str!("keywords.rs")),
+            ("material_library.rs", include_str!("material_library.rs")),
             ("main.rs", include_str!("main.rs")),
             ("model.rs", include_str!("model.rs")),
             ("overlay.rs", include_str!("overlay.rs")),
@@ -62,6 +67,7 @@ mod tests {
             ("solver_check.rs", include_str!("solver_check.rs")),
             ("style.rs", include_str!("style.rs")),
             ("tree.rs", include_str!("tree.rs")),
+            ("tree_icons.rs", include_str!("tree_icons.rs")),
             ("viewport.rs", include_str!("viewport.rs")),
         ];
         for (file, text) in sources {

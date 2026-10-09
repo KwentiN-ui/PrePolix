@@ -8,6 +8,7 @@ use crate::gizmo::{GizmoDrag, GizmoState, PlaneGizmo};
 use crate::overlay::{self, LabelOffsets, Overlay};
 
 const ZOOM_PER_SCROLL_POINT: f32 = 0.002;
+const ZOOM_PER_DRAG_POINT: f32 = 0.01;
 
 /// The 3D view: owns the GPU renderer and the camera and maps mouse input to camera moves.
 ///
@@ -22,7 +23,7 @@ pub struct Viewport {
     pub overlay: Overlay,
     /// Where the user dragged the labels.
     pub labels: LabelOffsets,
-    /// A dialog picks in the 3D view: the left button selects, the middle button rotates.
+    /// A dialog picks in the 3D view: the left button selects and draws selection boxes.
     pub selecting: bool,
     /// What a click at the resting mouse would select, drawn in PrePoMax's orange.
     pub preview: Preview,
@@ -32,6 +33,8 @@ pub struct Viewport {
     resting: Option<(Pos2, f64)>,
     /// The resting position last reported as hover.
     hovered: Option<Pos2>,
+    /// Where the view was drawn last, in points.
+    pub rect: Rect,
     /// The section plane being edited, with its manipulator.
     pub gizmo: Option<PlaneGizmo>,
     gizmo_state: GizmoState,
@@ -117,6 +120,39 @@ pub struct ViewportResponse {
 pub enum ViewCommand {
     Fit,
     View(StandardView),
+    /// Turns the closest global axis straight up.
+    Vertical,
+    /// Turns the given global axis straight up, looking square onto a global plane.
+    VerticalAxis(Axis),
+    /// Isometric view with the given global axis up.
+    IsometricAxis(Axis),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axis {
+    X,
+    Y,
+    Z,
+}
+
+impl Axis {
+    pub const ALL: [Axis; 3] = [Axis::X, Axis::Y, Axis::Z];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Axis::X => "X",
+            Axis::Y => "Y",
+            Axis::Z => "Z",
+        }
+    }
+
+    fn vector(self) -> Vec3 {
+        match self {
+            Axis::X => Vec3::X,
+            Axis::Y => Vec3::Y,
+            Axis::Z => Vec3::Z,
+        }
+    }
 }
 
 impl Viewport {
@@ -140,6 +176,7 @@ impl Viewport {
             box_start: None,
             resting: None,
             hovered: None,
+            rect: Rect::NOTHING,
             gizmo: None,
             gizmo_state: GizmoState::default(),
             scene_version: 0,
@@ -175,6 +212,11 @@ impl Viewport {
         self.scene_version
     }
 
+    /// Exchanges the camera, so the FE model and the results each keep their own view.
+    pub fn swap_camera(&mut self, camera: &mut Camera) {
+        std::mem::swap(&mut self.camera, camera);
+    }
+
     pub fn set_part_visible(&mut self, index: usize, visible: bool) {
         self.renderer.set_part_visible(index, visible);
     }
@@ -187,6 +229,9 @@ impl Viewport {
                 }
             }
             ViewCommand::View(view) => self.camera.set_view(view),
+            ViewCommand::Vertical => self.camera.set_vertical_view(),
+            ViewCommand::VerticalAxis(axis) => self.camera.set_vertical_axis(axis.vector()),
+            ViewCommand::IsometricAxis(axis) => self.camera.set_isometric_axis(axis.vector()),
         }
     }
 
@@ -194,26 +239,26 @@ impl Viewport {
     pub fn ui(&mut self, ui: &mut Ui) -> ViewportResponse {
         let mut result = ViewportResponse::default();
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        self.rect = rect;
         let delta = response.drag_delta();
         // The section plane manipulator takes left drags that start on one of its handles.
         result.gizmo =
             self.gizmo_state
                 .interact(self.gizmo.as_ref(), &self.camera, rect, &response);
         let free = !self.gizmo_state.dragging();
-        // While a dialog picks, the left button draws a selection box as in PrePoMax and the
-        // middle button rotates.
-        let (rotate, pan) = if self.selecting {
-            (PointerButton::Middle, PointerButton::Secondary)
-        } else {
-            (PointerButton::Primary, PointerButton::Secondary)
-        };
-        if free && response.dragged_by(rotate) {
-            self.camera.orbit(delta.x, delta.y);
-        } else if response.dragged_by(pan)
-            || (!self.selecting && response.dragged_by(PointerButton::Middle))
-        {
-            self.camera
-                .pan(delta.x, delta.y, rect.width(), rect.height());
+        let modifiers = ui.input(|i| i.modifiers);
+        let ctrl = modifiers.ctrl || modifiers.command;
+        // PrePoMax's mouse: the middle button rotates, with Shift it pans and with Ctrl it zooms;
+        // the left button picks and draws selection boxes, the right one opens the context menu.
+        if response.dragged_by(PointerButton::Middle) {
+            if ctrl {
+                self.camera.zoom((delta.y * ZOOM_PER_DRAG_POINT).exp());
+            } else if modifiers.shift {
+                self.camera
+                    .pan(delta.x, delta.y, rect.width(), rect.height());
+            } else {
+                self.camera.orbit(delta.x, delta.y);
+            }
         }
         if free && self.selecting && response.drag_started_by(PointerButton::Primary) {
             self.box_start = response.interact_pointer_pos();
@@ -221,22 +266,53 @@ impl Viewport {
         if !self.selecting {
             self.box_start = None;
         }
-        if response.hovered() {
+        if response.hovered()
+            && let Some(pointer) = ui.input(|i| i.pointer.hover_pos())
+        {
             let scroll = ui.input(|input| input.smooth_scroll_delta.y);
             if scroll != 0.0 {
-                self.camera.zoom((-scroll * ZOOM_PER_SCROLL_POINT).exp());
+                // Ctrl zooms in finer steps, as in PrePoMax.
+                let rate = if ctrl { 0.2 } else { 1.0 } * ZOOM_PER_SCROLL_POINT;
+                let offset = pointer - rect.center();
+                self.camera.zoom_at(
+                    (-scroll * rate).exp(),
+                    offset.x,
+                    offset.y,
+                    rect.width(),
+                    rect.height(),
+                );
             }
         }
+        response.context_menu(|ui| {
+            if ui.button("Einpassen").clicked() {
+                result.command = Some(ViewCommand::Fit);
+            }
+            if ui.button("Vertikal").clicked() {
+                result.command = Some(ViewCommand::Vertical);
+            }
+            ui.menu_button("Achse senkrecht", |ui| {
+                for axis in Axis::ALL {
+                    if ui.button(axis.label()).clicked() {
+                        result.command = Some(ViewCommand::VerticalAxis(axis));
+                    }
+                }
+            });
+            ui.menu_button("Isometrisch, Achse oben", |ui| {
+                for axis in Axis::ALL {
+                    if ui.button(axis.label()).clicked() {
+                        result.command = Some(ViewCommand::IsometricAxis(axis));
+                    }
+                }
+            });
+        });
         if response.double_clicked() {
             result.command = Some(ViewCommand::Fit);
         } else if response.clicked()
             && !self.gizmo_state.hovered()
             && let Some(pointer) = response.interact_pointer_pos()
         {
-            let modifiers = ui.input(|i| i.modifiers);
             result.click = Some(self.click_at(rect, pointer, modifiers));
         }
-        let modifiers = ui.input(|i| i.modifiers);
         let mut dragged_box = None;
         if let Some(start) = self.box_start {
             let end = ui.input(|i| i.pointer.latest_pos()).unwrap_or(start);

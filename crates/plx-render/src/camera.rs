@@ -1,5 +1,5 @@
 use glam::camera::rh::{proj::directx, view::look_at_mat4};
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat3, Mat4, Quat, Vec3};
 
 /// Viewing directions of the view toolbar: the eye looks from the named side at the target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,6 +123,24 @@ impl Camera {
             (self.distance * factor).clamp(self.scene_radius * 1e-4, self.scene_radius * 1e3);
     }
 
+    /// Zooms like [`Camera::zoom`] while the point under the mouse stays in place; the offset is
+    /// measured from the viewport centre in pixels, y downwards.
+    pub fn zoom_at(
+        &mut self,
+        factor: f32,
+        offset_x_px: f32,
+        offset_y_px: f32,
+        viewport_width_px: f32,
+        viewport_height_px: f32,
+    ) {
+        let world_per_pixel = self.pixel_size(viewport_width_px, viewport_height_px);
+        let point =
+            self.target + (self.right() * offset_x_px - self.up() * offset_y_px) * world_per_pixel;
+        let before = self.distance;
+        self.zoom(factor);
+        self.target = point + (self.target - point) * (self.distance / before);
+    }
+
     /// Centers the view on a bounding box and makes it fill the viewport.
     pub fn fit(&mut self, min: Vec3, max: Vec3) {
         self.target = (min + max) * 0.5;
@@ -150,6 +168,60 @@ impl Camera {
                 yaw * pitch
             }
         };
+    }
+
+    /// PrePoMax's "Vertical view": turns the view about the viewing direction until the global
+    /// axis closest to the screen's up direction points straight up.
+    pub fn set_vertical_view(&mut self) {
+        let up = closest_axis(self.up());
+        self.orient(self.forward(), up);
+    }
+
+    /// Makes a global axis point straight up and looks square onto the closest global plane
+    /// containing it, so the view runs along the global axis nearest to the current one.
+    pub fn set_vertical_axis(&mut self, axis: Vec3) {
+        let axis = axis.normalize();
+        let mut forward = self.forward() - axis * self.forward().dot(axis);
+        if forward.length_squared() < 1e-6 {
+            // Looking along the axis: look from the side that is up on the screen.
+            forward = -(self.up() - axis * self.up().dot(axis));
+        }
+        self.orient(closest_axis(forward), axis);
+    }
+
+    /// Isometric view with a global axis pointing up on the screen, seen from above along the
+    /// space diagonal nearest to the current viewing direction.
+    pub fn set_isometric_axis(&mut self, axis: Vec3) {
+        let axis = axis.normalize();
+        let eye = -self.forward();
+        let sign = |c: f32| if c < 0.0 { -1.0 } else { 1.0 };
+        let mut diagonal = Vec3::new(sign(eye.x), sign(eye.y), sign(eye.z));
+        // From above: the component along the axis is positive.
+        diagonal += axis * (axis.dot(diagonal).abs() - axis.dot(diagonal));
+        self.orient(-diagonal.normalize(), axis);
+    }
+
+    /// Looks along `forward` with `up` made perpendicular to it.
+    fn orient(&mut self, forward: Vec3, up: Vec3) {
+        let right = forward.cross(up);
+        if right.length_squared() < 1e-8 {
+            return;
+        }
+        let right = right.normalize();
+        let up = right.cross(forward).normalize();
+        self.rotation = Quat::from_mat3(&Mat3::from_cols(right, up, -forward)).normalize();
+    }
+}
+
+/// The signed global axis with the largest share of `v`.
+fn closest_axis(v: Vec3) -> Vec3 {
+    let a = v.abs();
+    if a.x >= a.y && a.x >= a.z {
+        Vec3::X * v.x.signum()
+    } else if a.y >= a.z {
+        Vec3::Y * v.y.signum()
+    } else {
+        Vec3::Z * v.z.signum()
     }
 }
 
@@ -272,5 +344,73 @@ mod tests {
         camera.zoom(0.5);
         let after = project(&camera, point).x;
         assert!((after - 2.0 * before).abs() < EPS);
+    }
+
+    #[test]
+    fn vertical_view_snaps_up_to_the_closest_axis() {
+        let mut camera = Camera::default();
+        camera.orbit(80.0, 0.0);
+        camera.orbit(0.0, 30.0);
+        let forward = camera.forward();
+        camera.set_vertical_view();
+        // Y points straight up on the screen; the view direction is kept.
+        assert!(
+            camera.right().dot(Vec3::Y).abs() < EPS,
+            "{:?}",
+            camera.right()
+        );
+        assert!(camera.up().y > 0.0);
+        assert!((camera.forward() - forward).length() < EPS);
+    }
+
+    #[test]
+    fn vertical_axis_puts_z_up() {
+        let mut camera = Camera::default();
+        camera.set_vertical_axis(Vec3::Z);
+        assert!((camera.up() - Vec3::Z).length() < EPS);
+        // The default isometric view looks along -X, -Y and -Z alike; X wins the tie.
+        assert!(
+            (camera.forward() - Vec3::NEG_X).length() < EPS,
+            "{:?}",
+            camera.forward()
+        );
+        // From the front the view looks along Z, so it turns to look from above the screen.
+        camera.set_view(StandardView::Front);
+        camera.set_vertical_axis(Vec3::Z);
+        assert!((camera.up() - Vec3::Z).length() < EPS);
+        assert!(
+            (camera.forward() - Vec3::NEG_Y).length() < EPS,
+            "{:?}",
+            camera.forward()
+        );
+    }
+
+    #[test]
+    fn zoom_at_keeps_the_point_under_the_mouse() {
+        let mut camera = Camera::default();
+        let (width, height) = (400.0, 400.0);
+        let pixel = camera.pixel_size(width, height);
+        let point = camera.target + (camera.right() * 100.0 - camera.up() * 50.0) * pixel;
+        let before = project(&camera, point);
+        camera.zoom_at(0.5, 100.0, 50.0, width, height);
+        let after = project(&camera, point);
+        assert!(
+            (before.truncate() - after.truncate()).length() < EPS,
+            "{before} {after}"
+        );
+    }
+
+    #[test]
+    fn isometric_axis_looks_along_a_diagonal_from_above() {
+        let mut camera = Camera::default();
+        camera.set_view(StandardView::Bottom);
+        camera.orbit(30.0, 0.0);
+        camera.set_isometric_axis(Vec3::Z);
+        assert!(camera.right().dot(Vec3::Z).abs() < EPS);
+        assert!(camera.up().z > 0.0);
+        let f = camera.forward();
+        let third = 1.0 / 3.0_f32.sqrt();
+        assert!((f.abs() - Vec3::splat(third)).length() < EPS, "{f:?}");
+        assert!(f.z < 0.0, "{f:?}");
     }
 }

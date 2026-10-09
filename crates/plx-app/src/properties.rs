@@ -10,16 +10,13 @@ use crate::tree::TreeItem;
 /// Title of the properties window of an item.
 pub fn title(model: Option<&Model>, item: &TreeItem) -> String {
     let name = match (item, model) {
-        (TreeItem::Group(name), _) => name.to_string(),
         (TreeItem::Model, Some(model)) => model.file_name(),
         (TreeItem::Model, None) => "Model".into(),
-        (TreeItem::Mesh, _) => "Mesh".into(),
         (TreeItem::Part(index), Some(model)) => model
             .parts
             .get(*index)
             .map_or_else(String::new, |p| p.name.clone()),
         (TreeItem::NodeSet(n) | TreeItem::ElementSet(n) | TreeItem::Surface(n), _) => n.clone(),
-        (TreeItem::FieldOutputs, _) => "Field Outputs".into(),
         (TreeItem::Field(f), Some(model)) => field_name(model, *f),
         (TreeItem::Component(f, c), Some(model)) => {
             let field = model
@@ -78,6 +75,8 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
     let mesh = &model.mesh;
     match item {
         TreeItem::Group(_)
+        | TreeItem::Mesh
+        | TreeItem::FieldOutputs
         | TreeItem::Material(_)
         | TreeItem::Section(_)
         | TreeItem::Step(_)
@@ -88,12 +87,7 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
         | TreeItem::Analysis => {}
         TreeItem::Model => {
             rows.push(("Datei", model.path.display().to_string()));
-            rows.push(("Knoten", mesh.node_count().to_string()));
-            rows.push(("Elemente", mesh.element_count().to_string()));
-            rows.push(("Parts", model.parts.len().to_string()));
             rows.push(("Ladezeit", format!("{} ms", model.load_time.as_millis())));
-        }
-        TreeItem::Mesh => {
             rows.push(("Knoten", mesh.node_count().to_string()));
             rows.push(("Elemente", mesh.element_count().to_string()));
             rows.push(("Parts", model.parts.len().to_string()));
@@ -150,16 +144,6 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
                     rows.push(("Knoten", nodes.len().to_string()));
                 }
                 None => {}
-            }
-        }
-        TreeItem::FieldOutputs => {
-            let Some(view) = &model.results else { return };
-            let steps: std::collections::BTreeSet<u32> =
-                view.increments.iter().map(|i| i.step).collect();
-            rows.push(("Steps", steps.len().to_string()));
-            rows.push(("Inkremente", view.increments.len().to_string()));
-            if let Some(inc) = view.current_increment() {
-                rows.push(("Felder", inc.fields.len().to_string()));
             }
         }
         TreeItem::Field(f) => {

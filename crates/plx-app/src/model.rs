@@ -49,12 +49,10 @@ pub struct Model {
     pub skipped_keywords: BTreeMap<String, usize>,
     pub included_files: usize,
     pub load_time: Duration,
-    /// Results read from an `.frd` file, with what the user currently looks at.
+    /// Results read from an `.frd` file, with what the user currently looks at. A model
+    /// with results is a results file: it lives in the Results workspace and has no FE model
+    /// to set up, as in PrePoMax.
     pub results: Option<ResultsView>,
-    /// Whether the results are drawn; the FE Model tab shows the plain mesh.
-    pub show_results: bool,
-    /// Opened from a results file: there is no FE model to set up.
-    pub results_only: bool,
     /// The analysis set up on this mesh.
     pub fe: FeModel,
     /// Faces and parts drawn in the highlight colour.
@@ -176,8 +174,6 @@ pub fn load(path: &Path) -> Result<LoadedModel, String> {
         skipped_keywords,
         included_files,
         load_time: Duration::ZERO,
-        results_only: results.is_some(),
-        show_results: true,
         results,
         fe,
         highlight: Highlight::default(),
@@ -198,47 +194,9 @@ pub fn load(path: &Path) -> Result<LoadedModel, String> {
 }
 
 impl Model {
-    /// The results, when they are drawn.
-    pub fn shown_results(&self) -> Option<&ResultsView> {
-        self.results.as_ref().filter(|_| self.show_results)
-    }
-
-    pub fn shown_results_mut(&mut self) -> Option<&mut ResultsView> {
-        self.results.as_mut().filter(|_| self.show_results)
-    }
-
-    /// Takes the results of an analysis of this model. Values are matched by node id, since
-    /// CalculiX may number its result nodes differently, e.g. after expanding shells.
-    pub fn attach_results(&mut self, frd: FrdImport) {
-        let FrdImport {
-            mesh: result_mesh,
-            mut increments,
-            date,
-            time,
-            ..
-        } = frd;
-        let indices: Vec<Option<usize>> = self
-            .mesh
-            .node_ids()
-            .iter()
-            .map(|&id| result_mesh.node_index(id))
-            .collect();
-        for component in increments
-            .iter_mut()
-            .flat_map(|i| &mut i.fields)
-            .flat_map(|f| &mut f.components)
-        {
-            component.values = indices
-                .iter()
-                .map(|index| index.and_then(|i| component.values.get(i).copied()))
-                .map(|value| value.unwrap_or(f32::NAN))
-                .collect();
-        }
-        let mut view = ResultsView::new(increments, self.mesh.bounds());
-        view.date = date;
-        view.time = time;
-        self.results = Some(view);
-        self.show_results = true;
+    /// Whether this is a results file rather than an FE model.
+    pub fn is_results(&self) -> bool {
+        self.results.is_some()
     }
 
     /// Node coordinates as drawn and the normalized contour values, if a result is shown;
@@ -247,7 +205,7 @@ impl Model {
         let mut coords = std::borrow::Cow::Borrowed(self.mesh.coords());
         let mut scalars = None;
         let mut deformed = false;
-        if let Some(view) = self.shown_results() {
+        if let Some(view) = &self.results {
             let scale = (view.scale() * view.amplitude()) as f64;
             let displacements = view.current_increment().and_then(|i| i.displacements());
             if let (Some(displacements), true) = (displacements, scale != 0.0) {
@@ -472,7 +430,7 @@ impl Model {
     /// Where a node is drawn, relative to the model origin, including the shown deformation.
     pub fn node_position(&self, index: usize) -> Option<Vec3> {
         let mut p = DVec3::from(*self.mesh.coords().get(index)?);
-        if let Some(view) = self.shown_results() {
+        if let Some(view) = &self.results {
             let scale = (view.scale() * view.amplitude()) as f64;
             let displacement = view
                 .current_increment()
@@ -569,7 +527,7 @@ mod tests {
         let loaded = load(&path).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(loaded.model.is_project());
-        assert!(!loaded.model.results_only);
+        assert!(!loaded.model.is_results());
         assert_eq!(loaded.model.fe, model.fe);
         assert_eq!(loaded.model.parts.len(), 2);
     }
@@ -612,26 +570,6 @@ mod tests {
         let node = model.mesh.node(model.hit_node(&hit)).unwrap();
         assert_eq!(node[2], 10.0);
         assert!(model.pick(origin, Vec3::Z).is_none());
-    }
-
-    #[test]
-    fn analysis_results_attach_to_the_input_model() {
-        let mut model = load(&testdata("kragbalken_c3d8.inp")).unwrap().model;
-        let plain = load(&testdata("kragbalken_c3d8.inp"))
-            .unwrap()
-            .render_meshes;
-        let frd = read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
-        model.attach_results(frd);
-        let view = model.results.as_ref().unwrap();
-        let tip = model.mesh.node_index(99).unwrap();
-        let displacements = view.increments[0].displacements().unwrap();
-        assert!(displacements[tip][2] < 0.0);
-        model.show_results = false;
-        let meshes = model.render_meshes();
-        assert_eq!(
-            meshes[0].vertices, plain[0].vertices,
-            "FE Model tab shows the plain mesh"
-        );
     }
 
     #[test]
