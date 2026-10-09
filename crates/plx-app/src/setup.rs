@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 
 use egui::Ui;
-use plx_mesh::{ElementId, FeMesh, NodeId};
+use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
     BoundaryCondition, BoundaryKind, Constraint, ContactPair, Elastic, EquationSolver,
     Extrapolation, FeModel, FieldOutput, FrequencyStep, HotSpot, HotSpotComponent, Incrementation,
@@ -76,6 +76,9 @@ pub(crate) struct RegionDraft {
     pub(crate) target: Target,
     nodes: History<NodeId>,
     faces: History<(ElementId, u8)>,
+    /// Picks of CAD entities on a mesh generated from geometry. Mixed with picks of nodes or
+    /// faces they turn into those, so only one of the histories is in use at a time.
+    geometry: History<CadEntity>,
     parts: BTreeSet<String>,
     set: String,
 }
@@ -94,6 +97,7 @@ impl RegionDraft {
             target,
             nodes: History::default(),
             faces: History::default(),
+            geometry: History::default(),
             parts: BTreeSet::new(),
             set: String::new(),
         }
@@ -116,6 +120,9 @@ impl RegionDraft {
                 draft.faces = History::from_items(faces.iter().copied());
             }
             Region::Faces(_) => draft.nodes = History::from_items(region.nodes(mesh)),
+            Region::Geometry(entities) => {
+                draft.geometry = History::from_items(entities.iter().copied());
+            }
             Region::NodeSet(set) | Region::ElementSet(set) | Region::Surface(set) => {
                 draft.source = match region {
                     Region::NodeSet(_) => Source::NodeSet,
@@ -130,6 +137,9 @@ impl RegionDraft {
 
     pub(crate) fn region(&self) -> Region {
         match self.source {
+            Source::Selection if self.geometry.can_undo() => {
+                Region::Geometry(self.geometry.items().into_iter().collect())
+            }
             Source::Selection => match self.target {
                 Target::Nodes => Region::Nodes(self.nodes.items().into_iter().collect()),
                 Target::Faces | Target::Edges => {
@@ -145,6 +155,7 @@ impl RegionDraft {
 
     pub(crate) fn is_empty(&self) -> bool {
         match self.source {
+            Source::Selection if self.geometry.can_undo() => self.geometry.items().is_empty(),
             Source::Selection => match self.target {
                 Target::Nodes => self.nodes.items().is_empty(),
                 Target::Faces | Target::Edges => self.faces.items().is_empty(),
@@ -181,7 +192,8 @@ impl RegionDraft {
             }
             Source::Selection => match pick {
                 Some((hit, precision)) => {
-                    self.take(picker.pick(model, hit, self.target, precision), operation);
+                    let items = picker.pick(model, hit, self.target, precision);
+                    self.take(&model.mesh, items, operation);
                 }
                 // PrePoMax clears the selection on a plain click into empty space.
                 None if operation == Operation::Replace => self.clear(),
@@ -194,24 +206,72 @@ impl RegionDraft {
     pub(crate) fn clear(&mut self) {
         self.nodes.clear();
         self.faces.clear();
+        self.geometry.clear();
     }
 
-    pub(crate) fn take(&mut self, items: Items, operation: Operation) {
+    /// Adds picked items to the selection. CAD entities stay CAD entities unless nodes or
+    /// faces are picked too; then they become the nodes or faces they stand for.
+    pub(crate) fn take(&mut self, mesh: &FeMesh, items: Items, operation: Operation) {
+        let replace = operation == Operation::Replace;
         match items {
-            Items::Nodes(nodes) => self.nodes.push(operation, nodes),
-            Items::Faces(faces) => self.faces.push(operation, faces),
+            Items::Geometry(entities) if replace || !self.ids_can_undo() => {
+                self.nodes.clear();
+                self.faces.clear();
+                self.geometry.push(operation, entities);
+            }
+            Items::Geometry(entities) => {
+                let items = Items::Geometry(entities).resolved(mesh, self.target);
+                self.take(mesh, items, operation);
+            }
+            items => {
+                if replace {
+                    self.geometry.clear();
+                } else {
+                    self.geometry_to_ids(mesh);
+                }
+                match items {
+                    Items::Nodes(nodes) => self.nodes.push(operation, nodes),
+                    Items::Faces(faces) => self.faces.push(operation, faces),
+                    Items::Geometry(_) => unreachable!("handled above"),
+                }
+            }
         }
     }
 
-    pub(crate) fn can_undo(&self) -> bool {
+    /// Turns picked CAD entities into the nodes or faces they stand for.
+    fn geometry_to_ids(&mut self, mesh: &FeMesh) {
+        if !self.geometry.can_undo() {
+            return;
+        }
+        let entities: Vec<CadEntity> = self.geometry.items().into_iter().collect();
+        self.geometry.clear();
+        match self.target {
+            Target::Nodes => self.nodes = History::from_items(mesh.cad_nodes(&entities)),
+            Target::Faces | Target::Edges => {
+                self.faces = History::from_items(mesh.cad_faces(&entities));
+            }
+        }
+    }
+
+    fn ids_can_undo(&self) -> bool {
         match self.target {
             Target::Nodes => self.nodes.can_undo(),
             Target::Faces | Target::Edges => self.faces.can_undo(),
         }
     }
 
+    pub(crate) fn can_undo(&self) -> bool {
+        self.geometry.can_undo() || self.ids_can_undo()
+    }
+
     /// Applies a button of the selection window.
     pub(crate) fn action(&mut self, model: &Model, action: PickerAction) {
+        match action {
+            PickerAction::Undo if self.geometry.can_undo() => return self.geometry.undo(),
+            PickerAction::Undo | PickerAction::Clear => {}
+            // The buttons work on nodes and faces.
+            _ => self.geometry_to_ids(&model.mesh),
+        }
         match (action, self.target) {
             (PickerAction::Undo, Target::Nodes) => self.nodes.undo(),
             (PickerAction::Undo, Target::Faces | Target::Edges) => self.faces.undo(),
@@ -296,12 +356,16 @@ impl RegionDraft {
                 Source::Selection => {
                     ui.horizontal(|ui| {
                         let count = self.count();
+                        let geometry = self.geometry.items();
                         let what = match self.target {
                             Target::Nodes => "Knoten",
                             Target::Faces => "Elementflächen",
                             Target::Edges => "Elementkanten",
                         };
-                        if count == 0 {
+                        if !geometry.is_empty() {
+                            let entities: Vec<CadEntity> = geometry.into_iter().collect();
+                            ui.label(plx_model::describe_entities(&entities));
+                        } else if count == 0 {
                             ui.label("Leer");
                         } else {
                             ui.label(format!("{count} {what}"));
@@ -360,7 +424,8 @@ impl RegionDraft {
         operation: Operation,
     ) {
         if self.source == Source::Selection {
-            self.take(picker.pick_box(model, area, self.target), operation);
+            let items = picker.pick_box(model, area, self.target);
+            self.take(&model.mesh, items, operation);
         }
     }
 
@@ -446,6 +511,7 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
                 .filter(|(element, _)| elements.contains(element))
                 .collect();
         }
+        Region::Geometry(entities) => return crate::cad_selection::highlight(model, entities),
         Region::Nodes(_) | Region::NodeSet(_) => {
             highlight.nodes = region.nodes(&model.mesh);
             // Faces whose corners are all selected show as faces, like PrePoMax does for
@@ -779,7 +845,8 @@ impl Editor {
         if let Some(r) = draft_region_mut(&mut self.draft)
             && r.source == Source::Selection
         {
-            r.take(self.picker.pick_box(model, area, r.target), operation);
+            let items = self.picker.pick_box(model, area, r.target);
+            r.take(&model.mesh, items, operation);
         }
     }
 

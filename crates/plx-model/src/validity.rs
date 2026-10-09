@@ -131,6 +131,13 @@ impl Region {
                     .count();
                 (missing > 0).then(|| format!("{missing} Elementflächen existieren nicht"))
             }
+            Region::Geometry(entities) => {
+                if mesh.cad.is_empty() {
+                    return Some("Das Netz ist nicht aus der Geometrie erzeugt".into());
+                }
+                let missing = entities.iter().filter(|&&e| !mesh.cad.contains(e)).count();
+                (missing > 0).then(|| format!("{missing} Geometrieelemente sind nicht vernetzt"))
+            }
         }
     }
 }
