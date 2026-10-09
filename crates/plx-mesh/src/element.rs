@@ -62,6 +62,19 @@ const HEX_FACES: [FaceTopology; 6] = [
     face(&[3, 7, 4, 0], &[19, 15, 16, 11]),
 ];
 
+const TRI_EDGES: [FaceTopology; 3] = [
+    face(&[0, 1], &[3]),
+    face(&[1, 2], &[4]),
+    face(&[2, 0], &[5]),
+];
+
+const QUAD_EDGES: [FaceTopology; 4] = [
+    face(&[0, 1], &[4]),
+    face(&[1, 2], &[5]),
+    face(&[2, 3], &[6]),
+    face(&[3, 0], &[7]),
+];
+
 const TRI_FACE: [FaceTopology; 1] = [face(&[0, 1, 2], &[3, 4, 5])];
 const QUAD_FACE: [FaceTopology; 1] = [face(&[0, 1, 2, 3], &[4, 5, 6, 7])];
 
@@ -147,6 +160,16 @@ impl ElementShape {
             Self::Hex8 | Self::Hex20 => &HEX_FACES,
         };
         all
+    }
+
+    /// Edges of a triangle or quadrilateral in CalculiX order, the faces of plane elements;
+    /// other shapes have none.
+    pub fn edges(self) -> &'static [FaceTopology] {
+        match self {
+            Self::Tri3 | Self::Tri6 => &TRI_EDGES,
+            Self::Quad4 | Self::Quad8 => &QUAD_EDGES,
+            _ => &[],
+        }
     }
 
     /// Local node chains of a line element, as segments for drawing.

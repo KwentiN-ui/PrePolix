@@ -204,28 +204,38 @@ fn face_geometry(model: &Model, region: &Region, visible: &Visible) -> Vec<FaceG
             continue;
         };
         let Some(topology) =
-            (usize::from(face).checked_sub(1)).and_then(|f| element.shape.faces().get(f))
+            (usize::from(face).checked_sub(1)).and_then(|f| element.faces().get(f))
         else {
             continue;
         };
         let corners: Option<Vec<DVec3>> = (topology.corners.iter())
             .map(|&local| element.nodes.get(local).copied().and_then(position))
             .collect();
-        let Some(corners) = corners.filter(|c| c.len() >= 3) else {
+        let Some(corners) = corners.filter(|c| c.len() >= 2) else {
             continue;
         };
         let center = corners.iter().sum::<DVec3>() / corners.len() as f64;
-        // Newell's method: twice the area along the normal, for any planar-ish polygon.
-        let mut normal = DVec3::ZERO;
-        for (i, a) in corners.iter().enumerate() {
-            normal += a.cross(corners[(i + 1) % corners.len()]);
-        }
-        let area = normal.length() / 2.0;
+        let nodes: Vec<DVec3> = element.nodes.iter().filter_map(|&n| position(n)).collect();
+        let centroid = nodes.iter().sum::<DVec3>() / nodes.len().max(1) as f64;
+        let (area, normal) = if let [a, b] = corners[..] {
+            // An edge of a 2D element: its length, and the normal in the element's plane.
+            let along = b - a;
+            let away = center - centroid;
+            (
+                along.length(),
+                away - along * away.dot(along) / along.length_squared(),
+            )
+        } else {
+            // Newell's method: twice the area along the normal, for any planar-ish polygon.
+            let mut normal = DVec3::ZERO;
+            for (i, a) in corners.iter().enumerate() {
+                normal += a.cross(corners[(i + 1) % corners.len()]);
+            }
+            (normal.length() / 2.0, normal)
+        };
         let Some(mut normal) = normal.try_normalize() else {
             continue;
         };
-        let nodes: Vec<DVec3> = element.nodes.iter().filter_map(|&n| position(n)).collect();
-        let centroid = nodes.iter().sum::<DVec3>() / nodes.len().max(1) as f64;
         if normal.dot(center - centroid) < 0.0 {
             normal = -normal;
         }

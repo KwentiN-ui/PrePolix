@@ -126,7 +126,7 @@ impl Region {
                     .iter()
                     .filter(|&&(element, face)| {
                         mesh.element(element)
-                            .is_none_or(|e| face == 0 || usize::from(face) > e.shape.faces().len())
+                            .is_none_or(|e| face == 0 || usize::from(face) > e.faces().len())
                     })
                     .count();
                 (missing > 0).then(|| format!("{missing} Elementflächen existieren nicht"))
@@ -181,6 +181,7 @@ mod tests {
             kind: BoundaryKind::Fixed,
         });
         FeModel {
+            properties: Default::default(),
             materials: vec![Material {
                 name: "Steel".into(),
                 density: None,
@@ -190,6 +191,7 @@ mod tests {
                 name: "Section-1".into(),
                 material: "Steel".into(),
                 region: Region::Parts(vec!["PART-1".into()]),
+                thickness: 1.0,
             }],
             steps: vec![step],
             user_keywords: Vec::new(),

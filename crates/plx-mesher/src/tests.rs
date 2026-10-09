@@ -324,3 +324,93 @@ fn names_are_made_calculix_safe() {
     assert!(is_cad_file(std::path::Path::new("a/B.STEP")));
     assert!(!is_cad_file(std::path::Path::new("a/b.inp")));
 }
+
+/// A geometry of one rounded rectangle in the x-y plane, as a 2D model has it.
+fn rectangle(origin: [f64; 3], size: [f64; 2], radius: f64) -> Geometry {
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        gmsh.add_rectangle(origin, size, radius)?;
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    Geometry {
+        source: "rechteck.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters::for_diagonal(size[0].hypot(size[1])),
+        mesh_items: Vec::new(),
+    }
+}
+
+/// Signed area of a triangle or quadrilateral in the x-y plane, positive counter-clockwise.
+fn signed_area(mesh: &FeMesh, element: &Element) -> f64 {
+    let n = if element.shape.edges().len() == 3 {
+        3
+    } else {
+        4
+    };
+    let p: Vec<[f64; 3]> = (0..n)
+        .map(|k| mesh.node(element.nodes[k]).unwrap())
+        .collect();
+    (0..n)
+        .map(|k| {
+            let (a, b) = (p[k], p[(k + 1) % n]);
+            a[0] * b[1] - a[1] * b[0]
+        })
+        .sum::<f64>()
+        / 2.0
+}
+
+#[test]
+fn faces_outside_solids_are_meshed_as_shell_parts() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = rectangle([10.0, 0.0, 0.0], [20.0, 10.0], 2.0);
+    assert_eq!(part_names(&geometry).unwrap(), ["SHELL-1"]);
+    let display = tessellate(&geometry).unwrap();
+    assert_eq!(display.mesh.parts[0].name, "SHELL-1");
+
+    geometry.meshing.max_size = 2.0;
+    let mesh = generate_mesh(&geometry).unwrap().mesh;
+    assert_eq!(mesh.parts.len(), 1);
+    assert!(mesh.elements().iter().all(|e| e.type_name == "S6"));
+    // Midside nodes lie between their corners, as CalculiX numbers them.
+    for element in mesh.elements() {
+        for edge in element.shape.edges() {
+            let p = |l: usize| mesh.node(element.nodes[l]).unwrap();
+            let (a, b, m) = (p(edge.corners[0]), p(edge.corners[1]), p(edge.mids[0]));
+            let off = (0..3)
+                .map(|k| (m[k] - (a[k] + b[k]) / 2.0).abs())
+                .fold(0.0, f64::max);
+            assert!(off < 0.05, "Element {}: {off}", element.id);
+        }
+    }
+    let area: f64 = mesh
+        .elements()
+        .iter()
+        .map(|e| signed_area(&mesh, e).abs())
+        .sum();
+    let exact = 200.0 - (4.0 - std::f64::consts::PI) * 4.0;
+    assert!((area - exact).abs() / exact < 0.01, "Fläche {area}");
+    assert!(mesh.coords().iter().all(|c| c[2].abs() < 1e-9));
+
+    geometry.meshing.second_order = false;
+    geometry.meshing.quad_dominated = true;
+    let quads = generate_mesh(&geometry).unwrap().mesh;
+    let count = |name: &str| {
+        quads
+            .elements()
+            .iter()
+            .filter(|e| e.type_name == name)
+            .count()
+    };
+    assert!(
+        count("S4") > 10 * count("S3"),
+        "{} S4, {} S3",
+        count("S4"),
+        count("S3")
+    );
+    geometry.meshing.second_order = true;
+    let quadratic = generate_mesh(&geometry).unwrap().mesh;
+    assert!(quadratic.elements().iter().any(|e| e.type_name == "S8"));
+}

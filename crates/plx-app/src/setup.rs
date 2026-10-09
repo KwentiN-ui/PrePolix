@@ -11,7 +11,7 @@ use plx_mesh::{ElementId, FeMesh, NodeId};
 use plx_model::{
     BoundaryCondition, BoundaryKind, Constraint, ContactPair, Elastic, EquationSolver,
     Extrapolation, FeModel, FieldOutput, FrequencyStep, HotSpot, HotSpotComponent, Incrementation,
-    Load, LoadKind, Material, OutputKind, Region, Section, StaticStep, Step, StepKind,
+    Load, LoadKind, Material, ModelSpace, OutputKind, Region, Section, StaticStep, Step, StepKind,
     SurfaceInteraction, extrapolation_weights, next_name,
 };
 
@@ -112,7 +112,7 @@ impl RegionDraft {
                 draft.parts = parts.iter().cloned().collect();
             }
             Region::Nodes(nodes) => draft.nodes = History::from_items(nodes.iter().copied()),
-            Region::Faces(faces) if target == Target::Faces => {
+            Region::Faces(faces) if target != Target::Nodes => {
                 draft.faces = History::from_items(faces.iter().copied());
             }
             Region::Faces(_) => draft.nodes = History::from_items(region.nodes(mesh)),
@@ -132,7 +132,9 @@ impl RegionDraft {
         match self.source {
             Source::Selection => match self.target {
                 Target::Nodes => Region::Nodes(self.nodes.items().into_iter().collect()),
-                Target::Faces => Region::Faces(self.faces.items().into_iter().collect()),
+                Target::Faces | Target::Edges => {
+                    Region::Faces(self.faces.items().into_iter().collect())
+                }
             },
             Source::Parts => Region::Parts(self.parts.iter().cloned().collect()),
             Source::NodeSet => Region::NodeSet(self.set.clone()),
@@ -145,7 +147,7 @@ impl RegionDraft {
         match self.source {
             Source::Selection => match self.target {
                 Target::Nodes => self.nodes.items().is_empty(),
-                Target::Faces => self.faces.items().is_empty(),
+                Target::Faces | Target::Edges => self.faces.items().is_empty(),
             },
             Source::Parts => self.parts.is_empty(),
             _ => self.set.is_empty(),
@@ -155,7 +157,7 @@ impl RegionDraft {
     pub(crate) fn count(&self) -> usize {
         match self.target {
             Target::Nodes => self.nodes.items().len(),
-            Target::Faces => self.faces.items().len(),
+            Target::Faces | Target::Edges => self.faces.items().len(),
         }
     }
 
@@ -204,7 +206,7 @@ impl RegionDraft {
     pub(crate) fn can_undo(&self) -> bool {
         match self.target {
             Target::Nodes => self.nodes.can_undo(),
-            Target::Faces => self.faces.can_undo(),
+            Target::Faces | Target::Edges => self.faces.can_undo(),
         }
     }
 
@@ -212,7 +214,7 @@ impl RegionDraft {
     pub(crate) fn action(&mut self, model: &Model, action: PickerAction) {
         match (action, self.target) {
             (PickerAction::Undo, Target::Nodes) => self.nodes.undo(),
-            (PickerAction::Undo, Target::Faces) => self.faces.undo(),
+            (PickerAction::Undo, Target::Faces | Target::Edges) => self.faces.undo(),
             (PickerAction::Clear, _) => self.clear(),
             (PickerAction::All, Target::Nodes) => {
                 self.nodes.push(Operation::Replace, model.visible_nodes());
@@ -225,6 +227,22 @@ impl RegionDraft {
                 let mut all = model.visible_nodes();
                 all.retain(|n| !selected.contains(n));
                 self.nodes.push(Operation::Replace, all);
+            }
+            (PickerAction::All, Target::Edges) => {
+                self.faces.push(Operation::Replace, visible_edges(model));
+            }
+            (PickerAction::Invert, Target::Edges) => {
+                let selected = self.faces.items();
+                let mut all = visible_edges(model);
+                all.retain(|f| !selected.contains(f));
+                self.faces.push(Operation::Replace, all);
+            }
+            (PickerAction::Ids(operation, ids), Target::Edges) => {
+                // Ids of elements: their edges on the outline.
+                let elements: BTreeSet<ElementId> = ids.into_iter().collect();
+                let mut edges = visible_edges(model);
+                edges.retain(|(element, _)| elements.contains(element));
+                self.faces.push(operation, edges);
             }
             (PickerAction::Invert, Target::Faces) => {
                 let selected = self.faces.items();
@@ -281,6 +299,7 @@ impl RegionDraft {
                         let what = match self.target {
                             Target::Nodes => "Knoten",
                             Target::Faces => "Elementflächen",
+                            Target::Edges => "Elementkanten",
                         };
                         if count == 0 {
                             ui.label("Leer");
@@ -360,6 +379,42 @@ impl RegionDraft {
     }
 }
 
+/// Edges of the outline of the visible parts, the faces of a 2D model.
+fn visible_edges(model: &Model) -> BTreeSet<(ElementId, u8)> {
+    (model.outline_edges().into_iter())
+        .filter(|(part, _, _)| model.parts[*part].visible)
+        .map(|(_, face, _)| face)
+        .collect()
+}
+
+/// Pressure and surface traction act on element faces, in 2D models on their edges.
+fn face_target(fe: &FeModel) -> Target {
+    if fe.properties.space.is_2d() {
+        Target::Edges
+    } else {
+        Target::Faces
+    }
+}
+
+/// The components of a force; 2D models have none along z.
+fn force_rows(ui: &mut Ui, force: &mut [f64; 3], two_d: bool) {
+    let count = if two_d { 2 } else { 3 };
+    for (value, label) in force.iter_mut().zip(["F1", "F2", "F3"]).take(count) {
+        ui.label(label);
+        ui.add(numeric::drag_value(value).speed(1.0));
+        ui.end_row();
+    }
+}
+
+/// Forces of axisymmetric models act on the whole revolution, as in CalculiX.
+fn revolution_hint(ui: &mut Ui, axisymmetric: bool) {
+    if axisymmetric {
+        ui.label("");
+        ui.weak("Rotationssymmetrisch: Kraft auf den ganzen Umfang (360°).");
+        ui.end_row();
+    }
+}
+
 /// How a region is shown selected in the 3D view.
 pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
     let mut highlight = Highlight::default();
@@ -369,6 +424,14 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
                 .filter(|(_, p)| names.contains(&p.name))
                 .map(|(i, _)| i)
                 .collect();
+        }
+        Region::Faces(_) | Region::Surface(_) if model.is_plane() => {
+            // The faces of 2D elements are edges, drawn as lines.
+            let faces = region.faces(&model.mesh).into_iter().collect();
+            highlight.lines = crate::selection::edge_lines(model, &faces);
+            if highlight.lines.is_empty() {
+                highlight.nodes = region.nodes(&model.mesh);
+            }
         }
         Region::Faces(_) | Region::Surface(_) => {
             highlight.faces = region.faces(&model.mesh).into_iter().collect();
@@ -508,6 +571,7 @@ impl Editor {
                         .map(|m| m.name.clone())
                         .unwrap_or_default(),
                     region: Region::Parts(Vec::new()),
+                    thickness: 1.0,
                 },
                 RegionDraft::new(ELEMENT_SOURCES, Target::Faces),
             ),
@@ -611,7 +675,7 @@ impl Editor {
                         RegionDraft::from_region(&load.region, NODE_SOURCES, Target::Nodes, mesh)
                     }
                     LoadKind::Pressure(_) | LoadKind::SurfaceTraction(_) => {
-                        RegionDraft::from_region(&load.region, FACE_SOURCES, Target::Faces, mesh)
+                        RegionDraft::from_region(&load.region, FACE_SOURCES, face_target(fe), mesh)
                     }
                 };
                 (Draft::Load(s, load, region), i)
@@ -797,6 +861,8 @@ impl Editor {
 
     fn form(&mut self, ui: &mut Ui, model: &Model) {
         let taken = self.taken(&model.fe);
+        let space = model.fe.properties.space;
+        let (two_d, axisymmetric) = (space.is_2d(), space == ModelSpace::Axisymmetric);
         match &mut self.draft {
             Draft::Material(material) => material_form(ui, material),
             Draft::Section(section, region) => {
@@ -812,6 +878,12 @@ impl Editor {
                         }
                     });
                 ui.end_row();
+                // Plane stress and plane strain sections have a thickness, as in PrePoMax.
+                if model.fe.properties.space.has_thickness() {
+                    ui.label("Dicke");
+                    ui.add(numeric::drag_value(&mut section.thickness).range(0.0..=f64::MAX));
+                    ui.end_row();
+                }
                 region.ui(ui, model);
             }
             Draft::Step(step) => step_form(ui, step, self.index.is_none(), &model.fe),
@@ -832,9 +904,12 @@ impl Editor {
                 });
                 ui.end_row();
                 if let BoundaryKind::Displacement(values) = &mut bc.kind {
+                    // Nodes of 2D models only move in the x-y plane.
+                    let dofs = if two_d { 2 } else { 6 };
                     for (value, label) in values
                         .iter_mut()
                         .zip(["U1", "U2", "U3", "UR1", "UR2", "UR3"])
+                        .take(dofs)
                     {
                         let mut set = value.is_some();
                         ui.checkbox(&mut set, label);
@@ -860,7 +935,7 @@ impl Editor {
                             if on_nodes {
                                 *region = RegionDraft::new(NODE_SOURCES, Target::Nodes);
                             } else if was_on_nodes {
-                                *region = RegionDraft::new(FACE_SOURCES, Target::Faces);
+                                *region = RegionDraft::new(FACE_SOURCES, face_target(&model.fe));
                             }
                         }
                     }
@@ -868,14 +943,11 @@ impl Editor {
                 ui.end_row();
                 match &mut load.kind {
                     LoadKind::ConcentratedForce(force) => {
-                        for (value, label) in force.iter_mut().zip(["F1", "F2", "F3"]) {
-                            ui.label(label);
-                            ui.add(numeric::drag_value(value).speed(1.0));
-                            ui.end_row();
-                        }
+                        force_rows(ui, force, two_d);
                         ui.label("");
                         ui.weak("Die Kraft wirkt an jedem Knoten der Region.");
                         ui.end_row();
+                        revolution_hint(ui, axisymmetric);
                     }
                     LoadKind::Pressure(pressure) => {
                         ui.label("Druck");
@@ -883,16 +955,13 @@ impl Editor {
                         ui.end_row();
                     }
                     LoadKind::SurfaceTraction(force) => {
-                        for (value, label) in force.iter_mut().zip(["F1", "F2", "F3"]) {
-                            ui.label(label);
-                            ui.add(numeric::drag_value(value).speed(1.0));
-                            ui.end_row();
-                        }
+                        force_rows(ui, force, two_d);
                         ui.label("");
                         ui.weak(
                             "Gesamtkraft, beim Export flächengewichtet auf die Knoten verteilt.",
                         );
                         ui.end_row();
+                        revolution_hint(ui, axisymmetric);
                     }
                 }
                 region.ui(ui, model);

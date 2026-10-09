@@ -12,8 +12,8 @@ use std::fmt::Write as _;
 use plx_mesh::{ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
     BoundaryKind, Constraint, ContactMethod, ContactPair, FeModel, FieldOutput, FrequencyStep,
-    GapConductance, Incrementation, InteractionProperty, LoadKind, OutputKind, Region, StaticStep,
-    Step, StepKind, SurfaceBehavior, SurfaceInteraction, UserKeyword,
+    GapConductance, Incrementation, InteractionProperty, LoadKind, ModelSpace, OutputKind, Region,
+    StaticStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, UserKeyword,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -212,6 +212,20 @@ pub fn model_keywords(
     model: &FeModel,
     heading: &str,
 ) -> Result<Vec<Keyword>, WriteError> {
+    // The faces of 2D elements are their edges; a mesh whose surface elements are still
+    // typed as shells is written as the model space types them.
+    let space = model.properties.space;
+    let retyped;
+    let mesh = if (mesh.elements().iter())
+        .any(|e| space.element_type(&e.type_name, e.shape) != e.type_name)
+    {
+        let mut copy = mesh.clone();
+        space.convert_mesh(&mut copy);
+        retyped = copy;
+        &retyped
+    } else {
+        mesh
+    };
     let mut sets = Sets::new(mesh);
     // Regions are resolved first: their sets must precede the materials and steps.
     let materials = materials(model);
@@ -227,7 +241,7 @@ pub fn model_keywords(
     let steps = model
         .steps
         .iter()
-        .map(|step| write_step(&mut sets, step, generated.boundary.as_ref()))
+        .map(|step| write_step(&mut sets, step, generated.boundary.as_ref(), space))
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut nodes = String::from("*Node\n");
@@ -237,7 +251,7 @@ pub fn model_keywords(
     for (id, [x, y, z]) in &generated.nodes {
         let _ = writeln!(nodes, "{id}, {:.8E}, {:.8E}, {:.8E}", x, y, z);
     }
-    let mut element_blocks = elements(mesh);
+    let mut element_blocks = elements(mesh, space);
     element_blocks.extend(generated.elements);
     let node_sets = sets
         .node_sets
@@ -295,23 +309,26 @@ pub fn model_keywords(
 }
 
 /// One `*Element` block per part and element type; the part name is the element set.
-fn elements(mesh: &FeMesh) -> Vec<Keyword> {
+/// Surface elements get the type of the model space, e.g. `CAX6` in an axisymmetric model.
+fn elements(mesh: &FeMesh, space: ModelSpace) -> Vec<Keyword> {
     let mut written = vec![false; mesh.element_count()];
-    let mut groups: Vec<(Option<&str>, &str, Vec<ElementId>)> = Vec::new();
+    let mut groups: Vec<(Option<&str>, String, Vec<ElementId>)> = Vec::new();
+    let type_name =
+        |element: &plx_mesh::Element| space.element_type(&element.type_name, element.shape);
     for part in &mesh.parts {
         for &id in &part.elements {
             let Some(index) = mesh.element_index(id) else {
                 continue;
             };
             if !std::mem::replace(&mut written[index], true) {
-                let type_name = mesh.elements()[index].type_name.as_str();
+                let type_name = type_name(&mesh.elements()[index]);
                 group(&mut groups, Some(&part.name), type_name).push(id);
             }
         }
     }
     for (element, done) in mesh.elements().iter().zip(&written) {
         if !done {
-            group(&mut groups, None, &element.type_name).push(element.id);
+            group(&mut groups, None, type_name(element)).push(element.id);
         }
     }
     let mut blocks = Vec::new();
@@ -336,9 +353,9 @@ fn elements(mesh: &FeMesh) -> Vec<Keyword> {
 }
 
 fn group<'a, 'b>(
-    groups: &'b mut Vec<(Option<&'a str>, &'a str, Vec<ElementId>)>,
+    groups: &'b mut Vec<(Option<&'a str>, String, Vec<ElementId>)>,
     set: Option<&'a str>,
-    type_name: &'a str,
+    type_name: String,
 ) -> &'b mut Vec<ElementId> {
     let index = match groups.iter().position(|g| g.0 == set && g.1 == type_name) {
         Some(index) => index,
@@ -578,10 +595,15 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError
         }
         let set = sets.element_set(&section.name, &section.region)?;
         let material = name(&section.material);
-        keywords.push(Keyword::generated(format!(
+        let mut out = format!(
             "** Name: {}\n*Solid section, Elset={set}, Material={material}\n",
             section.name
-        )));
+        );
+        // Plane stress and plane strain sections have a thickness, as in PrePoMax.
+        if model.properties.space.has_thickness() {
+            let _ = writeln!(out, "{}", number(section.thickness));
+        }
+        keywords.push(Keyword::generated(out));
     }
     Ok(keywords)
 }
@@ -732,7 +754,10 @@ fn write_step(
     sets: &mut Sets,
     step: &Step,
     extra_boundary: Option<&Keyword>,
+    space: ModelSpace,
 ) -> Result<Keyword, WriteError> {
+    // Nodes of 2D models move in the x-y plane only; CalculiX fails on rotations there.
+    let dofs = if space.is_2d() { 2 } else { 6 };
     if !step.active {
         return Ok(deactivated_step(step));
     }
@@ -750,10 +775,10 @@ fn write_step(
         let mut out = format!("** Name: {}\n*Boundary\n", bc.name);
         match bc.kind {
             BoundaryKind::Fixed => {
-                let _ = writeln!(out, "{set}, 1, 6, 0");
+                let _ = writeln!(out, "{set}, 1, {dofs}, 0");
             }
             BoundaryKind::Displacement(values) => {
-                for (dof, value) in (1..).zip(values) {
+                for (dof, value) in (1..).zip(values).take(dofs) {
                     if let Some(value) = value {
                         let _ = writeln!(out, "{set}, {dof}, {dof}, {}", number(value));
                     }
@@ -783,7 +808,7 @@ fn write_step(
             LoadKind::ConcentratedForce(force) => {
                 let set = sets.node_set(&load.name, &load.region)?;
                 out.push_str("*Cload\n");
-                for (dof, value) in (1..).zip(force) {
+                for (dof, value) in (1..).zip(force).take(dofs) {
                     if value != 0.0 {
                         let _ = writeln!(out, "{set}, {dof}, {}", number(value));
                     }
@@ -797,13 +822,14 @@ fn write_step(
             }
             LoadKind::SurfaceTraction(force) => {
                 let faces = load.region.faces(sets.mesh);
-                let nodal = traction_forces(sets.mesh, &faces, force);
+                let axisymmetric = space == ModelSpace::Axisymmetric;
+                let nodal = traction_forces(sets.mesh, &faces, force, axisymmetric);
                 if nodal.is_empty() {
                     return Err(empty(&load.name, "Elementflächen"));
                 }
                 out.push_str("*Cload\n");
                 for (node, values) in nodal {
-                    for (dof, value) in (1..).zip(values) {
+                    for (dof, value) in (1..).zip(values).take(dofs) {
                         if value != 0.0 {
                             let _ = writeln!(out, "{node}, {dof}, {}", number(value));
                         }
@@ -881,18 +907,61 @@ fn deactivated_step(step: &Step) -> Keyword {
 /// area; within a face the share follows the shape functions: equal parts on linear faces,
 /// only midside nodes on quadratic triangles, and -1/12 per corner and 1/3 per midside
 /// node on quadratic quadrilaterals.
+///
+/// The faces of 2D elements are their edges, which share the force by length. In an
+/// axisymmetric model the force acts on the whole revolution, as CalculiX's concentrated
+/// loads there do, so an edge's share grows with its distance from the axis.
 fn traction_forces(
     mesh: &FeMesh,
     faces: &[(ElementId, u8)],
     force: [f64; 3],
+    axisymmetric: bool,
 ) -> BTreeMap<NodeId, [f64; 3]> {
-    let (weights, total_area) = constraints::node_areas(mesh, faces);
+    let (weights, total_area) = constraints::node_areas(mesh, faces, axisymmetric);
     if total_area <= 0.0 {
         return BTreeMap::new();
     }
     (weights.into_iter())
         .map(|(node, weight)| (node, force.map(|f| f * weight / total_area)))
         .collect()
+}
+
+/// Integrals of the shape functions along an edge of two end points, or of two end points
+/// and a midside point: the nodes' shares of the edge's length, or with `axisymmetric` of
+/// the length times the radius x (the area the edge sweeps, divided by 2 pi).
+fn edge_weights(points: &[[f64; 3]], axisymmetric: bool) -> Vec<f64> {
+    // Three-point Gauss rule, exact for the quadratic edge with a linear radius.
+    let gauss = [
+        (-(0.6f64.sqrt()), 5.0 / 9.0),
+        (0.0, 8.0 / 9.0),
+        (0.6f64.sqrt(), 5.0 / 9.0),
+    ];
+    let mut weights = vec![0.0; points.len()];
+    for (t, w) in gauss {
+        let (shape, slope): (Vec<f64>, Vec<f64>) = if points.len() == 3 {
+            (
+                vec![t * (t - 1.0) / 2.0, t * (t + 1.0) / 2.0, 1.0 - t * t],
+                vec![t - 0.5, t + 0.5, -2.0 * t],
+            )
+        } else {
+            (vec![(1.0 - t) / 2.0, (1.0 + t) / 2.0], vec![-0.5, 0.5])
+        };
+        let combine =
+            |f: &[f64], k: usize| -> f64 { f.iter().zip(points).map(|(n, p)| n * p[k]).sum() };
+        let jacobian = (0..3)
+            .map(|k| combine(&slope, k).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let radius = if axisymmetric {
+            combine(&shape, 0)
+        } else {
+            1.0
+        };
+        for (weight, n) in weights.iter_mut().zip(&shape) {
+            *weight += w * n * jacobian * radius;
+        }
+    }
+    weights
 }
 
 /// Area of a (possibly slightly warped) polygon from its vector area.

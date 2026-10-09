@@ -15,6 +15,8 @@ pub struct Settings {
     pub post: PostProcessing,
     pub solver: Solver,
     pub gmsh: Gmsh,
+    /// Model space and unit system last chosen for a new model, proposed for the next one.
+    pub new_model: plx_model::ModelProperties,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

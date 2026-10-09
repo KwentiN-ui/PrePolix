@@ -104,7 +104,7 @@ fn face_nodes<'a>(
         let element = mesh.element(element);
         let nodes: Vec<NodeId> = element
             .and_then(|e| {
-                let topology = e.shape.faces().get(usize::from(face).checked_sub(1)?)?;
+                let topology = e.faces().get(usize::from(face).checked_sub(1)?)?;
                 let quadratic = e.shape.is_quadratic();
                 Some(
                     topology

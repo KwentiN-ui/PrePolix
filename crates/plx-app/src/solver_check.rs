@@ -298,6 +298,7 @@ fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
         kind: load,
     });
     FeModel {
+        properties: Default::default(),
         materials: vec![Material {
             name: "Steel".into(),
             density: None,
@@ -310,6 +311,7 @@ fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
             name: "Section-1".into(),
             material: "Steel".into(),
             region: Region::Parts(vec!["BEAM".into()]),
+            thickness: 1.0,
         }],
         steps: vec![step],
         user_keywords: Vec::new(),

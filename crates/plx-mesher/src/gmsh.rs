@@ -334,6 +334,20 @@ impl Gmsh {
         self.synchronize()
     }
 
+    /// A rectangle in a plane z = const, with corners rounded by `radius` if it is positive.
+    pub fn add_rectangle(
+        &self,
+        origin: [f64; 3],
+        size: [f64; 2],
+        radius: f64,
+    ) -> Result<(), GmshError> {
+        let ([x, y, z], [dx, dy]) = (origin, size);
+        self.call(|e| unsafe {
+            (self.api.occ_add_rectangle)(x, y, z, dx, dy, -1, radius, e);
+        })?;
+        self.synchronize()
+    }
+
     /// Removes entities given as (dimension, tag) with what bounds them and nothing else
     /// uses.
     pub fn remove(&self, entities: &[(i32, i32)]) -> Result<(), GmshError> {

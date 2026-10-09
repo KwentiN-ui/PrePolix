@@ -32,7 +32,7 @@ fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters) {
     ui.end_row();
     ui.label("Netztyp");
     ui.vertical(|ui| {
-        ui.checkbox(&mut d.second_order, "Zweite Ordnung (C3D10)");
+        ui.checkbox(&mut d.second_order, "Zweite Ordnung (C3D10, CPS6/CPS8)");
         ui.add_enabled(
             d.second_order,
             egui::Checkbox::new(
@@ -41,6 +41,8 @@ fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters) {
             ),
         );
         ui.checkbox(&mut d.optimize, "Netz optimieren (Netgen)");
+        ui.checkbox(&mut d.quad_dominated, "Vierecke bevorzugen (2D)")
+            .on_hover_text("Flächen von 2D-Modellen überwiegend mit Vierecken vernetzen.");
     });
     ui.end_row();
 }
@@ -581,10 +583,9 @@ fn entities_highlight(view: &Model, entities: &BTreeSet<CadEntity>) -> Highlight
             CadEntity::Edge(tag) => edges.insert(tag),
         };
     }
-    let nodes: BTreeSet<NodeId> = edge_segments(view, &edges).into_iter().flatten().collect();
     Highlight {
         faces: face_items(view, &faces),
-        nodes: nodes.into_iter().collect(),
+        lines: edge_segments(view, &edges),
         ..Highlight::default()
     }
 }
@@ -703,7 +704,7 @@ mod tests {
         editor.click(&view, Some((&face_hit, 0.5)), Operation::Replace);
         editor.click(&view, Some((&edge_hit, 0.5)), Operation::Add);
         let highlight = editor.highlight(&view);
-        assert!(!highlight.faces.is_empty() && !highlight.nodes.is_empty());
+        assert!(!highlight.faces.is_empty() && !highlight.lines.is_empty());
         let preview = editor.preview(&view, &edge_hit, 0.5);
         assert!(!preview.lines.is_empty());
         let item = editor.finish().unwrap();

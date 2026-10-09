@@ -30,6 +30,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
     });
     step.loads.push(load);
     let model = FeModel {
+        properties: Default::default(),
         materials: vec![Material {
             name: "Steel".into(),
             density: Some(7.85e-9),
@@ -42,6 +43,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
             name: "Section-1".into(),
             material: "Steel".into(),
             region: Region::Parts(vec!["EALL".into()]),
+            thickness: 1.0,
         }],
         steps: vec![step],
         user_keywords: Vec::new(),
@@ -280,7 +282,7 @@ fn surface_traction_spreads_the_total_force_by_area() {
         })
         .collect();
     assert!(!faces.is_empty());
-    let nodal = traction_forces(mesh, &faces, [0.0, -500.0, 30.0]);
+    let nodal = traction_forces(mesh, &faces, [0.0, -500.0, 30.0], false);
     let total = nodal
         .values()
         .fold([0.0; 3], |sum, f| [0, 1, 2].map(|k| sum[k] + f[k]));
@@ -551,6 +553,282 @@ fn a_deactivated_step_is_written_as_comments_only() {
     );
 }
 
+/// A rectangle of quadratic quadrilaterals in the x-y plane from (`x0`, 0) to
+/// (`x0 + width`, `height`), `nx` by `ny` elements, typed as shells (`S8`) so the model space
+/// decides the element type. Elements count row by row from 1.
+fn rectangle(x0: f64, width: f64, height: f64, nx: u32, ny: u32) -> FeMesh {
+    let mut mesh = FeMesh::default();
+    let columns = 2 * nx + 1;
+    let id = |i: u32, j: u32| j * columns + i + 1;
+    for j in 0..=2 * ny {
+        for i in 0..=2 * nx {
+            if i % 2 == 1 && j % 2 == 1 {
+                continue;
+            }
+            let x = x0 + width * f64::from(i) / f64::from(2 * nx);
+            let y = height * f64::from(j) / f64::from(2 * ny);
+            mesh.set_node(id(i, j), [x, y, 0.0]);
+        }
+    }
+    let mut part = plx_mesh::Part {
+        name: "PLATE".into(),
+        elements: Vec::new(),
+    };
+    for row in 0..ny {
+        for column in 0..nx {
+            let (i, j) = (2 * column, 2 * row);
+            let element = row * nx + column + 1;
+            let nodes = vec![
+                id(i, j),
+                id(i + 2, j),
+                id(i + 2, j + 2),
+                id(i, j + 2),
+                id(i + 1, j),
+                id(i + 2, j + 1),
+                id(i + 1, j + 2),
+                id(i, j + 1),
+            ];
+            mesh.add_element(plx_mesh::Element {
+                id: element,
+                type_name: "S8".into(),
+                shape: plx_mesh::ElementShape::Quad8,
+                nodes,
+            })
+            .unwrap();
+            part.elements.push(element);
+        }
+    }
+    mesh.parts.push(part);
+    mesh
+}
+
+/// Nodes of the mesh where `coordinate` of the axis is `value`.
+fn nodes_at(mesh: &FeMesh, axis: usize, value: f64) -> Vec<NodeId> {
+    (mesh.node_ids().iter().zip(mesh.coords()))
+        .filter(|(_, c)| (c[axis] - value).abs() < 1e-9)
+        .map(|(&id, _)| id)
+        .collect()
+}
+
+/// Edges of the rectangle's elements lying on the line where `axis` is `value`, as faces.
+fn edges_at(mesh: &FeMesh, axis: usize, value: f64) -> Vec<(ElementId, u8)> {
+    let mut faces = Vec::new();
+    for element in mesh.elements() {
+        for (k, edge) in element.shape.edges().iter().enumerate() {
+            let on = (edge.corners.iter())
+                .all(|&l| (mesh.node(element.nodes[l]).unwrap()[axis] - value).abs() < 1e-9);
+            if on {
+                faces.push((element.id, k as u8 + 1));
+            }
+        }
+    }
+    faces
+}
+
+/// A 2D model of the rectangle: steel, `thickness`, the given boundary conditions and load.
+fn plane_model(
+    space: ModelSpace,
+    thickness: f64,
+    bcs: Vec<(Vec<NodeId>, [Option<f64>; 6])>,
+    load: LoadKind,
+    region: Region,
+) -> FeModel {
+    let mut step = Step::new_static("Step-1");
+    for (k, (nodes, values)) in bcs.into_iter().enumerate() {
+        step.boundary_conditions.push(BoundaryCondition {
+            name: format!("Displacement_Rotation-{}", k + 1),
+            active: true,
+            region: Region::Nodes(nodes),
+            kind: BoundaryKind::Displacement(values),
+        });
+    }
+    step.loads.push(Load {
+        name: "Load-1".into(),
+        active: true,
+        region,
+        kind: load,
+    });
+    FeModel {
+        properties: plx_model::ModelProperties {
+            space,
+            ..Default::default()
+        },
+        materials: vec![Material {
+            name: "Steel".into(),
+            density: None,
+            elastic: Some(Elastic {
+                young: 210_000.0,
+                poisson: 0.3,
+            }),
+        }],
+        sections: vec![Section {
+            name: "Section-1".into(),
+            material: "Steel".into(),
+            region: Region::Parts(vec!["PLATE".into()]),
+            thickness,
+        }],
+        steps: vec![step],
+        ..FeModel::default()
+    }
+}
+
+const FIX_X: [Option<f64>; 6] = [Some(0.0), None, None, None, None, None];
+const FIX_Y: [Option<f64>; 6] = [None, Some(0.0), None, None, None, None];
+
+#[test]
+fn two_d_models_write_their_element_types_thickness_and_dofs() {
+    let mesh = rectangle(0.0, 10.0, 2.0, 2, 1);
+    let left = nodes_at(&mesh, 0, 0.0);
+    let mut model = plane_model(
+        ModelSpace::PlaneStress,
+        2.5,
+        vec![(left, FIX_X)],
+        LoadKind::ConcentratedForce([1.0, 2.0, 3.0]),
+        Region::Nodes(vec![5]),
+    );
+    model.steps[0].boundary_conditions[0].kind = BoundaryKind::Fixed;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Element, Type=CPS8, Elset=PLATE\n",
+        "*Solid section, Elset=Internal_Selection-1_Section-1, Material=Steel\n2.5\n",
+        ", 1, 2, 0\n",
+        "*Cload\nInternal_Selection-1_Load-1, 1, 1\nInternal_Selection-1_Load-1, 2, 2\n**\n",
+    ] {
+        assert!(text.contains(line), "{line:?} fehlt in\n{text}");
+    }
+    model.properties.space = ModelSpace::Axisymmetric;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Element, Type=CAX8, Elset=PLATE\n"));
+    assert!(text.contains("Material=Steel\n**"), "{text}");
+}
+
+#[test]
+fn edge_tractions_follow_length_and_radius() {
+    // One quadratic edge from x = 1 to x = 3: by length 1/6, 4/6, 1/6.
+    let weights = edge_weights(&[[1.0, 0.0, 0.0], [3.0, 0.0, 0.0], [2.0, 0.0, 0.0]], false);
+    for (w, expected) in weights.iter().zip([2.0 / 6.0, 2.0 / 6.0, 8.0 / 6.0]) {
+        assert!((w - expected).abs() < 1e-12, "{weights:?}");
+    }
+    // Times the radius: the integral of r over the edge is 4.
+    let weights = edge_weights(&[[1.0, 0.0, 0.0], [3.0, 0.0, 0.0]], true);
+    assert!((weights.iter().sum::<f64>() - 4.0).abs() < 1e-12);
+    assert!((weights[0] - 5.0 / 3.0).abs() < 1e-12, "{weights:?}");
+}
+
+/// Plane stress: a strip pulled by a surface traction stretches by sigma L / E.
+#[test]
+fn calculix_stretches_a_plane_stress_strip() {
+    let (length, height, thickness, force) = (10.0, 2.0, 2.0, 400.0);
+    let mesh = rectangle(0.0, length, height, 5, 2);
+    let model = plane_model(
+        ModelSpace::PlaneStress,
+        thickness,
+        vec![(nodes_at(&mesh, 0, 0.0), FIX_X), (vec![1], FIX_Y)],
+        LoadKind::SurfaceTraction([force, 0.0, 0.0]),
+        Region::Faces(edges_at(&mesh, 0, length)),
+    );
+    let Some(frd) = run_ccx(
+        "ebener-spannungszustand",
+        &write_inp(&mesh, &model, "").unwrap(),
+    ) else {
+        return;
+    };
+    let stress = force / (height * thickness);
+    let expected = stress * length / 210_000.0;
+    for node in nodes_at(&mesh, 0, length) {
+        let u = node_value(&frd, "DISP", "U1", node);
+        assert!((u - expected).abs() < 1e-5 * expected, "{u} != {expected}");
+        let s = node_value(&frd, "STRESS", "S11", node);
+        assert!((s - stress).abs() < 1e-3 * stress, "{s} != {stress}");
+    }
+}
+
+/// Plane strain: the same strip under pressure is stiffer by 1 - nu^2 and has a stress
+/// nu sigma across its plane.
+#[test]
+fn calculix_stretches_a_plane_strain_strip() {
+    let (length, height, pressure) = (10.0, 2.0, -100.0);
+    let mesh = rectangle(0.0, length, height, 5, 2);
+    let model = plane_model(
+        ModelSpace::PlaneStrain,
+        1.0,
+        vec![(nodes_at(&mesh, 0, 0.0), FIX_X), (vec![1], FIX_Y)],
+        LoadKind::Pressure(pressure),
+        Region::Faces(edges_at(&mesh, 0, length)),
+    );
+    let Some(frd) = run_ccx(
+        "ebener-verzerrungszustand",
+        &write_inp(&mesh, &model, "").unwrap(),
+    ) else {
+        return;
+    };
+    let expected = (1.0 - 0.3 * 0.3) * -pressure * length / 210_000.0;
+    for node in nodes_at(&mesh, 0, length) {
+        let u = node_value(&frd, "DISP", "U1", node);
+        assert!((u - expected).abs() < 1e-5 * expected, "{u} != {expected}");
+        let szz = node_value(&frd, "STRESS", "S33", node);
+        assert!((szz - 30.0).abs() < 1e-2, "{szz}");
+    }
+}
+
+/// Axisymmetric: a thick-walled tube under internal pressure, held axially, widens as Lamé's
+/// solution for plane strain says.
+#[test]
+fn calculix_widens_a_tube_under_internal_pressure() {
+    let (a, b, pressure) = (10.0, 20.0, 100.0);
+    let mesh = rectangle(a, b - a, 2.0, 10, 1);
+    let model = plane_model(
+        ModelSpace::Axisymmetric,
+        1.0,
+        vec![(mesh.node_ids().to_vec(), FIX_Y)],
+        LoadKind::Pressure(pressure),
+        Region::Faces(edges_at(&mesh, 0, a)),
+    );
+    let Some(frd) = run_ccx("rohr-innendruck", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let (e, nu) = (210_000.0, 0.3);
+    let lame = |r: f64| {
+        (1.0 + nu) / e * a * a * pressure / (b * b - a * a) * ((1.0 - 2.0 * nu) * r + b * b / r)
+    };
+    for r in [a, b] {
+        let expected = lame(r);
+        for node in nodes_at(&mesh, 0, r) {
+            let u = node_value(&frd, "DISP", "U1", node);
+            assert!(
+                (u - expected).abs() < 2e-3 * expected,
+                "r = {r}: {u} != {expected}"
+            );
+        }
+    }
+}
+
+/// Axisymmetric: a total axial force on the end of a tube is the force on the whole
+/// revolution, so the axial stress is F / (pi (b^2 - a^2)).
+#[test]
+fn calculix_pulls_a_tube_by_its_total_force() {
+    let (a, b, height, force) = (10.0, 12.0, 5.0, 10_000.0);
+    let mesh = rectangle(a, b - a, height, 2, 3);
+    let model = plane_model(
+        ModelSpace::Axisymmetric,
+        1.0,
+        vec![(nodes_at(&mesh, 1, 0.0), FIX_Y)],
+        LoadKind::SurfaceTraction([0.0, force, 0.0]),
+        Region::Faces(edges_at(&mesh, 1, height)),
+    );
+    let Some(frd) = run_ccx("rohr-zug", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let stress = force / (std::f64::consts::PI * (b * b - a * a));
+    for node in mesh.node_ids() {
+        let s = node_value(&frd, "STRESS", "S22", *node);
+        assert!(
+            (s - stress).abs() < 1e-3 * stress,
+            "{node}: {s} != {stress}"
+        );
+    }
+}
+
 type Faces = Vec<(ElementId, u8)>;
 
 /// Two blocks of 10 x 10 x 10 mm stacked along z, parts LOWER and UPPER, each 2 x 2 x 1
@@ -637,6 +915,7 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
         name: "Section-1".into(),
         material: "Steel".into(),
         region: Region::Parts(vec!["LOWER".into(), "UPPER".into()]),
+        thickness: 1.0,
     });
     model.steps.push(step);
     model
@@ -899,6 +1178,7 @@ fn blocks_model(
             name: "Section-1".into(),
             material: "Steel".into(),
             region: Region::Parts(vec!["A".into(), "B".into()]),
+            thickness: 1.0,
         }],
         constraints,
         steps: vec![step],

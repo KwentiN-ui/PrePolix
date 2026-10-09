@@ -81,6 +81,7 @@ mod tests {
             .unwrap()
             .mesh;
         let model = FeModel {
+            properties: Default::default(),
             materials: vec![Material {
                 name: "Steel".into(),
                 density: Some(7.85e-9),

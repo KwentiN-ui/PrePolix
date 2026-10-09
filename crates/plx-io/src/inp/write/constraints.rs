@@ -185,7 +185,7 @@ impl Writer {
         sets: &mut Sets,
         spring: &SurfaceSpring,
     ) -> Result<(), WriteError> {
-        let (weights, area) = node_areas(sets.mesh, &spring.region.faces(sets.mesh));
+        let (weights, area) = node_areas(sets.mesh, &spring.region.faces(sets.mesh), false);
         if weights.is_empty() {
             return Err(empty(&spring.name, "Elementflächen"));
         }
@@ -209,7 +209,7 @@ impl Writer {
     ) -> Result<(), WriteError> {
         let mesh = sets.mesh;
         let faces = support.region.faces(mesh);
-        let (weights, area) = node_areas(mesh, &faces);
+        let (weights, area) = node_areas(mesh, &faces, false);
         if weights.is_empty() {
             return Err(empty(&support.name, "Elementflächen"));
         }
@@ -275,7 +275,7 @@ impl Writer {
         spring: &SurfaceToSurfaceSpring,
     ) -> Result<(), WriteError> {
         let mesh = sets.mesh;
-        let (weights, area) = node_areas(mesh, &spring.slave.faces(mesh));
+        let (weights, area) = node_areas(mesh, &spring.slave.faces(mesh), false);
         if weights.is_empty() {
             return Err(empty(&spring.name, "Elementflächen auf der Slave-Seite"));
         }
@@ -333,7 +333,11 @@ fn real(value: f64) -> String {
 /// nodal forces of a constant pressure: equal parts on linear faces, only midside nodes on
 /// quadratic triangles, and -1/12 per corner and 1/3 per midside node on quadratic
 /// quadrilaterals.
-pub(super) fn node_areas(mesh: &FeMesh, faces: &[(ElementId, u8)]) -> (BTreeMap<NodeId, f64>, f64) {
+pub(super) fn node_areas(
+    mesh: &FeMesh,
+    faces: &[(ElementId, u8)],
+    axisymmetric: bool,
+) -> (BTreeMap<NodeId, f64>, f64) {
     let mut weights: BTreeMap<NodeId, f64> = BTreeMap::new();
     let mut total_area = 0.0;
     for &(element, face) in faces {
@@ -342,7 +346,7 @@ pub(super) fn node_areas(mesh: &FeMesh, faces: &[(ElementId, u8)]) -> (BTreeMap<
         };
         let Some(topology) = (face as usize)
             .checked_sub(1)
-            .and_then(|f| element.shape.faces().get(f))
+            .and_then(|f| element.faces().get(f))
         else {
             continue;
         };
@@ -352,9 +356,28 @@ pub(super) fn node_areas(mesh: &FeMesh, faces: &[(ElementId, u8)]) -> (BTreeMap<
         if corners.len() != topology.corners.len() {
             continue;
         }
+        let quadratic = element.shape.is_quadratic() && !topology.mids.is_empty();
+        // Edges of 2D elements: their length, or for axisymmetric ones length times radius.
+        if let [a, b] = corners[..] {
+            let ends = [topology.corners[0], topology.corners[1]];
+            let mid = topology.mids.first().copied().filter(|_| quadratic);
+            let (nodes, edge) = match mid.and_then(|m| Some((m, point(m)?))) {
+                Some((m, pm)) => (
+                    vec![ends[0], ends[1], m],
+                    super::edge_weights(&[a, b, pm], axisymmetric),
+                ),
+                None => (ends.to_vec(), super::edge_weights(&[a, b], axisymmetric)),
+            };
+            total_area += edge.iter().sum::<f64>();
+            for (local, weight) in nodes.into_iter().zip(edge) {
+                if let Some(id) = node(local) {
+                    *weights.entry(id).or_default() += weight;
+                }
+            }
+            continue;
+        }
         let area = super::polygon_area(&corners);
         total_area += area;
-        let quadratic = element.shape.is_quadratic() && !topology.mids.is_empty();
         let (corner_weight, mid_weight) = match (corners.len(), quadratic) {
             (3, true) => (0.0, 1.0 / 3.0),
             (4, true) => (-1.0 / 12.0, 1.0 / 3.0),
@@ -383,7 +406,7 @@ fn face_node_ids(mesh: &FeMesh, element: ElementId, face: u8) -> Vec<NodeId> {
     };
     let Some(topology) = (face as usize)
         .checked_sub(1)
-        .and_then(|f| element.shape.faces().get(f))
+        .and_then(|f| element.faces().get(f))
     else {
         return Vec::new();
     };
@@ -401,7 +424,7 @@ fn face_node_ids(mesh: &FeMesh, element: ElementId, face: u8) -> Vec<NodeId> {
 /// of its first face.
 fn outward_normal(mesh: &FeMesh, element: ElementId, face: u8) -> Option<[f64; 3]> {
     let e = mesh.element(element)?;
-    let topology = e.shape.faces().get(usize::from(face).checked_sub(1)?)?;
+    let topology = e.faces().get(usize::from(face).checked_sub(1)?)?;
     let corners: Vec<[f64; 3]> = (topology.corners.iter())
         .map(|&l| e.nodes.get(l).and_then(|&n| mesh.node(n)))
         .collect::<Option<_>>()?;
@@ -470,7 +493,7 @@ impl Target {
             .iter()
             .filter_map(|&(element, face)| {
                 let e = mesh.element(element)?;
-                let topology = e.shape.faces().get(usize::from(face).checked_sub(1)?)?;
+                let topology = e.faces().get(usize::from(face).checked_sub(1)?)?;
                 let corners: Vec<[f64; 3]> = (topology.corners.iter())
                     .map(|&l| e.nodes.get(l).and_then(|&n| mesh.node(n)))
                     .collect::<Option<_>>()?;
