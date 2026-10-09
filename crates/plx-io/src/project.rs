@@ -1,0 +1,104 @@
+//! Project files (`.plx`): the mesh and the FE model in RON, written by serde.
+
+use std::path::{Path, PathBuf};
+
+use plx_mesh::FeMesh;
+use plx_model::{FeModel, PROJECT_FORMAT, Project};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProjectError {
+    #[error("{path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{path}: keine gültige Projektdatei: {message}")]
+    Format { path: PathBuf, message: String },
+    #[error("{path} stammt aus einer neueren prepolix-Version (Format {format})")]
+    Newer { path: PathBuf, format: u32 },
+}
+
+/// Writes the project; a crash while saving leaves an existing file intact.
+pub fn save_project(path: &Path, mesh: &FeMesh, model: &FeModel) -> Result<(), ProjectError> {
+    let project = Project {
+        format: PROJECT_FORMAT,
+        mesh: mesh.clone(),
+        model: model.clone(),
+    };
+    let text = ron::to_string(&project).map_err(|e| ProjectError::Format {
+        path: path.to_owned(),
+        message: e.to_string(),
+    })?;
+    let io = |source| ProjectError::Io {
+        path: path.to_owned(),
+        source,
+    };
+    let temporary = path.with_extension("plx.tmp");
+    std::fs::write(&temporary, text).map_err(io)?;
+    std::fs::rename(&temporary, path).map_err(io)
+}
+
+pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
+    let text = std::fs::read_to_string(path).map_err(|source| ProjectError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    let project: Project = ron::from_str(&text).map_err(|e| ProjectError::Format {
+        path: path.to_owned(),
+        message: e.to_string(),
+    })?;
+    if project.format > PROJECT_FORMAT {
+        return Err(ProjectError::Newer {
+            path: path.to_owned(),
+            format: project.format,
+        });
+    }
+    Ok(project)
+}
+
+#[cfg(test)]
+mod tests {
+    use plx_model::{Material, Step};
+
+    use super::*;
+    use crate::inp::read_inp;
+
+    #[test]
+    fn projects_read_back_what_was_saved() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mesh = read_inp(&root.join("testdata/block_c3d20r.inp"))
+            .unwrap()
+            .mesh;
+        let model = FeModel {
+            materials: vec![Material {
+                name: "Steel".into(),
+                density: Some(7.85e-9),
+                elastic: None,
+            }],
+            sections: Vec::new(),
+            steps: vec![Step::new_static("Step-1")],
+        };
+        let dir = std::env::temp_dir().join(format!("plx-project-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("block.plx");
+        save_project(&path, &mesh, &model).unwrap();
+        let project = read_project(&path).unwrap();
+        assert_eq!(project.model, model);
+        assert_eq!(project.mesh.elements(), mesh.elements());
+        assert_eq!(project.mesh.coords(), mesh.coords());
+        assert_eq!(project.mesh.node_sets, mesh.node_sets);
+
+        let newer = std::fs::read_to_string(&path).unwrap().replacen(
+            &format!("format:{PROJECT_FORMAT}"),
+            "format:99",
+            1,
+        );
+        std::fs::write(&path, newer).unwrap();
+        assert!(matches!(
+            read_project(&path),
+            Err(ProjectError::Newer { format: 99, .. })
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

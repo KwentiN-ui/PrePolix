@@ -27,7 +27,7 @@ rfd.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
-ron = "0.12"
+ron.workspace = true
 
 [lints]
 workspace = true

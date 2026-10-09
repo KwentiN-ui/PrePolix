@@ -2,3 +2,4 @@
 
 pub mod frd;
 pub mod inp;
+pub mod project;

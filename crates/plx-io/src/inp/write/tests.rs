@@ -226,3 +226,54 @@ fn calculix_reads_quadratic_elements_over_two_lines() {
         );
     }
 }
+
+#[test]
+fn surface_traction_spreads_the_total_force_by_area() {
+    let mesh = &read_inp(&testdata("block_c3d20r.inp")).unwrap().mesh;
+    // Every element face on the x = min side of the block.
+    let min_x = mesh.bounds().unwrap().0[0];
+    let faces: Vec<(ElementId, u8)> = mesh
+        .elements()
+        .iter()
+        .flat_map(|e| {
+            (1..=6u8).filter_map(move |f| {
+                let topology = e.shape.faces()[usize::from(f) - 1];
+                let on_side = topology
+                    .corners
+                    .iter()
+                    .all(|&l| mesh.node(e.nodes[l]).unwrap()[0] == min_x);
+                on_side.then_some((e.id, f))
+            })
+        })
+        .collect();
+    assert!(!faces.is_empty());
+    let nodal = traction_forces(mesh, &faces, [0.0, -500.0, 30.0]);
+    let total = nodal
+        .values()
+        .fold([0.0; 3], |sum, f| [0, 1, 2].map(|k| sum[k] + f[k]));
+    assert!(
+        (total[1] + 500.0).abs() < 1e-9 && (total[2] - 30.0).abs() < 1e-9,
+        "{total:?}"
+    );
+    // Quadratic quads: corners pull against the load direction, midside nodes carry it.
+    assert!(nodal.values().any(|f| f[1] > 0.0) && nodal.values().any(|f| f[1] < 0.0));
+}
+
+#[test]
+fn calculix_balances_a_surface_traction() {
+    let load = Load {
+        name: "Surface_Traction-1".into(),
+        region: Region::Surface("TIP".into()),
+        kind: LoadKind::SurfaceTraction([0.0, -80.0, 0.0]),
+    };
+    let (mesh, model) = cantilever(load);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let Some(frd) = run_ccx("traktion", &text) else {
+        return;
+    };
+    let reaction: f64 = mesh.node_sets["FIX"]
+        .iter()
+        .map(|&node| node_value(&frd, "FORC", "F2", node))
+        .sum();
+    assert!((reaction - 80.0).abs() < 1e-3, "{reaction}");
+}

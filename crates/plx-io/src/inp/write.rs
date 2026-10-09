@@ -366,6 +366,21 @@ fn write_step(out: &mut String, sets: &mut Sets, step: &Step) -> Result<(), Writ
                     let _ = writeln!(out, "{set}, P{face}, {}", number(pressure));
                 }
             }
+            LoadKind::SurfaceTraction(force) => {
+                let faces = load.region.faces(sets.mesh);
+                let nodal = traction_forces(sets.mesh, &faces, force);
+                if nodal.is_empty() {
+                    return Err(empty(&load.name, "Elementflächen"));
+                }
+                out.push_str("*Cload\n");
+                for (node, values) in nodal {
+                    for (dof, value) in (1..).zip(values) {
+                        if value != 0.0 {
+                            let _ = writeln!(out, "{node}, {dof}, {}", number(value));
+                        }
+                    }
+                }
+            }
         }
     }
     title(out, "Field outputs");
@@ -375,6 +390,76 @@ fn write_step(out: &mut String, sets: &mut Sets, step: &Step) -> Result<(), Writ
     title(out, "End step");
     out.push_str("*End step\n");
     Ok(())
+}
+
+/// Equivalent nodal forces of a total force spread evenly over element faces, the way
+/// PrePoMax turns a surface traction into concentrated loads. Each face takes its share by
+/// area; within a face the share follows the shape functions: equal parts on linear faces,
+/// only midside nodes on quadratic triangles, and -1/12 per corner and 1/3 per midside
+/// node on quadratic quadrilaterals.
+fn traction_forces(
+    mesh: &FeMesh,
+    faces: &[(ElementId, u8)],
+    force: [f64; 3],
+) -> BTreeMap<NodeId, [f64; 3]> {
+    let mut weighted: Vec<(NodeId, f64)> = Vec::new();
+    let mut total_area = 0.0;
+    for &(element, face) in faces {
+        let Some(element) = mesh.element(element) else {
+            continue;
+        };
+        let Some(topology) = (face as usize)
+            .checked_sub(1)
+            .and_then(|f| element.shape.faces().get(f))
+        else {
+            continue;
+        };
+        let node = |local: usize| element.nodes.get(local).copied();
+        let point = |local: usize| node(local).and_then(|id| mesh.node(id));
+        let corners: Vec<[f64; 3]> = topology.corners.iter().filter_map(|&l| point(l)).collect();
+        if corners.len() != topology.corners.len() {
+            continue;
+        }
+        let area = polygon_area(&corners);
+        total_area += area;
+        let quadratic = element.shape.is_quadratic() && !topology.mids.is_empty();
+        let (corner_weight, mid_weight) = match (corners.len(), quadratic) {
+            (3, true) => (0.0, 1.0 / 3.0),
+            (4, true) => (-1.0 / 12.0, 1.0 / 3.0),
+            (n, _) => (1.0 / n as f64, 0.0),
+        };
+        for &local in topology.corners {
+            weighted.extend(node(local).map(|id| (id, area * corner_weight)));
+        }
+        if quadratic {
+            for &local in topology.mids {
+                weighted.extend(node(local).map(|id| (id, area * mid_weight)));
+            }
+        }
+    }
+    let mut nodal: BTreeMap<NodeId, [f64; 3]> = BTreeMap::new();
+    if total_area <= 0.0 {
+        return nodal;
+    }
+    for (node, weight) in weighted {
+        let share = nodal.entry(node).or_default();
+        for k in 0..3 {
+            share[k] += force[k] * weight / total_area;
+        }
+    }
+    nodal
+}
+
+/// Area of a (possibly slightly warped) polygon from its vector area.
+fn polygon_area(corners: &[[f64; 3]]) -> f64 {
+    let mut sum = [0.0; 3];
+    for (i, a) in corners.iter().enumerate() {
+        let b = corners[(i + 1) % corners.len()];
+        sum[0] += a[1] * b[2] - a[2] * b[1];
+        sum[1] += a[2] * b[0] - a[0] * b[2];
+        sum[2] += a[0] * b[1] - a[1] * b[0];
+    }
+    0.5 * (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt()
 }
 
 fn static_step(out: &mut String, settings: &StaticStep) {

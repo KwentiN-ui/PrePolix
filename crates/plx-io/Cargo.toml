@@ -10,6 +10,7 @@ repository.workspace = true
 plx-mesh.workspace = true
 plx-model.workspace = true
 plx-results.workspace = true
+ron.workspace = true
 thiserror.workspace = true
 
 [lints]
