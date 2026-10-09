@@ -270,9 +270,11 @@ fn has_properties(item: &TreeItem) -> bool {
 }
 
 /// Items of the FE model that have an edit dialog.
-/// Items the context menu and the Delete key remove; a step's field outputs are not.
-fn deletable(item: &TreeItem) -> bool {
+/// Items the context menu and the Delete key remove; a step's field outputs are not, nor
+/// the parts of results.
+fn deletable(view: TreeView, item: &TreeItem) -> bool {
     (is_fe_item(item) && !matches!(item, TreeItem::FieldOutput(..)))
+        || (matches!(item, TreeItem::Part(_)) && view != TreeView::Results)
         || matches!(
             item,
             TreeItem::ResultFieldOutput(_) | TreeItem::HistorySet(_) | TreeItem::MeshItem(_)
@@ -384,11 +386,11 @@ pub fn part_menu(
     ui: &mut Ui,
     index: usize,
     visible: bool,
-    geometry: bool,
+    view: TreeView,
     response: &mut TreeResponse,
 ) {
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-    if geometry {
+    if view == TreeView::Geometry {
         if ui.button("Netz erzeugen").clicked() {
             response.mesh_part = Some(index);
         }
@@ -400,6 +402,12 @@ pub fn part_menu(
     let label = if visible { "Ausblenden" } else { "Einblenden" };
     if ui.button(label).clicked() {
         response.visibility.push((index, !visible));
+    }
+    if deletable(view, &TreeItem::Part(index)) {
+        ui.separator();
+        if ui.button("Löschen").clicked() {
+            response.delete = Some(TreeItem::Part(index));
+        }
     }
 }
 
@@ -556,7 +564,7 @@ impl Tree<'_> {
                         }
                         ui.separator();
                     }
-                    if deletable(&item) && ui.button("Löschen").clicked() {
+                    if deletable(self.view, &item) && ui.button("Löschen").clicked() {
                         self.response.delete = Some(item.clone());
                     }
                 }
@@ -807,9 +815,9 @@ impl Tree<'_> {
                 if changed {
                     tree.response.visibility.push((index, part.visible));
                 }
-                let geometry = tree.view == TreeView::Geometry;
+                let view = tree.view;
                 response.context_menu(|ui| {
-                    part_menu(ui, index, part.visible, geometry, &mut tree.response);
+                    part_menu(ui, index, part.visible, view, &mut tree.response);
                 });
             }
         });
@@ -983,7 +991,7 @@ pub fn show(
     // context menu. The selection may come from the 3D view, so the pointer can be anywhere.
     if let Some((selected_view, item)) = &tree.state.selected
         && *selected_view == view
-        && deletable(item)
+        && deletable(view, item)
         && !ui.ctx().text_edit_focused()
         && ui.input(|i| i.key_pressed(egui::Key::Delete))
     {

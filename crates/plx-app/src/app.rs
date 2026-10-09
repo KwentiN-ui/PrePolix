@@ -2126,8 +2126,7 @@ impl Workbench {
         response.context_menu(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             if let Some((index, visible)) = part {
-                let geometry = self.tree_view == TreeView::Geometry;
-                tree::part_menu(ui, index, visible, geometry, &mut tree_response);
+                tree::part_menu(ui, index, visible, self.tree_view, &mut tree_response);
                 ui.separator();
             }
             command = crate::viewport::view_menu(ui);
@@ -2435,8 +2434,19 @@ impl Workbench {
             return;
         };
         let mut answer = None;
+        // Like PrePoMax, a part is named in the question.
+        let part = match item {
+            TreeItem::Part(index) => (self.tree_model(view))
+                .and_then(|m| m.parts.get(index))
+                .map(|p| p.name.clone()),
+            _ => None,
+        };
+        let question = match &part {
+            Some(name) => format!("Ausgewähltes Part löschen?\n{name}"),
+            None => "Ausgewähltes Element löschen?".into(),
+        };
         egui::Modal::new(egui::Id::new("confirm delete")).show(ctx, |ui| {
-            ui.label("Ausgewähltes Element löschen?");
+            ui.label(question);
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui.button("OK").clicked() {
@@ -2460,7 +2470,7 @@ impl Workbench {
                 self.confirm_delete = None;
                 // The tree may have changed meanwhile, e.g. by another tab's selection.
                 if self.tree.selected.as_ref() == Some(&(view, item.clone())) {
-                    self.delete_item(item);
+                    self.delete_item(view, item);
                 }
             }
             Some(false) => self.confirm_delete = None,
@@ -2468,8 +2478,23 @@ impl Workbench {
         }
     }
 
-    fn delete_item(&mut self, item: TreeItem) {
-        if let TreeItem::ResultFieldOutput(field) = item {
+    /// The model a tree shows.
+    fn tree_model(&self, view: TreeView) -> Option<&Model> {
+        match view {
+            TreeView::Results => self.results.get(self.current_result),
+            TreeView::Geometry => self.geometry.as_ref(),
+            TreeView::FeModel => self.model.as_ref(),
+        }
+    }
+
+    fn delete_item(&mut self, view: TreeView, item: TreeItem) {
+        if let TreeItem::Part(index) = item {
+            match view {
+                TreeView::Geometry => self.delete_geometry_part(index),
+                TreeView::FeModel => self.delete_mesh_part(index),
+                TreeView::Results => {}
+            }
+        } else if let TreeItem::ResultFieldOutput(field) = item {
             self.delete_field_output(field);
         } else if let TreeItem::HistorySet(set) = item {
             self.delete_history_output(set);
@@ -2487,6 +2512,67 @@ impl Workbench {
             self.tree.selected = None;
             self.editor = None;
         }
+    }
+
+    /// PrePoMax's Delete of a geometry part: the geometry loses the solid or face; a mesh
+    /// already generated from it stays, as a part of the FE model.
+    fn delete_geometry_part(&mut self, index: usize) {
+        let name = (self.geometry.as_ref())
+            .and_then(|g| g.parts.get(index))
+            .map(|p| p.name.clone());
+        let (Some(name), Some(model)) = (name, self.model.as_mut()) else {
+            return;
+        };
+        let Some(geometry) = &model.geometry else {
+            return;
+        };
+        let smaller = match plx_mesher::delete_part(geometry, &name) {
+            Ok(smaller) => smaller,
+            Err(error) => {
+                self.output
+                    .push(format!("{name} kann nicht gelöscht werden: {error}"));
+                return;
+            }
+        };
+        self.geometry = match &smaller {
+            Some(geometry) => match plx_mesher::tessellate(geometry) {
+                Ok(display) => Some(Model::geometry_view(&model.path, display)),
+                Err(error) => {
+                    self.output
+                        .push(format!("Geometrie kann nicht angezeigt werden: {error}"));
+                    None
+                }
+            },
+            None => None,
+        };
+        model.geometry = smaller;
+        self.output.push(format!("Part {name} gelöscht"));
+        self.after_part_deleted();
+    }
+
+    /// PrePoMax's Delete of a mesh part: its elements go, with the nodes no other part has.
+    fn delete_mesh_part(&mut self, index: usize) {
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        let Some(name) = model.parts.get(index).map(|p| p.name.clone()) else {
+            return;
+        };
+        let smaller = plx_mesher::delete_mesh_part(&model.mesh, &name);
+        model.set_mesh(smaller);
+        self.output.push(format!("Part {name} gelöscht"));
+        self.after_part_deleted();
+    }
+
+    fn after_part_deleted(&mut self) {
+        self.tree.selected = None;
+        self.menu_part = None;
+        self.dialog = None;
+        self.mesh_item_editor = None;
+        self.highlighted = None;
+        self.symbols_shown = None;
+        self.frame_cache.clear();
+        self.results_changed = true;
     }
 
     fn editor_window(&mut self, ctx: &egui::Context) {
