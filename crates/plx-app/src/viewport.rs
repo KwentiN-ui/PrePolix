@@ -21,6 +21,8 @@ pub struct Viewport {
     pub overlay: Overlay,
     /// Where the user dragged the labels.
     pub labels: LabelOffsets,
+    /// Where the view was drawn last, in points.
+    pub rect: Rect,
 }
 
 /// A click into the scene as a ray in render coordinates.
@@ -62,6 +64,7 @@ impl Viewport {
             options: DisplayOptions::default(),
             overlay: Overlay::default(),
             labels: LabelOffsets::default(),
+            rect: Rect::NOTHING,
         }
     }
 
@@ -88,6 +91,7 @@ impl Viewport {
     pub fn ui(&mut self, ui: &mut Ui) -> ViewportResponse {
         let mut result = ViewportResponse::default();
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        self.rect = rect;
         let delta = response.drag_delta();
         if response.dragged_by(PointerButton::Primary) {
             self.camera.orbit(delta.x, delta.y);

@@ -8,6 +8,7 @@ mod model;
 mod overlay;
 mod properties;
 mod results;
+mod screenshot;
 mod settings;
 mod setup;
 mod solver_check;

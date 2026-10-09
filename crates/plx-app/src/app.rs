@@ -10,6 +10,7 @@ use crate::model::{self, LoadedModel, Model};
 use crate::overlay::{Marker, Overlay};
 use crate::properties;
 use crate::results::{Deformation, ResultsView, format_legend_value};
+use crate::screenshot::{self, Screenshot};
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::setup::{Editor, EditorResult, NewItem};
 use crate::tree::{self, TreeItem, TreeState, TreeView};
@@ -49,6 +50,7 @@ struct Workbench {
     analysis: Option<Analysis>,
     /// Results file the user asked to open; read by the app on a worker thread.
     open_results: Option<PathBuf>,
+    screenshot: Screenshot,
 }
 
 pub struct PrepolixApp {
@@ -94,6 +96,7 @@ impl PrepolixApp {
                 highlighted: None,
                 analysis: None,
                 open_results: None,
+                screenshot: Screenshot::default(),
             },
             load_events: channel(),
             loading: None,
@@ -257,6 +260,17 @@ impl PrepolixApp {
                     self.workbench.view_command = Some(ViewCommand::View(view));
                 }
             }
+            let camera = icons::button(ui, Icon::Screenshot, "Screenshot", true, false);
+            egui::Popup::menu(&camera).show(|ui| {
+                if ui.button("In Zwischenablage kopieren").clicked() {
+                    self.workbench
+                        .screenshot
+                        .request(screenshot::Target::Clipboard);
+                }
+                if ui.button("Speichern unter …").clicked() {
+                    self.workbench.screenshot.request(screenshot::Target::File);
+                }
+            });
             ui.separator();
             let options = &mut self.workbench.viewport.options;
             let mesh = options.mesh_edges;
@@ -395,6 +409,11 @@ impl eframe::App for PrepolixApp {
                 self.workbench.click(click);
             }
         });
+        let view = self.workbench.viewport.rect;
+        let workbench = &mut self.workbench;
+        workbench
+            .screenshot
+            .update(&ctx, view, &mut workbench.output);
         self.workbench.properties_window(&ctx);
         self.workbench.editor_window(&ctx);
         self.workbench.run_analysis(&ctx);
