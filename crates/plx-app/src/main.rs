@@ -3,6 +3,7 @@
 mod analysis;
 mod animation;
 mod app;
+mod gizmo;
 mod icons;
 mod keywords;
 mod material_library;
@@ -12,6 +13,7 @@ mod overlay;
 mod properties;
 mod results;
 mod screenshot;
+mod section;
 mod selection;
 mod settings;
 mod setup;

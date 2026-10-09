@@ -10,6 +10,10 @@ struct Globals {
     edge: vec4<f32>,
     // x: number of contour bands, 0 to show part colours.
     contour: vec4<f32>,
+    // Section view plane: unit normal in xyz, normal · point in w.
+    clip: vec4<f32>,
+    // x: 1 while the section view is on, y: tolerance behind the plane in world units.
+    clip_options: vec4<f32>,
     palette: array<vec4<f32>, 24>,
 };
 
@@ -49,7 +53,14 @@ struct SurfaceOut {
     @location(0) normal: vec3<f32>,
     @location(1) color: vec3<f32>,
     @location(2) scalar: f32,
+    @location(3) world: vec3<f32>,
 };
+
+// Everything on the cut-off side of the section plane is not drawn.
+fn clipped(world: vec3<f32>) -> bool {
+    return globals.clip_options.x > 0.0
+        && dot(globals.clip.xyz, world) - globals.clip.w < -globals.clip_options.y;
+}
 
 // Colour without a result value: light grey, like PrePoMax's NaN colour.
 const NO_VALUE_COLOR: vec3<f32> = vec3<f32>(0.75, 0.75, 0.75);
@@ -68,6 +79,7 @@ fn vs_surface(in: SurfaceIn) -> SurfaceOut {
     out.normal = in.normal;
     out.color = in.color;
     out.scalar = in.scalar;
+    out.world = in.position;
     return out;
 }
 
@@ -83,6 +95,9 @@ fn contour_color(t: f32) -> vec3<f32> {
 
 @fragment
 fn fs_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if clipped(in.world) {
+        discard;
+    }
     var color = in.color;
     if globals.contour.x > 0.0 {
         color = contour_color(in.scalar);
@@ -108,6 +123,7 @@ fn fs_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0
 struct EdgeOut {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) world: vec3<f32>,
 };
 
 // Edges lie exactly on surface triangles; pulling them slightly towards the viewer keeps them from
@@ -120,6 +136,7 @@ fn vs_edge(in: SurfaceIn) -> EdgeOut {
     out.position.z -= globals.edge.x * out.position.w;
     // Line vertices carry their opacity in the scalar slot.
     out.color = vec4<f32>(in.color, in.scalar);
+    out.world = in.position;
     return out;
 }
 
@@ -157,10 +174,14 @@ fn vs_wide_edge(
     out.position.z -= globals.edge.x * out.position.w;
     out.position = vec4<f32>(out.position.xy + offset * out.position.w, out.position.zw);
     out.color = vec4<f32>(color, 1.0);
+    out.world = select(a, b, end == 1u);
     return out;
 }
 
 @fragment
 fn fs_edge(in: EdgeOut) -> @location(0) vec4<f32> {
+    if clipped(in.world) {
+        discard;
+    }
     return in.color;
 }

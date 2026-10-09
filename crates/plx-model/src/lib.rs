@@ -7,9 +7,11 @@
 
 pub mod library;
 mod region;
+mod validity;
 
 pub use library::MaterialLibrary;
 pub use region::Region;
+pub use validity::{Invalid, ModelItem};
 
 use serde::{Deserialize, Serialize};
 

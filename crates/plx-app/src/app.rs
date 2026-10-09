@@ -14,6 +14,7 @@ use crate::overlay::{Marker, Overlay};
 use crate::properties;
 use crate::results::{Deformation, ResultsView, format_legend_value};
 use crate::screenshot::{self, Screenshot};
+use crate::section::{SectionDialog, SectionResult, SectionView};
 use crate::selection::Operation;
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::setup::{Editor, EditorResult, NewItem};
@@ -68,6 +69,11 @@ struct Workbench {
     /// Results file the user asked to open; read by the app on a worker thread.
     open_results: Option<PathBuf>,
     screenshot: Screenshot,
+    /// The section view, while it is on; it cuts whatever the 3D view shows.
+    section: Option<SectionView>,
+    section_dialog: Option<SectionDialog>,
+    /// The section view shown in the scene of the given version, to rebuild it on changes.
+    section_shown: Option<(u64, SectionView)>,
 }
 
 pub struct PrepolixApp {
@@ -121,6 +127,9 @@ impl PrepolixApp {
                 analysis: None,
                 open_results: None,
                 screenshot: Screenshot::default(),
+                section: None,
+                section_dialog: None,
+                section_shown: None,
             },
             load_events: channel(),
             loading: None,
@@ -243,6 +252,22 @@ impl PrepolixApp {
                     &mut self.workbench.viewport.options.mesh_edges,
                     "Netzkanten",
                 );
+                ui.separator();
+                let has_model = self.workbench.shown().is_some();
+                if ui
+                    .add_enabled(has_model, egui::Button::new("Schnittansicht …"))
+                    .clicked()
+                {
+                    self.workbench.open_section_dialog();
+                }
+                let active = self.workbench.section.is_some();
+                if ui
+                    .add_enabled(active, egui::Button::new("Schnittansicht aus"))
+                    .clicked()
+                {
+                    self.workbench.section = None;
+                    self.workbench.section_dialog = None;
+                }
             });
             for menu in ["Geometrie", "Netz"] {
                 ui.menu_button(menu, not_implemented);
@@ -307,6 +332,13 @@ impl PrepolixApp {
             }
             if icons::button(ui, Icon::MeshEdges, "Netzkanten", true, mesh).clicked() {
                 options.mesh_edges = true;
+            }
+            ui.separator();
+            let shown = self.workbench.shown().is_some();
+            let sectioned =
+                self.workbench.section.is_some() || self.workbench.section_dialog.is_some();
+            if icons::button(ui, Icon::SectionView, "Schnittansicht", shown, sectioned).clicked() {
+                self.workbench.open_section_dialog();
             }
         });
     }
@@ -426,8 +458,18 @@ impl eframe::App for PrepolixApp {
             .frame(pane.inner_margin(4))
             .show(ui, |ui| self.workbench.output(ui));
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            self.workbench.viewport.selecting = self.workbench.picking();
+            self.workbench.viewport.selecting =
+                self.workbench.picking() || self.workbench.section_picks();
+            self.workbench.viewport.gizmo =
+                match (&self.workbench.section_dialog, self.workbench.shown()) {
+                    (Some(dialog), Some(model)) => Some(dialog.gizmo(model)),
+                    _ => None,
+                };
             let response = self.workbench.viewport.ui(ui);
+            if let (Some(drag), Some(dialog)) = (response.gizmo, &mut self.workbench.section_dialog)
+            {
+                dialog.drag(drag);
+            }
             if let Some(command) = response.command {
                 self.workbench.view_command = Some(command);
             }
@@ -452,6 +494,7 @@ impl eframe::App for PrepolixApp {
             .update(&ctx, view, &mut workbench.output);
         self.workbench.properties_window(&ctx);
         self.workbench.editor_window(&ctx);
+        self.workbench.section_window(&ctx);
         self.workbench.keyword_editor_window(&ctx);
         self.workbench.material_library_window(&ctx);
         self.workbench.run_analysis(&ctx);
@@ -461,6 +504,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.update_highlight();
         self.workbench.settings_window(&ctx);
         self.workbench.rebuild_if_results_changed();
+        self.workbench.update_section();
 
         if let Some(command) = self.workbench.view_command.take() {
             let bounds = self.workbench.shown().and_then(Model::visible_bounds);
@@ -1097,6 +1141,22 @@ impl Workbench {
     /// selects it in the tree, as in PrePoMax, and a click into empty space clears the tree
     /// selection and with it the highlighted region.
     fn click(&mut self, click: Click) {
+        if let Some(dialog) = &mut self.section_dialog
+            && dialog.picks()
+        {
+            let model = match self.tree_view {
+                TreeView::Results => self.results.get(self.current_result),
+                _ => self.model.as_ref(),
+            };
+            if let Some(model) = model {
+                let hit = model.pick(click.origin, click.direction);
+                dialog.click(
+                    model,
+                    hit.as_ref().map(|h| (h, click.precision_at(h.point))),
+                );
+            }
+            return;
+        }
         if !self.picking() {
             let hit = self
                 .shown()
@@ -1169,7 +1229,7 @@ impl Workbench {
     }
 
     fn box_select(&mut self, area: &BoxSelect) {
-        if !self.picking() {
+        if !self.picking() || self.section_picks() {
             return;
         }
         if let (Some(editor), Some(model)) = (&mut self.editor, &self.model) {
@@ -1183,6 +1243,17 @@ impl Workbench {
 
     /// Shows what a click would select where the mouse rests.
     fn hover(&mut self, hover: Option<Click>) {
+        if let (Some(dialog), Some(model)) = (&self.section_dialog, self.shown())
+            && dialog.picks()
+        {
+            self.viewport.preview = hover
+                .and_then(|click| {
+                    let hit = model.pick(click.origin, click.direction)?;
+                    Some(dialog.preview(model, &hit, click.precision_at(hit.point)))
+                })
+                .unwrap_or_default();
+            return;
+        }
         let hover = hover.filter(|_| self.picking());
         let preview = match (hover, &self.editor, &self.model) {
             (Some(click), Some(editor), Some(model)) => model
@@ -1238,7 +1309,10 @@ impl Workbench {
         let Some(model) = &mut self.model else {
             return;
         };
-        let highlight = if let Some(editor) = &self.editor {
+        let highlight = if let Some(dialog) = &self.section_dialog {
+            self.highlighted = None;
+            dialog.highlight()
+        } else if let Some(editor) = &self.editor {
             editor.highlight(model)
         } else {
             match &self.tree.selected {
@@ -1253,6 +1327,80 @@ impl Workbench {
             model.highlight = highlight;
             self.results_changed |= self.tree_view != TreeView::Results;
         }
+    }
+
+    fn section_picks(&self) -> bool {
+        self.section_dialog
+            .as_ref()
+            .is_some_and(SectionDialog::picks)
+    }
+
+    /// Opens the section view dialog on the current section, or on a new one facing away
+    /// from the viewer.
+    fn open_section_dialog(&mut self) {
+        if self.section_dialog.is_some() {
+            return;
+        }
+        if let Some(model) = self.shown() {
+            let forward = self.viewport.camera().forward().as_dvec3();
+            let dialog = SectionDialog::new(self.section.clone(), model, forward);
+            self.section_dialog = Some(dialog);
+        }
+    }
+
+    fn section_window(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.section_dialog.take() else {
+            return;
+        };
+        let Some(model) = self.shown() else {
+            return;
+        };
+        match dialog.show(ctx, model) {
+            SectionResult::Open => {
+                self.section_dialog = Some(dialog);
+                return;
+            }
+            SectionResult::Ok => self.section = Some(dialog.draft),
+            SectionResult::Cancel => self.section = dialog.before,
+            SectionResult::Disable => self.section = None,
+        }
+        self.viewport.preview = Default::default();
+    }
+
+    /// Cuts the scene at the section plane being edited or shown, when it or the scene
+    /// changed.
+    fn update_section(&mut self) {
+        let wanted = self
+            .section_dialog
+            .as_ref()
+            .map(|d| &d.draft)
+            .or(self.section.as_ref())
+            .map(|s| (self.viewport.scene_version(), s.clone()));
+        if wanted == self.section_shown {
+            return;
+        }
+        // Only the model in view is cut; picking in the others sees everything.
+        for model in self.model.iter_mut().chain(&mut self.results) {
+            model.clip = None;
+        }
+        let shown = match self.tree_view {
+            TreeView::Results => self.results.get_mut(self.current_result),
+            _ => self.model.as_mut(),
+        };
+        match (shown, &wanted) {
+            (Some(model), Some((_, section))) => {
+                // The model origin is the centre of its bounds, where a principal plane's
+                // manipulator sits.
+                let anchor = section.anchor(model.origin());
+                let normal = section.normal();
+                let clip = plx_render::clip_plane(anchor, normal, model.origin());
+                let faces = model.section_meshes(anchor, normal, section.lighten);
+                model.clip = Some(clip);
+                self.viewport.set_section(Some((clip, &faces)));
+            }
+            _ => self.viewport.set_section(None),
+        }
+        self.section_shown = wanted;
     }
 
     fn settings_window(&mut self, ctx: &egui::Context) {
@@ -1345,6 +1493,8 @@ impl Workbench {
         self.close_results(true);
         self.tree.selected = None;
         self.dialog = None;
+        self.section = None;
+        self.section_dialog = None;
         self.editor = None;
         self.highlighted = None;
         self.parked_camera = None;

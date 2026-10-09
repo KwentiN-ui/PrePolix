@@ -2,8 +2,9 @@ use egui::{Color32, PointerButton, Pos2, Rect, Sense, Ui, pos2};
 use egui_wgpu::RenderState;
 use glam::{Mat4, Vec2, Vec3};
 use plx_render::wgpu::FilterMode;
-use plx_render::{Camera, DisplayOptions, RenderMesh, StandardView, ViewportRenderer};
+use plx_render::{Camera, ClipPlane, DisplayOptions, RenderMesh, StandardView, ViewportRenderer};
 
+use crate::gizmo::{GizmoDrag, GizmoState, PlaneGizmo};
 use crate::overlay::{self, LabelOffsets, Overlay};
 
 const ZOOM_PER_SCROLL_POINT: f32 = 0.002;
@@ -34,6 +35,11 @@ pub struct Viewport {
     hovered: Option<Pos2>,
     /// Where the view was drawn last, in points.
     pub rect: Rect,
+    /// The section plane being edited, with its manipulator.
+    pub gizmo: Option<PlaneGizmo>,
+    gizmo_state: GizmoState,
+    /// Counts scene replacements; section faces have to be rebuilt for each new scene.
+    scene_version: u64,
 }
 
 /// Lines and points in render coordinates drawn as the hover preview.
@@ -109,6 +115,8 @@ pub struct ViewportResponse {
     pub secondary_click: Option<Click>,
     /// The view's response, for the owner's context menu.
     pub response: Option<egui::Response>,
+    /// The section plane manipulator was dragged.
+    pub gizmo: Option<GizmoDrag>,
 }
 
 /// The view entries of the 3D view's context menu.
@@ -199,11 +207,39 @@ impl Viewport {
             resting: None,
             hovered: None,
             rect: Rect::NOTHING,
+            gizmo: None,
+            gizmo_state: GizmoState::default(),
+            scene_version: 0,
+        }
+    }
+
+    pub fn camera(&self) -> &Camera {
+        &self.camera
+    }
+
+    /// Cuts the scene at the section plane and shows the section faces of the parts, or shows
+    /// the whole scene again.
+    pub fn set_section(&mut self, section: Option<(ClipPlane, &[RenderMesh])>) {
+        let device = &self.render_state.device;
+        match section {
+            Some((clip, faces)) => {
+                self.renderer.set_clip_plane(Some(clip));
+                self.renderer.set_sections(device, faces);
+            }
+            None => {
+                self.renderer.set_clip_plane(None);
+                self.renderer.set_sections(device, &[]);
+            }
         }
     }
 
     pub fn set_parts(&mut self, parts: &[RenderMesh]) {
         self.renderer.set_parts(&self.render_state.device, parts);
+        self.scene_version += 1;
+    }
+
+    pub fn scene_version(&self) -> u64 {
+        self.scene_version
     }
 
     /// Exchanges the camera, so the FE model and the results each keep their own view.
@@ -235,6 +271,11 @@ impl Viewport {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         self.rect = rect;
         let delta = response.drag_delta();
+        // The section plane manipulator takes left drags that start on one of its handles.
+        result.gizmo =
+            self.gizmo_state
+                .interact(self.gizmo.as_ref(), &self.camera, rect, &response);
+        let free = !self.gizmo_state.dragging();
         let modifiers = ui.input(|i| i.modifiers);
         let ctrl = modifiers.ctrl || modifiers.command;
         // PrePoMax's mouse: the middle button rotates, with Shift it pans and with Ctrl it zooms;
@@ -249,7 +290,7 @@ impl Viewport {
                 self.camera.orbit(delta.x, delta.y);
             }
         }
-        if self.selecting && response.drag_started_by(PointerButton::Primary) {
+        if free && self.selecting && response.drag_started_by(PointerButton::Primary) {
             self.box_start = response.interact_pointer_pos();
         }
         if !self.selecting {
@@ -280,6 +321,7 @@ impl Viewport {
         if response.double_clicked() {
             result.command = Some(ViewCommand::Fit);
         } else if response.clicked()
+            && !self.gizmo_state.hovered()
             && let Some(pointer) = response.interact_pointer_pos()
         {
             result.click = Some(self.click_at(rect, pointer, modifiers));
@@ -340,6 +382,9 @@ impl Viewport {
             Color32::WHITE,
         );
         overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels);
+        if let Some(gizmo) = &self.gizmo {
+            self.gizmo_state.draw(&painter, gizmo, &self.camera, rect);
+        }
         if self.selecting {
             let to_screen = |p: Vec3| overlay::project(&self.camera, rect, p);
             let stroke = egui::Stroke::new(2.0, PREVIEW_COLOR);

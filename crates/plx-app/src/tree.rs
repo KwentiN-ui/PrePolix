@@ -2,10 +2,13 @@
 //! node names. Nodes for features prepolix does not support yet are shown as empty
 //! placeholders, so that the structure is already the familiar one.
 
+use std::collections::{HashMap, HashSet};
+
 use egui::collapsing_header::CollapsingState;
 use egui::epaint::Mesh;
 use egui::{Color32, Pos2, Rect, Response, Shape, Ui, Vec2, WidgetText, pos2, vec2};
 use plx_job::JobStatus;
+use plx_model::ModelItem;
 
 use crate::model::{Model, PartInfo};
 use crate::setup::NewItem;
@@ -83,9 +86,18 @@ pub struct TreeResponse {
 
 /// Tree label with a fixed size: highlight and hover frame are painted over the same area, so
 /// that hovering never moves the rows below (egui's selectable label grows by its frame).
-fn row_label(ui: &mut Ui, selected: bool, text: impl Into<WidgetText>) -> Response {
+fn row_label(
+    ui: &mut Ui,
+    selected: bool,
+    color: Option<Color32>,
+    text: impl Into<WidgetText>,
+) -> Response {
     let padding = egui::vec2(3.0, 1.0);
-    let galley = text.into().into_galley(
+    let mut text = text.into();
+    if let Some(color) = color.filter(|_| !selected) {
+        text = text.color(color);
+    }
+    let galley = text.into_galley(
         ui,
         Some(egui::TextWrapMode::Extend),
         f32::INFINITY,
@@ -115,6 +127,41 @@ fn row_label(ui: &mut Ui, selected: bool, text: impl Into<WidgetText>) -> Respon
         ui.painter().galley(rect.min + padding, galley, text_color);
     }
     response
+}
+
+/// Text colour of invalid items and of the containers holding them, Windows' red as in
+/// PrePoMax.
+const INVALID: Color32 = Color32::from_rgb(255, 0, 0);
+
+/// Warning sign next to an invalid item, PrePoMax's warning icon.
+fn warning_sign(ui: &mut Ui) -> Response {
+    ui.add_space(3.0);
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::splat(tree_icons::SIZE), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        tree_icons::paint(ui.painter(), rect.min, TreeIcon::Warning);
+    }
+    response
+}
+
+/// Tree item of an item of the FE model and the containers it is shown in, innermost first.
+fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
+    let step = |s: usize, group: &'static str| {
+        vec![
+            TreeItem::StepGroup(s, group),
+            TreeItem::Step(s),
+            TreeItem::Group("Steps"),
+            TreeItem::Model,
+        ]
+    };
+    match item {
+        ModelItem::Section(i) => (
+            TreeItem::Section(i),
+            vec![TreeItem::Group("Sections"), TreeItem::Model],
+        ),
+        ModelItem::BoundaryCondition(s, i) => (TreeItem::BoundaryCondition(s, i), step(s, "BCs")),
+        ModelItem::Load(s, i) => (TreeItem::Load(s, i), step(s, "Loads")),
+    }
 }
 
 /// What double-clicking a container creates.
@@ -263,6 +310,10 @@ struct Tree<'a> {
     levels: Vec<Vec<Row>>,
     /// Inside an item being expanded or collapsed: the state all branches take.
     forced_open: Option<bool>,
+    /// Items whose references are gone, with the reason, shown red with a warning sign.
+    invalid: HashMap<TreeItem, String>,
+    /// Containers holding invalid items, shown red so that they are found when collapsed.
+    holds_invalid: HashSet<TreeItem>,
 }
 
 impl Tree<'_> {
@@ -275,7 +326,13 @@ impl Tree<'_> {
 
     /// Selectable label of an item: a click selects it, a double click opens its properties.
     fn label(&mut self, ui: &mut Ui, item: TreeItem, text: impl Into<WidgetText>) -> Response {
-        let response = row_label(ui, self.is_selected(&item), text);
+        let reason = self.invalid.get(&item).cloned();
+        let red = reason.is_some() || self.holds_invalid.contains(&item);
+        let mut response = row_label(ui, self.is_selected(&item), red.then_some(INVALID), text);
+        if let Some(reason) = reason {
+            warning_sign(ui).on_hover_text(&reason);
+            response = response.on_hover_text(reason);
+        }
         // Like PrePoMax, a right click selects the item its context menu belongs to.
         if response.clicked() || response.double_clicked() || response.secondary_clicked() {
             self.state.selected = Some((self.view, item.clone()));
@@ -644,6 +701,8 @@ pub fn show(
         job,
         levels: vec![Vec::new()],
         forced_open: None,
+        invalid: HashMap::new(),
+        holds_invalid: HashSet::new(),
     };
     let expanding = tree.state.expand.clone();
     egui::ScrollArea::both()
@@ -679,6 +738,13 @@ pub fn show(
 fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
     // A results file has no FE model, as in PrePoMax; its mesh lives in the Results tree.
     let model = model.filter(|m| !m.is_results());
+    if let Some(model) = &model {
+        for invalid in model.fe.invalid_items(&model.mesh) {
+            let (item, containers) = tree_items(invalid.item);
+            tree.invalid.insert(item, invalid.reason);
+            tree.holds_invalid.extend(containers);
+        }
+    }
     let fe = model.as_ref().map(|m| m.fe.clone()).unwrap_or_default();
     let has_model = model.is_some();
     tree.branch(ui, TreeItem::Model, "Model", true, |tree, ui| {
