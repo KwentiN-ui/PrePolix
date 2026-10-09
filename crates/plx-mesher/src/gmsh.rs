@@ -1,0 +1,516 @@
+//! Safe access to the Gmsh library: finding and loading it, and one wrapper per C function.
+//!
+//! Gmsh keeps one global model per process, so the library is loaded once and every use goes
+//! through [`with_gmsh`], which serialises them.
+
+// Calling into a C library needs `unsafe`; it is confined to this module and `ffi`.
+#![allow(unsafe_code)]
+
+use std::ffi::{CStr, CString, c_char, c_int};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use crate::ffi::Api;
+
+/// The Gmsh version prepolix is built and tested against; `scripts/fetch_gmsh.py` fetches it.
+pub const TESTED_VERSION: (u32, u32) = (4, 15);
+
+/// Environment variable naming the Gmsh library, used when no path is configured. Tests and
+/// the CI use it.
+pub const LIBRARY_ENV: &str = "PREPOLIX_GMSH";
+
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+pub enum GmshError {
+    #[error(
+        "Gmsh-Bibliothek nicht gefunden (gesucht: {}). Pfad unter Einstellungen > Gmsh angeben.",
+        .0.join(", ")
+    )]
+    NotFound(Vec<String>),
+    #[error("{path}: kann nicht geladen werden: {message}")]
+    Load { path: PathBuf, message: String },
+    #[error("{path}: keine passende Gmsh-Bibliothek, es fehlen {}", .missing.join(", "))]
+    MissingFunctions {
+        path: PathBuf,
+        missing: Vec<&'static str>,
+    },
+    #[error("Gmsh {version} wird nicht unterstützt, benötigt wird Gmsh 4")]
+    UnsupportedVersion { version: String },
+    #[error("Gmsh: {0}")]
+    Call(String),
+    #[error("{0}")]
+    Other(String),
+}
+
+/// What the settings show about the loaded library.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LibraryInfo {
+    pub path: PathBuf,
+    pub version: String,
+    /// The version differs from [`TESTED_VERSION`]; it may work, but is not tested.
+    pub untested: bool,
+}
+
+/// A loaded and initialised Gmsh.
+pub struct Gmsh {
+    api: Api,
+    info: LibraryInfo,
+}
+
+struct State {
+    /// Library from the settings; `None` searches the default places.
+    configured: Option<PathBuf>,
+    loaded: Option<Gmsh>,
+}
+
+static STATE: Mutex<State> = Mutex::new(State {
+    configured: None,
+    loaded: None,
+});
+
+/// Sets where the library is loaded from. Gmsh cannot be unloaded, so a change takes effect
+/// only if the library has not been loaded yet; returns whether that is the case.
+pub fn set_library_path(path: Option<PathBuf>) -> bool {
+    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.configured = path;
+    state.loaded.is_none()
+}
+
+/// The loaded library, if any use loaded it already.
+pub fn loaded_library() -> Option<LibraryInfo> {
+    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.loaded.as_ref().map(|g| g.info.clone())
+}
+
+/// Runs `f` with Gmsh, loading the library on first use. Calls from several threads wait for
+/// each other, because Gmsh has one global model.
+pub fn with_gmsh<T>(f: impl FnOnce(&Gmsh) -> Result<T, GmshError>) -> Result<T, GmshError> {
+    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if state.loaded.is_none() {
+        let gmsh = Gmsh::load(state.configured.as_deref())?;
+        state.loaded = Some(gmsh);
+    }
+    let gmsh = state.loaded.as_ref().expect("loaded above");
+    gmsh.clear()?;
+    gmsh.start_log()?;
+    let result = f(gmsh);
+    // The model is not needed any more; clearing frees its memory right away.
+    let _ = gmsh.clear();
+    result
+}
+
+/// Places the library is looked for, in order: the configured path, [`LIBRARY_ENV`], the
+/// program's folder (where releases ship it) with its `gmsh` and `../gmsh` subfolders, in
+/// development builds `target/gmsh` of the workspace (where `scripts/fetch_gmsh.py` puts it),
+/// then the system's search path.
+pub fn candidates(configured: Option<&Path>) -> Vec<PathBuf> {
+    if let Some(path) = configured {
+        return vec![path.to_path_buf()];
+    }
+    if let Some(path) = std::env::var_os(LIBRARY_ENV).filter(|p| !p.is_empty()) {
+        return vec![PathBuf::from(path)];
+    }
+    let mut found = Vec::new();
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| Some(e.parent()?.to_path_buf()))
+    {
+        for dir in [dir.clone(), dir.join("gmsh"), dir.join("..").join("gmsh")] {
+            found.extend(libraries_in(&dir));
+        }
+    }
+    // Development builds and tests also find the library fetched into the workspace.
+    if cfg!(debug_assertions) {
+        found.extend(libraries_in(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/gmsh"),
+        ));
+    }
+    // Bare names are resolved by the system's loader.
+    let (major, minor) = TESTED_VERSION;
+    found.extend(
+        if cfg!(windows) {
+            vec![format!("gmsh-{major}.{minor}.dll"), "gmsh.dll".into()]
+        } else if cfg!(target_os = "macos") {
+            vec!["libgmsh.dylib".into()]
+        } else {
+            vec![format!("libgmsh.so.{major}.{minor}"), "libgmsh.so".into()]
+        }
+        .into_iter()
+        .map(PathBuf::from),
+    );
+    found
+}
+
+/// Gmsh libraries in a folder, newest version first.
+fn libraries_in(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .filter(|p| {
+            let name = p
+                .file_name()
+                .map_or(String::new(), |n| n.to_string_lossy().into());
+            if cfg!(windows) {
+                name.starts_with("gmsh") && name.ends_with(".dll")
+            } else if cfg!(target_os = "macos") {
+                name.starts_with("libgmsh") && name.ends_with(".dylib")
+            } else {
+                name.starts_with("libgmsh.so")
+            }
+        })
+        .collect();
+    found.sort();
+    found.reverse();
+    found
+}
+
+/// "4.15.2" as (4, 15).
+fn parse_version(version: &str) -> Option<(u32, u32)> {
+    let mut parts = version.trim().split('.');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+impl Gmsh {
+    fn load(configured: Option<&Path>) -> Result<Self, GmshError> {
+        let candidates = candidates(configured);
+        let mut first_error = None;
+        for path in &candidates {
+            let explicit = path.components().count() > 1;
+            if explicit && !path.is_file() {
+                continue;
+            }
+            match Self::load_from(path) {
+                Ok(gmsh) => return Ok(gmsh),
+                // A bare name the loader does not know is just not installed.
+                Err(GmshError::Load { .. }) if !explicit => {}
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        Err(first_error.unwrap_or_else(|| {
+            GmshError::NotFound(candidates.iter().map(|p| p.display().to_string()).collect())
+        }))
+    }
+
+    fn load_from(path: &Path) -> Result<Self, GmshError> {
+        // SAFETY: loading runs the library's initialisers; Gmsh's only set up its globals.
+        let library = unsafe { libloading::Library::new(path) }.map_err(|e| GmshError::Load {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })?;
+        // SAFETY: a library exporting Gmsh's function names is Gmsh.
+        let api = unsafe { Api::load(library) }.map_err(|missing| GmshError::MissingFunctions {
+            path: path.to_path_buf(),
+            missing,
+        })?;
+        let mut gmsh = Self {
+            api,
+            info: LibraryInfo {
+                path: std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
+                version: String::new(),
+                untested: false,
+            },
+        };
+        gmsh.initialize()?;
+        let version = gmsh.option_string("General.Version")?;
+        match parse_version(&version) {
+            Some((4, minor)) => gmsh.info.untested = (4, minor) != TESTED_VERSION,
+            _ => return Err(GmshError::UnsupportedVersion { version }),
+        }
+        gmsh.info.version = version;
+        // Messages go to the log, not to the terminal; STEP files are read in millimetres.
+        gmsh.set_number("General.Terminal", 0.0)?;
+        gmsh.set_string("Geometry.OCCTargetUnit", "MM")?;
+        Ok(gmsh)
+    }
+
+    pub fn info(&self) -> &LibraryInfo {
+        &self.info
+    }
+
+    /// Calls a C function with an error flag and turns a set flag into Gmsh's last error.
+    fn call(&self, f: impl FnOnce(*mut c_int)) -> Result<(), GmshError> {
+        let mut ierr: c_int = 0;
+        f(&mut ierr);
+        if ierr == 0 {
+            return Ok(());
+        }
+        let mut message: *mut c_char = std::ptr::null_mut();
+        let mut ignored: c_int = 0;
+        // SAFETY: valid out pointers; the returned string is copied and freed.
+        unsafe {
+            (self.api.logger_get_last_error)(&mut message, &mut ignored);
+        }
+        let text = self.take_string(message);
+        Err(GmshError::Call(if text.is_empty() {
+            format!("Fehler {ierr}")
+        } else {
+            text
+        }))
+    }
+
+    /// Copies a string returned by Gmsh and releases it.
+    fn take_string(&self, pointer: *mut c_char) -> String {
+        if pointer.is_null() {
+            return String::new();
+        }
+        // SAFETY: Gmsh returns NUL-terminated strings allocated with its own allocator.
+        unsafe {
+            let text = CStr::from_ptr(pointer).to_string_lossy().into_owned();
+            (self.api.free)(pointer.cast());
+            text
+        }
+    }
+
+    /// Copies an array returned by Gmsh and releases it.
+    fn take_vec<T: Copy>(&self, pointer: *mut T, len: usize) -> Vec<T> {
+        if pointer.is_null() {
+            return Vec::new();
+        }
+        // SAFETY: Gmsh returns `len` initialised values allocated with its own allocator.
+        unsafe {
+            let values = std::slice::from_raw_parts(pointer, len).to_vec();
+            (self.api.free)(pointer.cast());
+            values
+        }
+    }
+
+    fn initialize(&self) -> Result<(), GmshError> {
+        // No command line, no configuration files of a Gmsh installation, no GUI.
+        self.call(|e| unsafe { (self.api.initialize)(0, std::ptr::null_mut(), 0, 0, e) })
+    }
+
+    pub fn clear(&self) -> Result<(), GmshError> {
+        self.call(|e| unsafe { (self.api.clear)(e) })?;
+        let name = c_string("prepolix")?;
+        self.call(|e| unsafe { (self.api.model_add)(name.as_ptr(), e) })
+    }
+
+    pub fn set_number(&self, name: &str, value: f64) -> Result<(), GmshError> {
+        let name = c_string(name)?;
+        self.call(|e| unsafe { (self.api.option_set_number)(name.as_ptr(), value, e) })
+    }
+
+    pub fn set_string(&self, name: &str, value: &str) -> Result<(), GmshError> {
+        let (name, value) = (c_string(name)?, c_string(value)?);
+        self.call(|e| unsafe {
+            (self.api.option_set_string)(name.as_ptr(), value.as_ptr(), e);
+        })
+    }
+
+    pub fn option_string(&self, name: &str) -> Result<String, GmshError> {
+        let name = c_string(name)?;
+        let mut value = std::ptr::null_mut();
+        self.call(|e| unsafe { (self.api.option_get_string)(name.as_ptr(), &mut value, e) })?;
+        Ok(self.take_string(value))
+    }
+
+    /// Writes the model in the format given by the extension, e.g. `.brep` or `.step`.
+    pub fn write(&self, path: &Path) -> Result<(), GmshError> {
+        let path = c_path(path)?;
+        self.call(|e| unsafe { (self.api.write)(path.as_ptr(), e) })
+    }
+
+    /// Reads a STEP, IGES or BREP file into the OpenCASCADE kernel and synchronises the model.
+    pub fn import_shapes(&self, path: &Path) -> Result<Vec<(i32, i32)>, GmshError> {
+        let file = c_path(path)?;
+        let empty = c_string("")?;
+        let (mut tags, mut len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe {
+            (self.api.occ_import_shapes)(file.as_ptr(), &mut tags, &mut len, 1, empty.as_ptr(), e);
+        })?;
+        let tags = self.take_vec(tags, len);
+        self.synchronize()?;
+        Ok(pairs(&tags))
+    }
+
+    pub fn add_box(&self, origin: [f64; 3], size: [f64; 3]) -> Result<(), GmshError> {
+        let ([x, y, z], [dx, dy, dz]) = (origin, size);
+        self.call(|e| unsafe { (self.api.occ_add_box)(x, y, z, dx, dy, dz, -1, e) })?;
+        self.synchronize()
+    }
+
+    fn synchronize(&self) -> Result<(), GmshError> {
+        self.call(|e| unsafe { (self.api.occ_synchronize)(e) })
+    }
+
+    /// Tags of all entities of a dimension (0 points, 1 curves, 2 surfaces, 3 volumes).
+    pub fn entities(&self, dim: i32) -> Result<Vec<i32>, GmshError> {
+        let (mut tags, mut len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe { (self.api.get_entities)(&mut tags, &mut len, dim, e) })?;
+        Ok(pairs(&self.take_vec(tags, len))
+            .into_iter()
+            .map(|(_, tag)| tag)
+            .collect())
+    }
+
+    pub fn entity_name(&self, dim: i32, tag: i32) -> Result<String, GmshError> {
+        let mut name = std::ptr::null_mut();
+        self.call(|e| unsafe { (self.api.get_entity_name)(dim, tag, &mut name, e) })?;
+        Ok(self.take_string(name))
+    }
+
+    /// Entities of the next higher and the next lower dimension touching an entity.
+    pub fn adjacencies(&self, dim: i32, tag: i32) -> Result<(Vec<i32>, Vec<i32>), GmshError> {
+        let (mut up, mut up_len) = (std::ptr::null_mut(), 0);
+        let (mut down, mut down_len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe {
+            (self.api.get_adjacencies)(dim, tag, &mut up, &mut up_len, &mut down, &mut down_len, e);
+        })?;
+        Ok((self.take_vec(up, up_len), self.take_vec(down, down_len)))
+    }
+
+    /// Bounding box of the whole model.
+    pub fn bounding_box(&self) -> Result<([f64; 3], [f64; 3]), GmshError> {
+        let (mut min, mut max) = ([0.0; 3], [0.0; 3]);
+        let [x0, y0, z0] = &mut min;
+        let [x1, y1, z1] = &mut max;
+        self.call(|e| unsafe { (self.api.get_bounding_box)(-1, -1, x0, y0, z0, x1, y1, z1, e) })?;
+        Ok((min, max))
+    }
+
+    pub fn generate(&self, dim: i32) -> Result<(), GmshError> {
+        self.call(|e| unsafe { (self.api.mesh_generate)(dim, e) })
+    }
+
+    pub fn set_order(&self, order: i32) -> Result<(), GmshError> {
+        self.call(|e| unsafe { (self.api.mesh_set_order)(order, e) })
+    }
+
+    /// Tags and coordinates of all mesh nodes.
+    pub fn nodes(&self) -> Result<(Vec<usize>, Vec<f64>), GmshError> {
+        let (mut tags, mut tags_len) = (std::ptr::null_mut(), 0);
+        let (mut coords, mut coords_len) = (std::ptr::null_mut(), 0);
+        let (mut parametric, mut parametric_len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe {
+            (self.api.mesh_get_nodes)(
+                &mut tags,
+                &mut tags_len,
+                &mut coords,
+                &mut coords_len,
+                &mut parametric,
+                &mut parametric_len,
+                -1,
+                -1,
+                0,
+                0,
+                e,
+            );
+        })?;
+        self.take_vec(parametric, parametric_len);
+        Ok((
+            self.take_vec(tags, tags_len),
+            self.take_vec(coords, coords_len),
+        ))
+    }
+
+    /// Elements of a Gmsh element type on one entity: their tags and node tags, `n` per
+    /// element.
+    pub fn elements(
+        &self,
+        element_type: i32,
+        entity: i32,
+    ) -> Result<(Vec<usize>, Vec<usize>), GmshError> {
+        let (mut tags, mut tags_len) = (std::ptr::null_mut(), 0);
+        let (mut nodes, mut nodes_len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe {
+            (self.api.mesh_get_elements_by_type)(
+                element_type,
+                &mut tags,
+                &mut tags_len,
+                &mut nodes,
+                &mut nodes_len,
+                entity,
+                0,
+                1,
+                e,
+            );
+        })?;
+        Ok((
+            self.take_vec(tags, tags_len),
+            self.take_vec(nodes, nodes_len),
+        ))
+    }
+
+    fn start_log(&self) -> Result<(), GmshError> {
+        // Restarting empties the log of the previous use.
+        self.call(|e| unsafe { (self.api.logger_stop)(e) })?;
+        self.call(|e| unsafe { (self.api.logger_start)(e) })
+    }
+
+    /// Warnings and errors Gmsh logged since the current use started.
+    pub fn warnings(&self) -> Result<Vec<String>, GmshError> {
+        let (mut lines, mut len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe { (self.api.logger_get)(&mut lines, &mut len, e) })?;
+        let lines = self.take_vec(lines, len);
+        Ok(lines
+            .into_iter()
+            .map(|line| self.take_string(line))
+            .filter_map(|line| {
+                let rest = line
+                    .strip_prefix("Warning : ")
+                    .or_else(|| line.strip_prefix("Error   : "))?;
+                Some(rest.trim().to_string())
+            })
+            .collect())
+    }
+}
+
+/// Gmsh's flat (dim, tag) lists as pairs.
+fn pairs(flat: &[c_int]) -> Vec<(i32, i32)> {
+    flat.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[a, b]| (a, b))
+        .collect()
+}
+
+fn c_string(text: &str) -> Result<CString, GmshError> {
+    CString::new(text).map_err(|_| GmshError::Other(format!("ungültiger Text: {text:?}")))
+}
+
+fn c_path(path: &Path) -> Result<CString, GmshError> {
+    // Gmsh expects UTF-8 file names on every platform.
+    let text = path
+        .to_str()
+        .ok_or_else(|| GmshError::Other(format!("{}: Pfad ist kein UTF-8", path.display())))?;
+    c_string(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn versions_are_parsed() {
+        assert_eq!(parse_version("4.15.2"), Some((4, 15)));
+        assert_eq!(parse_version("4.13"), Some((4, 13)));
+        assert_eq!(parse_version("x"), None);
+    }
+
+    #[test]
+    fn a_configured_path_is_the_only_candidate() {
+        let path = PathBuf::from("/opt/gmsh/libgmsh.so");
+        assert_eq!(candidates(Some(&path)), vec![path]);
+        // Without one, the system loader is asked last.
+        if std::env::var_os(LIBRARY_ENV).is_none() {
+            let names = candidates(None);
+            assert!(names.last().is_some_and(|p| p.components().count() == 1));
+        }
+    }
+
+    #[test]
+    fn a_missing_configured_library_is_reported() {
+        let missing = std::env::temp_dir()
+            .join("plx-gibt-es-nicht")
+            .join("libgmsh.so");
+        assert!(matches!(
+            Gmsh::load(Some(&missing)),
+            Err(GmshError::NotFound(_))
+        ));
+    }
+}

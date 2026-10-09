@@ -89,6 +89,10 @@ pub struct TreeResponse {
     pub run: bool,
     /// Open the material library.
     pub material_library: bool,
+    /// Open the meshing parameters of the geometry.
+    pub mesh_setup: bool,
+    /// Mesh the geometry.
+    pub generate_mesh: bool,
     /// Evaluate the hot spots with the current results.
     pub evaluate_hot_spots: bool,
 }
@@ -365,6 +369,25 @@ impl Tree<'_> {
             response = response.on_hover_text(reason);
         }
         let creates = creates(&item).filter(|_| closed.is_none());
+        let meshing = self.view == TreeView::Geometry
+            && matches!(
+                item,
+                TreeItem::Group("Mesh Setup") | TreeItem::Group("Parts")
+            );
+        if response.double_clicked() && item == TreeItem::Group("Mesh Setup") {
+            self.response.mesh_setup = true;
+        }
+        if meshing {
+            response.context_menu(|ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                if ui.button("Netzparameter …").clicked() {
+                    self.response.mesh_setup = true;
+                }
+                if ui.button("Netz erzeugen").clicked() {
+                    self.response.generate_mesh = true;
+                }
+            });
+        }
         if response.double_clicked() {
             match creates {
                 // PrePoMax creates an item when its container is double-clicked.
@@ -612,6 +635,25 @@ impl Tree<'_> {
         }
     }
 
+    /// Parts with visibility and colour; of the mesh, or of the geometry.
+    fn parts(&mut self, ui: &mut Ui, model: &mut Model) {
+        let parts = counted("Parts", model.parts.len());
+        self.branch(ui, TreeItem::Group("Parts"), parts, true, |tree, ui| {
+            for (index, part) in model.parts.iter_mut().enumerate() {
+                let icon = part_icon(part);
+                let item = TreeItem::Part(index);
+                let (_, response, changed) =
+                    tree.row(ui, None, Some(&mut part.visible), icon, item, &part.name);
+                if changed {
+                    tree.response.visibility.push((index, part.visible));
+                }
+                response.context_menu(|ui| {
+                    part_menu(ui, index, part.visible, &mut tree.response);
+                });
+            }
+        });
+    }
+
     /// Mesh with parts and sets; shared by the FE Model and Results trees.
     fn mesh(&mut self, ui: &mut Ui, model: Option<&mut Model>) {
         let Some(model) = model else {
@@ -623,21 +665,7 @@ impl Tree<'_> {
             return;
         };
         self.branch(ui, TreeItem::Mesh, "Mesh", true, |tree, ui| {
-            let parts = counted("Parts", model.parts.len());
-            tree.branch(ui, TreeItem::Group("Parts"), parts, true, |tree, ui| {
-                for (index, part) in model.parts.iter_mut().enumerate() {
-                    let icon = part_icon(part);
-                    let item = TreeItem::Part(index);
-                    let (_, response, changed) =
-                        tree.row(ui, None, Some(&mut part.visible), icon, item, &part.name);
-                    if changed {
-                        tree.response.visibility.push((index, part.visible));
-                    }
-                    response.context_menu(|ui| {
-                        part_menu(ui, index, part.visible, &mut tree.response);
-                    });
-                }
-            });
+            tree.parts(ui, model);
             let mesh = &model.mesh;
             let sets: [(&'static str, Vec<TreeItem>); 3] = [
                 (
@@ -750,7 +778,12 @@ pub fn show(
             let lines = ui.painter().add(Shape::Noop);
             match view {
                 TreeView::Geometry => {
-                    tree.leaf(ui, TreeItem::Group("Parts"), "Parts");
+                    match model {
+                        Some(model) => tree.parts(ui, model),
+                        None => {
+                            tree.leaf(ui, TreeItem::Group("Parts"), "Parts");
+                        }
+                    }
                     tree.leaf(ui, TreeItem::Group("Mesh Setup"), "Mesh Setup");
                 }
                 TreeView::FeModel => fe_model(&mut tree, ui, model),
@@ -804,6 +837,11 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
         for name in ["Distributions", "Amplitudes", "Initial Conditions"] {
             tree.leaf(ui, TreeItem::Group(name), name);
         }
+        // Not in PrePoMax: hot spot stresses, evaluated on the results of the analysis.
+        let hot_spots = (fe.hot_spots.iter().enumerate())
+            .map(|(i, h)| (TreeItem::HotSpot(i), h.name.as_str()))
+            .collect();
+        tree.container(ui, HOT_SPOTS, hot_spots);
         let steps = TreeItem::Group("Steps");
         if fe.steps.is_empty() {
             tree.leaf(ui, steps, "Steps");
@@ -849,13 +887,6 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
         );
     } else {
         tree.leaf(ui, TreeItem::Group("Analyses"), "Analyses");
-    }
-    // Not in PrePoMax: hot spot stresses, evaluated on the results of the analysis.
-    if has_model {
-        let hot_spots = (fe.hot_spots.iter().enumerate())
-            .map(|(i, h)| (TreeItem::HotSpot(i), h.name.as_str()))
-            .collect();
-        tree.container(ui, HOT_SPOTS, hot_spots);
     }
 }
 

@@ -14,6 +14,7 @@ pub struct Settings {
     pub graphics: Graphics,
     pub post: PostProcessing,
     pub solver: Solver,
+    pub gmsh: Gmsh,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -137,6 +138,22 @@ impl Solver {
     }
 }
 
+/// Where the Gmsh library comes from, for geometry import and meshing.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Gmsh {
+    /// The library file; empty to search next to the program and on the system.
+    pub library: String,
+}
+
+impl Gmsh {
+    pub fn library(&self) -> Option<std::path::PathBuf> {
+        Some(clean_path(&self.library))
+            .filter(|p| !p.is_empty())
+            .map(std::path::PathBuf::from)
+    }
+}
+
 fn solvers_text(solvers: Option<&[EquationSolver]>) -> String {
     match solvers {
         None => "noch nicht geprüft".into(),
@@ -191,16 +208,23 @@ pub enum Page {
     Graphics,
     PostProcessing,
     Solver,
+    Gmsh,
 }
 
 impl Page {
-    const ALL: [Page; 3] = [Page::Graphics, Page::PostProcessing, Page::Solver];
+    const ALL: [Page; 4] = [
+        Page::Graphics,
+        Page::PostProcessing,
+        Page::Solver,
+        Page::Gmsh,
+    ];
 
     fn title(self) -> &'static str {
         match self {
             Page::Graphics => "Grafik",
             Page::PostProcessing => "Postprocessing",
             Page::Solver => "CalculiX",
+            Page::Gmsh => "Gmsh",
         }
     }
 }
@@ -211,6 +235,16 @@ pub struct SettingsWindow {
     draft: Settings,
     default_work_dir: String,
     solver_check: SolverCheck,
+    gmsh_check: GmshCheck,
+}
+
+/// State of the Gmsh test on the settings page.
+#[derive(Default)]
+enum GmshCheck {
+    #[default]
+    NotRun,
+    Running(std::sync::mpsc::Receiver<Result<String, String>>),
+    Done(Result<String, String>),
 }
 
 /// State of the CalculiX self test on the settings page.
@@ -239,6 +273,7 @@ impl SettingsWindow {
             draft: settings.clone(),
             default_work_dir: default_work_dir().display().to_string(),
             solver_check: SolverCheck::NotRun,
+            gmsh_check: GmshCheck::NotRun,
         }
     }
 
@@ -353,6 +388,97 @@ impl SettingsWindow {
                 ui.add_space(8.0);
                 self.solver_check_ui(ui);
             }
+            Page::Gmsh => self.gmsh_ui(ui),
+        }
+    }
+
+    /// Gmsh imports STEP, IGES and BREP and meshes; prepolix loads its library at run time.
+    fn gmsh_ui(&mut self, ui: &mut egui::Ui) {
+        let loaded = plx_mesher::loaded_library();
+        egui::Grid::new("gmsh settings")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Bibliothek");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.draft.gmsh.library)
+                        .hint_text("automatisch suchen")
+                        .desired_width(260.0),
+                );
+                ui.end_row();
+                ui.label("Geladen");
+                match &loaded {
+                    Some(info) => {
+                        ui.label(format!("Gmsh {}\n{}", info.version, info.path.display()))
+                    }
+                    None => ui.weak("noch nicht"),
+                };
+                ui.end_row();
+            });
+        ui.add(
+            egui::Label::new(
+                "Ohne Angabe wird die Bibliothek neben dem Programm gesucht (libgmsh.so bzw. \
+                 gmsh-4.15.dll), dann im Suchpfad des Systems. Eine andere Bibliothek wird erst \
+                 nach einem Neustart geladen.",
+            )
+            .wrap(),
+        );
+        ui.add_space(8.0);
+        if let GmshCheck::Running(receiver) = &self.gmsh_check
+            && let Ok(result) = receiver.try_recv()
+        {
+            self.gmsh_check = GmshCheck::Done(result);
+        }
+        let running = matches!(self.gmsh_check, GmshCheck::Running(_));
+        ui.horizontal(|ui| {
+            let button = ui
+                .add_enabled(!running, egui::Button::new("Gmsh testen"))
+                .on_hover_text("Lädt Gmsh und vernetzt einen Würfel.");
+            if button.clicked() {
+                if loaded.is_none() {
+                    plx_mesher::set_library_path(self.draft.gmsh.library());
+                }
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let ctx = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    let result = plx_mesher::self_test()
+                        .map(|(info, elements)| {
+                            let mut text = format!(
+                                "Gmsh {} arbeitet korrekt, Würfel mit {elements} Elementen vernetzt.",
+                                info.version
+                            );
+                            if info.untested {
+                                let (major, minor) = plx_mesher::gmsh::TESTED_VERSION;
+                                text += &format!(
+                                    " Getestet ist prepolix mit Gmsh {major}.{minor}."
+                                );
+                            }
+                            text
+                        })
+                        .map_err(|e| e.to_string());
+                    let _ = sender.send(result);
+                    ctx.request_repaint();
+                });
+                self.gmsh_check = GmshCheck::Running(receiver);
+            }
+            if running {
+                ui.spinner();
+                ui.label("Test läuft …");
+            }
+        });
+        match &self.gmsh_check {
+            GmshCheck::Done(Ok(text)) => {
+                ui.colored_label(egui::Color32::from_rgb(0, 128, 0), text);
+            }
+            GmshCheck::Done(Err(text)) => {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(text).color(egui::Color32::from_rgb(200, 0, 0)),
+                    )
+                    .wrap(),
+                );
+            }
+            _ => {}
         }
     }
 

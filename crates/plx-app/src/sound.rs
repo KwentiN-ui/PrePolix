@@ -9,7 +9,9 @@
 use std::f64::consts::TAU;
 use std::sync::{Arc, Mutex};
 
-use plx_results::{AnalysisKind, Increment};
+use plx_results::{AnalysisKind, Component, Field, Increment, add_derived_components};
+
+use crate::results::Superposition;
 
 /// Lowest frequency a person hears.
 pub const AUDIBLE_MIN: f64 = 20.0;
@@ -71,6 +73,13 @@ pub struct ModeSound {
     pub duration: f32,
     /// Last problem with the audio device or the export, shown in the window.
     pub message: Option<String>,
+    /// Overlay the chosen mode shapes in the 3D view while the sound plays.
+    pub show_shape: bool,
+    /// Time of the egui clock when the sound was started.
+    pub started: Option<f64>,
+    /// Mode shapes prepared for the overlay; rebuilt when the settings or the shown
+    /// component change.
+    pub mix: Option<ShapeMix>,
 }
 
 /// A sine tone as the synthesizer plays it.
@@ -112,6 +121,9 @@ impl ModeSound {
             volume: 0.5,
             duration: 3.0,
             message: None,
+            show_shape: true,
+            started: None,
+            mix: None,
         })
     }
 
@@ -155,13 +167,18 @@ impl ModeSound {
             .map(|&(frequency, level)| Tone {
                 frequency,
                 amplitude: self.volume * level / total.max(1.0),
-                decay: match self.envelope {
-                    Envelope::Sustained => f32::INFINITY,
-                    // Higher modes ring shorter, as in a struck bell or plate.
-                    Envelope::Struck => self.decay * (lowest / frequency).sqrt() as f32,
-                },
+                decay: self.decay_of(frequency, lowest),
             })
             .collect()
+    }
+
+    /// Decay time constant of a mode: infinite for a sustained sound; higher modes ring
+    /// shorter, as in a struck bell or plate.
+    fn decay_of(&self, frequency: f64, lowest: f64) -> f32 {
+        match self.envelope {
+            Envelope::Sustained => f32::INFINITY,
+            Envelope::Struck => self.decay * (lowest / frequency).sqrt() as f32,
+        }
     }
 
     /// Length of an exported file in seconds.
@@ -358,6 +375,195 @@ impl Player {
     }
 }
 
+/// Slow-motion frequency of the lowest chosen mode in the 3D view, in hertz. The other modes
+/// swing faster in the ratio of their eigenfrequencies, as they sound.
+pub const SHAPE_BASE_FREQUENCY: f64 = 0.5;
+
+/// The chosen mode shapes, prepared to be overlaid frame by frame while the sound plays.
+pub struct ShapeMix {
+    field: String,
+    component: String,
+    /// Names of the raw components of the field, when the shown one is derived from them.
+    base_names: Option<Vec<String>>,
+    modes: Vec<MixMode>,
+    range: Option<(f32, f32)>,
+    peak: f32,
+    numbers: Vec<u32>,
+}
+
+struct MixMode {
+    /// Frequency in the 3D view, in hertz.
+    visual: f64,
+    /// Factor that gives every mode the same largest displacement, times its level.
+    weight: f32,
+    decay: f32,
+    displacements: Vec<[f32; 3]>,
+    /// Values of the shown component, or of the raw components it is derived from.
+    values: Vec<Vec<f32>>,
+}
+
+impl ShapeMix {
+    /// Prepares the enabled modes for the shown component `field`/`component`. Mode shapes
+    /// have arbitrary amplitudes, so each is scaled to the same largest displacement first
+    /// and then by its level. `None` without a mode with displacements.
+    pub fn new(
+        sound: &ModeSound,
+        increments: &[Increment],
+        field: &str,
+        component: &str,
+    ) -> Option<Self> {
+        let chosen: Vec<(&Voice, &Increment, Vec<[f32; 3]>, f32)> = sound
+            .voices
+            .iter()
+            .filter(|v| v.enabled && v.level > 0.0 && v.frequency > 0.0)
+            .filter_map(|v| {
+                let increment = increments.get(v.increment)?;
+                let displacements = increment.displacements()?;
+                let max = displacements
+                    .iter()
+                    .map(|d| (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt())
+                    .fold(0.0f32, f32::max);
+                (max > 0.0).then_some((v, increment, displacements, max))
+            })
+            .collect();
+        let reference = chosen.iter().map(|c| c.3).fold(0.0f32, f32::max);
+        let lowest = (chosen.iter())
+            .map(|c| c.0.frequency)
+            .fold(f64::INFINITY, f64::min);
+        let derived = increments
+            .iter()
+            .find_map(|i| i.field(field)?.component(component))
+            .is_some_and(|c| c.derived);
+        let base_names: Option<Vec<String>> = derived.then(|| {
+            let field = chosen.first().and_then(|c| c.1.field(field));
+            field.map_or_else(Vec::new, |f| {
+                (f.components.iter())
+                    .filter(|c| !c.derived)
+                    .map(|c| c.name.clone())
+                    .collect()
+            })
+        });
+        let mut bound = 0.0f32;
+        let mut invariant = false;
+        let modes: Vec<MixMode> = chosen
+            .iter()
+            .map(|(voice, increment, displacements, max)| {
+                let weight = voice.level * reference / max;
+                let shown = increment.field(field).and_then(|f| f.component(component));
+                if let Some(shown) = shown {
+                    invariant = shown.is_invariant();
+                    let largest = (shown.range()).map_or(0.0, |(a, b)| a.abs().max(b.abs()));
+                    bound += weight * largest;
+                }
+                let values = match &base_names {
+                    Some(names) => names
+                        .iter()
+                        .map(|n| component_values(increment, field, n))
+                        .collect(),
+                    None => vec![component_values(increment, field, component)],
+                };
+                MixMode {
+                    visual: SHAPE_BASE_FREQUENCY * voice.frequency / lowest,
+                    weight,
+                    decay: sound.decay_of(voice.frequency, lowest),
+                    displacements: displacements.clone(),
+                    values,
+                }
+            })
+            .collect();
+        if modes.is_empty() {
+            return None;
+        }
+        let levels: f32 = chosen.iter().map(|c| c.0.level.powi(2)).sum();
+        Some(Self {
+            field: field.to_string(),
+            component: component.to_string(),
+            base_names,
+            modes,
+            range: (bound > 0.0).then_some(if invariant {
+                (0.0, bound)
+            } else {
+                (-bound, bound)
+            }),
+            peak: reference * levels.sqrt(),
+            numbers: chosen.iter().map(|c| c.0.mode).collect(),
+        })
+    }
+
+    /// Whether the mix was prepared for this shown component.
+    pub fn shows(&self, field: &str, component: &str) -> bool {
+        self.field == field && self.component == component
+    }
+
+    /// The overlaid mode shapes `time` seconds after the sound started.
+    pub fn frame(&self, time: f64) -> Superposition {
+        let factors: Vec<f32> = self
+            .modes
+            .iter()
+            .map(|m| {
+                let swing = (TAU * m.visual * time).sin() as f32;
+                m.weight * (-(time as f32) / m.decay).exp() * swing
+            })
+            .collect();
+        let nodes = self.modes[0].displacements.len();
+        let mut displacements = vec![[0.0f32; 3]; nodes];
+        for (mode, &factor) in self.modes.iter().zip(&factors) {
+            for (sum, d) in displacements.iter_mut().zip(&mode.displacements) {
+                for k in 0..3 {
+                    sum[k] += factor * d[k];
+                }
+            }
+        }
+        let sums: Vec<Vec<f32>> = (0..self.modes[0].values.len())
+            .map(|c| {
+                let mut sum = vec![0.0f32; nodes];
+                for (mode, &factor) in self.modes.iter().zip(&factors) {
+                    for (s, v) in sum.iter_mut().zip(&mode.values[c]) {
+                        *s += factor * v;
+                    }
+                }
+                sum
+            })
+            .collect();
+        let values = match &self.base_names {
+            None => sums.into_iter().next(),
+            Some(names) => {
+                let mut field = Field {
+                    name: self.field.clone(),
+                    components: names
+                        .iter()
+                        .zip(sums)
+                        .map(|(name, values)| Component {
+                            name: name.clone(),
+                            values,
+                            derived: false,
+                        })
+                        .collect(),
+                };
+                add_derived_components(&mut field);
+                (field.components.into_iter())
+                    .find(|c| c.name == self.component)
+                    .map(|c| c.values)
+            }
+        };
+        Superposition {
+            displacements,
+            values: values.filter(|v| v.len() == nodes),
+            range: self.range,
+            peak: self.peak,
+            modes: self.numbers.clone(),
+        }
+    }
+}
+
+/// Values of a component, empty where the increment does not have it.
+fn component_values(increment: &Increment, field: &str, component: &str) -> Vec<f32> {
+    (increment.field(field))
+        .and_then(|f| f.component(component))
+        .map(|c| c.values.clone())
+        .unwrap_or_default()
+}
+
 /// What the user did in the sound window.
 #[derive(Default)]
 pub struct WindowActions {
@@ -524,6 +730,15 @@ pub fn window(
                         });
                     }
                     ui.end_row();
+                    ui.label("Schwingform");
+                    actions.changed |= ui
+                        .checkbox(&mut sound.show_shape, "Beim Abspielen überlagert zeigen")
+                        .on_hover_text(
+                            "Die gewählten Eigenformen nach Pegel skaliert überlagern; sie \
+                             schwingen im Verhältnis ihrer Frequenzen, verlangsamt",
+                        )
+                        .changed();
+                    ui.end_row();
                     ui.label("Lautstärke");
                     actions.changed |= ui
                         .add(egui::Slider::new(&mut sound.volume, 0.0..=1.0).show_value(false))
@@ -681,6 +896,111 @@ mod tests {
         }
         assert!(!synth.sounding());
         assert_eq!(synth.next_sample(rate), 0.0);
+    }
+
+    fn shape(
+        step: u32,
+        number: u32,
+        frequency: f64,
+        disp: [f32; 3],
+        stress: [f32; 6],
+    ) -> Increment {
+        let component = |name: &str, value: f32| Component {
+            name: name.into(),
+            values: vec![value, 0.0],
+            derived: false,
+        };
+        let mut disp_field = Field {
+            name: "DISP".into(),
+            components: ["U1", "U2", "U3"]
+                .iter()
+                .zip(disp)
+                .map(|(n, v)| component(n, v))
+                .collect(),
+        };
+        let mut stress_field = Field {
+            name: "STRESS".into(),
+            components: ["SXX", "SYY", "SZZ", "SXY", "SYZ", "SZX"]
+                .iter()
+                .zip(stress)
+                .map(|(n, v)| component(n, v))
+                .collect(),
+        };
+        add_derived_components(&mut disp_field);
+        add_derived_components(&mut stress_field);
+        Increment {
+            step,
+            increment: number,
+            kind: AnalysisKind::Frequency,
+            value: frequency,
+            fields: vec![disp_field, stress_field],
+        }
+    }
+
+    #[test]
+    fn overlay_scales_modes_to_the_same_size_and_by_level() {
+        // Mode 2 has a ten times larger raw amplitude and twice the frequency.
+        let increments = vec![
+            shape(
+                1,
+                1,
+                100.0,
+                [1.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ),
+            shape(
+                1,
+                2,
+                200.0,
+                [0.0, 10.0, 0.0],
+                [0.0, 100.0, 0.0, 0.0, 0.0, 0.0],
+            ),
+        ];
+        let mut sound = ModeSound::new(&increments, 0).unwrap();
+        sound.voices[1].enabled = true;
+        sound.voices[1].level = 0.5;
+        let mix = ShapeMix::new(&sound, &increments, "DISP", "U2").unwrap();
+        // A quarter period of the slowed down lowest mode: mode 1 at its peak, mode 2 (twice
+        // as fast) back at zero.
+        let quarter = 0.25 / SHAPE_BASE_FREQUENCY;
+        let frame = mix.frame(quarter);
+        assert!((frame.displacements[0][0] - 10.0).abs() < 1e-4);
+        assert!(frame.displacements[0][1].abs() < 1e-4);
+        // An eighth period: mode 2 at its peak, scaled to the size of the largest mode and
+        // by level 0.5.
+        let frame = mix.frame(quarter / 2.0);
+        assert!((frame.displacements[0][1] - 5.0).abs() < 1e-4);
+        assert_eq!(frame.values.unwrap()[0], frame.displacements[0][1]);
+        assert_eq!(frame.modes, [1, 2]);
+        assert_eq!(frame.range, Some((-5.0, 5.0)));
+    }
+
+    #[test]
+    fn overlay_derives_equivalent_values_from_the_superposed_components() {
+        let increments = vec![
+            shape(
+                1,
+                1,
+                100.0,
+                [1.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ),
+            shape(
+                1,
+                2,
+                100.0,
+                [1.0, 0.0, 0.0],
+                [-10.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ),
+        ];
+        let mut sound = ModeSound::new(&increments, 0).unwrap();
+        sound.voices[1].enabled = true;
+        let mix = ShapeMix::new(&sound, &increments, "STRESS", "MISES").unwrap();
+        // Same frequency, opposite stresses: they cancel, so the von Mises stress is zero
+        // although each mode alone has 10.
+        let frame = mix.frame(0.25 / SHAPE_BASE_FREQUENCY);
+        assert!(frame.values.unwrap()[0].abs() < 1e-4);
+        assert_eq!(frame.range, Some((0.0, 20.0)));
     }
 
     #[test]

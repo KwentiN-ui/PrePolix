@@ -5,11 +5,13 @@
 //! input file; node and element sets that CalculiX needs for them are derived when the input
 //! file is written, so the user never has to define sets by hand.
 
+mod geometry;
 mod hot_spot;
 pub mod library;
 mod region;
 mod validity;
 
+pub use geometry::{Geometry, MeshSetup};
 pub use hot_spot::{Extrapolation, HotSpot, HotSpotComponent, extrapolation_weights};
 pub use library::MaterialLibrary;
 pub use region::Region;
@@ -25,6 +27,9 @@ pub const PROJECT_FORMAT: u32 = 1;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
     pub format: u32,
+    /// CAD geometry the mesh is generated from; projects made from an input file have none.
+    #[serde(default)]
+    pub geometry: Option<Geometry>,
     pub mesh: plx_mesh::FeMesh,
     #[serde(default)]
     pub model: FeModel,
