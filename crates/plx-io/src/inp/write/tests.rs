@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use plx_model::{BoundaryCondition, Elastic, Load, Material, Section};
+use plx_model::{BoundaryCondition, Elastic, Load, Material, Section, UserKeyword};
 
 use super::*;
 use crate::frd::{FrdImport, read_frd};
@@ -43,6 +43,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
             region: Region::Parts(vec!["EALL".into()]),
         }],
         steps: vec![step],
+        user_keywords: Vec::new(),
     };
     (mesh, model)
 }
@@ -276,4 +277,86 @@ fn calculix_balances_a_surface_traction() {
         .map(|&node| node_value(&frd, "FORC", "F2", node))
         .sum();
     assert!((reaction - 80.0).abs() < 1e-3, "{reaction}");
+}
+
+/// Position of the title `name` among the top-level keywords.
+fn top_title(tree: &[Keyword], name: &str) -> usize {
+    tree.iter()
+        .position(|k| k.kind == KeywordKind::Title(name.into()))
+        .unwrap()
+}
+
+#[test]
+fn user_keywords_are_written_at_their_place_and_read_back() {
+    let (mesh, mut model) = cantilever(tip_force());
+    let mut tree = model_keywords(&mesh, &model, "").unwrap();
+    let amplitudes = top_title(&tree, "Amplitudes");
+    let steps = top_title(&tree, "Steps");
+    // Step title > *Step > [*Static, Controls, ..., History outputs (index 6), ...].
+    let history = &tree[steps].children[0].children[0].children[6];
+    assert_eq!(history.kind, KeywordKind::Title("History outputs".into()));
+    model.user_keywords = vec![
+        UserKeyword {
+            position: vec![amplitudes, 0],
+            text: "*Amplitude, Name=Ramp\n0, 0, 1, 1".into(),
+            active: true,
+        },
+        UserKeyword {
+            position: vec![steps, 0, 0, 6, 0],
+            text: "*Node print, Nset=FIX\nRF".into(),
+            active: true,
+        },
+        UserKeyword {
+            position: vec![steps, 0, 0, 6, 1],
+            text: "*El print, Elset=EALL\nS".into(),
+            active: false,
+        },
+        // A place that no longer exists, for example inside a deleted material.
+        UserKeyword {
+            position: vec![top_title(&tree, "Materials"), 5, 0],
+            text: "*Plastic".into(),
+            active: true,
+        },
+    ];
+    let placed = insert_user_keywords(&mut tree, &model.user_keywords);
+    assert_eq!(placed, [true, true, true, false]);
+    // Collecting them again gives the same positions, without the one left out.
+    assert_eq!(user_keywords(&tree), model.user_keywords[..3]);
+
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text, write_keywords(&tree));
+    for line in [
+        "** Amplitudes ++++++++++++++++++++++++++++++++++++++++++++++\n**\n*Amplitude, Name=Ramp\n0, 0, 1, 1\n",
+        "** History outputs +++++++++++++++++++++++++++++++++++++++++\n**\n*Node print, Nset=FIX\nRF\n** *El print, Elset=EALL\n** S\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in\n{text}");
+    }
+    assert!(!text.contains("*Plastic"));
+    // The step's *Node print ends up in the .dat file, so CalculiX accepted it.
+    let Some(dat) = run_ccx_dat("benutzer", &text) else {
+        return;
+    };
+    assert!(dat.contains("forces (fx,fy,fz) for set FIX"), "{dat}");
+}
+
+/// Runs CalculiX like [`run_ccx`] and returns the `.dat` file.
+fn run_ccx_dat(name: &str, text: &str) -> Option<String> {
+    if Command::new("ccx").arg("-v").output().is_err() {
+        eprintln!("ccx nicht gefunden, Test übersprungen");
+        return None;
+    }
+    let dir = std::env::temp_dir().join(format!("plx-write-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{name}.inp")), text).unwrap();
+    let output = Command::new("ccx")
+        .args(["-i", name])
+        .current_dir(&dir)
+        .env("OMP_NUM_THREADS", "1")
+        .output()
+        .unwrap();
+    let log = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && !log.contains("*ERROR"), "{log}");
+    let dat = std::fs::read_to_string(dir.join(format!("{name}.dat"))).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    Some(dat)
 }

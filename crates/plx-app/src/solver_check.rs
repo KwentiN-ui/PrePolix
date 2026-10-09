@@ -228,6 +228,7 @@ fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
             region: Region::Parts(vec!["BEAM".into()]),
         }],
         steps: vec![step],
+        user_keywords: Vec::new(),
     }
 }
 

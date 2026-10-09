@@ -6,6 +6,7 @@ use plx_render::StandardView;
 use crate::analysis::{Analysis, MonitorEvent};
 use crate::animation::{AnimationKind, ColorLimits, Playback};
 use crate::icons::{self, Icon};
+use crate::keywords::KeywordEditor;
 use crate::model::{self, LoadedModel, Model};
 use crate::overlay::{Marker, Overlay};
 use crate::properties;
@@ -45,6 +46,8 @@ struct Workbench {
     frame_cache: std::collections::HashMap<usize, Vec<RenderMesh>>,
     /// Open dialog creating or editing an item of the FE model.
     editor: Option<Editor>,
+    /// Open CalculiX keyword editor.
+    keyword_editor: Option<KeywordEditor>,
     /// The tree selection whose region is highlighted.
     highlighted: Option<(TreeView, TreeItem)>,
     analysis: Option<Analysis>,
@@ -92,6 +95,7 @@ impl PrepolixApp {
                 frame_changed: false,
                 frame_cache: Default::default(),
                 editor: None,
+                keyword_editor: None,
                 highlighted: None,
                 analysis: None,
                 open_results: None,
@@ -407,6 +411,7 @@ impl eframe::App for PrepolixApp {
         });
         self.workbench.properties_window(&ctx);
         self.workbench.editor_window(&ctx);
+        self.workbench.keyword_editor_window(&ctx);
         self.workbench.run_analysis(&ctx);
         if let Some(path) = self.workbench.open_results.take() {
             self.read_results(path, &ctx);
@@ -609,8 +614,15 @@ impl Workbench {
 
     /// PrePoMax's Model menu: create items of the FE model.
     fn model_menu(&mut self, ui: &mut egui::Ui) {
-        let Some(model) = self.setup_model() else {
+        if self.setup_model().is_none() {
             ui.label("Zuerst eine .inp-Datei öffnen");
+            return;
+        }
+        if ui.button("CalculiX-Keywords bearbeiten …").clicked() {
+            self.open_keyword_editor();
+        }
+        ui.separator();
+        let Some(model) = self.setup_model() else {
             return;
         };
         let last_step = model.fe.steps.len().checked_sub(1);
@@ -636,6 +648,36 @@ impl Workbench {
         }
         if let Some(kind) = kind {
             self.create(kind);
+        }
+    }
+
+    /// PrePoMax's Model > Edit CalculiX Keywords.
+    fn open_keyword_editor(&mut self) {
+        let Some(model) = self.setup_model() else {
+            return;
+        };
+        let heading = format!("prepolix: {}", model.file_name());
+        match KeywordEditor::new(&model.mesh, &model.fe, &heading) {
+            Ok(editor) => self.keyword_editor = Some(editor),
+            Err(error) => self
+                .output
+                .push(format!("Keyword-Editor nicht möglich: {error}")),
+        }
+    }
+
+    fn keyword_editor_window(&mut self, ctx: &egui::Context) {
+        let Some(editor) = &mut self.keyword_editor else {
+            return;
+        };
+        match editor.show(ctx) {
+            crate::keywords::EditorResult::Open => {}
+            crate::keywords::EditorResult::Ok(keywords) => {
+                self.keyword_editor = None;
+                if let Some(model) = self.model.as_mut().filter(|m| !m.results_only) {
+                    model.fe.user_keywords = keywords;
+                }
+            }
+            crate::keywords::EditorResult::Cancel => self.keyword_editor = None,
         }
     }
 

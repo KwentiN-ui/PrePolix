@@ -4,6 +4,7 @@ mod analysis;
 mod animation;
 mod app;
 mod icons;
+mod keywords;
 mod model;
 mod overlay;
 mod properties;
@@ -47,6 +48,7 @@ mod tests {
             ("animation.rs", include_str!("animation.rs")),
             ("app.rs", include_str!("app.rs")),
             ("icons.rs", include_str!("icons.rs")),
+            ("keywords.rs", include_str!("keywords.rs")),
             ("main.rs", include_str!("main.rs")),
             ("model.rs", include_str!("model.rs")),
             ("overlay.rs", include_str!("overlay.rs")),
