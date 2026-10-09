@@ -126,7 +126,7 @@ fn node_limits(
     let mut node_limit = vec![f64::NAN; mesh.node_count()];
     for (item, limit) in limits {
         if *limit == 0.0 || !limit.is_finite() {
-            return Err(format!("Der Grenzwert für {item} muss ungleich 0 sein."));
+            return Err(format!("The limit for {item} must not be 0."));
         }
         let nodes = match basis {
             LimitBasis::Parts => match mesh.parts.iter().find(|p| p.name == *item) {
@@ -238,7 +238,7 @@ pub fn compute(
     systems: &[CoordinateSystem],
 ) -> Result<(), String> {
     let missing = |field: &str, component: &str| {
-        format!("Das Ergebnis {field}.{component} gibt es in keinem Inkrement.")
+        format!("The result {field}.{component} exists in no increment.")
     };
     let fields: Vec<Option<Field>> = match &output.kind {
         FieldOutputKind::Limit {
@@ -310,21 +310,18 @@ pub fn compute(
                 .iter()
                 .map(|v| {
                     v.split_once('.').ok_or_else(|| {
-                        format!(
-                            "{v}: Ergebnisse werden als Feldname.Komponente angegeben, z. B. STRESS.MISES."
-                        )
+                        format!("{v}: Results are given as FieldName.Component, e.g. STRESS.MISES.")
                     })
                 })
                 .collect::<Result<_, _>>()?;
             if names.is_empty() {
                 return Err(
-                    "Die Gleichung muss mindestens eine Komponente enthalten, z. B. =STRESS.MISES."
-                        .into(),
+                    "The equation must contain at least one component, e.g. =STRESS.MISES.".into(),
                 );
             }
             for (field, name) in &names {
                 if field == &output.name {
-                    return Err(format!("{} kann sich nicht selbst verwenden.", output.name));
+                    return Err(format!("{} cannot use itself.", output.name));
                 }
                 if !increments
                     .iter()
@@ -361,7 +358,7 @@ pub fn compute(
             let system = (systems.iter())
                 .find(|s| s.name == *coordinate_system)
                 .ok_or_else(|| {
-                    format!("Das Koordinatensystem {coordinate_system} gibt es nicht.")
+                    format!("The coordinate system {coordinate_system} does not exist.")
                 })?;
             // The local directions at every node, as rows of a rotation.
             let rotations = (mesh.coords().iter())
@@ -378,7 +375,7 @@ pub fn compute(
             FieldOutputKind::Limit {
                 field, component, ..
             } => missing(field, component),
-            _ => "Für kein Inkrement sind die Ausgangsdaten vorhanden.".into(),
+            _ => "The source data is available for no increment.".into(),
         });
     }
     remove(&output.name, increments);

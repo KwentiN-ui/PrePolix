@@ -90,12 +90,12 @@ impl Region {
         }
     }
 
-    /// Short description for the GUI, e.g. "3 Knoten".
+    /// Short description for the GUI, e.g. "3 nodes".
     pub fn describe(&self) -> String {
         match self {
             Region::Parts(names) => names.join(", "),
-            Region::Nodes(nodes) => format!("{} Knoten", nodes.len()),
-            Region::Faces(faces) => format!("{} Elementflächen", faces.len()),
+            Region::Nodes(nodes) => format!("{} nodes", nodes.len()),
+            Region::Faces(faces) => format!("{} element faces", faces.len()),
             Region::NodeSet(name) | Region::ElementSet(name) | Region::Surface(name) => {
                 name.clone()
             }
@@ -109,24 +109,16 @@ impl Region {
     }
 }
 
-/// E.g. "2 Flächen, 1 Kante".
+/// E.g. "2 faces, 1 edge".
 pub fn describe_entities(entities: &[CadEntity]) -> String {
     let count = |f: fn(&CadEntity) -> bool| entities.iter().filter(|e| f(e)).count();
     let parts = [
-        (
-            count(|e| matches!(e, CadEntity::Face(_))),
-            "Fläche",
-            "Flächen",
-        ),
-        (
-            count(|e| matches!(e, CadEntity::Edge(_))),
-            "Kante",
-            "Kanten",
-        ),
+        (count(|e| matches!(e, CadEntity::Face(_))), "face", "faces"),
+        (count(|e| matches!(e, CadEntity::Edge(_))), "edge", "edges"),
         (
             count(|e| matches!(e, CadEntity::Vertex(_))),
-            "Punkt",
-            "Punkte",
+            "vertex",
+            "vertices",
         ),
     ];
     let text: Vec<String> = (parts.iter())
@@ -134,7 +126,7 @@ pub fn describe_entities(entities: &[CadEntity]) -> String {
         .map(|&(n, one, many)| format!("{n} {}", if n == 1 { one } else { many }))
         .collect();
     if text.is_empty() {
-        "keine Geometrie".into()
+        "no geometry".into()
     } else {
         text.join(", ")
     }

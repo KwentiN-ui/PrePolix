@@ -18,10 +18,10 @@ fn gmsh_available() -> bool {
     match self_test() {
         Ok(_) => true,
         Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
-            eprintln!("Gmsh nicht verfügbar, Test übersprungen: {error}");
+            eprintln!("Gmsh not available, test skipped: {error}");
             false
         }
-        Err(error) => panic!("Gmsh wird verlangt: {error}"),
+        Err(error) => panic!("Gmsh is required: {error}"),
     }
 }
 
@@ -75,8 +75,8 @@ fn step_files_import_with_faces_and_edges() {
     let display = &import.display;
     assert_eq!(display.solids, 1);
     // Four sides, top and bottom with the hole, and the hole's wall.
-    assert!(display.faces >= 7, "{} Flächen", display.faces);
-    assert!(display.edges >= 12, "{} Kanten", display.edges);
+    assert!(display.faces >= 7, "{} faces", display.faces);
+    assert!(display.edges >= 12, "{} edges", display.edges);
     assert_eq!(display.mesh.parts.len(), 1);
     assert_eq!(display.mesh.parts[0].name, "SOLID-1");
     let types: BTreeSet<&str> = (display.mesh.elements().iter())
@@ -98,7 +98,7 @@ fn step_files_import_with_faces_and_edges() {
     assert_eq!(geometry.source, "platte_mit_loch.step");
     assert!(
         geometry.brep.starts_with("DBRep_DrawableShape"),
-        "BREP-Text"
+        "BREP text"
     );
     // 5 % of the diagonal of 100 x 40 x 10, rounded.
     assert_eq!(geometry.meshing.max_size, 5.0);
@@ -177,7 +177,7 @@ fn quadratic_tetrahedra_follow_calculix_numbering() {
     for element in mesh.elements() {
         assert_eq!(element.type_name, "C3D10");
         let v = volume(&mesh, element);
-        assert!(v > 0.0, "Element {} ist verdreht", element.id);
+        assert!(v > 0.0, "Element {} is inverted", element.id);
         total += v;
         // Straight midside nodes lie halfway along CalculiX's edges 1-2, 2-3, 3-1, 1-4,
         // 2-4, 3-4.
@@ -195,7 +195,7 @@ fn quadratic_tetrahedra_follow_calculix_numbering() {
         }
     }
     let exact = 100.0 * 40.0 * 10.0 - std::f64::consts::PI * 8.0 * 8.0 * 10.0;
-    assert!((total - exact).abs() / exact < 0.01, "Volumen {total}");
+    assert!((total - exact).abs() / exact < 0.01, "Volume {total}");
     assert!(mesh.missing_nodes().is_empty());
 }
 
@@ -226,7 +226,7 @@ fn every_solid_becomes_a_part_and_size_controls_the_count() {
     let fine = generate_mesh(&geometry).unwrap().mesh;
     assert!(
         fine.element_count() > 3 * coarse.element_count(),
-        "{} gegen {}",
+        "{} vs {}",
         fine.element_count(),
         coarse.element_count()
     );
@@ -264,7 +264,7 @@ fn a_remeshed_part_replaces_its_old_mesh_and_leaves_the_others() {
     let names: Vec<&str> = merged.parts.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, ["SOLID-1", "SOLID-2"], "the part keeps its place");
     let new_first = merged.parts[0].elements.len();
-    assert!(new_first > 3 * old_first, "{new_first} gegen {old_first}");
+    assert!(new_first > 3 * old_first, "{new_first} vs {old_first}");
     assert!(merged.missing_nodes().is_empty());
     // The second block is untouched, with its numbers.
     assert_eq!(merged.parts[1], whole.parts[1]);
@@ -347,13 +347,13 @@ fn meshes_record_where_the_cad_entities_lie() {
             })
             .collect();
         let recorded: BTreeSet<NodeId> = cad.nodes[&CadEntity::Face(tag)].iter().copied().collect();
-        assert_eq!(nodes, recorded, "Fläche {tag}");
+        assert_eq!(nodes, recorded, "Face {tag}");
     }
     for (&tag, segments) in &cad.segments {
         let nodes = &cad.nodes[&CadEntity::Edge(tag)];
         // Quadratic segments have a midside node each; the hole's edge is closed.
         let n = 2 * segments.len();
-        assert!(nodes.len() == n + 1 || nodes.len() == n, "Kante {tag}");
+        assert!(nodes.len() == n + 1 || nodes.len() == n, "Edge {tag}");
     }
 }
 
@@ -383,7 +383,7 @@ fn local_mesh_sizes_refine_faces_and_edges() {
     };
     geometry.mesh_items = vec![local(vec![face], vec![], 1.0)];
     let on_face = count(&geometry);
-    assert!(on_face > 2 * coarse, "{on_face} gegen {coarse}");
+    assert!(on_face > 2 * coarse, "{on_face} vs {coarse}");
     let edge = (import.display.entities.iter())
         .find_map(|e| match e {
             CadEntity::Edge(tag) => Some(*tag),
@@ -392,7 +392,7 @@ fn local_mesh_sizes_refine_faces_and_edges() {
         .unwrap();
     geometry.mesh_items = vec![local(vec![], vec![edge], 0.5)];
     let on_edge = count(&geometry);
-    assert!(on_edge > coarse, "{on_edge} gegen {coarse}");
+    assert!(on_edge > coarse, "{on_edge} vs {coarse}");
     // Tags of other parts or faces that do not exist change nothing.
     geometry.mesh_items = vec![local(vec![9999], vec![], 1.0)];
     assert_eq!(count(&geometry), coarse);
@@ -527,13 +527,13 @@ fn faces_outside_solids_are_meshed_as_shell_parts() {
         .map(|e| signed_area(&mesh, e).abs())
         .sum();
     let exact = 200.0 - (4.0 - std::f64::consts::PI) * 4.0;
-    assert!((area - exact).abs() / exact < 0.01, "Fläche {area}");
+    assert!((area - exact).abs() / exact < 0.01, "Area {area}");
     assert!(mesh.coords().iter().all(|c| c[2].abs() < 1e-9));
     // The face covers every element; the edges run around it.
     let faces: Vec<(ElementId, u8)> = mesh.cad.faces.values().flatten().copied().collect();
     assert_eq!(faces.len(), mesh.element_count());
     assert!(faces.iter().all(|&(_, f)| f == 1));
-    assert_eq!(mesh.cad.segments.len(), 8, "4 Seiten, 4 Rundungen");
+    assert_eq!(mesh.cad.segments.len(), 8, "4 sides, 4 fillets");
     assert_eq!(
         mesh.cad_nodes(&[CadEntity::Face(*mesh.cad.faces.keys().next().unwrap())])
             .len(),
@@ -929,7 +929,7 @@ fn contact_edges_found_in_2d_survive_remeshing() {
             let edge = &element.faces()[usize::from(face) - 1];
             for &corner in edge.corners {
                 let y = mesh.node(element.nodes[corner]).unwrap()[1];
-                assert!(y.abs() < 1e-6, "Kante bei y = {y}");
+                assert!(y.abs() < 1e-6, "Edge at y = {y}");
             }
         }
     };
@@ -937,7 +937,7 @@ fn contact_edges_found_in_2d_survive_remeshing() {
     for side in [&items[0].master, &items[0].slave] {
         let faces = plx_mesh::surface_faces(&coarse, &skins, side);
         on_contact(&coarse, &faces);
-        let whole = coarse.whole_cad_faces(&faces).expect("ganze CAD-Kanten");
+        let whole = coarse.whole_cad_faces(&faces).expect("whole CAD edges");
         assert!(
             whole.iter().all(|e| matches!(e, CadEntity::Edge(_))),
             "{whole:?}"

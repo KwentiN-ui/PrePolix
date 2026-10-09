@@ -66,20 +66,13 @@ fn window_icon() -> egui::IconData {
     let decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!(
         "../assets/icon/prepolix.png"
     )));
-    let mut reader = decoder.read_info().expect("Icon ist ein gültiges PNG");
-    let mut rgba = vec![
-        0;
-        reader
-            .output_buffer_size()
-            .expect("Icon passt in den Speicher")
-    ];
-    let info = reader
-        .next_frame(&mut rgba)
-        .expect("Icon ist ein gültiges PNG");
+    let mut reader = decoder.read_info().expect("Icon is a valid PNG");
+    let mut rgba = vec![0; reader.output_buffer_size().expect("Icon fits into memory")];
+    let info = reader.next_frame(&mut rgba).expect("Icon is a valid PNG");
     assert_eq!(
         info.color_type,
         png::ColorType::Rgba,
-        "Icon braucht einen Alphakanal"
+        "Icon needs an alpha channel"
     );
     rgba.truncate(info.buffer_size());
     egui::IconData {
@@ -141,7 +134,11 @@ mod tests {
             for (line, content) in text.lines().enumerate() {
                 for c in content.chars() {
                     let ok = (c as u32) < 0x100 || "…–".contains(c);
-                    assert!(ok, "{file}:{}: Zeichen {c:?} fehlt im egui-Font", line + 1);
+                    assert!(
+                        ok,
+                        "{file}:{}: character {c:?} is missing from the egui font",
+                        line + 1
+                    );
                 }
             }
         }

@@ -143,15 +143,14 @@ impl FeModel {
         });
         if zero_moves && scaled_temperature {
             notes.push(
-                "Temperaturen mit Amplitude beziehen sich jetzt auf einen anderen Nullpunkt; \
-                 bitte die Amplituden prüfen."
+                "Temperatures with an amplitude now refer to a different zero point; \
+                 please check the amplitudes."
                     .into(),
             );
         }
         if !self.user_keywords.is_empty() {
             notes.push(
-                "Eigene Keywords des Keyword-Editors wurden nicht umgerechnet; bitte prüfen."
-                    .into(),
+                "User keywords of the Keyword Editor were not converted; please check them.".into(),
             );
         }
         notes

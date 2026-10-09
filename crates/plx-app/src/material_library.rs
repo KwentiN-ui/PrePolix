@@ -69,7 +69,7 @@ impl MaterialLibraryEditor {
             None => (
                 MaterialLibrary::default(),
                 None,
-                Some("Kein Benutzerverzeichnis gefunden.".into()),
+                Some("No user data directory found.".into()),
             ),
         };
         let mut editor = Self {
@@ -123,10 +123,7 @@ impl MaterialLibraryEditor {
 
     fn copy_to_model(&mut self) {
         let Some(material) = self.selected_library_material() else {
-            self.error = Some(
-                "Bitte in der Bibliothek ein Material wählen, das in das Modell kopiert werden soll."
-                    .into(),
-            );
+            self.error = Some("Please select a library material to copy to the model.".into());
             return;
         };
         let mut material = material.clone();
@@ -143,10 +140,7 @@ impl MaterialLibraryEditor {
 
     fn copy_to_library(&mut self) {
         let (Some(index), Some(selected)) = (self.material_selected, &self.library_selected) else {
-            self.error = Some(
-                "Bitte eine Kategorie der Bibliothek wählen, in die das Material kopiert werden soll."
-                    .into(),
-            );
+            self.error = Some("Please select a library category to copy the material to.".into());
             return;
         };
         let mut material = self.materials[index].clone();
@@ -243,7 +237,7 @@ impl MaterialLibraryEditor {
 
     fn save_library(&mut self) -> bool {
         let Some(file) = &self.file else {
-            self.error = Some("Die Bibliothek kann nicht gespeichert werden.".into());
+            self.error = Some("The library cannot be saved.".into());
             return false;
         };
         match plx_io::library::save_library(file, &self.library) {
@@ -252,7 +246,7 @@ impl MaterialLibraryEditor {
                 true
             }
             Err(error) => {
-                self.error = Some(format!("Speichern fehlgeschlagen: {error}"));
+                self.error = Some(format!("Saving failed: {error}"));
                 false
             }
         }
@@ -281,7 +275,7 @@ impl MaterialLibraryEditor {
         let mut open = true;
         let mut result = LibraryResult::Open;
         let size = vec2(600.0, 560.0);
-        let window = egui::Window::new("Materialbibliothek")
+        let window = egui::Window::new("Material Library")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -297,22 +291,22 @@ impl MaterialLibraryEditor {
                 ui.horizontal_top(|ui| {
                     // Two group boxes with their frames and the button column between them.
                     let column = (size.x - 80.0) / 2.0;
-                    group(ui, "Bibliotheksmaterialien", vec2(column, body), |ui| {
+                    group(ui, "Library Materials", vec2(column, body), |ui| {
                         self.library_side(ui, inner)
                     });
                     ui.vertical(|ui| {
                         ui.add_space(52.0);
                         self.copy_buttons(ui);
                     });
-                    group(ui, "Materialien im FE-Modell", vec2(column, body), |ui| {
+                    group(ui, "FE Model Materials", vec2(column, body), |ui| {
                         self.model_side(ui, inner)
                     });
                 });
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.preview, "Materialeigenschaften anzeigen");
+                    ui.checkbox(&mut self.preview, "Preview material properties");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Abbrechen").clicked() {
+                        if ui.button("Cancel").clicked() {
                             result = self.cancel();
                         }
                         if ui.button("OK").clicked() {
@@ -342,19 +336,19 @@ impl MaterialLibraryEditor {
         }
         if self.confirm_close {
             egui::Modal::new(egui::Id::new("material library close")).show(ctx, |ui| {
-                ui.label("Änderungen an der Materialbibliothek vor dem Schließen speichern?");
+                ui.label("Save changes to the material library before closing?");
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Ja").clicked() {
+                    if ui.button("Yes").clicked() {
                         self.confirm_close = false;
                         if self.save_library() {
                             result = LibraryResult::Cancel;
                         }
                     }
-                    if ui.button("Nein").clicked() {
+                    if ui.button("No").clicked() {
                         result = LibraryResult::Cancel;
                     }
-                    if ui.button("Abbrechen").clicked() {
+                    if ui.button("Cancel").clicked() {
                         self.confirm_close = false;
                     }
                 });
@@ -365,19 +359,19 @@ impl MaterialLibraryEditor {
 
     /// PrePoMax's collapsed "Libraries" box: here the one library file of the user.
     fn libraries_section(&mut self, ui: &mut Ui) {
-        egui::CollapsingHeader::new("Bibliotheken")
+        egui::CollapsingHeader::new("Libraries")
             .default_open(false)
             .show(ui, |ui| {
                 match &self.file {
                     Some(file) => {
-                        ui.label("Eigene Bibliothek:");
+                        ui.label("User library:");
                         ui.add(
                             egui::Label::new(RichText::new(file.display().to_string()).monospace())
                                 .truncate(),
                         );
                     }
                     None => {
-                        ui.label("Die Bibliothek wird nicht gespeichert.");
+                        ui.label("The library is not saved.");
                     }
                 }
                 if let Some(error) = &self.load_error {
@@ -394,14 +388,14 @@ impl MaterialLibraryEditor {
         let is_node = selected.as_deref().is_some_and(|p| !p.is_empty());
         button_row(ui, |ui| {
             if ui
-                .add_enabled(is_category, egui::Button::new("Kategorie hinzufügen"))
+                .add_enabled(is_category, egui::Button::new("Add Category"))
                 .clicked()
             {
                 self.add_category();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .add_enabled(is_node, egui::Button::new("Löschen"))
+                    .add_enabled(is_node, egui::Button::new("Delete"))
                     .clicked()
                 {
                     self.delete_from_library();
@@ -456,7 +450,7 @@ impl MaterialLibraryEditor {
             );
             let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if ui
-                .add_enabled(is_node, egui::Button::new("Umbenennen"))
+                .add_enabled(is_node, egui::Button::new("Rename"))
                 .clicked()
                 || enter
             {
@@ -467,13 +461,8 @@ impl MaterialLibraryEditor {
 
     fn copy_buttons(&mut self, ui: &mut Ui) {
         let to_model = self.selected_library_material().is_some();
-        if icons::dialog_button(
-            ui,
-            Icon::Arrow(vec2(1.0, 0.0)),
-            "In das Modell kopieren",
-            to_model,
-        )
-        .clicked()
+        if icons::dialog_button(ui, Icon::Arrow(vec2(1.0, 0.0)), "Copy to Model", to_model)
+            .clicked()
         {
             self.copy_to_model();
         }
@@ -481,7 +470,7 @@ impl MaterialLibraryEditor {
         if icons::dialog_button(
             ui,
             Icon::Arrow(vec2(-1.0, 0.0)),
-            "In die Bibliothek kopieren",
+            "Copy to Library",
             to_library,
         )
         .clicked()
@@ -491,7 +480,7 @@ impl MaterialLibraryEditor {
         if icons::dialog_button(
             ui,
             Icon::Arrow(vec2(0.0, -1.0)),
-            "Nach oben",
+            "Move Up",
             self.can_move(true),
         )
         .clicked()
@@ -501,7 +490,7 @@ impl MaterialLibraryEditor {
         if icons::dialog_button(
             ui,
             Icon::Arrow(vec2(0.0, 1.0)),
-            "Nach unten",
+            "Move Down",
             self.can_move(false),
         )
         .clicked()
@@ -516,7 +505,7 @@ impl MaterialLibraryEditor {
                 if ui
                     .add_enabled(
                         self.material_selected.is_some(),
-                        egui::Button::new("Löschen"),
+                        egui::Button::new("Delete"),
                     )
                     .clicked()
                 {
@@ -560,7 +549,7 @@ impl MaterialLibraryEditor {
     fn preview_window(&mut self, ctx: &egui::Context, at: egui::Pos2) {
         let mut open = true;
         let material = self.previewed().map(|(m, units)| (m.clone(), units));
-        egui::Window::new("Materialeigenschaften")
+        egui::Window::new("Material Properties")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -569,14 +558,14 @@ impl MaterialLibraryEditor {
             .current_pos(at)
             .show(ctx, |ui| {
                 let Some((material, units)) = material else {
-                    ui.weak("Kein Material gewählt.");
+                    ui.weak("No material selected.");
                     return;
                 };
-                ui.strong("Daten");
+                ui.strong("Data");
                 egui::Grid::new("preview data")
                     .num_columns(2)
                     .show(ui, |ui| {
-                        ui.label("Materialname");
+                        ui.label("Material name");
                         let mut name = material.name.clone();
                         ui.add(
                             egui::TextEdit::singleline(&mut name)
@@ -586,7 +575,7 @@ impl MaterialLibraryEditor {
                         ui.end_row();
                     });
                 ui.add_space(6.0);
-                ui.strong("Materialmodelle");
+                ui.strong("Material Models");
                 let models = material_models(&material, units);
                 if !models.iter().any(|(label, _)| *label == self.preview_model)
                     && let Some((first, _)) = models.first()
@@ -603,7 +592,7 @@ impl MaterialLibraryEditor {
                     }
                 });
                 ui.add_space(6.0);
-                ui.strong("Eigenschaften");
+                ui.strong("Properties");
                 frame().show(ui, |ui| {
                     ui.set_min_size(vec2(ui.available_width(), 150.0));
                     let rows = models
@@ -624,7 +613,7 @@ impl MaterialLibraryEditor {
                         });
                 });
                 ui.add_space(4.0);
-                ui.weak(format!("Einheitensystem: {}", units.label()));
+                ui.weak(format!("Unit system: {}", units.label()));
             });
         if !open {
             self.preview = false;
@@ -632,8 +621,8 @@ impl MaterialLibraryEditor {
     }
 }
 
-const DENSITY: &str = "Dichte";
-const ELASTIC: &str = "Elastisch";
+const DENSITY: &str = "Density";
+const ELASTIC: &str = "Elastic";
 
 /// Material models with their property rows (name, value with unit).
 fn material_models(
@@ -653,28 +642,31 @@ fn material_models(
     if let Some(density) = material.density {
         models.push((
             DENSITY,
-            vec![("Dichte", with_unit(density, Quantity::Density))],
+            vec![("Density", with_unit(density, Quantity::Density))],
         ));
     }
     if let Some(elastic) = material.elastic {
         models.push((
             ELASTIC,
             vec![
-                ("E-Modul", with_unit(elastic.young, Quantity::Pressure)),
-                ("Querkontraktionszahl", format_value(elastic.poisson)),
+                (
+                    "Young's modulus",
+                    with_unit(elastic.young, Quantity::Pressure),
+                ),
+                ("Poisson's ratio", format_value(elastic.poisson)),
             ],
         ));
     }
     if let Some(expansion) = material.expansion {
         models.push((
-            "Wärmeausdehnung",
+            "Thermal Expansion",
             vec![
                 (
-                    "Ausdehnungskoeffizient",
+                    "Thermal expansion coefficient",
                     with_unit(expansion.coefficient, Quantity::ThermalExpansion),
                 ),
                 (
-                    "Referenztemperatur",
+                    "Zero temperature",
                     with_unit(expansion.zero_temperature, Quantity::Temperature),
                 ),
             ],
@@ -682,18 +674,18 @@ fn material_models(
     }
     if let Some(conductivity) = material.conductivity {
         models.push((
-            "Wärmeleitung",
+            "Thermal Conductivity",
             vec![(
-                "Wärmeleitfähigkeit",
+                "Thermal conductivity",
                 with_unit(conductivity, Quantity::ThermalConductivity),
             )],
         ));
     }
     if let Some(specific_heat) = material.specific_heat {
         models.push((
-            "Spezifische Wärme",
+            "Specific Heat",
             vec![(
-                "Spez. Wärmekapazität",
+                "Specific heat",
                 with_unit(specific_heat, Quantity::SpecificHeat),
             )],
         ));

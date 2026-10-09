@@ -90,33 +90,33 @@ impl Quantity {
     /// Name in the GUI.
     pub fn label(self) -> &'static str {
         match self {
-            Quantity::Length => "Länge",
-            Quantity::Angle => "Winkel",
-            Quantity::Mass => "Masse",
-            Quantity::Time => "Zeit",
-            Quantity::Temperature => "Temperatur",
-            Quantity::Area => "Fläche",
-            Quantity::Volume => "Volumen",
-            Quantity::Velocity => "Geschwindigkeit",
-            Quantity::RotationalSpeed => "Winkelgeschwindigkeit",
-            Quantity::Acceleration => "Beschleunigung",
-            Quantity::Force => "Kraft",
-            Quantity::ForcePerLength => "Kraft pro Länge",
+            Quantity::Length => "Length",
+            Quantity::Angle => "Angle",
+            Quantity::Mass => "Mass",
+            Quantity::Time => "Time",
+            Quantity::Temperature => "Temperature",
+            Quantity::Area => "Area",
+            Quantity::Volume => "Volume",
+            Quantity::Velocity => "Velocity",
+            Quantity::RotationalSpeed => "Rotational speed",
+            Quantity::Acceleration => "Acceleration",
+            Quantity::Force => "Force",
+            Quantity::ForcePerLength => "Force per length",
             Quantity::Moment => "Moment",
-            Quantity::Pressure => "Druck",
-            Quantity::Density => "Dichte",
-            Quantity::Energy => "Energie",
-            Quantity::Power => "Leistung",
-            Quantity::Frequency => "Frequenz",
-            Quantity::ForcePerVolume => "Kraft pro Volumen",
-            Quantity::HeatTransferCoefficient => "Wärmeübergangskoeffizient",
-            Quantity::TemperatureDifference => "Temperaturdifferenz",
-            Quantity::ThermalConductivity => "Wärmeleitfähigkeit",
-            Quantity::SpecificHeat => "Spezifische Wärmekapazität",
-            Quantity::ThermalExpansion => "Wärmeausdehnungskoeffizient",
-            Quantity::HeatFlux => "Wärmestromdichte",
-            Quantity::PowerPerVolume => "Leistung pro Volumen",
-            Quantity::StefanBoltzmann => "Stefan-Boltzmann-Konstante",
+            Quantity::Pressure => "Pressure",
+            Quantity::Density => "Density",
+            Quantity::Energy => "Energy",
+            Quantity::Power => "Power",
+            Quantity::Frequency => "Frequency",
+            Quantity::ForcePerVolume => "Force per volume",
+            Quantity::HeatTransferCoefficient => "Heat transfer coefficient",
+            Quantity::TemperatureDifference => "Temperature difference",
+            Quantity::ThermalConductivity => "Thermal conductivity",
+            Quantity::SpecificHeat => "Specific heat",
+            Quantity::ThermalExpansion => "Thermal expansion coefficient",
+            Quantity::HeatFlux => "Heat flux",
+            Quantity::PowerPerVolume => "Power per volume",
+            Quantity::StefanBoltzmann => "Stefan-Boltzmann constant",
         }
     }
 
@@ -212,7 +212,7 @@ impl UnitSystem {
     /// PrePoMax's name of the unit system.
     pub fn label(self) -> &'static str {
         match self {
-            UnitSystem::Unitless => "Ohne Einheiten",
+            UnitSystem::Unitless => "Unitless",
             UnitSystem::MKgSC => "m, kg, s, °C",
             UnitSystem::MmTonSC => "mm, ton, s, °C",
             UnitSystem::MTonSC => "m, ton, s, °C",
@@ -356,17 +356,17 @@ impl UnitSystem {
     /// units with prefixes, products, quotients and powers, e.g. "kN·m", "Nmm", "N/mm²",
     /// "200 GPa", "7,85 g/cm³", "5°".
     pub fn parse_value(self, text: &str, quantity: Quantity) -> Result<f64, String> {
-        let (number, unit) = split_number(text).ok_or_else(|| format!("Keine Zahl: {text}"))?;
+        let (number, unit) = split_number(text).ok_or_else(|| format!("Not a number: {text}"))?;
         if unit.is_empty() {
             return Ok(number);
         }
         if !self.has_units() {
-            return Err("Das Modell hat kein Einheitensystem; bitte nur die Zahl angeben.".into());
+            return Err("The model has no unit system; please enter only the number.".into());
         }
         let parsed = parse_unit(unit)?;
         if parsed.dimension != quantity.dimension() {
             return Err(format!(
-                "{unit} ist keine Einheit für {} ({})",
+                "{unit} is not a unit of {} ({})",
                 quantity.label(),
                 self.unit(quantity)
             ));
@@ -386,7 +386,7 @@ impl UnitSystem {
         };
         value
             .filter(|v| v.is_finite())
-            .ok_or_else(|| format!("Wert außerhalb des Zahlenbereichs: {text}"))
+            .ok_or_else(|| format!("Value out of range: {text}"))
     }
 }
 
@@ -555,7 +555,7 @@ pub fn parse_unit(text: &str) -> Result<ParsedUnit, String> {
     let (factor, dimension, symbols) = parser
         .product()
         .filter(|_| parser.at == parser.chars.len())
-        .ok_or_else(|| format!("Unbekannte Einheit: {text}"))?;
+        .ok_or_else(|| format!("Unknown unit: {text}"))?;
     let zero = match symbols.as_slice() {
         ["°C" | "degC"] => Some(273.15),
         ["°F" | "degF"] => Some(459.67 * 5.0 / 9.0),

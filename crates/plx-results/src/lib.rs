@@ -31,9 +31,9 @@ impl AnalysisKind {
     /// Label of the increment value (time, eigenfrequency, buckling factor).
     pub fn value_label(self) -> &'static str {
         match self {
-            AnalysisKind::Frequency => "Frequenz",
-            AnalysisKind::Buckling => "Lastfaktor",
-            _ => "Zeit",
+            AnalysisKind::Frequency => "Frequency",
+            AnalysisKind::Buckling => "Load factor",
+            _ => "Time",
         }
     }
 }

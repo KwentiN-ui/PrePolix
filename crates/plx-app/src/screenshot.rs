@@ -69,13 +69,13 @@ fn deliver(ctx: &Context, target: Target, image: ColorImage, output: &mut Vec<St
         Target::Clipboard => {
             ctx.copy_image(image);
             output.push(format!(
-                "Screenshot ({width} x {height}) in die Zwischenablage kopiert"
+                "Screenshot ({width} x {height}) copied to the clipboard"
             ));
         }
         Target::File => {
             let Some(path) = rfd::FileDialog::new()
-                .set_title("Screenshot speichern unter")
-                .add_filter("PNG-Bild", &["png"])
+                .set_title("Save Screenshot As")
+                .add_filter("PNG image", &["png"])
                 .set_file_name("screenshot.png")
                 .save_file()
             else {
@@ -87,9 +87,9 @@ fn deliver(ctx: &Context, target: Target, image: ColorImage, output: &mut Vec<St
                 path
             };
             match write_png(&path, &image) {
-                Ok(()) => output.push(format!("Screenshot gespeichert: {}", path.display())),
+                Ok(()) => output.push(format!("Screenshot saved: {}", path.display())),
                 Err(err) => output.push(format!(
-                    "Screenshot konnte nicht gespeichert werden ({}): {err}",
+                    "Screenshot could not be saved ({}): {err}",
                     path.display()
                 )),
             }

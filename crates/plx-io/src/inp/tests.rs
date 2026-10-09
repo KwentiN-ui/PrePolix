@@ -115,12 +115,12 @@ fn errors_name_file_and_line() {
     .unwrap_err();
     assert_eq!(
         err.to_string(),
-        "<text>:4: Element 1 vom Typ C3D4 ist unvollständig"
+        "<text>:4: Element 1 of type C3D4 is incomplete"
     );
     let err = read_inp_str("*NODE\n1,0,abc,0\n", None).unwrap_err();
-    assert_eq!(err.to_string(), "<text>:2: Ungültige Koordinate 'abc'");
+    assert_eq!(err.to_string(), "<text>:2: Invalid coordinate 'abc'");
     let err = read_inp_str("*ELEMENT\n", None).unwrap_err();
-    assert_eq!(err.to_string(), "<text>:1: *ELEMENT ohne TYPE=");
+    assert_eq!(err.to_string(), "<text>:1: *ELEMENT without TYPE=");
 }
 
 #[test]

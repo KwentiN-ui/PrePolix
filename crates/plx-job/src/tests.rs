@@ -25,7 +25,7 @@ fn work_dir(name: &str) -> PathBuf {
 fn ccx_installed() -> bool {
     let found = Command::new("ccx").arg("-v").output().is_ok();
     if !found {
-        eprintln!("ccx nicht gefunden, Test übersprungen");
+        eprintln!("ccx not found, test skipped");
     }
     found
 }

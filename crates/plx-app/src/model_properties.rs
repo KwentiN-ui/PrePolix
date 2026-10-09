@@ -70,7 +70,7 @@ impl ModelPropertiesDialog {
         let mut result = DialogResult::Open;
         let error = (mesh.and_then(|mesh| space_error(self.draft.space, mesh)))
             .or_else(|| geometry.and_then(|g| geometry_check(self.draft.space, g).err()));
-        egui::Window::new("Modelleigenschaften")
+        egui::Window::new("Model Properties")
             .id(egui::Id::new("model properties"))
             .open(&mut open)
             .collapsible(false)
@@ -81,7 +81,7 @@ impl ModelPropertiesDialog {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 ui.set_width(340.0);
                 let draft = &mut self.draft;
-                group(ui, "Modellraum", |ui| {
+                group(ui, "Model Space", |ui| {
                     egui::Grid::new("model space")
                         .num_columns(2)
                         .spacing([24.0, 4.0])
@@ -94,7 +94,7 @@ impl ModelPropertiesDialog {
                             }
                         });
                 });
-                group(ui, "Einheitensystem", |ui| {
+                group(ui, "Unit System", |ui| {
                     egui::Frame::new()
                         .fill(crate::style::WINDOW)
                         .stroke(egui::Stroke::new(1.0, crate::style::BORDER))
@@ -109,7 +109,7 @@ impl ModelPropertiesDialog {
                             }
                         });
                 });
-                group(ui, "Einheiten", |ui| units_table(ui, draft.units));
+                group(ui, "Units", |ui| units_table(ui, draft.units));
                 // The constants follow a changed unit system when the model is converted
                 // or is new, so that they stay the same physically.
                 if self.constants_units != draft.units {
@@ -120,17 +120,17 @@ impl ModelPropertiesDialog {
                     }
                     self.constants_units = draft.units;
                 }
-                group(ui, "Physikalische Konstanten", |ui| constants(ui, draft));
+                group(ui, "Physical Constants", |ui| constants(ui, draft));
                 let (from, to) = (self.original.units, draft.units);
                 if self.editing && from != to {
                     if from.has_units() && to.has_units() {
-                        ui.checkbox(&mut self.convert, "Werte des Modells umrechnen");
+                        ui.checkbox(&mut self.convert, "Convert the model values");
                     }
                     let note = if self.convert && from.has_units() && to.has_units() {
-                        "Netz, Geometrie, Materialien, Lasten und alle anderen Werte werden \
-                         umgerechnet; das Modell bleibt physikalisch gleich."
+                        "Mesh, geometry, materials, loads and all other values are \
+                         converted; the model stays physically the same."
                     } else {
-                        "Die Zahlenwerte bleiben und gelten in den neuen Einheiten."
+                        "The numbers stay the same and apply in the new units."
                     };
                     ui.add(egui::Label::new(egui::RichText::new(note).weak()).wrap());
                 }
@@ -139,7 +139,7 @@ impl ModelPropertiesDialog {
                 }
                 ui.add_space(4.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Abbrechen").clicked() {
+                    if ui.button("Cancel").clicked() {
                         result = DialogResult::Cancel;
                     }
                     let ok = ui.add_enabled(error.is_none(), egui::Button::new("OK"));
@@ -163,11 +163,9 @@ impl ModelPropertiesDialog {
 pub fn space_error(space: ModelSpace, mesh: &FeMesh) -> Option<String> {
     let has = |family| mesh.elements().iter().any(|e| e.shape.family() == family);
     if space.is_2d() && has(ElementFamily::Solid) {
-        Some(
-            "Das Netz enthält Volumenelemente; ein 2D-Modell geht nur mit Flächenelementen.".into(),
-        )
+        Some("The mesh contains solid elements; a 2D model works only with plane elements.".into())
     } else if !space.is_2d() && mesh.elements().iter().any(|e| e.is_plane()) {
-        Some("Das Netz enthält 2D-Elemente; ein 3D-Modell geht damit nicht.".into())
+        Some("The mesh contains 2D elements; a 3D model does not work with them.".into())
     } else {
         None
     }
@@ -182,8 +180,8 @@ pub fn geometry_check(space: ModelSpace, geometry: &Model) -> Result<Vec<i32>, S
     }
     if geometry.geometry_solids > 0 {
         return Err(format!(
-            "Die Geometrie enthält {} Volumenkörper; ein 2D-Modell braucht Flächen in der \
-             x-y-Ebene.",
+            "The geometry contains {} solids; a 2D model needs faces in the \
+             x-y plane.",
             geometry.geometry_solids
         ));
     }
@@ -197,15 +195,15 @@ pub fn geometry_check(space: ModelSpace, geometry: &Model) -> Result<Vec<i32>, S
     let tolerance = 1e-6 * diagonal.max(f64::MIN_POSITIVE);
     if min[2].abs() > tolerance || max[2].abs() > tolerance {
         return Err(format!(
-            "Die Geometrie liegt nicht in der x-y-Ebene (z von {:.4} bis {:.4}); ein \
-             2D-Modell braucht Flächen bei z = 0.",
+            "The geometry does not lie in the x-y plane (z from {:.4} to {:.4}); a \
+             2D model needs faces at z = 0.",
             min[2], max[2]
         ));
     }
     if space == ModelSpace::Axisymmetric && min[0] < -tolerance {
         return Err(format!(
-            "Die Geometrie reicht bis x = {:.4}; ein rotationssymmetrisches Modell liegt ganz \
-             bei x >= 0, die y-Achse ist die Drehachse.",
+            "The geometry reaches to x = {:.4}; an axisymmetric model lies entirely \
+             at x >= 0, the y-axis is the axis of revolution.",
             min[0]
         ));
     }
@@ -254,7 +252,7 @@ fn constants(ui: &mut egui::Ui, draft: &mut ModelProperties) {
         .show(ui, |ui| {
             for (label, value, quantity) in [
                 (
-                    "Absoluter Nullpunkt",
+                    "Absolute zero",
                     &mut draft.absolute_zero,
                     Quantity::Temperature,
                 ),
@@ -274,14 +272,16 @@ fn constants(ui: &mut egui::Ui, draft: &mut ModelProperties) {
         });
     if let Some((zero, sigma)) = ModelProperties::standard_constants(units)
         && ui
-            .button("Standardwerte")
-            .on_hover_text("Absoluter Nullpunkt und Stefan-Boltzmann-Konstante im Einheitensystem")
+            .button("Defaults")
+            .on_hover_text("Absolute zero and Stefan-Boltzmann constant in the unit system")
             .clicked()
     {
         draft.absolute_zero = Some(zero);
         draft.stefan_boltzmann = Some(sigma);
     }
-    ui.add(egui::Label::new(egui::RichText::new("Nur für Wärmestrahlung nötig.").weak()).wrap());
+    ui.add(
+        egui::Label::new(egui::RichText::new("Only needed for thermal radiation.").weak()).wrap(),
+    );
 }
 
 /// The units of the system, PrePoMax's base and derived units.
@@ -291,13 +291,9 @@ fn units_table(ui: &mut egui::Ui, units: UnitSystem) {
         .auto_shrink([false, true])
         .show(ui, |ui| {
             for (title, quantities, values) in [
+                ("Base Units", &BASE_QUANTITIES[..], &units.base_units()[..]),
                 (
-                    "Basiseinheiten",
-                    &BASE_QUANTITIES[..],
-                    &units.base_units()[..],
-                ),
-                (
-                    "Abgeleitete Einheiten",
+                    "Derived Units",
                     &DERIVED_QUANTITIES[..],
                     &units.derived_units()[..],
                 ),

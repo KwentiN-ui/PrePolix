@@ -75,7 +75,7 @@ pub fn expand(
         return Err(InpError::Parse {
             file: name,
             line: 0,
-            message: "Zu viele verschachtelte *INCLUDE-Dateien".into(),
+            message: "Too many nested *INCLUDE files".into(),
         });
     }
     let file = files.len();
@@ -93,7 +93,7 @@ pub fn expand(
                     return Err(InpError::Parse {
                         file: name,
                         line: index + 1,
-                        message: "*INCLUDE ohne INPUT=".into(),
+                        message: "*INCLUDE without INPUT=".into(),
                     });
                 };
                 let input = input.trim_matches('"');

@@ -121,7 +121,7 @@ pub fn interpolate(points: &[PathPoint], values: &[f32]) -> Vec<f64> {
 /// values outside the mesh are left empty. A semicolon suits CSV files, a tab spreadsheets.
 pub fn to_csv(points: &[PathPoint], values: &[f64], header: &str, separator: char) -> String {
     let s = separator;
-    let mut csv = format!("Abstand{s}X{s}Y{s}Z{s}{header}\n");
+    let mut csv = format!("Distance{s}X{s}Y{s}Z{s}{header}\n");
     for (point, value) in points.iter().zip(values) {
         let [x, y, z] = point.position;
         let value = if value.is_finite() {
@@ -440,7 +440,7 @@ mod tests {
         let csv = to_csv(&points, &[f64::NAN, 4.25], "STRESS MISES", ';');
         assert_eq!(
             csv,
-            "Abstand;X;Y;Z;STRESS MISES\n0;0;0;0;\n1.5;1.5;0;0;4.25\n"
+            "Distance;X;Y;Z;STRESS MISES\n0;0;0;0;\n1.5;1.5;0;0;4.25\n"
         );
     }
 }

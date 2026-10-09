@@ -22,18 +22,18 @@ pub const LIBRARY_ENV: &str = "PREPOLIX_GMSH";
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
 pub enum GmshError {
     #[error(
-        "Gmsh-Bibliothek nicht gefunden (gesucht: {}). Pfad unter Einstellungen > Gmsh angeben.",
+        "Gmsh library not found (searched: {}). Set the path under Settings > Gmsh.",
         .0.join(", ")
     )]
     NotFound(Vec<String>),
-    #[error("{path}: kann nicht geladen werden: {message}")]
+    #[error("{path}: cannot be loaded: {message}")]
     Load { path: PathBuf, message: String },
-    #[error("{path}: keine passende Gmsh-Bibliothek, es fehlen {}", .missing.join(", "))]
+    #[error("{path}: not a matching Gmsh library, missing {}", .missing.join(", "))]
     MissingFunctions {
         path: PathBuf,
         missing: Vec<&'static str>,
     },
-    #[error("Gmsh {version} wird nicht unterstützt, benötigt wird Gmsh 4")]
+    #[error("Gmsh {version} is not supported, Gmsh 4 is required")]
     UnsupportedVersion { version: String },
     #[error("Gmsh: {0}")]
     Call(String),
@@ -247,7 +247,7 @@ impl Gmsh {
         }
         let text = self.take_string(message);
         Err(GmshError::Call(if text.is_empty() {
-            format!("Fehler {ierr}")
+            format!("Error {ierr}")
         } else {
             text
         }))
@@ -550,14 +550,14 @@ fn pairs(flat: &[c_int]) -> Vec<(i32, i32)> {
 }
 
 fn c_string(text: &str) -> Result<CString, GmshError> {
-    CString::new(text).map_err(|_| GmshError::Other(format!("ungültiger Text: {text:?}")))
+    CString::new(text).map_err(|_| GmshError::Other(format!("invalid text: {text:?}")))
 }
 
 fn c_path(path: &Path) -> Result<CString, GmshError> {
     // Gmsh expects UTF-8 file names on every platform.
     let text = path
         .to_str()
-        .ok_or_else(|| GmshError::Other(format!("{}: Pfad ist kein UTF-8", path.display())))?;
+        .ok_or_else(|| GmshError::Other(format!("{}: path is not UTF-8", path.display())))?;
     c_string(text)
 }
 

@@ -123,12 +123,12 @@ impl Extrapolation {
 
     pub fn label(&self) -> &'static str {
         match self {
-            Extrapolation::IiwFineLinear => "IIW a, fein, linear: 0,4t / 1,0t",
-            Extrapolation::IiwFineQuadratic => "IIW a, fein, quadr.: 0,4t / 0,9t / 1,4t",
-            Extrapolation::IiwCoarse => "IIW a, grob, linear: 0,5t / 1,5t",
-            Extrapolation::IiwTypeBFine => "IIW b, fein, quadr.: 4 / 8 / 12 mm",
-            Extrapolation::IiwTypeBCoarse => "IIW b, grob, linear: 5 / 15 mm",
-            Extrapolation::Custom(_) => "Eigene Lesepunkte",
+            Extrapolation::IiwFineLinear => "IIW a, fine, linear: 0.4t / 1.0t",
+            Extrapolation::IiwFineQuadratic => "IIW a, fine, quadr.: 0.4t / 0.9t / 1.4t",
+            Extrapolation::IiwCoarse => "IIW a, coarse, linear: 0.5t / 1.5t",
+            Extrapolation::IiwTypeBFine => "IIW b, fine, quadr.: 4 / 8 / 12 mm",
+            Extrapolation::IiwTypeBCoarse => "IIW b, coarse, linear: 5 / 15 mm",
+            Extrapolation::Custom(_) => "Custom read-out points",
         }
     }
 }
@@ -171,9 +171,9 @@ impl HotSpotComponent {
 
     pub fn label(self) -> &'static str {
         match self {
-            HotSpotComponent::Perpendicular => "Senkrecht zum Nahtübergang",
-            HotSpotComponent::MaxPrincipal => "Größte Hauptspannung",
-            HotSpotComponent::SignedMaxAbsPrincipal => "Betragsgrößte Hauptspannung",
+            HotSpotComponent::Perpendicular => "Perpendicular to weld toe",
+            HotSpotComponent::MaxPrincipal => "Max principal stress",
+            HotSpotComponent::SignedMaxAbsPrincipal => "Signed max abs principal stress",
         }
     }
 

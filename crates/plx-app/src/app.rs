@@ -166,11 +166,11 @@ impl PrepolixApp {
         let render_state = cc
             .wgpu_render_state
             .clone()
-            .ok_or("prepolix benötigt das wgpu-Backend von eframe")?;
+            .ok_or("prepolix requires the wgpu backend of eframe")?;
         crate::style::apply(&cc.egui_ctx);
         let adapter = render_state.adapter.get_info();
         let output = vec![format!(
-            "prepolix {} gestartet, Grafik: {} ({:?})",
+            "prepolix {} started, graphics: {} ({:?})",
             env!("CARGO_PKG_VERSION"),
             adapter.name,
             adapter.backend
@@ -269,17 +269,17 @@ impl PrepolixApp {
         let units = self.workbench.import_units();
         std::thread::spawn(move || {
             let picked = rfd::FileDialog::new()
-                .set_title("Modell öffnen")
+                .set_title("Open Model")
                 .add_filter(
-                    "Projekt, CalculiX-Modell, -Ergebnisse oder Geometrie",
+                    "Project, CalculiX model, results or geometry",
                     &[
                         "plx", "PLX", "inp", "INP", "frd", "FRD", "step", "STEP", "stp", "STP",
                         "iges", "IGES", "igs", "IGS", "brep", "BREP",
                     ],
                 )
-                .add_filter("prepolix-Projekt (*.plx)", &["plx", "PLX"])
-                .add_filter("Eingabedatei (*.inp)", &["inp", "INP"])
-                .add_filter("Ergebnisdatei (*.frd)", &["frd", "FRD"])
+                .add_filter("prepolix project (*.plx)", &["plx", "PLX"])
+                .add_filter("Input file (*.inp)", &["inp", "INP"])
+                .add_filter("Results file (*.frd)", &["frd", "FRD"])
                 .add_filter(GEOMETRY_FILTER.0, GEOMETRY_FILTER.1)
                 .pick_file();
             if let Some(path) = picked {
@@ -318,7 +318,7 @@ impl PrepolixApp {
             });
         std::thread::spawn(move || {
             let picked = rfd::FileDialog::new()
-                .set_title("Geometrie importieren")
+                .set_title("Import Geometry")
                 .add_filter(GEOMETRY_FILTER.0, GEOMETRY_FILTER.1)
                 .pick_files();
             let Some(paths) = picked.filter(|p| !p.is_empty()) else {
@@ -374,38 +374,37 @@ impl PrepolixApp {
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("Datei", |ui| {
-                let new = egui::Button::new("Neu …").shortcut_text("Strg+N");
+            ui.menu_button("File", |ui| {
+                let new = egui::Button::new("New …").shortcut_text("Ctrl+N");
                 if ui.add(new).clicked() {
                     self.workbench.new_model(false);
                 }
-                let open = egui::Button::new("Öffnen …").shortcut_text("Strg+O");
+                let open = egui::Button::new("Open …").shortcut_text("Ctrl+O");
                 if ui.add_enabled(self.loading.is_none(), open).clicked() {
                     self.open_dialog(ui.ctx());
                 }
                 let setup = self.workbench.setup_model().is_some();
-                let save = egui::Button::new("Speichern").shortcut_text("Strg+S");
+                let save = egui::Button::new("Save").shortcut_text("Ctrl+S");
                 if ui.add_enabled(setup, save).clicked() {
                     self.workbench.save_project(false);
                 }
-                let save_as =
-                    egui::Button::new("Speichern unter …").shortcut_text("Strg+Umschalt+S");
+                let save_as = egui::Button::new("Save As …").shortcut_text("Ctrl+Shift+S");
                 if ui.add_enabled(setup, save_as).clicked() {
                     self.workbench.save_project(true);
                 }
                 ui.separator();
-                let export = egui::Button::new("CalculiX-Eingabedatei exportieren …");
+                let export = egui::Button::new("Export CalculiX Input File …");
                 if ui.add_enabled(setup, export).clicked() {
                     self.workbench.export_inp();
                 }
                 ui.separator();
-                if ui.button("Beenden").clicked() {
+                if ui.button("Exit").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
-            ui.menu_button("Bearbeiten", not_implemented);
-            ui.menu_button("Ansicht", |ui| {
-                if ui.button("Einpassen").clicked() {
+            ui.menu_button("Edit", not_implemented);
+            ui.menu_button("View", |ui| {
+                if ui.button("Zoom to Fit").clicked() {
                     self.workbench.view_command = Some(ViewCommand::Fit);
                 }
                 for (view, label) in STANDARD_VIEWS {
@@ -413,17 +412,17 @@ impl PrepolixApp {
                         self.workbench.view_command = Some(ViewCommand::View(view));
                     }
                 }
-                if ui.button("Vertikal").clicked() {
+                if ui.button("Vertical View").clicked() {
                     self.workbench.view_command = Some(ViewCommand::Vertical);
                 }
-                ui.menu_button("Ansicht senkrecht zu", |ui| {
+                ui.menu_button("View Normal to Axis", |ui| {
                     for axis in Axis::ALL {
                         if ui.button(axis.label()).clicked() {
                             self.workbench.view_command = Some(ViewCommand::AxisView(axis));
                         }
                     }
                 });
-                ui.menu_button("Isometrisch, Achse oben", |ui| {
+                ui.menu_button("Isometric, Axis Up", |ui| {
                     for axis in Axis::ALL {
                         if ui.button(axis.label()).clicked() {
                             self.workbench.view_command = Some(ViewCommand::IsometricAxis(axis));
@@ -433,19 +432,19 @@ impl PrepolixApp {
                 ui.separator();
                 ui.checkbox(
                     &mut self.workbench.viewport.options.mesh_edges,
-                    "Netzkanten",
+                    "Mesh Edges",
                 );
                 ui.separator();
                 let has_model = self.workbench.shown().is_some();
                 if ui
-                    .add_enabled(has_model, egui::Button::new("Schnittansicht …"))
+                    .add_enabled(has_model, egui::Button::new("Section View …"))
                     .clicked()
                 {
                     self.workbench.open_section_dialog();
                 }
                 let active = self.workbench.section.is_some();
                 if ui
-                    .add_enabled(active, egui::Button::new("Schnittansicht aus"))
+                    .add_enabled(active, egui::Button::new("Section View Off"))
                     .clicked()
                 {
                     self.workbench.section = None;
@@ -453,37 +452,37 @@ impl PrepolixApp {
                 }
                 ui.separator();
                 if ui
-                    .add_enabled(has_model, egui::Button::new("Explosionsansicht …"))
+                    .add_enabled(has_model, egui::Button::new("Exploded View …"))
                     .clicked()
                 {
                     self.workbench.open_exploded_dialog();
                 }
                 let exploded = self.workbench.exploded_applied();
                 if ui
-                    .add_enabled(exploded, egui::Button::new("Explosionsansicht aus"))
+                    .add_enabled(exploded, egui::Button::new("Exploded View Off"))
                     .clicked()
                 {
                     self.workbench.toggle_exploded();
                 }
             });
-            ui.menu_button("Geometrie", |ui| {
-                let import = egui::Button::new("Importieren …");
+            ui.menu_button("Geometry", |ui| {
+                let import = egui::Button::new("Import …");
                 if ui.add_enabled(self.loading.is_none(), import).clicked() {
                     self.import(ui.ctx());
                 }
             });
-            ui.menu_button("Netz", |ui| self.workbench.mesh_menu(ui));
-            ui.menu_button("Modell", |ui| self.workbench.model_menu(ui));
-            ui.menu_button("Interaktion", |ui| self.workbench.interaction_menu(ui));
-            ui.menu_button("Analyse", |ui| self.workbench.analysis_menu(ui));
-            ui.menu_button("Ergebnisse", |ui| self.workbench.results_menu(ui));
-            ui.menu_button("Werkzeuge", |ui| {
-                if ui.button("Einstellungen …").clicked() {
+            ui.menu_button("Mesh", |ui| self.workbench.mesh_menu(ui));
+            ui.menu_button("Model", |ui| self.workbench.model_menu(ui));
+            ui.menu_button("Interaction", |ui| self.workbench.interaction_menu(ui));
+            ui.menu_button("Analysis", |ui| self.workbench.analysis_menu(ui));
+            ui.menu_button("Results", |ui| self.workbench.results_menu(ui));
+            ui.menu_button("Tools", |ui| {
+                if ui.button("Settings …").clicked() {
                     self.workbench.settings_window =
                         Some(SettingsWindow::new(&self.workbench.settings));
                 }
             });
-            ui.menu_button("Hilfe", not_implemented);
+            ui.menu_button("Help", not_implemented);
         });
     }
 
@@ -491,23 +490,23 @@ impl PrepolixApp {
     fn tool_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 1.0;
-            if icons::button(ui, Icon::New, "Neu (Strg+N)", true, false).clicked() {
+            if icons::button(ui, Icon::New, "New (Ctrl+N)", true, false).clicked() {
                 self.workbench.new_model(false);
             }
             let can_open = self.loading.is_none();
-            if icons::button(ui, Icon::Open, "Öffnen (Strg+O)", can_open, false).clicked() {
+            if icons::button(ui, Icon::Open, "Open (Ctrl+O)", can_open, false).clicked() {
                 self.open_dialog(ui.ctx());
             }
-            let import = "Geometrie importieren (STEP, IGES, BREP)";
+            let import = "Import Geometry (STEP, IGES, BREP)";
             if icons::button(ui, Icon::Import, import, can_open, false).clicked() {
                 self.import(ui.ctx());
             }
             let can_save = self.workbench.setup_model().is_some();
-            if icons::button(ui, Icon::Save, "Speichern (Strg+S)", can_save, false).clicked() {
+            if icons::button(ui, Icon::Save, "Save (Ctrl+S)", can_save, false).clicked() {
                 self.workbench.save_project(false);
             }
             ui.separator();
-            if icons::button(ui, Icon::Fit, "Einpassen", true, false).clicked() {
+            if icons::button(ui, Icon::Fit, "Zoom to Fit", true, false).clicked() {
                 self.workbench.view_command = Some(ViewCommand::Fit);
             }
             for (view, label) in STANDARD_VIEWS {
@@ -515,41 +514,41 @@ impl PrepolixApp {
                     self.workbench.view_command = Some(ViewCommand::View(view));
                 }
             }
-            if icons::button(ui, Icon::Vertical, "Vertikal", true, false).clicked() {
+            if icons::button(ui, Icon::Vertical, "Vertical View", true, false).clicked() {
                 self.workbench.view_command = Some(ViewCommand::Vertical);
             }
             let camera = icons::button(ui, Icon::Screenshot, "Screenshot", true, false);
             egui::Popup::menu(&camera).show(|ui| {
-                if ui.button("In Zwischenablage kopieren").clicked() {
+                if ui.button("Copy to Clipboard").clicked() {
                     self.workbench
                         .screenshot
                         .request(screenshot::Target::Clipboard);
                 }
-                if ui.button("Speichern unter …").clicked() {
+                if ui.button("Save As …").clicked() {
                     self.workbench.screenshot.request(screenshot::Target::File);
                 }
             });
             ui.separator();
             let options = &mut self.workbench.viewport.options;
             let mesh = options.mesh_edges;
-            if icons::button(ui, Icon::FeatureEdges, "Nur Kanten", true, !mesh).clicked() {
+            if icons::button(ui, Icon::FeatureEdges, "Edges Only", true, !mesh).clicked() {
                 options.mesh_edges = false;
             }
-            if icons::button(ui, Icon::MeshEdges, "Netzkanten", true, mesh).clicked() {
+            if icons::button(ui, Icon::MeshEdges, "Mesh Edges", true, mesh).clicked() {
                 options.mesh_edges = true;
             }
             ui.separator();
             let shown = self.workbench.shown().is_some();
             let sectioned =
                 self.workbench.section.is_some() || self.workbench.section_dialog.is_some();
-            if icons::button(ui, Icon::SectionView, "Schnittansicht", shown, sectioned).clicked() {
+            if icons::button(ui, Icon::SectionView, "Section View", shown, sectioned).clicked() {
                 self.workbench.open_section_dialog();
             }
             // PrePoMax: a left click turns the exploded view on and off, a right click opens
             // its dialog.
             let exploded =
                 self.workbench.exploded_applied() || self.workbench.exploded_dialog.is_some();
-            let tooltip = "Explosionsansicht ein/aus (Rechtsklick: Einstellungen)";
+            let tooltip = "Exploded View on/off (right click: settings)";
             let button = icons::button(ui, Icon::ExplodedView, tooltip, shown, exploded);
             if button.clicked() {
                 self.workbench.toggle_exploded();
@@ -567,7 +566,7 @@ impl PrepolixApp {
                 let properties = model.fe.properties;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(format!(
-                        "Einheitensystem: {}   Modellraum: {}",
+                        "Unit system: {}   Model space: {}",
                         properties.units.label(),
                         properties.space.label()
                     ));
@@ -585,22 +584,22 @@ impl PrepolixApp {
         ui.horizontal(|ui| match (&self.loading, self.workbench.shown()) {
             (Some(path), _) => {
                 ui.spinner();
-                ui.label(format!("Lade {} …", path.display()));
+                ui.label(format!("Loading {} …", path.display()));
             }
             (None, _) if self.workbench.meshing.is_some() => {
                 ui.spinner();
-                ui.label("Netz wird erzeugt …");
+                ui.label("Meshing …");
             }
             (None, Some(model)) if model.is_geometry() => {
                 ui.label(format!(
-                    "{}: {} Parts",
+                    "{}: {} parts",
                     model.file_name(),
                     model.parts.len()
                 ));
             }
             (None, Some(model)) => {
                 ui.label(format!(
-                    "{}: {} Knoten, {} Elemente, {} Parts",
+                    "{}: {} nodes, {} elements, {} parts",
                     model.file_name(),
                     model.mesh.node_count(),
                     model.mesh.element_count(),
@@ -609,9 +608,9 @@ impl PrepolixApp {
             }
             (None, None) => {
                 ui.weak(if self.workbench.tree_view == TreeView::Results {
-                    "Keine Ergebnisse geladen"
+                    "No results loaded"
                 } else {
-                    "Kein Modell geladen"
+                    "No model loaded"
                 });
             }
         });
@@ -619,7 +618,7 @@ impl PrepolixApp {
 }
 
 fn not_implemented(ui: &mut egui::Ui) {
-    ui.label("Noch nicht implementiert");
+    ui.label("Not implemented yet");
 }
 
 /// Moves the parts of a model between two scales of an exploded view: through the levels of a
@@ -698,8 +697,8 @@ type TreeSelection = (Option<(TreeView, TreeItem)>, BTreeSet<usize>);
 /// The output line after deleting parts.
 fn deleted_message(names: &[String]) -> String {
     match names {
-        [name] => format!("Part {name} gelöscht"),
-        names => format!("Parts {} gelöscht", names.join(", ")),
+        [name] => format!("Part {name} deleted"),
+        names => format!("Parts {} deleted", names.join(", ")),
     }
 }
 
@@ -713,20 +712,20 @@ fn lost_selections(fe: &plx_model::FeModel, mesh: &plx_mesh::FeMesh) -> usize {
 
 /// File dialog filter of the CAD formats Gmsh imports.
 const GEOMETRY_FILTER: (&str, &[&str]) = (
-    "Geometrie (*.step, *.stp, *.iges, *.igs, *.brep)",
+    "Geometry (*.step, *.stp, *.iges, *.igs, *.brep)",
     &[
         "step", "STEP", "stp", "STP", "iges", "IGES", "igs", "IGS", "brep", "BREP",
     ],
 );
 
 const STANDARD_VIEWS: [(StandardView, &str); 7] = [
-    (StandardView::Front, "Vorne"),
-    (StandardView::Back, "Hinten"),
-    (StandardView::Top, "Oben"),
-    (StandardView::Bottom, "Unten"),
-    (StandardView::Left, "Links"),
-    (StandardView::Right, "Rechts"),
-    (StandardView::Isometric, "Isometrisch"),
+    (StandardView::Front, "Front View"),
+    (StandardView::Back, "Back View"),
+    (StandardView::Top, "Top View"),
+    (StandardView::Bottom, "Bottom View"),
+    (StandardView::Left, "Left View"),
+    (StandardView::Right, "Right View"),
+    (StandardView::Isometric, "Isometric View"),
 ];
 
 /// Storage key of the project file open at exit, reopened at the next start.
@@ -923,10 +922,8 @@ impl Workbench {
                     match geometry_check(old.fe.properties.space, view) {
                         Ok(faces) => turned_faces = faces,
                         Err(error) => {
-                            self.output.push(format!(
-                                "Fehler beim Import von {}: {error}",
-                                path.display()
-                            ));
+                            self.output
+                                .push(format!("Error importing {}: {error}", path.display()));
                             return;
                         }
                     }
@@ -952,13 +949,13 @@ impl Workbench {
                             _ => path.display().to_string(),
                         };
                         self.output.push(format!(
-                            "{what} importiert: {} Parts ({} ms)",
+                            "{what} imported: {} parts ({} ms)",
                             view.parts.len(),
                             model.load_time.as_millis()
                         ));
                     }
                     _ => self.output.push(format!(
-                        "{} geladen: {} Knoten, {} Elemente, {} Parts ({} ms)",
+                        "{} loaded: {} nodes, {} elements, {} parts ({} ms)",
                         path.display(),
                         model.mesh.node_count(),
                         model.mesh.element_count(),
@@ -967,19 +964,17 @@ impl Workbench {
                     )),
                 }
                 if model.included_files > 0 {
-                    self.output.push(format!(
-                        "{} eingebundene Datei(en) gelesen",
-                        model.included_files
-                    ));
+                    self.output
+                        .push(format!("{} included file(s) read", model.included_files));
                 }
                 for warning in &model.warnings {
-                    self.output.push(format!("Warnung: {warning}"));
+                    self.output.push(format!("Warning: {warning}"));
                 }
                 if !turned_faces.is_empty() {
                     let faces: Vec<String> = turned_faces.iter().map(i32::to_string).collect();
                     self.output.push(format!(
-                        "Hinweis: Normale von Fläche {} zeigt in -z; die Elemente werden beim \
-                         Vernetzen umgedreht.",
+                        "Note: the normal of face {} points in -z; the elements are flipped \
+                         when meshing.",
                         faces.join(", ")
                     ));
                 }
@@ -990,16 +985,16 @@ impl Workbench {
                         .map(|k| format!("*{k}"))
                         .collect();
                     self.output
-                        .push(format!("Noch nicht ausgewertet: {}", keywords.join(", ")));
+                        .push(format!("Not evaluated yet: {}", keywords.join(", ")));
                 }
                 if let Some(view) = &model.results {
                     self.output.push(format!(
-                        "{} Ergebnis-Inkrement(e) gelesen",
+                        "{} result increment(s) read",
                         view.increments.len()
                     ));
                     if !view.file_history.is_empty() {
                         self.output.push(format!(
-                            "{} History-Ausgabe(n) aus der .dat-Datei gelesen",
+                            "{} history output(s) read from the .dat file",
                             view.file_history.len()
                         ));
                     }
@@ -1101,7 +1096,7 @@ impl Workbench {
                 self.update_contour();
                 self.view_command = Some(ViewCommand::Fit);
             }
-            Err(error) => self.output.push(format!("Fehler beim Laden: {error}")),
+            Err(error) => self.output.push(format!("Error loading: {error}")),
         }
     }
 
@@ -1168,18 +1163,15 @@ impl Workbench {
 
     fn model_tree(&mut self, ui: &mut egui::Ui, view: TreeView) {
         let empty = match view {
-            TreeView::Geometry => self.geometry.is_none().then_some("Keine Geometrie geladen"),
-            TreeView::FeModel => self.model.is_none().then_some("Kein Modell geladen"),
-            TreeView::Results => self
-                .results
-                .is_empty()
-                .then_some("Keine Ergebnisse geladen"),
+            TreeView::Geometry => self.geometry.is_none().then_some("No geometry loaded"),
+            TreeView::FeModel => self.model.is_none().then_some("No model loaded"),
+            TreeView::Results => self.results.is_empty().then_some("No results loaded"),
         };
         if let Some(text) = empty {
             let hint = if view == TreeView::Geometry {
-                "Geometrie > Importieren oder eine STEP-, IGES- oder BREP-Datei ins Fenster ziehen."
+                "Geometry > Import or drag a STEP, IGES or BREP file into the window."
             } else {
-                "Datei > Öffnen (Strg+O) oder eine .plx-, .inp- oder .frd-Datei ins Fenster ziehen."
+                "File > Open (Ctrl+O) or drag a .plx, .inp or .frd file into the window."
             };
             ui.weak(format!("{text}.\n{hint}"));
             ui.separator();
@@ -1321,7 +1313,7 @@ impl Workbench {
         };
         let mut open = true;
         let mut close = false;
-        egui::Window::new("Modellprüfung")
+        egui::Window::new("Model Check")
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -1338,10 +1330,10 @@ impl Workbench {
                             }
                             let (kind, color) = match finding.severity() {
                                 plx_model::Severity::Error => {
-                                    ("Fehler", egui::Color32::from_rgb(200, 0, 0))
+                                    ("Error", egui::Color32::from_rgb(200, 0, 0))
                                 }
                                 plx_model::Severity::Warning => {
-                                    ("Warnung", egui::Color32::from_rgb(170, 110, 0))
+                                    ("Warning", egui::Color32::from_rgb(170, 110, 0))
                                 }
                             };
                             ui.horizontal(|ui| {
@@ -1356,14 +1348,14 @@ impl Workbench {
                             ui.add(egui::Label::new(finding.problem.explanation()).wrap());
                             ui.add_space(4.0);
                             ui.add(
-                                egui::Label::new(format!("Abhilfe: {}", finding.problem.fix()))
+                                egui::Label::new(format!("Remedy: {}", finding.problem.fix()))
                                     .wrap(),
                             );
                         }
                     });
                 ui.separator();
                 ui.vertical_centered(|ui| {
-                    close = ui.button("Schließen").clicked();
+                    close = ui.button("Close").clicked();
                 });
             });
         if !open || close {
@@ -1389,7 +1381,7 @@ impl Workbench {
         match crate::hot_spots::write(&results.path, &reports) {
             Ok(file) => {
                 self.output
-                    .push(format!("Hot Spots ausgewertet: {}", file.display()));
+                    .push(format!("Hot spots evaluated: {}", file.display()));
                 hot_spots.file = Some(file);
             }
             Err(error) => self.output.push(error),
@@ -1397,7 +1389,7 @@ impl Workbench {
         self.output.extend(crate::hot_spots::summary(&reports));
         for report in &reports {
             self.output
-                .extend(report.warnings.iter().map(|w| format!("Warnung: {w}")));
+                .extend(report.warnings.iter().map(|w| format!("Warning: {w}")));
         }
         hot_spots.reports = reports;
         if table {
@@ -1433,7 +1425,7 @@ impl Workbench {
         }
         let removed = model.hot_spots.definitions.remove(index);
         self.output
-            .push(format!("Hot Spot {} gelöscht", removed.name));
+            .push(format!("Hot spot {} deleted", removed.name));
         self.hot_spot_dialog = None;
         self.tree.selected = None;
         self.evaluate_hot_spots(self.hot_spot_window);
@@ -1458,15 +1450,15 @@ impl Workbench {
         let verb = match dialog.edit.filter(|&i| i < definitions.len()) {
             Some(index) => {
                 definitions[index] = hot_spot.clone();
-                "geändert"
+                "modified"
             }
             None => {
                 definitions.push(hot_spot.clone());
-                "erstellt"
+                "created"
             }
         };
         self.output
-            .push(format!("Hot Spot {} {verb}", hot_spot.name));
+            .push(format!("Hot spot {} {verb}", hot_spot.name));
         if next {
             dialog.next(&hot_spot);
         } else {
@@ -1679,8 +1671,7 @@ impl Workbench {
             Vec::new()
         };
         for model in closed {
-            self.output
-                .push(format!("{} geschlossen", model.file_name()));
+            self.output.push(format!("{} closed", model.file_name()));
         }
         self.current_result = self
             .current_result
@@ -1699,7 +1690,7 @@ impl Workbench {
     fn results_menu(&mut self, ui: &mut egui::Ui) {
         let any = !self.results.is_empty();
         if ui
-            .add_enabled(any, egui::Button::new("Hot Spot erstellen …"))
+            .add_enabled(any, egui::Button::new("Create Hot Spot …"))
             .clicked()
         {
             self.create(NewItem::ResultHotSpot);
@@ -1707,20 +1698,20 @@ impl Workbench {
         let evaluated = (self.results.get(self.current_result))
             .is_some_and(|m| !m.hot_spots.reports.is_empty());
         if ui
-            .add_enabled(evaluated, egui::Button::new("Hot-Spot-Tabelle"))
+            .add_enabled(evaluated, egui::Button::new("Hot Spot Table"))
             .clicked()
         {
             self.show_hot_spot_table();
         }
         ui.separator();
         if ui
-            .add_enabled(any, egui::Button::new("Aktuelle Ergebnisse schließen"))
+            .add_enabled(any, egui::Button::new("Close Current Results"))
             .clicked()
         {
             self.close_results(false);
         }
         if ui
-            .add_enabled(any, egui::Button::new("Alle Ergebnisse schließen"))
+            .add_enabled(any, egui::Button::new("Close All Results"))
             .clicked()
         {
             self.close_results(true);
@@ -1736,7 +1727,7 @@ impl Workbench {
 
     fn results_tool_bar_row(&mut self, ui: &mut egui::Ui, enabled: bool) {
         ui.horizontal(|ui| {
-            ui.label("Ergebnis");
+            ui.label("Result");
             let mut selected = self.current_result;
             let current = self
                 .results
@@ -1890,17 +1881,17 @@ impl Workbench {
     fn mesh_menu(&mut self, ui: &mut egui::Ui) {
         let has_geometry = self.model.as_ref().is_some_and(|m| m.geometry.is_some());
         if !has_geometry {
-            ui.label("Zuerst eine Geometrie importieren");
+            ui.label("Import a geometry first");
             return;
         }
-        if ui.button("Mesh-Setup-Eintrag erstellen …").clicked() {
+        if ui.button("Create Mesh Setup Item …").clicked() {
             self.create(NewItem::MeshSetupItem);
         }
-        if ui.button("Standard-Netzparameter …").clicked() {
+        if ui.button("Default Mesh Parameters …").clicked() {
             self.open_mesh_setup();
         }
         ui.separator();
-        let mesh = egui::Button::new("Alle Parts vernetzen");
+        let mesh = egui::Button::new("Mesh All Parts");
         if ui.add_enabled(self.meshing.is_none(), mesh).clicked() {
             self.generate_mesh(ui.ctx(), None);
         }
@@ -1979,7 +1970,7 @@ impl Workbench {
             Some(parts) => parts.join(", "),
             None => geometry.source.clone(),
         };
-        self.output.push(format!("Vernetze {what} …"));
+        self.output.push(format!("Meshing {what} …"));
         self.meshing = Some(MeshingJob::start(geometry, parts, ctx));
     }
 
@@ -1998,8 +1989,7 @@ impl Workbench {
                 let space = model.fe.properties.space;
                 for mut part in generated.meshes {
                     if let Err(error) = space.prepare_generated_mesh(&mut part.mesh) {
-                        self.output
-                            .push(format!("Vernetzung fehlgeschlagen: {error}"));
+                        self.output.push(format!("Meshing failed: {error}"));
                         return;
                     }
                     for warning in &part.warnings {
@@ -2008,7 +1998,7 @@ impl Workbench {
                     for p in &part.mesh.parts {
                         let parameters = model.geometry.as_ref().map(|g| g.parameters(&p.name));
                         self.output.push(format!(
-                            "{}: {} Elemente ({}. Ordnung, Elementgröße {} bis {})",
+                            "{}: {} elements (order {}, element size {} to {})",
                             p.name,
                             p.elements.len(),
                             if parameters.is_some_and(|s| s.second_order) {
@@ -2026,12 +2016,12 @@ impl Workbench {
                 let lost = lost_selections(&model.fe, &model.mesh);
                 if had_mesh && lost > 0 {
                     self.output.push(format!(
-                        "Hinweis: {lost} Auswahlen aus Knoten- oder Elementnummern beziehen \
-                         sich auf das alte Netz und müssen neu ausgewählt werden"
+                        "Note: {lost} selections made of node or element numbers refer \
+                         to the old mesh and must be selected again"
                     ));
                 }
                 self.output.push(format!(
-                    "Netz erzeugt: {} Knoten, {} Elemente, {} Parts ({} ms)",
+                    "Mesh created: {} nodes, {} elements, {} parts ({} ms)",
                     model.mesh.node_count(),
                     model.mesh.element_count(),
                     model.parts.len(),
@@ -2045,9 +2035,7 @@ impl Workbench {
                     self.view_command = Some(ViewCommand::Fit);
                 }
             }
-            Err(error) => self
-                .output
-                .push(format!("Vernetzung fehlgeschlagen: {error}")),
+            Err(error) => self.output.push(format!("Meshing failed: {error}")),
         }
     }
 
@@ -2055,17 +2043,14 @@ impl Workbench {
     /// PrePoMax's Interaction menu: constraints, contacts and the search for contact pairs.
     fn interaction_menu(&mut self, ui: &mut egui::Ui) {
         if self.setup_model().is_none() {
-            ui.label("Zuerst eine .inp-Datei öffnen");
+            ui.label("Open an .inp file first");
             return;
         }
         let mut kind = None;
         for (item, label) in [
-            (NewItem::Constraint, "Constraint erstellen …"),
-            (
-                NewItem::SurfaceInteraction,
-                "Surface Interaction erstellen …",
-            ),
-            (NewItem::ContactPair, "Kontaktpaar erstellen …"),
+            (NewItem::Constraint, "Create Constraint …"),
+            (NewItem::SurfaceInteraction, "Create Surface Interaction …"),
+            (NewItem::ContactPair, "Create Contact Pair …"),
         ] {
             if ui.button(label).clicked() {
                 kind = Some(item);
@@ -2075,20 +2060,20 @@ impl Workbench {
             self.create(kind);
         }
         ui.separator();
-        if ui.button("Kontaktpaare suchen …").clicked() {
+        if ui.button("Search Contact Pairs …").clicked() {
             self.open_contact_search();
         }
     }
 
     fn model_menu(&mut self, ui: &mut egui::Ui) {
         if self.setup_model().is_none() {
-            ui.label("Zuerst ein Modell anlegen oder öffnen");
+            ui.label("Create or open a model first");
             return;
         }
-        if ui.button("Modelleigenschaften …").clicked() {
+        if ui.button("Model Properties …").clicked() {
             self.edit_model_properties();
         }
-        if ui.button("CalculiX-Keywords bearbeiten …").clicked() {
+        if ui.button("Edit CalculiX Keywords …").clicked() {
             self.open_keyword_editor();
         }
         ui.separator();
@@ -2103,28 +2088,28 @@ impl Workbench {
             .is_some_and(|s| s.kind.supports_loads());
         let mut kind = None;
         for (item, label, enabled) in [
-            (NewItem::Material, "Material erstellen …", true),
-            (NewItem::Section, "Section erstellen …", true),
+            (NewItem::Material, "Create Material …", true),
+            (NewItem::Section, "Create Section …", true),
             (
                 NewItem::InitialCondition,
-                "Anfangsbedingung erstellen …",
+                "Create Initial Condition …",
                 true,
             ),
-            (NewItem::Amplitude, "Amplitude erstellen …", true),
-            (NewItem::Step, "Step erstellen …", true),
+            (NewItem::Amplitude, "Create Amplitude …", true),
+            (NewItem::Step, "Create Step …", true),
             (
                 NewItem::BoundaryCondition(last_step.unwrap_or(0)),
-                "Randbedingung erstellen …",
+                "Create Boundary Condition …",
                 last_step.is_some(),
             ),
             (
                 NewItem::Load(last_step.unwrap_or(0)),
-                "Last erstellen …",
+                "Create Load …",
                 takes_loads,
             ),
             (
                 NewItem::HistoryOutput(last_step.unwrap_or(0)),
-                "History Output erstellen …",
+                "Create History Output …",
                 last_step.is_some(),
             ),
         ] {
@@ -2147,7 +2132,7 @@ impl Workbench {
             Ok(editor) => self.keyword_editor = Some(editor),
             Err(error) => self
                 .output
-                .push(format!("Keyword-Editor nicht möglich: {error}")),
+                .push(format!("Keyword Editor not available: {error}")),
         }
     }
 
@@ -2204,20 +2189,20 @@ impl Workbench {
         if ui
             .add_enabled(
                 can_start,
-                egui::Button::new("Analyse starten").shortcut_text("F5"),
+                egui::Button::new("Run Analysis").shortcut_text("F5"),
             )
             .clicked()
         {
             self.start_analysis(false);
         }
         if ui
-            .add_enabled(can_start, egui::Button::new("Modell prüfen"))
+            .add_enabled(can_start, egui::Button::new("Check Model"))
             .clicked()
         {
             self.start_analysis(true);
         }
         if ui
-            .add_enabled(running, egui::Button::new("Analyse abbrechen"))
+            .add_enabled(running, egui::Button::new("Kill Analysis"))
             .clicked()
             && let Some(analysis) = &mut self.analysis
         {
@@ -2234,7 +2219,7 @@ impl Workbench {
         if ui
             .add_enabled(
                 !running && results.is_some(),
-                egui::Button::new("Ergebnisse öffnen"),
+                egui::Button::new("Open Results"),
             )
             .clicked()
         {
@@ -2254,7 +2239,7 @@ impl Workbench {
             AnalysisAction::Monitor => match &mut self.analysis {
                 Some(analysis) => analysis.monitor = true,
                 None => self.output.push(
-                    "Die Analyse wurde noch nicht gestartet (Analyse > Analyse starten).".into(),
+                    "The analysis has not been started yet (Analysis > Run Analysis).".into(),
                 ),
             },
             AnalysisAction::Results => {
@@ -2281,7 +2266,7 @@ impl Workbench {
         };
         if model.mesh.element_count() == 0 {
             self.output
-                .push("Das Modell hat noch kein Netz: Netz > Netz erzeugen".into());
+                .push("The model has no mesh yet: Mesh > Mesh All Parts".into());
             return;
         }
         let findings = model.findings();
@@ -2293,17 +2278,17 @@ impl Workbench {
                     (findings.iter()).filter(|f| f.severity() == plx_model::Severity::Error)
                 {
                     analysis.note(format!(
-                        "Modellprüfung: {}: {}",
+                        "Model check: {}: {}",
                         finding.problem.title(),
                         finding.detail
                     ));
                 }
                 self.output.push(format!(
-                    "{} gestartet: {}",
+                    "{} started: {}",
                     if check_model {
-                        "Modellprüfung"
+                        "Model check"
                     } else {
-                        "Analyse"
+                        "Analysis"
                     },
                     self.settings.solver.work_dir().display()
                 ));
@@ -2324,7 +2309,7 @@ impl Workbench {
         };
         if let Some(status) = analysis.poll() {
             self.output
-                .push(format!("Analyse {}", Analysis::status_text(status)));
+                .push(format!("Analysis {}", Analysis::status_text(status)));
             if matches!(
                 status,
                 plx_job::JobStatus::Failed | plx_job::JobStatus::FailedWithResults
@@ -2336,14 +2321,15 @@ impl Workbench {
                     .filter(|f| f.item == plx_model::ModelItem::Analysis)
                 {
                     analysis.note(format!(
-                        "Mögliche Ursache: {}. {}",
+                        "Possible cause: {}. {}",
                         finding.problem.title(),
                         finding.problem.fix()
                     ));
                 }
                 if !self.solver_findings.is_empty() {
-                    analysis
-                        .note("Das Warnsymbol an der Analyse im Baum erklärt die Ursache.".into());
+                    analysis.note(
+                        "The warning symbol on the analysis in the tree explains the cause.".into(),
+                    );
                 }
             }
         }
@@ -2375,10 +2361,10 @@ impl Workbench {
             let stem = model
                 .path
                 .file_stem()
-                .map_or_else(|| "Projekt".into(), |s| s.to_string_lossy().into_owned());
+                .map_or_else(|| "Project".into(), |s| s.to_string_lossy().into_owned());
             let mut dialog = rfd::FileDialog::new()
-                .set_title("Projekt speichern")
-                .add_filter("prepolix-Projekt (*.plx)", &[model::PROJECT_EXTENSION])
+                .set_title("Save Project")
+                .add_filter("prepolix project (*.plx)", &[model::PROJECT_EXTENSION])
                 .set_file_name(format!("{stem}.{}", model::PROJECT_EXTENSION));
             if let Some(dir) = model.path.parent() {
                 dialog = dialog.set_directory(dir);
@@ -2394,10 +2380,10 @@ impl Workbench {
         let geometry = model.geometry.as_ref();
         match plx_io::project::save_project(&path, geometry, &model.mesh, &model.fe) {
             Ok(()) => {
-                self.output.push(format!("{} gespeichert", path.display()));
+                self.output.push(format!("{} saved", path.display()));
                 model.path = path;
             }
-            Err(error) => self.output.push(format!("Nicht gespeichert: {error}")),
+            Err(error) => self.output.push(format!("Not saved: {error}")),
         }
     }
 
@@ -2416,18 +2402,18 @@ impl Workbench {
         let text = match plx_io::inp::write_inp(&model.mesh, &fe, &heading) {
             Ok(text) => text,
             Err(error) => {
-                self.output.push(format!("Export nicht möglich: {error}"));
+                self.output.push(format!("Export not possible: {error}"));
                 return;
             }
         };
         let picked = rfd::FileDialog::new()
-            .set_title("CalculiX-Eingabedatei exportieren")
-            .add_filter("Eingabedatei (*.inp)", &["inp"])
+            .set_title("Export CalculiX Input File")
+            .add_filter("Input file (*.inp)", &["inp"])
             .set_file_name(format!("{}.inp", crate::tree::ANALYSIS_NAME))
             .save_file();
         if let Some(path) = picked {
             match std::fs::write(&path, text) {
-                Ok(()) => self.output.push(format!("{} geschrieben", path.display())),
+                Ok(()) => self.output.push(format!("{} written", path.display())),
                 Err(error) => self.output.push(format!("{}: {error}", path.display())),
             }
         }
@@ -2716,9 +2702,9 @@ impl Workbench {
         };
         let name = view.field_outputs[index].name.clone();
         let warnings = view.remove_field_output(index, &model.mesh);
-        self.output.push(format!("Feldausgabe {name} gelöscht"));
+        self.output.push(format!("Field output {name} deleted"));
         for warning in warnings {
-            self.output.push(format!("Warnung: {warning}"));
+            self.output.push(format!("Warning: {warning}"));
         }
         self.tree.selected = None;
         self.field_output_dialog = None;
@@ -2750,13 +2736,13 @@ impl Workbench {
         match view.set_field_output(edit, output, &model.mesh) {
             Ok(warnings) => {
                 let verb = if edit.is_some() {
-                    "geändert"
+                    "modified"
                 } else {
-                    "erstellt"
+                    "created"
                 };
-                self.output.push(format!("Feldausgabe {name} {verb}"));
+                self.output.push(format!("Field output {name} {verb}"));
                 for warning in warnings {
-                    self.output.push(format!("Warnung: {warning}"));
+                    self.output.push(format!("Warning: {warning}"));
                 }
                 // PrePoMax shows a new field output right away.
                 if edit.is_none()
@@ -2800,9 +2786,9 @@ impl Workbench {
         };
         let name = view.history_outputs[index].name.clone();
         let warnings = view.remove_history_output(index, &model.mesh);
-        self.output.push(format!("History-Ausgabe {name} gelöscht"));
+        self.output.push(format!("History output {name} deleted"));
         for warning in warnings {
-            self.output.push(format!("Warnung: {warning}"));
+            self.output.push(format!("Warning: {warning}"));
         }
         self.tree.selected = None;
         self.close_history_windows();
@@ -2830,14 +2816,14 @@ impl Workbench {
         match view.set_history_output(edit, output.clone(), &model.mesh) {
             Ok(warnings) => {
                 let verb = if edit.is_some() {
-                    "geändert"
+                    "modified"
                 } else {
-                    "erstellt"
+                    "created"
                 };
                 self.output
-                    .push(format!("History-Ausgabe {} {verb}", output.name));
+                    .push(format!("History output {} {verb}", output.name));
                 for warning in warnings {
-                    self.output.push(format!("Warnung: {warning}"));
+                    self.output.push(format!("Warning: {warning}"));
                 }
                 // The table may show another component now.
                 self.history_table = None;
@@ -2894,7 +2880,7 @@ impl Workbench {
             SearchResult::Open => {}
             SearchResult::Ok(ties, pairs, joints) => {
                 let mut created = format!(
-                    "Kontaktsuche: {} Ties und {} Kontaktpaare erstellt",
+                    "Contact search: {} ties and {} contact pairs created",
                     ties.len(),
                     pairs.len()
                 );
@@ -2943,9 +2929,9 @@ impl Workbench {
             })
             .collect();
         let question = match parts.as_slice() {
-            [] => "Ausgewähltes Element löschen?".into(),
-            [name] => format!("Ausgewähltes Part löschen?\n{name}"),
-            names => format!("Ausgewählte Parts löschen?\n{}", names.join(", ")),
+            [] => "Delete the selected item?".into(),
+            [name] => format!("Delete the selected part?\n{name}"),
+            names => format!("Delete the selected parts?\n{}", names.join(", ")),
         };
         egui::Modal::new(egui::Id::new("confirm delete")).show(ctx, |ui| {
             ui.label(question);
@@ -2954,7 +2940,7 @@ impl Workbench {
                 if ui.button("OK").clicked() {
                     answer = Some(true);
                 }
-                if ui.button("Abbrechen").clicked() {
+                if ui.button("Cancel").clicked() {
                     answer = Some(false);
                 }
             });
@@ -3074,7 +3060,7 @@ impl Workbench {
             Ok(addition) => *addition,
             Err(error) => {
                 self.output
-                    .push(format!("Fehler beim Import von {files}: {error}"));
+                    .push(format!("Error importing {files}: {error}"));
                 return;
             }
         };
@@ -3091,15 +3077,15 @@ impl Workbench {
             Ok(faces) if !faces.is_empty() => {
                 let faces: Vec<String> = faces.iter().map(i32::to_string).collect();
                 self.output.push(format!(
-                    "Hinweis: Normale von Fläche {} zeigt in -z; die Elemente werden beim \
-                     Vernetzen umgedreht.",
+                    "Note: the normal of face {} points in -z; the elements are flipped \
+                     when meshing.",
                     faces.join(", ")
                 ));
             }
             Ok(_) => {}
             Err(error) => {
                 self.output
-                    .push(format!("Fehler beim Import von {files}: {error}"));
+                    .push(format!("Error importing {files}: {error}"));
                 return;
             }
         }
@@ -3113,10 +3099,10 @@ impl Workbench {
         }
         model.geometry = Some(import.geometry);
         for warning in &import.warnings {
-            self.output.push(format!("Warnung: {warning}"));
+            self.output.push(format!("Warning: {warning}"));
         }
         self.output.push(format!(
-            "{files} importiert: {} Part(s) hinzugefügt ({})",
+            "{files} imported: {} part(s) added ({})",
             added.len(),
             added.join(", ")
         ));
@@ -3162,7 +3148,7 @@ impl Workbench {
             }
             Err(error) => {
                 self.output
-                    .push(format!("{name} kann nicht gelöscht werden: {error}"));
+                    .push(format!("{name} cannot be deleted: {error}"));
                 return;
             }
         };
@@ -3171,7 +3157,7 @@ impl Workbench {
                 Ok(display) => Some(Model::geometry_view(&model.path, display)),
                 Err(error) => {
                     self.output
-                        .push(format!("Geometrie kann nicht angezeigt werden: {error}"));
+                        .push(format!("Geometry cannot be displayed: {error}"));
                     None
                 }
             },
@@ -3823,7 +3809,7 @@ impl Workbench {
         };
         if new.gmsh != self.settings.gmsh && !plx_mesher::set_library_path(new.gmsh.library()) {
             self.output
-                .push("Die geänderte Gmsh-Bibliothek wird nach einem Neustart geladen".into());
+                .push("The changed Gmsh library is loaded after a restart".into());
         }
         if new != self.settings {
             self.settings = new;
@@ -3868,10 +3854,10 @@ impl Workbench {
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                     if part.is_some() {
-                        close = ui.button("Abbrechen").clicked();
+                        close = ui.button("Cancel").clicked();
                         accept = ui.button("OK").clicked();
                     } else {
-                        close = ui.button("Schließen").clicked();
+                        close = ui.button("Close").clicked();
                     }
                 });
             });
@@ -3947,12 +3933,12 @@ impl Workbench {
     fn create_model(&mut self, properties: plx_model::ModelProperties) {
         self.close_model();
         let mut model = Model::new(
-            std::path::Path::new("Unbenannt"),
+            std::path::Path::new("Untitled"),
             plx_mesh::FeMesh::default(),
         );
         model.fe.properties = properties;
         self.output.push(format!(
-            "Neues Modell: {}, {}",
+            "New model: {}, {}",
             properties.space.label(),
             properties.units.label()
         ));
@@ -3985,11 +3971,11 @@ impl Workbench {
                 self.highlighted = None;
             }
             self.output
-                .push(format!("Modellraum: {}", properties.space.label()));
+                .push(format!("Model space: {}", properties.space.label()));
         }
         if old.units != properties.units {
             self.output
-                .push(format!("Einheitensystem: {}", properties.units.label()));
+                .push(format!("Unit system: {}", properties.units.label()));
         }
         self.results_changed = true;
     }
@@ -4021,12 +4007,12 @@ impl Workbench {
                             }
                             Err(error) => self
                                 .output
-                                .push(format!("Geometrie kann nicht angezeigt werden: {error}")),
+                                .push(format!("Geometry cannot be displayed: {error}")),
                         }
                     }
-                    Err(error) => self.output.push(format!(
-                        "Geometrie konnte nicht umgerechnet werden: {error}"
-                    )),
+                    Err(error) => self
+                        .output
+                        .push(format!("Geometry could not be converted: {error}")),
                 }
             }
             self.frame_cache.clear();
@@ -4034,7 +4020,7 @@ impl Workbench {
         }
         self.output.extend(notes);
         self.output.push(format!(
-            "Modell in {} umgerechnet (Längen × {factor})",
+            "Model converted to {} (lengths × {factor})",
             units.label()
         ));
     }
@@ -4042,8 +4028,7 @@ impl Workbench {
     /// Removes the model and all results, like PrePoMax's File > New.
     fn close_model(&mut self) {
         if let Some(model) = self.model.take() {
-            self.output
-                .push(format!("{} geschlossen", model.file_name()));
+            self.output.push(format!("{} closed", model.file_name()));
         }
         self.geometry = None;
         self.mesh_setup = None;
@@ -4138,9 +4123,9 @@ impl Workbench {
         }
         if actions.export {
             let picked = rfd::FileDialog::new()
-                .set_title("Klang speichern")
-                .add_filter("WAV-Datei (*.wav)", &["wav"])
-                .set_file_name(format!("Moden-Step-{}.wav", sound.step))
+                .set_title("Save Sound")
+                .add_filter("WAV file (*.wav)", &["wav"])
+                .set_file_name(format!("Modes-Step-{}.wav", sound.step))
                 .save_file();
             if let Some(mut path) = picked {
                 if path.extension().is_none() {
@@ -4148,8 +4133,8 @@ impl Workbench {
                 }
                 let data = sound::wav(sound.tones(), sound.export_seconds());
                 match std::fs::write(&path, data) {
-                    Ok(()) => self.output.push(format!("{} gespeichert", path.display())),
-                    Err(error) => sound.message = Some(format!("Nicht gespeichert: {error}")),
+                    Ok(()) => self.output.push(format!("{} saved", path.display())),
+                    Err(error) => sound.message = Some(format!("Not saved: {error}")),
                 }
             }
         }
@@ -4386,7 +4371,7 @@ fn results_tool_bar(
     let mut changed = false;
     let mut transformations = false;
     ui.horizontal(|ui| {
-        ui.label("Verformung");
+        ui.label("Deformation");
         let before = view.deformation;
         egui::ComboBox::from_id_salt("deformation")
             .selected_text(view.deformation.label())
@@ -4397,7 +4382,7 @@ fn results_tool_bar(
                 }
             });
         changed |= view.deformation != before;
-        ui.label("Faktor");
+        ui.label("Factor");
         let user = view.deformation == Deformation::UserDefined;
         let mut factor = if user { view.user_scale } else { view.scale() };
         let response = ui.add_enabled(
@@ -4409,19 +4394,19 @@ fn results_tool_bar(
             changed = true;
         }
         changed |= ui
-            .checkbox(&mut view.show_undeformed, "Unverformt zeigen")
+            .checkbox(&mut view.show_undeformed, "Show Undeformed")
             .changed();
         ui.separator();
-        ui.label("Farbstufen");
+        ui.label("Color levels");
         changed |= ui
             .add(numeric::drag_value(&mut view.levels).range(2..=plx_render::contour::MAX_LEVELS))
             .changed();
         ui.separator();
-        let tip = "Transformationen: Symmetrien und Muster";
+        let tip = "Transformations: symmetries and patterns";
         transformations = icons::button(ui, Icon::Transformation, tip, true, transformed).clicked();
         ui.separator();
 
-        ui.label("Schritt, Inkrement");
+        ui.label("Step, Increment");
         let mut increment = view.increment;
         let selected = view
             .current_increment()
@@ -4439,14 +4424,14 @@ fn results_tool_bar(
         let last = view.increments.len().saturating_sub(1);
         let current = view.increment;
         for (icon, tooltip, target) in [
-            (Icon::First, "Erstes Inkrement", 0),
+            (Icon::First, "First Increment", 0),
             (
                 Icon::Previous,
-                "Vorheriges Inkrement",
+                "Previous Increment",
                 current.saturating_sub(1),
             ),
-            (Icon::Next, "Nächstes Inkrement", (current + 1).min(last)),
-            (Icon::Last, "Letztes Inkrement", last),
+            (Icon::Next, "Next Increment", (current + 1).min(last)),
+            (Icon::Last, "Last Increment", last),
         ] {
             let enabled = target != current && view.animation.is_none();
             if icons::button(ui, icon, tooltip, enabled, false).clicked() {
@@ -4472,7 +4457,7 @@ fn results_tool_bar(
         let is_mode = view
             .current_increment()
             .is_some_and(|i| i.kind == plx_results::AnalysisKind::Frequency);
-        let tip = "Klang der Eigenformen";
+        let tip = "Sound of the mode shapes";
         if icons::button(ui, Icon::Sound, tip, sounding || is_mode, sounding).clicked() {
             view.sound = match view.sound {
                 Some(_) => None,
@@ -4515,11 +4500,11 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView) -> WindowEvent 
                 .num_columns(2)
                 .spacing([12.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label("Art");
+                    ui.label("Type");
                     ui.horizontal(|ui| {
                         for (kind, label) in [
-                            (AnimationKind::ScaleFactor, "Skalierung"),
-                            (AnimationKind::Increments, "Inkremente des Steps"),
+                            (AnimationKind::ScaleFactor, "Scale factor"),
+                            (AnimationKind::Increments, "Step increments"),
                         ] {
                             if ui.radio(animation.kind == kind, label).clicked()
                                 && animation.kind != kind
@@ -4530,7 +4515,7 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView) -> WindowEvent 
                     });
                     ui.end_row();
                     if animation.kind == AnimationKind::ScaleFactor {
-                        ui.label("Bilder");
+                        ui.label("Frames");
                         let frames = numeric::drag_value(&mut animation.frames).range(2..=200);
                         if ui.add(frames).changed() {
                             animation.go_to(animation.frame);
@@ -4538,25 +4523,25 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView) -> WindowEvent 
                         }
                         ui.end_row();
                     }
-                    ui.label("Bilder pro Sekunde");
+                    ui.label("Frames per second");
                     ui.add(numeric::drag_value(&mut animation.fps).range(1.0..=60.0));
                     ui.end_row();
-                    ui.label("Ablauf");
+                    ui.label("Playback");
                     ui.horizontal(|ui| {
                         for (playback, label) in [
-                            (Playback::Once, "Einmal"),
-                            (Playback::Loop, "Schleife"),
-                            (Playback::Swing, "Hin und her"),
+                            (Playback::Once, "Once"),
+                            (Playback::Loop, "Loop"),
+                            (Playback::Swing, "Swing"),
                         ] {
                             ui.radio_value(&mut animation.playback, playback, label);
                         }
                     });
                     ui.end_row();
-                    ui.label("Farbskala");
+                    ui.label("Color scale");
                     ui.horizontal(|ui| {
                         for (limits, label) in [
-                            (ColorLimits::CurrentFrame, "Aktuelles Bild"),
-                            (ColorLimits::AllFrames, "Alle Bilder"),
+                            (ColorLimits::CurrentFrame, "Current frame"),
+                            (ColorLimits::AllFrames, "All frames"),
                         ] {
                             if ui
                                 .radio_value(&mut animation.limits, limits, label)
@@ -4574,17 +4559,16 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView) -> WindowEvent 
                 let last = animation.frame_count() - 1;
                 let frame = animation.frame;
                 let mut target = None;
-                if icons::button(ui, Icon::First, "Erstes Bild", frame > 0, false).clicked() {
+                if icons::button(ui, Icon::First, "First Frame", frame > 0, false).clicked() {
                     target = Some(0);
                 }
-                if icons::button(ui, Icon::Previous, "Vorheriges Bild", frame > 0, false).clicked()
-                {
+                if icons::button(ui, Icon::Previous, "Previous Frame", frame > 0, false).clicked() {
                     target = Some(frame - 1);
                 }
                 let (icon, tip) = if animation.playing {
-                    (Icon::Pause, "Anhalten")
+                    (Icon::Pause, "Pause")
                 } else {
-                    (Icon::Animate, "Abspielen")
+                    (Icon::Animate, "Play")
                 };
                 if icons::button(ui, icon, tip, true, false).clicked() {
                     if animation.playing {
@@ -4593,10 +4577,10 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView) -> WindowEvent 
                         animation.play();
                     }
                 }
-                if icons::button(ui, Icon::Next, "Nächstes Bild", frame < last, false).clicked() {
+                if icons::button(ui, Icon::Next, "Next Frame", frame < last, false).clicked() {
                     target = Some(frame + 1);
                 }
-                if icons::button(ui, Icon::Last, "Letztes Bild", frame < last, false).clicked() {
+                if icons::button(ui, Icon::Last, "Last Frame", frame < last, false).clicked() {
                     target = Some(last);
                 }
                 ui.add_space(8.0);
@@ -4606,7 +4590,7 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView) -> WindowEvent 
                     target = Some(slider);
                 }
                 ui.add_space(8.0);
-                ui.label(format!("Bild {} von {}", frame + 1, last + 1));
+                ui.label(format!("Frame {} of {}", frame + 1, last + 1));
                 if let Some(target) = target {
                     animation.playing = false;
                     if animation.go_to(target) && matches!(event, WindowEvent::None) {
@@ -4651,7 +4635,7 @@ mod tests {
 
     #[test]
     fn the_project_stored_at_exit_is_read_back() {
-        let path = std::env::temp_dir().join("prepolix_test_letztes_projekt.plx");
+        let path = std::env::temp_dir().join("prepolix_test_last_project.plx");
         std::fs::write(&path, "").unwrap();
         let mut storage = MemoryStorage::default();
         eframe::set_value(&mut storage, LAST_PROJECT_KEY, &Some(path.clone()));

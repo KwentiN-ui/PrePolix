@@ -241,7 +241,7 @@ impl ContactSearchDialog {
     pub fn show(&mut self, ctx: &egui::Context, model: &Model) -> SearchResult {
         let mut result = SearchResult::Open;
         let mut open = true;
-        egui::Window::new("Kontaktpaare suchen")
+        egui::Window::new("Search Contact Pairs")
             .id(egui::Id::new("contact search"))
             .open(&mut open)
             .collapsible(false)
@@ -252,7 +252,7 @@ impl ContactSearchDialog {
             .show(ctx, |ui| {
                 self.parameters(ui, model);
                 ui.separator();
-                ui.label("Kontaktpaare");
+                ui.label("Contact pairs");
                 // Fixed widths: a table sized by the window would grow the window whenever
                 // the properties beside it need more room, without end.
                 ui.horizontal_top(|ui| {
@@ -269,7 +269,7 @@ impl ContactSearchDialog {
                 }
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Abbrechen").clicked() {
+                    if ui.button("Cancel").clicked() {
                         result = SearchResult::Cancel;
                     }
                     if ui.button("OK").clicked() {
@@ -291,9 +291,9 @@ impl ContactSearchDialog {
     /// The four groups above the table, as in PrePoMax.
     fn parameters(&mut self, ui: &mut Ui, model: &Model) {
         ui.horizontal_top(|ui| {
-            group(ui, "Suchparameter", |ui| {
+            group(ui, "Search Parameters", |ui| {
                 egui::Grid::new("search parameters").show(ui, |ui| {
-                    ui.label("Abstand");
+                    ui.label("Distance");
                     let units = model.fe.properties.units;
                     ui.add(
                         numeric::quantity(&mut self.distance, units, Quantity::Length)
@@ -301,7 +301,7 @@ impl ContactSearchDialog {
                             .speed(0.001),
                     );
                     ui.end_row();
-                    ui.label("Winkel");
+                    ui.label("Angle");
                     ui.add(
                         numeric::drag_value(&mut self.angle)
                             .range(0.0..=180.0)
@@ -309,7 +309,7 @@ impl ContactSearchDialog {
                             .suffix(" °"),
                     );
                     ui.end_row();
-                    ui.label("Gruppieren nach");
+                    ui.label("Group by");
                     egui::ComboBox::from_id_salt("group by")
                         .selected_text(group_label(self.group_by))
                         .show_ui(ui, |ui| {
@@ -324,27 +324,28 @@ impl ContactSearchDialog {
                     ui.end_row();
                 });
             });
-            group(ui, "Geometriefilter", |ui| {
+            group(ui, "Geometry Filter", |ui| {
                 // Solids are searched in 3D models, the edges of the elements in 2D ones.
                 let (mut solid, mut shell, mut edge) = (!self.plane, false, self.plane);
-                let unsupported = "Schalenelemente werden noch nicht durchsucht.";
+                let unsupported = "Shell elements are not searched yet.";
                 ui.add_enabled(false, egui::Checkbox::new(&mut solid, "Solid"));
                 ui.add_enabled(false, egui::Checkbox::new(&mut shell, "Shell"))
                     .on_disabled_hover_text(unsupported);
                 let edges = ui.add_enabled(false, egui::Checkbox::new(&mut edge, "Shell edge"));
                 if self.plane {
-                    edges
-                        .on_disabled_hover_text("Im 2D-Modell sind die Elementkanten die Flächen.");
+                    edges.on_disabled_hover_text(
+                        "In a 2D model the element edges are the surfaces.",
+                    );
                 } else {
                     edges.on_disabled_hover_text(unsupported);
                 }
                 ui.checkbox(&mut self.line_ends, "Line end")
-                    .on_hover_text("Enden von Balken und Stäben, die auf einem Punkt liegen");
-                ui.checkbox(&mut self.ignore_hidden, "Ausgeblendete Parts ignorieren");
+                    .on_hover_text("Ends of beams and trusses that lie on one point");
+                ui.checkbox(&mut self.ignore_hidden, "Ignore hidden parts");
             });
-            group(ui, "Kontaktpaar-Parameter", |ui| {
+            group(ui, "Contact Pair Parameters", |ui| {
                 egui::Grid::new("pair parameters").show(ui, |ui| {
-                    ui.label("Typ");
+                    ui.label("Type");
                     egui::ComboBox::from_id_salt("pair type")
                         .selected_text(self.kind.label())
                         .show_ui(ui, |ui| {
@@ -359,12 +360,12 @@ impl ContactSearchDialog {
                         interaction_combo(ui, "search interaction", &mut self.interaction, model);
                     });
                     ui.end_row();
-                    ui.label("Methode");
+                    ui.label("Method");
                     ui.add_enabled_ui(contact, |ui| {
                         method_combo(ui, "search method", &mut self.method);
                     });
                     ui.end_row();
-                    ui.label("Netz anpassen");
+                    ui.label("Adjust mesh");
                     yes_no(ui, "search adjust", &mut self.adjust);
                     ui.end_row();
                 });
@@ -372,7 +373,7 @@ impl ContactSearchDialog {
             ui.vertical(|ui| {
                 ui.add_space(70.0);
                 if ui
-                    .add_sized([90.0, 24.0], egui::Button::new("Suchen"))
+                    .add_sized([90.0, 24.0], egui::Button::new("Search"))
                     .clicked()
                 {
                     self.error = None;
@@ -418,7 +419,7 @@ impl ContactSearchDialog {
                 let header = egui::Checkbox::new(&mut all, "").indeterminate(partial);
                 if ui
                     .add(header)
-                    .on_hover_text("Alle Kontaktpaare an- oder abwählen")
+                    .on_hover_text("Select or deselect all contact pairs")
                     .changed()
                 {
                     for row in &mut self.rows {
@@ -444,7 +445,7 @@ impl ContactSearchDialog {
                     let mut checked = row.checked;
                     let checkbox = ui
                         .add(egui::Checkbox::without_text(&mut checked))
-                        .on_hover_text("Beim OK erstellen");
+                        .on_hover_text("Create on OK");
                     if checkbox.changed() {
                         toggled = Some((i, checked));
                     }
@@ -499,16 +500,16 @@ impl ContactSearchDialog {
             });
         if self.rows.is_empty() {
             ui.weak(if self.searched {
-                "Keine Kontaktpaare gefunden."
+                "No contact pairs found."
             } else {
-                "Mit \"Suchen\" die Kontaktpaare finden."
+                "Use \"Search\" to find the contact pairs."
             });
         }
     }
 
     fn row_menu(&self, ui: &mut Ui) -> Option<RowAction> {
         let mut action = None;
-        if ui.button("Master/Slave tauschen").clicked() {
+        if ui.button("Swap Master/Slave").clicked() {
             action = Some(RowAction::Swap);
         }
         let several = (self.rows.iter())
@@ -516,10 +517,7 @@ impl ContactSearchDialog {
             .count()
             > 1;
         if ui
-            .add_enabled(
-                several,
-                egui::Button::new("Nach Master/Slave zusammenführen"),
-            )
+            .add_enabled(several, egui::Button::new("Merge by Master/Slave"))
             .clicked()
         {
             action = Some(RowAction::Merge);
@@ -588,7 +586,7 @@ impl ContactSearchDialog {
             .map(|(i, _)| i)
             .collect();
         let Some(&first) = selected.first() else {
-            ui.weak("Ein Kontaktpaar in der Tabelle wählen, um es zu bearbeiten.");
+            ui.weak("Select a contact pair in the table to edit it.");
             return;
         };
         let mut row = self.rows[first].clone();
@@ -606,17 +604,17 @@ impl ContactSearchDialog {
                         );
                         ui.end_row();
                     }
-                    ui.label("Typ");
+                    ui.label("Type");
                     ui.label("Node tie");
                     ui.end_row();
-                    ui.label("Rotationen");
+                    ui.label("Rotations");
                     yes_no(ui, "row rotations", &mut row.rotations);
                     ui.end_row();
                 });
             ui.add_space(8.0);
             ui.weak(
-                "Die Knoten der Linienenden folgen einander als Gleichungen. Rotationen: \
-                 biegesteif statt Gelenk; Stäbe haben keine.",
+                "The nodes of the line ends follow each other as equations. Rotations: \
+                 rigid instead of hinged; trusses have none.",
             );
             let old = self.rows[first].clone();
             for &i in &selected {
@@ -641,7 +639,7 @@ impl ContactSearchDialog {
                     );
                     ui.end_row();
                 }
-                ui.label("Typ");
+                ui.label("Type");
                 egui::ComboBox::from_id_salt("row type")
                     .selected_text(row.kind.label())
                     .show_ui(ui, |ui| {
@@ -654,14 +652,14 @@ impl ContactSearchDialog {
                     ui.label("Surface Interaction");
                     interaction_combo(ui, "row interaction", &mut row.interaction, model);
                     ui.end_row();
-                    ui.label("Methode");
+                    ui.label("Method");
                     method_combo(ui, "row method", &mut row.method);
                     ui.end_row();
                 }
                 ui.label("Adjust");
                 yes_no(ui, "row adjust", &mut row.adjust);
                 ui.end_row();
-                ui.label("Abstand");
+                ui.label("Distance");
                 ui.add(
                     numeric::quantity(
                         &mut row.distance,
@@ -675,8 +673,8 @@ impl ContactSearchDialog {
             });
         ui.add_space(8.0);
         ui.weak(match row.kind {
-            PairType::Tie => "Abstand: Positionstoleranz des Ties.",
-            PairType::Contact => "Abstand: Bereich, in dem Adjust die Slave-Knoten verschiebt.",
+            PairType::Tie => "Distance: position tolerance of the tie.",
+            PairType::Contact => "Distance: range in which Adjust moves the slave nodes.",
         });
         let old = self.rows[first].clone();
         for &i in &selected {
@@ -761,8 +759,8 @@ impl ContactSearchDialog {
                 PairType::Contact => {
                     if !(fe.surface_interactions.iter()).any(|s| s.name == row.interaction) {
                         return Err(format!(
-                            "{}: bitte eine Surface Interaction wählen; zuerst unter Surface \
-                             Interactions anlegen.",
+                            "{}: please select a Surface Interaction; create one under Surface \
+                             Interactions first.",
                             row.name
                         ));
                     }
@@ -828,7 +826,7 @@ fn group(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
 
 fn group_label(group_by: GroupBy) -> &'static str {
     match group_by {
-        GroupBy::None => "Keine",
+        GroupBy::None => "None",
         GroupBy::Parts => "Parts",
         GroupBy::Graph => "Graph",
     }
@@ -836,7 +834,7 @@ fn group_label(group_by: GroupBy) -> &'static str {
 
 fn interaction_combo(ui: &mut Ui, id: &str, interaction: &mut String, model: &Model) {
     let text = if interaction.is_empty() {
-        "Fehlt"
+        "Missing"
     } else {
         interaction.as_str()
     };
@@ -862,10 +860,10 @@ fn method_combo(ui: &mut Ui, id: &str, method: &mut ContactMethod) {
 
 fn yes_no(ui: &mut Ui, id: &str, value: &mut bool) {
     egui::ComboBox::from_id_salt(id)
-        .selected_text(if *value { "Ja" } else { "Nein" })
+        .selected_text(if *value { "Yes" } else { "No" })
         .show_ui(ui, |ui| {
-            ui.selectable_value(value, true, "Ja");
-            ui.selectable_value(value, false, "Nein");
+            ui.selectable_value(value, true, "Yes");
+            ui.selectable_value(value, false, "No");
         });
 }
 

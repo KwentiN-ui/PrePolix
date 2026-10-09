@@ -21,29 +21,29 @@ const ERROR: egui::Color32 = egui::Color32::from_rgb(200, 0, 0);
 
 /// The rows of the meshing parameters in a two-column grid.
 fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem) {
-    ui.label("Max. Elementgröße");
+    ui.label("Max. element size");
     ui.add(numeric::quantity(&mut d.max_size, units, Quantity::Length).range(0.0..=f64::MAX));
     ui.end_row();
-    ui.label("Min. Elementgröße");
+    ui.label("Min. element size");
     ui.add(numeric::quantity(&mut d.min_size, units, Quantity::Length).range(0.0..=f64::MAX));
     ui.end_row();
-    ui.label("Elemente pro Krümmungsradius")
-        .on_hover_text("0 schaltet die Verfeinerung an gekrümmten Flächen ab.");
+    ui.label("Elements per curvature radius")
+        .on_hover_text("0 turns off the refinement on curved surfaces.");
     ui.add(numeric::drag_value(&mut d.elements_per_curvature).range(0.0..=100.0));
     ui.end_row();
-    ui.label("Netztyp");
+    ui.label("Mesh type");
     ui.vertical(|ui| {
-        ui.checkbox(&mut d.second_order, "Zweite Ordnung (C3D10, CPS6/CPS8)");
+        ui.checkbox(&mut d.second_order, "Second order (C3D10, CPS6/CPS8)");
         ui.add_enabled(
             d.second_order,
             egui::Checkbox::new(
                 &mut d.midside_nodes_on_geometry,
-                "Mittelknoten auf der Geometrie",
+                "Midside nodes on geometry",
             ),
         );
-        ui.checkbox(&mut d.optimize, "Netz optimieren (Netgen)");
-        ui.checkbox(&mut d.quad_dominated, "Vierecke bevorzugen (2D)")
-            .on_hover_text("Flächen von 2D-Modellen überwiegend mit Vierecken vernetzen.");
+        ui.checkbox(&mut d.optimize, "Optimize mesh (Netgen)");
+        ui.checkbox(&mut d.quad_dominated, "Quad-dominated mesh (2D)")
+            .on_hover_text("Mesh the surfaces of 2D models mostly with quadrilaterals.");
     });
     ui.end_row();
 }
@@ -76,7 +76,7 @@ impl MeshSetupWindow {
     pub fn show(&mut self, ctx: &egui::Context) -> MeshSetupResult {
         let mut open = true;
         let mut result = MeshSetupResult::Open;
-        egui::Window::new("Standard-Netzparameter")
+        egui::Window::new("Default Meshing Parameters")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -85,25 +85,25 @@ impl MeshSetupWindow {
             .show(ctx, |ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 let (d, units) = (&mut self.draft, self.units);
-                ui.weak("Gelten für alle Parts ohne eigene Meshing Parameters.");
+                ui.weak("Apply to all parts without their own Meshing Parameters.");
                 egui::Grid::new("mesh size")
                     .num_columns(2)
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| parameters_ui(ui, d, units));
                 if d.max_size <= 0.0 {
-                    ui.colored_label(ERROR, "Die maximale Elementgröße muss größer als 0 sein.");
+                    ui.colored_label(ERROR, "The max. element size must be greater than 0.");
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
                     let valid = d.max_size > 0.0;
                     if ui
-                        .add_enabled(valid, egui::Button::new("Alle Parts vernetzen"))
+                        .add_enabled(valid, egui::Button::new("Mesh All Parts"))
                         .clicked()
                     {
                         result = MeshSetupResult::Mesh(*d);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Abbrechen").clicked() {
+                        if ui.button("Cancel").clicked() {
                             result = MeshSetupResult::Cancel;
                         }
                         if ui.add_enabled(valid, egui::Button::new("OK")).clicked() {
@@ -154,7 +154,7 @@ const ALGORITHMS_2D: [(Algorithm2d, &str); 4] = [
     (Algorithm2d::FrontalDelaunay, "Frontal-Delaunay"),
     (Algorithm2d::Delaunay, "Delaunay"),
     (Algorithm2d::MeshAdapt, "MeshAdapt"),
-    (Algorithm2d::Automatic, "Automatisch"),
+    (Algorithm2d::Automatic, "Automatic"),
 ];
 
 const ALGORITHMS_3D: [(Algorithm3d, &str); 3] = [
@@ -240,8 +240,8 @@ impl MeshItemEditor {
 
     fn title(&self) -> String {
         match self.index {
-            Some(_) => format!("Mesh-Setup-Eintrag bearbeiten: {}", self.draft.name),
-            None => "Mesh-Setup-Eintrag erstellen".into(),
+            Some(_) => format!("Edit Mesh Setup Item: {}", self.draft.name),
+            None => "Create Mesh Setup Item".into(),
         }
     }
 
@@ -267,7 +267,7 @@ impl MeshItemEditor {
             .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
             .show(ctx, |ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                ui.strong("Typ");
+                ui.strong("Type");
                 let current = type_index(&self.draft.kind);
                 // PrePoMax's list of item types; an edited item keeps its type.
                 egui::Frame::group(ui.style())
@@ -291,7 +291,7 @@ impl MeshItemEditor {
                         });
                     });
                 ui.separator();
-                ui.strong("Eigenschaften");
+                ui.strong("Properties");
                 egui::Grid::new("mesh item form")
                     .num_columns(2)
                     .spacing([12.0, 6.0])
@@ -301,7 +301,7 @@ impl MeshItemEditor {
                 }
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Abbrechen").clicked() {
+                    if ui.button("Cancel").clicked() {
                         result = MeshItemResult::Cancel;
                     }
                     if ui.button("OK").clicked() {
@@ -362,25 +362,25 @@ impl MeshItemEditor {
                     let edges = picked.len() - faces;
                     ui.horizontal(|ui| {
                         if picked.is_empty() {
-                            ui.label("Leer");
+                            ui.label("Empty");
                         } else {
-                            ui.label(format!("{faces} Flächen, {edges} Kanten"));
+                            ui.label(format!("{faces} faces, {edges} edges"));
                         }
-                        if ui.button("Auswahl löschen").clicked() {
+                        if ui.button("Clear Selection").clicked() {
                             self.picks.clear();
                         }
                         if ui
-                            .add_enabled(self.picks.can_undo(), egui::Button::new("Rückgängig"))
+                            .add_enabled(self.picks.can_undo(), egui::Button::new("Undo"))
                             .clicked()
                         {
                             self.picks.undo();
                         }
                     });
-                    ui.weak("Flächen und Kanten im 3D-Fenster anklicken.");
-                    ui.weak("Umschalt: hinzufügen, Strg: entfernen");
+                    ui.weak("Click faces and edges in the 3D view.");
+                    ui.weak("Shift: add, Ctrl: remove");
                 });
                 ui.end_row();
-                ui.label("Elementgröße");
+                ui.label("Element size");
                 ui.add(numeric::quantity(size, self.units, Quantity::Length).range(0.0..=f64::MAX));
                 ui.end_row();
             }
@@ -390,10 +390,10 @@ impl MeshItemEditor {
                 ..
             } => {
                 parts_ui(ui, &mut self.parts);
-                ui.label("Algorithmus Flächen");
+                ui.label("Surface algorithm");
                 algorithm_combo(ui, "algorithm 2d", algorithm_2d, &ALGORITHMS_2D);
                 ui.end_row();
-                ui.label("Algorithmus Volumen");
+                ui.label("Volume algorithm");
                 algorithm_combo(ui, "algorithm 3d", algorithm_3d, &ALGORITHMS_3D);
                 ui.end_row();
             }
@@ -406,27 +406,27 @@ impl MeshItemEditor {
         let mut item = self.draft.clone();
         item.name = item.name.trim().to_string();
         if item.name.is_empty() {
-            return Err("Der Name fehlt.".into());
+            return Err("The name is missing.".into());
         }
         if self
             .others
             .iter()
             .any(|o| o.eq_ignore_ascii_case(&item.name))
         {
-            return Err(format!("Der Name {} ist schon vergeben.", item.name));
+            return Err(format!("The name {} is already in use.", item.name));
         }
         match &mut item.kind {
             MeshSetupKind::MeshingParameters { parts, parameters } => {
                 if parts.is_empty() {
-                    return Err("Kein Part gewählt.".into());
+                    return Err("No part selected.".into());
                 }
                 if parameters.max_size <= 0.0 {
-                    return Err("Die maximale Elementgröße muss größer als 0 sein.".into());
+                    return Err("The max. element size must be greater than 0.".into());
                 }
             }
             MeshSetupKind::TetrahedralGmsh { parts, .. } => {
                 if parts.is_empty() {
-                    return Err("Kein Part gewählt.".into());
+                    return Err("No part selected.".into());
                 }
             }
             MeshSetupKind::LocalMeshSize { faces, edges, size } => {
@@ -444,10 +444,10 @@ impl MeshItemEditor {
                     })
                     .collect();
                 if picked.is_empty() {
-                    return Err("Keine Fläche oder Kante gewählt.".into());
+                    return Err("No face or edge selected.".into());
                 }
                 if *size <= 0.0 {
-                    return Err("Die Elementgröße muss größer als 0 sein.".into());
+                    return Err("The element size must be greater than 0.".into());
                 }
             }
         }
@@ -698,7 +698,7 @@ impl MeshingJob {
             Ok(result) => Some(result),
             Err(std::sync::mpsc::TryRecvError::Empty) => None,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                Some(Err("Vernetzung abgebrochen".into()))
+                Some(Err("Meshing cancelled".into()))
             }
         }
     }
@@ -716,10 +716,10 @@ mod tests {
         match crate::model::load(&path, plx_model::UnitSystem::MmTonSC) {
             Ok(loaded) => Some((loaded.model.geometry?, loaded.geometry_view?)),
             Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
-                eprintln!("Gmsh nicht verfügbar, Test übersprungen: {error}");
+                eprintln!("Gmsh not available, test skipped: {error}");
                 None
             }
-            Err(error) => panic!("Gmsh wird verlangt: {error}"),
+            Err(error) => panic!("Gmsh is required: {error}"),
         }
     }
 

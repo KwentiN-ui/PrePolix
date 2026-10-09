@@ -133,7 +133,7 @@ impl Reader {
                 .param(key)
                 .filter(|v| !v.is_empty())
                 .map(|v| v.to_ascii_uppercase())
-                .ok_or_else(|| self.error(line, format!("*{} ohne {key}=", keyword.name)))
+                .ok_or_else(|| self.error(line, format!("*{} without {key}=", keyword.name)))
         };
         Ok(match keyword.name.as_str() {
             "NODE" => Block::Node {
@@ -187,13 +187,13 @@ impl Reader {
             Block::Skip => {}
             Block::Node { set } => {
                 let values: Vec<&str> = fields(&line.text).collect();
-                let id = parse_id(values[0])
-                    .ok_or_else(|| self.error(line, "Ungültige Knotennummer"))?;
+                let id =
+                    parse_id(values[0]).ok_or_else(|| self.error(line, "Invalid node number"))?;
                 let mut coords = [0.0; 3];
                 for (axis, value) in values[1..].iter().take(3).enumerate() {
                     if !value.is_empty() {
                         coords[axis] = parse_f64(value).ok_or_else(|| {
-                            self.error(line, format!("Ungültige Koordinate '{value}'"))
+                            self.error(line, format!("Invalid coordinate '{value}'"))
                         })?;
                     }
                 }
@@ -216,17 +216,16 @@ impl Reader {
                     *pending_line = line.number;
                 }
                 for value in fields(&line.text) {
-                    pending.push(
-                        parse_id(value).ok_or_else(|| {
-                            self.error(line, format!("Ungültige Nummer '{value}'"))
-                        })?,
-                    );
+                    pending
+                        .push(parse_id(value).ok_or_else(|| {
+                            self.error(line, format!("Invalid number '{value}'"))
+                        })?);
                 }
                 if pending.len() > shape.node_count() + 1 {
                     return Err(self.error(
                         line,
                         format!(
-                            "Element {} vom Typ {type_name} hat mehr als {} Knoten",
+                            "Element {} of type {type_name} has more than {} nodes",
                             pending[0],
                             shape.node_count()
                         ),
@@ -294,11 +293,11 @@ impl Reader {
                 .iter()
                 .map(|v| parse_id(v))
                 .collect::<Option<Vec<_>>>()
-                .ok_or_else(|| self.error(line, "GENERATE erwartet Zahlen"))?;
+                .ok_or_else(|| self.error(line, "GENERATE expects numbers"))?;
             let (start, end, step) = match numbers.as_slice() {
                 [start, end] => (*start, *end, 1),
                 [start, end, step] if *step > 0 => (*start, *end, *step),
-                _ => return Err(self.error(line, "GENERATE erwartet Anfang, Ende[, Schritt]")),
+                _ => return Err(self.error(line, "GENERATE expects start, end[, increment]")),
             };
             return Ok((start..=end).step_by(step as usize).collect());
         }
@@ -309,7 +308,7 @@ impl Reader {
             } else {
                 match lookup(&self.import.mesh, &value.to_ascii_uppercase()) {
                     Some(members) => ids.extend(members),
-                    None => self.warn(line, format!("Set '{value}' ist nicht definiert")),
+                    None => self.warn(line, format!("Set '{value}' is not defined")),
                 }
             }
         }
@@ -343,7 +342,7 @@ impl Reader {
                 SurfaceDefinition::Nodes(nodes) => nodes.extend(ids),
                 SurfaceDefinition::ElementFaces(_) => self.warn(
                     line,
-                    format!("Surface {name} mischt Knoten und Elementflächen"),
+                    format!("Surface {name} mixes nodes and element faces"),
                 ),
             }
             return Ok(());
@@ -351,13 +350,13 @@ impl Reader {
         let face = values
             .get(1)
             .and_then(|label| face_number(label))
-            .ok_or_else(|| self.error(line, "Elementfläche erwartet, z. B. 'EALL, S2'"))?;
+            .ok_or_else(|| self.error(line, "Element face expected, e.g. 'EALL, S2'"))?;
         let elements: Vec<ElementId> = match parse_id(values[0]) {
             Some(id) => vec![id],
             None => match mesh.element_sets.get(&values[0].to_ascii_uppercase()) {
                 Some(set) => set.clone(),
                 None => {
-                    self.warn(line, format!("Set '{}' ist nicht definiert", values[0]));
+                    self.warn(line, format!("Set '{}' is not defined", values[0]));
                     Vec::new()
                 }
             },
@@ -374,7 +373,7 @@ impl Reader {
             }
             SurfaceDefinition::Nodes(_) => self.warn(
                 line,
-                format!("Surface {name} mischt Knoten und Elementflächen"),
+                format!("Surface {name} mixes nodes and element faces"),
             ),
         }
         Ok(())
@@ -395,10 +394,7 @@ impl Reader {
             };
             return Err(self.error(
                 &line,
-                format!(
-                    "Element {} vom Typ {type_name} ist unvollständig",
-                    pending[0]
-                ),
+                format!("Element {} of type {type_name} is incomplete", pending[0]),
             ));
         }
         Ok(())
@@ -418,19 +414,19 @@ impl Reader {
         let warnings = &mut self.import.warnings;
         for type_name in &self.unsupported_elements {
             warnings.push(format!(
-                "Elementtyp {type_name} wird noch nicht unterstützt und wurde übersprungen"
+                "Element type {type_name} is not supported yet and was skipped"
             ));
         }
         if self.duplicate_nodes > 0 {
             warnings.push(format!(
-                "{} Knoten waren mehrfach definiert, die letzte Definition gilt",
+                "{} nodes were defined more than once, the last definition applies",
                 self.duplicate_nodes
             ));
         }
         let missing = self.import.mesh.missing_nodes();
         if let Some((element, node)) = missing.first() {
             warnings.push(format!(
-                "{} Elementknoten verweisen auf fehlende Knoten (z. B. Element {element}, Knoten {node})",
+                "{} element nodes refer to missing nodes (e.g. Element {element}, Node {node})",
                 missing.len()
             ));
         }

@@ -254,7 +254,7 @@ impl TransformationDialog {
     pub fn show(&mut self, ctx: &egui::Context, model: &Model) -> TransformationAction {
         let mut action = TransformationAction::Open;
         let mut open = true;
-        let window = egui::Window::new("Transformation erstellen")
+        let window = egui::Window::new("Create Transformation")
             .id(egui::Id::new("transformation dialog"))
             .open(&mut open)
             .collapsible(false)
@@ -263,10 +263,10 @@ impl TransformationDialog {
             .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 110.0))
             .show(ctx, |ui| {
                 ui.set_width(360.0);
-                ui.label(RichText::new("Transformationsarten").strong());
+                ui.label(RichText::new("Transformation Types").strong());
                 ui.horizontal_top(|ui| self.lists(ui));
                 ui.add_space(6.0);
-                ui.label(RichText::new("Eigenschaften").strong());
+                ui.label(RichText::new("Properties").strong());
                 frame().show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.set_min_height(210.0);
@@ -287,12 +287,12 @@ impl TransformationDialog {
                 }
                 ui.add_space(4.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Abbrechen").clicked() {
+                    if ui.button("Cancel").clicked() {
                         action = TransformationAction::Cancel;
                     }
                     let clear = ui
-                        .button("Aufheben")
-                        .on_hover_text("Zeigt das Ergebnis wieder ohne Transformationen.");
+                        .button("Clear")
+                        .on_hover_text("Shows the results again without transformations.");
                     if clear.clicked() {
                         // OK then keeps the results as they are, as in PrePoMax.
                         self.changed = false;
@@ -302,7 +302,7 @@ impl TransformationDialog {
                             close: false,
                         };
                     }
-                    if ui.button("Übernehmen").clicked() {
+                    if ui.button("Apply").clicked() {
                         self.changed = true;
                         action = self.apply(false);
                     }
@@ -354,23 +354,23 @@ impl TransformationDialog {
         let height = 130.0;
         let mut add = false;
         ui.vertical(|ui| {
-            ui.label("Verfügbar");
+            ui.label("Available");
             frame().show(ui, |ui| {
                 ui.set_width(140.0);
                 ui.set_height(height);
                 let branches = [
                     (
-                        "Symmetrie",
+                        "Symmetry",
                         SymmetryPlane::ALL
                             .iter()
                             .map(|&p| (Available::Symmetry(p), p.label()))
                             .collect::<Vec<_>>(),
                     ),
                     (
-                        "Muster",
+                        "Pattern",
                         vec![
                             (Available::Linear, "Linear"),
-                            (Available::Circular, "Kreisförmig"),
+                            (Available::Circular, "Circular"),
                         ],
                     ),
                 ];
@@ -395,13 +395,11 @@ impl TransformationDialog {
         ui.vertical(|ui| {
             ui.add_space(22.0);
             let can_add = self.available.is_some();
-            if icons::dialog_button(ui, Icon::Arrow(egui::vec2(1.0, 0.0)), "Hinzufügen", can_add)
-                .clicked()
+            if icons::dialog_button(ui, Icon::Arrow(egui::vec2(1.0, 0.0)), "Add", can_add).clicked()
             {
                 add = true;
             }
-            if icons::dialog_button(ui, Icon::Remove, "Entfernen", self.selected.is_some())
-                .clicked()
+            if icons::dialog_button(ui, Icon::Remove, "Remove", self.selected.is_some()).clicked()
                 && let Some(index) = self.selected
             {
                 self.active.remove(index);
@@ -420,7 +418,7 @@ impl TransformationDialog {
             self.changed = true;
         }
         ui.vertical(|ui| {
-            ui.label("Aktiv");
+            ui.label("Active");
             frame().show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.set_height(height);
@@ -451,7 +449,7 @@ impl TransformationDialog {
             picking: &mut self.picking,
             changed: false,
         };
-        grid.category(ui, "Daten");
+        grid.category(ui, "Data");
         grid.rows(ui, "data", |grid, ui| {
             grid.row(ui, Row::Name, |ui| {
                 let edit =
@@ -476,13 +474,13 @@ impl TransformationDialog {
             }
         });
         let slots: &[(Slot, &str)] = match transformation.kind {
-            TransformationKind::Symmetry { .. } => &[(Slot::First, "Symmetriepunkt")],
+            TransformationKind::Symmetry { .. } => &[(Slot::First, "Symmetry Point")],
             TransformationKind::LinearPattern { .. } => {
-                &[(Slot::First, "Startpunkt"), (Slot::Second, "Endpunkt")]
+                &[(Slot::First, "Start Point"), (Slot::Second, "End Point")]
             }
             TransformationKind::CircularPattern { .. } => &[
-                (Slot::First, "Erster Achspunkt"),
-                (Slot::Second, "Zweiter Achspunkt"),
+                (Slot::First, "First Axis Point"),
+                (Slot::Second, "Second Axis Point"),
             ],
         };
         for &(slot, title) in slots {
@@ -504,33 +502,33 @@ impl TransformationDialog {
             .and_then(|i| self.active.get(i))
             .map(|t| &t.kind);
         match (self.focus, kind) {
-            (Row::Name, _) | (_, None) => ("Name", "Name der Transformation.".into()),
+            (Row::Name, _) | (_, None) => ("Name", "Name of the transformation.".into()),
             (Row::Count, _) => (
-                "Anzahl",
-                "Anzahl aller Elemente des Musters, das Original eingeschlossen.".into(),
+                "Number of items",
+                "Number of all items of the pattern, including the original.".into(),
             ),
             (Row::Angle, _) => (
-                "Winkel",
-                "Winkel zwischen zwei benachbarten Elementen, positiv nach der Rechte-Hand-Regel \
-                 um die Achse vom ersten zum zweiten Achspunkt."
+                "Angle",
+                "Angle between two neighbouring items, positive by the right-hand rule \
+                 about the axis from the first to the second axis point."
                     .into(),
             ),
             (Row::Point(_), Some(TransformationKind::Symmetry { plane, .. })) => (
-                "Symmetriepunkt",
+                "Symmetry point",
                 format!(
-                    "Die Symmetrieebene geht durch diesen Punkt, senkrecht zur {}-Achse.",
+                    "The symmetry plane passes through this point, normal to the {} axis.",
                     plane.label()
                 ),
             ),
             (Row::Point(_), Some(TransformationKind::LinearPattern { .. })) => (
-                "Start- und Endpunkt",
-                "Jedes Element ist gegenüber dem vorigen um den Abstand vom Start- zum \
-                 Endpunkt verschoben."
+                "Start and end point",
+                "Each item is offset from the previous one by the distance from the start to \
+                 the end point."
                     .into(),
             ),
             (Row::Point(_), Some(TransformationKind::CircularPattern { .. })) => (
-                "Achspunkte",
-                "Zwei Punkte auf der Drehachse des Musters.".into(),
+                "Axis points",
+                "Two points on the rotation axis of the pattern.".into(),
             ),
         }
     }
@@ -598,7 +596,7 @@ impl Grid<'_> {
         let row = Row::Point(slot);
         let picking = *self.picking == Some(slot);
         let mut toggle = false;
-        self.labelled(ui, row, "Aus Auswahl", |ui| {
+        self.labelled(ui, row, "By selection", |ui| {
             toggle = crate::setup::pick_button(ui, picking);
             (false, toggle)
         });
@@ -621,8 +619,8 @@ impl Grid<'_> {
 fn row_label(row: Row) -> &'static str {
     match row {
         Row::Name => "Name",
-        Row::Count => "Anzahl",
-        Row::Angle => "Winkel",
+        Row::Count => "Number of items",
+        Row::Angle => "Angle",
         Row::Point(_) => "",
     }
 }

@@ -140,17 +140,17 @@ const MESH_MODES: [SelectBy; 8] = [
 impl SelectBy {
     fn label(self, target: Target) -> &'static str {
         match self {
-            SelectBy::Geometry if target == Target::Faces => "Flächen",
-            SelectBy::Geometry if target == Target::Edges => "Kanten",
-            SelectBy::Geometry => "Flächen, Kanten und Punkte",
+            SelectBy::Geometry if target == Target::Faces => "Faces",
+            SelectBy::Geometry if target == Target::Edges => "Edges",
+            SelectBy::Geometry => "Faces, edges and points",
             SelectBy::GeometryPart | SelectBy::Part => "Part",
-            SelectBy::GeometryEdgeAngle | SelectBy::EdgeAngle => "Kantenwinkel",
-            SelectBy::GeometrySurfaceAngle => "Flächenwinkel",
-            SelectBy::Node => "Knoten",
+            SelectBy::GeometryEdgeAngle | SelectBy::EdgeAngle => "Edge angle",
+            SelectBy::GeometrySurfaceAngle => "Surface angle",
+            SelectBy::Node => "Node",
             SelectBy::Element => "Element",
-            SelectBy::Edge => "Kante",
-            SelectBy::Surface => "Fläche",
-            SelectBy::FaceAngle => "Flächenwinkel",
+            SelectBy::Edge => "Edge",
+            SelectBy::Surface => "Surface",
+            SelectBy::FaceAngle => "Surface angle",
             SelectBy::Id => "ID",
         }
     }
@@ -298,7 +298,7 @@ impl Picker {
                 .max(screen.left()),
             anchor.top(),
         );
-        egui::Window::new("Auswahl")
+        egui::Window::new("Selection")
             .id(id)
             .constrain(false)
             .movable(false)
@@ -310,7 +310,7 @@ impl Picker {
                 ui.horizontal_top(|ui| {
                     ui.group(|ui| {
                         ui.vertical(|ui| {
-                            ui.strong("Geometriebasiert");
+                            ui.strong("Geometry Based");
                             for mode in GEOMETRY_MODES {
                                 if parts {
                                     self.part_mode_row(ui, mode);
@@ -323,20 +323,20 @@ impl Picker {
                     if self.expanded && !parts {
                         ui.group(|ui| {
                             ui.vertical(|ui| {
-                                ui.strong("Netzbasiert");
+                                ui.strong("Mesh Based");
                                 for mode in MESH_MODES {
                                     self.mode_row(ui, mode, target);
                                 }
                                 ui.add_enabled_ui(self.select_by == SelectBy::Id, |ui| {
                                     ui.add(
                                         egui::TextEdit::singleline(&mut self.ids)
-                                            .hint_text("z. B. 1, 5, 10-20")
+                                            .hint_text("e.g. 1, 5, 10-20")
                                             .desired_width(150.0),
                                     );
                                     ui.horizontal(|ui| {
                                         for (label, operation) in [
-                                            ("Hinzufügen", Operation::Add),
-                                            ("Entfernen", Operation::Subtract),
+                                            ("Add", Operation::Add),
+                                            ("Remove", Operation::Subtract),
                                         ] {
                                             if ui.button(label).clicked() {
                                                 match parse_ids(&self.ids) {
@@ -351,7 +351,7 @@ impl Picker {
                                         }
                                     });
                                     if target != Target::Nodes {
-                                        ui.weak("IDs von Elementen");
+                                        ui.weak("IDs of elements");
                                     }
                                 });
                             });
@@ -363,25 +363,22 @@ impl Picker {
                 }
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(can_undo, egui::Button::new("Rückgängig"))
+                        .add_enabled(can_undo, egui::Button::new("Undo"))
                         .clicked()
                     {
                         action = Some(PickerAction::Undo);
                     }
-                    if ui.button("Löschen").clicked() {
+                    if ui.button("Clear").clicked() {
                         action = Some(PickerAction::Clear);
                     }
                     let mesh = parts || !self.select_by.is_geometry();
-                    if ui.add_enabled(mesh, egui::Button::new("Alle")).clicked() {
+                    if ui.add_enabled(mesh, egui::Button::new("All")).clicked() {
                         action = Some(PickerAction::All);
                     }
-                    if ui
-                        .add_enabled(mesh, egui::Button::new("Invertieren"))
-                        .clicked()
-                    {
+                    if ui.add_enabled(mesh, egui::Button::new("Invert")).clicked() {
                         action = Some(PickerAction::Invert);
                     }
-                    let more = if self.expanded { "Weniger" } else { "Mehr" };
+                    let more = if self.expanded { "Less" } else { "More" };
                     if !parts && ui.button(more).clicked() {
                         self.expanded = !self.expanded;
                         if !self.expanded && !self.select_by.is_geometry() {
@@ -389,9 +386,9 @@ impl Picker {
                         }
                     }
                 });
-                ui.weak("Umschalt: hinzufügen, Strg: entfernen");
-                ui.weak("Ziehen: Rahmen (nach links: auch angeschnittene)");
-                ui.weak("Mittlere Maustaste: drehen, mit Umschalt verschieben");
+                ui.weak("Shift: add, Ctrl: remove");
+                ui.weak("Drag: box (to the left: also crossing)");
+                ui.weak("Middle mouse button: rotate, with Shift pan");
             });
         action
     }
@@ -746,7 +743,7 @@ impl PartPicks {
                 wanted = crate::setup::pick_button(ui, active);
                 let names: Vec<String> = self.names().into_iter().collect();
                 let label = match names.len() {
-                    0 => "Leer".to_string(),
+                    0 => "Empty".to_string(),
                     1..=3 => names.join(", "),
                     n => format!("{n} Parts"),
                 };
@@ -754,11 +751,11 @@ impl PartPicks {
                 if names.len() > 3 {
                     response.on_hover_text(names.join("\n"));
                 }
-                if ui.button("Auswahl löschen").clicked() {
+                if ui.button("Clear Selection").clicked() {
                     self.clear();
                 }
             });
-            ui.weak("Parts im 3D-Fenster anklicken.");
+            ui.weak("Click parts in the 3D view.");
         });
         wanted
     }
@@ -875,7 +872,7 @@ pub fn edge_lines(model: &Model, faces: &BTreeSet<(ElementId, u8)>) -> Vec<[Node
 fn parse_ids(text: &str) -> Result<Vec<u32>, String> {
     let mut ids = Vec::new();
     for token in text.split([',', ' ', ';']).filter(|t| !t.trim().is_empty()) {
-        let invalid = || format!("Keine gültige ID: {token}");
+        let invalid = || format!("Not a valid ID: {token}");
         match token.split_once('-') {
             Some((from, to)) => {
                 let from: u32 = from.trim().parse().map_err(|_| invalid())?;

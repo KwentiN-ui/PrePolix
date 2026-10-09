@@ -71,10 +71,10 @@ impl MasterSlave {
 
     pub fn ui(&mut self, ui: &mut Ui, model: &Model) {
         let master = self.side == Side::Master;
-        if (self.master).ui_labeled(ui, model, "Master-Region", "master", master) {
+        if (self.master).ui_labeled(ui, model, "Master region", "master", master) {
             self.side = Side::Master;
         }
-        if (self.slave).ui_labeled(ui, model, "Slave-Region", "slave", !master) {
+        if (self.slave).ui_labeled(ui, model, "Slave region", "slave", !master) {
             self.side = Side::Slave;
         }
     }
@@ -86,10 +86,10 @@ impl MasterSlave {
 
     pub fn validate(&self) -> Result<(), String> {
         if self.master.is_empty() {
-            return Err("Die Master-Region ist leer.".into());
+            return Err("The master region is empty.".into());
         }
         if self.slave.is_empty() {
-            return Err("Die Slave-Region ist leer.".into());
+            return Err("The slave region is empty.".into());
         }
         Ok(())
     }
@@ -132,20 +132,17 @@ pub fn tie_form(ui: &mut Ui, model: &Model, tie: &mut Tie, regions: &mut MasterS
     let length = (model.fe.properties.units, Quantity::Length);
     optional_row(
         ui,
-        "Positionstoleranz",
+        "Position tolerance",
         &mut tie.position_tolerance,
         0.05,
         length,
     );
     ui.label("");
-    ui.checkbox(
-        &mut tie.adjust,
-        "Slave-Knoten auf Master verschieben (Adjust)",
-    );
+    ui.checkbox(&mut tie.adjust, "Move slave nodes onto master (Adjust)");
     ui.end_row();
     regions.ui(ui, model);
-    color_row(ui, "Farbe Master", &mut tie.master_color);
-    color_row(ui, "Farbe Slave", &mut tie.slave_color);
+    color_row(ui, "Master color", &mut tie.master_color);
+    color_row(ui, "Slave color", &mut tie.slave_color);
 }
 
 pub fn contact_pair_form(
@@ -165,7 +162,7 @@ pub fn contact_pair_form(
             }
         });
     ui.end_row();
-    ui.label("Methode");
+    ui.label("Method");
     egui::ComboBox::from_id_salt("contact method")
         .selected_text(pair.method.name())
         .width(200.0)
@@ -181,36 +178,33 @@ pub fn contact_pair_form(
         node_to_surface,
         egui::Checkbox::new(&mut pair.small_sliding, "Small sliding"),
     )
-    .on_hover_text("Paarung nur zu Beginn jedes Inkrements; nur Node to surface.");
+    .on_hover_text("Pairing only at the start of each increment; Node to surface only.");
     if !node_to_surface {
         pair.small_sliding = false;
     }
     ui.end_row();
     ui.label("");
-    ui.checkbox(
-        &mut pair.adjust,
-        "Slave-Knoten auf Master verschieben (Adjust)",
-    );
+    ui.checkbox(&mut pair.adjust, "Move slave nodes onto master (Adjust)");
     ui.end_row();
     if pair.adjust {
         let length = (model.fe.properties.units, Quantity::Length);
         optional_row(
             ui,
-            "Abstand für Adjust",
+            "Adjust distance",
             &mut pair.adjustment_size,
             0.01,
             length,
         );
     }
     regions.ui(ui, model);
-    color_row(ui, "Farbe Master", &mut pair.master_color);
-    color_row(ui, "Farbe Slave", &mut pair.slave_color);
+    color_row(ui, "Master color", &mut pair.master_color);
+    color_row(ui, "Slave color", &mut pair.slave_color);
 }
 
 pub fn validate_contact_pair(pair: &ContactPair, fe: &FeModel) -> Result<(), String> {
     if !(fe.surface_interactions.iter()).any(|s| s.name == pair.interaction) {
         return Err(
-            "Bitte eine Surface Interaction wählen; zuerst unter Surface Interactions anlegen."
+            "Please select a Surface Interaction; create one under Surface Interactions first."
                 .into(),
         );
     }
@@ -250,7 +244,7 @@ pub fn interaction_dialog(
 ) {
     // As wide as the title, which grows with the name.
     ui.set_min_width(420.0);
-    group(ui, "Daten", |ui| {
+    group(ui, "Data", |ui| {
         let mut focus = None;
         egui::Grid::new("interaction data")
             .num_columns(2)
@@ -262,7 +256,7 @@ pub fn interaction_dialog(
                         .desired_width(ui.available_width()),
                 );
                 if label.clicked() || edit.has_focus() {
-                    focus = Some(("Name", "Name der Surface Interaction."));
+                    focus = Some(("Name", "Name of the Surface Interaction."));
                 }
             });
         if focus.is_some() {
@@ -273,7 +267,7 @@ pub fn interaction_dialog(
         model_lists(ui, interaction, view)
     });
     ui.add_space(4.0);
-    ui.strong("Eigenschaften");
+    ui.strong("Properties");
     frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.set_min_height(150.0);
@@ -299,7 +293,7 @@ pub fn interaction_dialog(
                     });
             }
             None => {
-                ui.weak("Ein Modell aus der Liste Gewählt zeigt hier seine Eigenschaften.");
+                ui.weak("A model from the Selected list shows its properties here.");
             }
         }
     });
@@ -326,7 +320,7 @@ fn model_lists(ui: &mut Ui, interaction: &mut SurfaceInteraction, view: &mut Int
     let mut add = false;
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
-            ui.label("Verfügbar");
+            ui.label("Available");
             frame().show(ui, |ui| {
                 ui.set_width(140.0);
                 ui.set_height(height);
@@ -355,11 +349,11 @@ fn model_lists(ui: &mut Ui, interaction: &mut SurfaceInteraction, view: &mut Int
                 .and_then(|i| all.get(i))
                 .is_some_and(|model| !taken(interaction, model));
             let arrow = Icon::Arrow(egui::vec2(1.0, 0.0));
-            if icons::dialog_button(ui, arrow, "Hinzufügen", can_add).clicked() {
+            if icons::dialog_button(ui, arrow, "Add", can_add).clicked() {
                 add = true;
             }
             let can_remove = view.selected.is_some();
-            if icons::dialog_button(ui, Icon::Remove, "Entfernen", can_remove).clicked()
+            if icons::dialog_button(ui, Icon::Remove, "Remove", can_remove).clicked()
                 && let Some(index) = view.selected
             {
                 interaction.properties.remove(index);
@@ -379,7 +373,7 @@ fn model_lists(ui: &mut Ui, interaction: &mut SurfaceInteraction, view: &mut Int
             view.focus = None;
         }
         ui.vertical(|ui| {
-            ui.label("Gewählt");
+            ui.label("Selected");
             frame().show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.set_height(height);
@@ -399,15 +393,14 @@ fn model_description(property: &InteractionProperty) -> Description {
     match property {
         InteractionProperty::SurfaceBehavior(_) => (
             "Surface Behavior",
-            "Kontaktdruck in Abhängigkeit von der Eindringung der Flächen.",
+            "Contact pressure as a function of the overclosure of the surfaces.",
         ),
-        InteractionProperty::Friction(_) => (
-            "Friction",
-            "Reibung zwischen den Kontaktflächen nach Coulomb.",
-        ),
+        InteractionProperty::Friction(_) => {
+            ("Friction", "Coulomb friction between the contact surfaces.")
+        }
         InteractionProperty::GapConductance(_) => (
             "Gap Conductance",
-            "Wärmeleitung über den Spalt zwischen den Kontaktflächen.",
+            "Heat conduction across the gap between the contact surfaces.",
         ),
     }
 }
@@ -497,8 +490,8 @@ impl Rows<'_> {
 
     fn surface_behavior(&mut self, ui: &mut Ui, behavior: &mut SurfaceBehavior) {
         let description = (
-            "Druck-Eindringung",
-            "Kennlinie des Kontaktdrucks über der Eindringung (Pressure-overclosure).",
+            "Pressure-overclosure",
+            "Curve of the contact pressure over the overclosure (pressure-overclosure).",
         );
         self.row(ui, description, |ui| {
             egui::ComboBox::from_id_salt("pressure overclosure")
@@ -518,46 +511,47 @@ impl Rows<'_> {
         match behavior {
             SurfaceBehavior::Hard => {}
             SurfaceBehavior::Linear { k, sigma_inf, c0 } => {
-                let k_text = "Steigung der Kennlinie, etwa 5- bis 50-mal der E-Modul je Länge.";
+                let k_text =
+                    "Slope of the curve, about 5 to 50 times the Young's modulus per length.";
                 self.value(ui, ("K", k_text), k, Quantity::ForcePerVolume);
-                let sigma_text = "Zugspannung bei großem Spalt, etwa 0,25 % der größten \
-                                  erwarteten Vergleichsspannung.";
+                let sigma_text = "Tensile stress at a large gap, about 0.25 % of the largest \
+                                  expected equivalent stress.";
                 self.value(
                     ui,
-                    ("Sigma unendlich", sigma_text),
+                    ("Sigma infinity", sigma_text),
                     sigma_inf,
                     Quantity::Pressure,
                 );
-                let c0_text = "Optionaler Parameter c0 der linearen Kennlinie, siehe \
-                               *SURFACE BEHAVIOR im CalculiX-Handbuch.";
+                let c0_text = "Optional parameter c0 of the linear curve, see \
+                               *SURFACE BEHAVIOR in the CalculiX manual.";
                 self.optional(ui, ("c0", c0_text), c0, 1.0, Quantity::Length);
             }
             SurfaceBehavior::Exponential { c0, p0 } => {
-                let c0_text = "Spalt, bei dem der Kontaktdruck auf 1 % von p0 gefallen ist.";
+                let c0_text = "Gap at which the contact pressure has dropped to 1 % of p0.";
                 self.value(ui, ("c0", c0_text), c0, Quantity::Length);
                 self.value(
                     ui,
-                    ("p0", "Kontaktdruck bei Spalt null."),
+                    ("p0", "Contact pressure at zero gap."),
                     p0,
                     Quantity::Pressure,
                 );
             }
             SurfaceBehavior::Tabular(rows) => {
-                let text = "Je Zeile ein Kontaktdruck und die zugehörige Eindringung.";
+                let text = "One contact pressure and its overclosure per row.";
                 self.table(
                     ui,
-                    ("Tabelle", text),
+                    ("Table", text),
                     rows,
                     [
-                        ("Druck", Quantity::Pressure),
-                        ("Eindringung", Quantity::Length),
+                        ("Pressure", Quantity::Pressure),
+                        ("Overclosure", Quantity::Length),
                     ],
                 );
             }
             SurfaceBehavior::Tied { k } => {
                 self.value(
                     ui,
-                    ("K", "Steifigkeit der Verbindung."),
+                    ("K", "Stiffness of the connection."),
                     k,
                     Quantity::ForcePerVolume,
                 );
@@ -566,18 +560,18 @@ impl Rows<'_> {
     }
 
     fn friction(&mut self, ui: &mut Ui, friction: &mut Friction) {
-        let text = "Reibungskoeffizient mu, größer als null.";
-        self.row(ui, ("Reibungskoeffizient", text), |ui| {
+        let text = "Friction coefficient mu, greater than zero.";
+        self.row(ui, ("Friction coefficient", text), |ui| {
             let value = numeric::drag_value(&mut friction.coefficient)
                 .range(0.0..=f64::MAX)
                 .speed(0.01);
             ui.add_sized(field_size(ui), value)
         });
-        let text = "Steigung lambda der Schubspannung über dem Schlupf im Haftbereich; \
-                    ohne Angabe wählt CalculiX sie selbst.";
+        let text = "Slope lambda of the shear stress over the slip in the stick range; \
+                    if empty, CalculiX chooses it.";
         self.optional(
             ui,
-            ("Haftsteigung", text),
+            ("Stick slope", text),
             &mut friction.stick_slope,
             1e5,
             Quantity::ForcePerVolume,
@@ -585,15 +579,15 @@ impl Rows<'_> {
     }
 
     fn gap_conductance(&mut self, ui: &mut Ui, conductance: &mut GapConductance) {
-        let text = "Konstanter Leitwert oder Tabelle über Druck und Temperatur.";
-        self.row(ui, ("Art", text), |ui| {
+        let text = "Constant conductance or table over pressure and temperature.";
+        self.row(ui, ("Kind", text), |ui| {
             ui.horizontal(|ui| {
                 let constant = matches!(conductance, GapConductance::Constant(_));
-                let mut response = ui.radio(constant, "Konstant");
+                let mut response = ui.radio(constant, "Constant");
                 if response.clicked() && !constant {
                     *conductance = GapConductance::Constant(0.0);
                 }
-                let table = ui.radio(!constant, "Tabelle");
+                let table = ui.radio(!constant, "Table");
                 if table.clicked() && constant {
                     *conductance = GapConductance::Tabular(vec![[0.0; 3]]);
                 }
@@ -604,25 +598,25 @@ impl Rows<'_> {
         });
         match conductance {
             GapConductance::Constant(value) => {
-                let text = "Wärmestrom je Fläche und Temperaturdifferenz über den Spalt.";
+                let text = "Heat flux per area and temperature difference across the gap.";
                 self.value(
                     ui,
-                    ("Leitwert", text),
+                    ("Conductance", text),
                     value,
                     Quantity::HeatTransferCoefficient,
                 );
             }
             GapConductance::Tabular(rows) => {
-                let text = "Je Zeile ein Leitwert mit dem Kontaktdruck und der Temperatur, \
-                            für die er gilt.";
+                let text = "One conductance per row with the contact pressure and the temperature \
+                            it applies to.";
                 self.table(
                     ui,
-                    ("Tabelle", text),
+                    ("Table", text),
                     rows,
                     [
-                        ("Leitwert", Quantity::HeatTransferCoefficient),
-                        ("Druck", Quantity::Pressure),
-                        ("Temperatur", Quantity::Temperature),
+                        ("Conductance", Quantity::HeatTransferCoefficient),
+                        ("Pressure", Quantity::Pressure),
+                        ("Temperature", Quantity::Temperature),
                     ],
                 );
             }
@@ -663,7 +657,7 @@ impl Rows<'_> {
                         }
                         if ui
                             .add_enabled(rows_len > 1, egui::Button::new("x").small())
-                            .on_hover_text("Zeile entfernen")
+                            .on_hover_text("Remove row")
                             .clicked()
                         {
                             remove = Some(i);
@@ -674,7 +668,7 @@ impl Rows<'_> {
                         rows.remove(i);
                     }
                 });
-                if ui.small_button("Zeile hinzufügen").clicked() {
+                if ui.small_button("Add Row").clicked() {
                     let last = rows.last().copied().unwrap_or([0.0; N]);
                     rows.push(last);
                 }
@@ -687,13 +681,13 @@ impl Rows<'_> {
 
 pub fn validate_interaction(interaction: &SurfaceInteraction) -> Result<(), String> {
     if interaction.properties.is_empty() {
-        return Err("Bitte mindestens ein Interaction Model hinzufügen.".into());
+        return Err("Please add at least one Interaction Model.".into());
     }
     for property in &interaction.properties {
         if let InteractionProperty::Friction(friction) = property
             && friction.coefficient <= 0.0
         {
-            return Err("Der Reibungskoeffizient muss größer als 0 sein.".into());
+            return Err("The friction coefficient must be greater than 0.".into());
         }
     }
     Ok(())

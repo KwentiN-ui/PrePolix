@@ -44,7 +44,7 @@ impl FeModel {
         let mut invalid = Vec::new();
         for (i, section) in self.sections.iter().enumerate() {
             let reason = if !self.materials.iter().any(|m| m.name == section.material) {
-                Some(format!("Material {} existiert nicht", section.material))
+                Some(format!("Material {} does not exist", section.material))
             } else {
                 (section.region.missing_reference(mesh)).or_else(|| section.kind_problem(mesh))
             };
@@ -72,7 +72,7 @@ impl FeModel {
             let reason = if !(self.surface_interactions.iter()).any(|s| s.name == pair.interaction)
             {
                 Some(format!(
-                    "Surface Interaction {} existiert nicht",
+                    "Surface Interaction {} does not exist",
                     pair.interaction
                 ))
             } else {
@@ -110,8 +110,8 @@ impl FeModel {
                     && self.properties.stefan_boltzmann.is_some();
                 let reason = if radiation && !constants {
                     Some(
-                        "Strahlung braucht den absoluten Nullpunkt und die \
-                         Stefan-Boltzmann-Konstante (Modelleigenschaften)"
+                        "Radiation needs the absolute zero and the \
+                         Stefan-Boltzmann constant (model properties)"
                             .into(),
                     )
                 } else {
@@ -132,7 +132,7 @@ impl FeModel {
                 let reason = match &output.kind {
                     crate::HistoryKind::Contact { pair } => {
                         (!self.contact_pairs.iter().any(|c| c.name == *pair))
-                            .then(|| format!("Contact Pair {pair} existiert nicht"))
+                            .then(|| format!("Contact Pair {pair} does not exist"))
                     }
                     kind => kind.region().and_then(|r| r.missing_reference(mesh)),
                 };
@@ -170,7 +170,7 @@ impl FeModel {
     ) -> Option<String> {
         (references.into_iter().flatten())
             .find(|name| self.amplitude(name).is_none())
-            .map(|name| format!("Amplitude {name} existiert nicht"))
+            .map(|name| format!("Amplitude {name} does not exist"))
     }
 }
 
@@ -183,12 +183,12 @@ impl Section {
             SectionKind::Solid => {}
             SectionKind::Truss { area } => {
                 if !(area.is_finite() && *area > 0.0) {
-                    return Some("Die Querschnittsfläche muss größer als 0 sein".into());
+                    return Some("The cross-section area must be greater than 0".into());
                 }
             }
             SectionKind::Beam(beam) => {
                 if !beam.profile.is_valid() {
-                    return Some("Die Profilmaße sind ungültig".into());
+                    return Some("The profile dimensions are invalid".into());
                 }
             }
         }
@@ -204,7 +204,7 @@ impl Section {
                     .is_none()
             {
                 return Some(format!(
-                    "Die Normale ist parallel zur Achse von Element {}",
+                    "The normal is parallel to the axis of element {}",
                     element.id
                 ));
             }
@@ -222,23 +222,23 @@ fn master_slave_reference(master: &Region, slave: &Region, mesh: &FeMesh) -> Opt
 }
 
 impl Region {
-    /// What the region refers to that the mesh does not have, e.g. "Node Set FIX existiert
-    /// nicht".
+    /// What the region refers to that the mesh does not have, e.g. "Node Set FIX does not
+    /// exist".
     pub fn missing_reference(&self, mesh: &FeMesh) -> Option<String> {
         match self {
             Region::Parts(names) => names
                 .iter()
                 .find(|name| !mesh.parts.iter().any(|p| &p.name == *name))
-                .map(|name| format!("Part {name} existiert nicht")),
+                .map(|name| format!("Part {name} does not exist")),
             Region::NodeSet(name) => (!mesh.node_sets.contains_key(name))
-                .then(|| format!("Node Set {name} existiert nicht")),
+                .then(|| format!("Node Set {name} does not exist")),
             Region::ElementSet(name) => (!mesh.element_sets.contains_key(name))
-                .then(|| format!("Element Set {name} existiert nicht")),
+                .then(|| format!("Element Set {name} does not exist")),
             Region::Surface(name) => (!mesh.surfaces.contains_key(name))
-                .then(|| format!("Surface {name} existiert nicht")),
+                .then(|| format!("Surface {name} does not exist")),
             Region::Nodes(nodes) => {
                 let missing = nodes.iter().filter(|&&n| mesh.node(n).is_none()).count();
-                (missing > 0).then(|| format!("{missing} Knoten existieren nicht"))
+                (missing > 0).then(|| format!("{missing} nodes do not exist"))
             }
             Region::Faces(faces) => {
                 let missing = faces
@@ -248,14 +248,14 @@ impl Region {
                             .is_none_or(|e| face == 0 || usize::from(face) > e.faces().len())
                     })
                     .count();
-                (missing > 0).then(|| format!("{missing} Elementflächen existieren nicht"))
+                (missing > 0).then(|| format!("{missing} element faces do not exist"))
             }
             Region::Geometry(entities) => {
                 if mesh.cad.is_empty() {
-                    return Some("Das Netz ist nicht aus der Geometrie erzeugt".into());
+                    return Some("The mesh was not created from the geometry".into());
                 }
                 let missing = entities.iter().filter(|&&e| !mesh.cad.contains(e)).count();
-                (missing > 0).then(|| format!("{missing} Geometrieelemente sind nicht vernetzt"))
+                (missing > 0).then(|| format!("{missing} geometry entities are not meshed"))
             }
         }
     }

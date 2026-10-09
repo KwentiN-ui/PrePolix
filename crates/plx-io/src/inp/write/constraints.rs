@@ -172,7 +172,7 @@ impl Writer {
     fn point_spring(&mut self, sets: &mut Sets, spring: &PointSpring) -> Result<(), WriteError> {
         let nodes = spring.region.nodes(sets.mesh);
         if nodes.is_empty() {
-            return Err(empty(&spring.name, "Knoten"));
+            return Err(empty(&spring.name, "nodes"));
         }
         let name = super::name(&spring.name);
         let springs = nodes.into_iter().map(|node| vec![node]).collect();
@@ -187,7 +187,7 @@ impl Writer {
     ) -> Result<(), WriteError> {
         let (weights, area) = node_areas(sets.mesh, &spring.region.faces(sets.mesh), false);
         if weights.is_empty() {
-            return Err(empty(&spring.name, "Elementflächen"));
+            return Err(empty(&spring.name, "element faces"));
         }
         let scale = if spring.per_area { 1.0 } else { 1.0 / area };
         let name = super::name(&spring.name);
@@ -211,7 +211,7 @@ impl Writer {
         let faces = support.region.faces(mesh);
         let (weights, area) = node_areas(mesh, &faces, false);
         if weights.is_empty() {
-            return Err(empty(&support.name, "Elementflächen"));
+            return Err(empty(&support.name, "element faces"));
         }
         // Normal of each node: the mean of the outward normals of its faces.
         let mut normals: BTreeMap<NodeId, [f64; 3]> = BTreeMap::new();
@@ -277,11 +277,11 @@ impl Writer {
         let mesh = sets.mesh;
         let (weights, area) = node_areas(mesh, &spring.slave.faces(mesh), false);
         if weights.is_empty() {
-            return Err(empty(&spring.name, "Elementflächen auf der Slave-Seite"));
+            return Err(empty(&spring.name, "element faces on the slave side"));
         }
         let target = Target::new(mesh, &spring.master.faces(mesh));
         if target.faces.is_empty() {
-            return Err(empty(&spring.name, "Elementflächen auf der Master-Seite"));
+            return Err(empty(&spring.name, "element faces on the master side"));
         }
         let scale = if spring.per_area { 1.0 } else { 1.0 / area };
         let name = super::name(&spring.name);

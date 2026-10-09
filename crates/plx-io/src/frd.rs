@@ -19,7 +19,7 @@ pub enum FrdError {
         #[source]
         source: std::io::Error,
     },
-    #[error("Zeile {line}: {message}")]
+    #[error("Line {line}: {message}")]
     Parse { line: usize, message: String },
 }
 
@@ -198,7 +198,7 @@ impl<'a> Reader<'a> {
             .pos
             .checked_add(count)
             .filter(|&end| end <= self.data.len())
-            .ok_or_else(|| self.error("Binärdaten enden vorzeitig"))?;
+            .ok_or_else(|| self.error("Binary data ends prematurely"))?;
         let data: &'a [u8] = self.data;
         self.pos = end;
         Ok(&data[end - count..end])
@@ -240,10 +240,12 @@ impl<'a> Reader<'a> {
                         continue;
                     }
                     let id = int_field(&line, 3..13)
-                        .ok_or_else(|| self.error(format!("Ungültige Knotenzeile: {line}")))?;
+                        .ok_or_else(|| self.error(format!("Invalid node line: {line}")))?;
                     let values = fixed_floats(&line, 13, 3);
                     if values.len() < 3 {
-                        return Err(self.error(format!("Knoten {id} hat keine drei Koordinaten")));
+                        return Err(
+                            self.error(format!("Node {id} does not have three coordinates"))
+                        );
                     }
                     self.add_node(id, [values[0], values[1], values[2]]);
                 }
@@ -256,7 +258,7 @@ impl<'a> Reader<'a> {
         if id > 0 && self.import.mesh.set_node(id as u32, xyz) {
             self.import
                 .warnings
-                .push(format!("Knoten {id} ist mehrfach definiert"));
+                .push(format!("Node {id} is defined more than once"));
         }
     }
 
@@ -269,7 +271,7 @@ impl<'a> Reader<'a> {
                     let [id, kind, _group, material] = [0, 4, 8, 12].map(|o| i32_at(head, o));
                     let node_count = element_kind(kind)
                         .map(|(shape, _)| shape.node_count())
-                        .ok_or_else(|| self.error(format!("Unbekannter Elementtyp {kind}")))?;
+                        .ok_or_else(|| self.error(format!("Unknown element type {kind}")))?;
                     let nodes = self.take_bytes(node_count * 4)?;
                     let nodes: Vec<i32> = (0..node_count).map(|k| i32_at(nodes, k * 4)).collect();
                     self.add_element(id, kind, material, nodes);
@@ -311,7 +313,7 @@ impl<'a> Reader<'a> {
     fn add_element(&mut self, id: i32, kind: i32, material: i32, frd_nodes: Vec<i32>) {
         let Some((shape, type_name)) = element_kind(kind) else {
             self.import.warnings.push(format!(
-                "Element {id}: Elementtyp {kind} wird nicht unterstützt"
+                "Element {id}: Element type {kind} is not supported"
             ));
             return;
         };
@@ -319,7 +321,7 @@ impl<'a> Reader<'a> {
         if frd_nodes.len() < count {
             self.import
                 .warnings
-                .push(format!("Element {id} ist unvollständig"));
+                .push(format!("Element {id} is incomplete"));
             return;
         }
         let nodes = reorder_nodes(shape, &frd_nodes[..count])
@@ -364,7 +366,7 @@ impl<'a> Reader<'a> {
 
         let field_line = self
             .next_line()
-            .ok_or_else(|| self.error("Ergebnisblock endet nach dem Kopf"))?;
+            .ok_or_else(|| self.error("Result block ends after the header"))?;
         let field_name = field_line
             .split_whitespace()
             .nth(1)
@@ -375,7 +377,7 @@ impl<'a> Reader<'a> {
         for _ in 0..declared {
             let line = self
                 .next_line()
-                .ok_or_else(|| self.error("Komponentenliste endet vorzeitig"))?;
+                .ok_or_else(|| self.error("Component list ends prematurely"))?;
             // Components flagged as existing elsewhere (like ALL) carry no values.
             if int_field(&line, 33..38).unwrap_or(0) == 0 {
                 let name = line.get(5..13).unwrap_or("").trim();

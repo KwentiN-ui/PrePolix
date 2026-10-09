@@ -57,7 +57,7 @@ impl ExplodedDialog {
         let mut result = ExplodedResult::Open;
         let mut change = None;
         let mut open = true;
-        egui::Window::new("Explosionsansicht")
+        egui::Window::new("Exploded View")
             .id(egui::Id::new("exploded view"))
             .open(&mut open)
             .collapsible(false)
@@ -68,10 +68,10 @@ impl ExplodedDialog {
                 change = self.form(ui);
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Abbrechen").clicked() {
+                    if ui.button("Cancel").clicked() {
                         result = ExplodedResult::Cancel;
                     }
-                    if ui.button("Deaktivieren").clicked() {
+                    if ui.button("Turn Off").clicked() {
                         result = ExplodedResult::Disable;
                     }
                     if ui.button("OK").clicked() {
@@ -88,13 +88,13 @@ impl ExplodedDialog {
     fn form(&mut self, ui: &mut Ui) -> Option<Change> {
         let before = self.draft.clone();
         let method = self.draft.method;
-        ui.strong("Methode");
+        ui.strong("Method");
         egui::Grid::new("exploded method")
             .num_columns(2)
             .min_col_width(LABEL_WIDTH)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
-                ui.label("Explosionsmethode");
+                ui.label("Explosion method");
                 egui::ComboBox::from_id_salt("exploded method combo")
                     .selected_text(method.label())
                     .width(160.0)
@@ -110,7 +110,7 @@ impl ExplodedDialog {
                     });
                 ui.end_row();
                 if method == Method::CenterPoint {
-                    for (axis, label) in ["X-Koordinate", "Y-Koordinate", "Z-Koordinate"]
+                    for (axis, label) in ["X coordinate", "Y coordinate", "Z coordinate"]
                         .into_iter()
                         .enumerate()
                     {
@@ -124,8 +124,8 @@ impl ExplodedDialog {
                     }
                     ui.label("");
                     if ui
-                        .button("Modellmitte")
-                        .on_hover_text("Den Mittelpunkt in die Mitte des Modells legen")
+                        .button("Model Center")
+                        .on_hover_text("Place the center point at the center of the model")
                         .clicked()
                     {
                         self.draft.center = self.model_center;
@@ -133,9 +133,9 @@ impl ExplodedDialog {
                     ui.end_row();
                 }
                 if method == Method::Disassembly {
-                    ui.label("Kontakttoleranz").on_hover_text(
-                        "Abstand, unter dem sich Flächen zweier Parts berühren; \
-                             0 nimmt ein Tausendstel der Diagonale der Baugruppe.",
+                    ui.label("Contact tolerance").on_hover_text(
+                        "Distance below which faces of two parts touch; \
+                             0 takes one thousandth of the assembly diagonal.",
                     );
                     ui.add(
                         egui::DragValue::new(&mut self.draft.tolerance)
@@ -148,13 +148,13 @@ impl ExplodedDialog {
             });
         ui.weak(method.description());
         ui.add_space(6.0);
-        ui.strong("Richtung und Skalierung");
+        ui.strong("Direction and Scaling");
         egui::Grid::new("exploded scaling")
             .num_columns(2)
             .min_col_width(LABEL_WIDTH)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
-                ui.label("Richtung");
+                ui.label("Direction");
                 egui::ComboBox::from_id_salt("exploded direction combo")
                     .selected_text(self.draft.direction.label())
                     .width(160.0)
@@ -168,8 +168,8 @@ impl ExplodedDialog {
                         }
                     });
                 ui.end_row();
-                ui.label("Vergrößerung")
-                    .on_hover_text("Wie weit die Parts beim Skalierungsfaktor 1 auseinander sind");
+                ui.label("Magnification")
+                    .on_hover_text("How far apart the parts are at scale factor 1");
                 ui.add(
                     egui::DragValue::new(&mut self.draft.magnification)
                         .speed(0.05)
@@ -177,7 +177,7 @@ impl ExplodedDialog {
                         .max_decimals(3),
                 );
                 ui.end_row();
-                ui.label("Skalierungsfaktor");
+                ui.label("Scale factor");
                 ui.add(
                     egui::DragValue::new(&mut self.draft.scale_factor)
                         .speed(0.005)
@@ -186,16 +186,16 @@ impl ExplodedDialog {
                 );
                 ui.end_row();
                 if method == Method::Disassembly {
-                    ui.label("Schrittweise").on_hover_text(
-                        "Die Baugruppe Ebene für Ebene zerlegen: erst kommen die Parts ab, die \
-                         auf dem Grundkörper sitzen, und nehmen mit, was auf ihnen sitzt, dann \
-                         diese Parts und so weiter.",
+                    ui.label("Sequential").on_hover_text(
+                        "Disassemble the assembly level by level: first the parts sitting on the \
+                         base body come off, taking along what sits on them, then \
+                         these parts and so on.",
                     );
                     ui.horizontal(|ui| {
-                        ui.radio_value(&mut self.draft.sequential, true, "Ja");
-                        ui.radio_value(&mut self.draft.sequential, false, "Nein");
+                        ui.radio_value(&mut self.draft.sequential, true, "Yes");
+                        ui.radio_value(&mut self.draft.sequential, false, "No");
                         if self.draft.sequential && self.step_count > 1 {
-                            ui.weak(format!("{} Ebenen", self.step_count));
+                            ui.weak(format!("{} levels", self.step_count));
                         }
                     });
                     ui.end_row();
@@ -208,11 +208,11 @@ impl ExplodedDialog {
         let mut position = self.draft.scale_factor;
         let dragged = ui
             .horizontal(|ui| {
-                ui.label("Zusammengebaut");
+                ui.label("Assembled");
                 ui.spacing_mut().slider_width = 200.0;
                 let response =
                     ui.add(egui::Slider::new(&mut position, 0.0..=1.0).show_value(false));
-                ui.label("Explodiert");
+                ui.label("Exploded");
                 response.changed()
             })
             .inner;

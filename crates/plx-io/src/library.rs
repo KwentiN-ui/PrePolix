@@ -14,9 +14,9 @@ pub enum LibraryError {
         #[source]
         source: std::io::Error,
     },
-    #[error("{path}: keine gültige Materialbibliothek: {message}")]
+    #[error("{path}: not a valid material library: {message}")]
     Format { path: PathBuf, message: String },
-    #[error("{path} stammt aus einer neueren prepolix-Version (Format {format})")]
+    #[error("{path} comes from a newer prepolix version (format {format})")]
     Newer { path: PathBuf, format: u32 },
 }
 
@@ -79,7 +79,7 @@ mod tests {
 
         let mut library = MaterialLibrary::default();
         let category = library.add_category(&[]).unwrap();
-        library.rename(&category, "Eigene").unwrap();
+        library.rename(&category, "Custom").unwrap();
         save_library(&path, &library).unwrap();
         assert_eq!(read_library(&path).unwrap(), library);
 

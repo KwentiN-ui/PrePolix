@@ -39,25 +39,25 @@ impl Method {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Disassembly => "Demontage",
-            Self::AssemblyCenter => "Baugruppenmitte",
-            Self::CenterPoint => "Mittelpunkt",
+            Self::Disassembly => "Disassembly",
+            Self::AssemblyCenter => "Assembly center",
+            Self::CenterPoint => "Center point",
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
             Self::Disassembly => {
-                "Jedes Part wird so bewegt, wie es abgenommen würde: entlang der Normalen \
-                 seiner Anlagefläche oder entlang der Achse der Bohrung, in der es sitzt."
+                "Each part is moved the way it would be taken off: along the normal of its \
+                 mating face or along the axis of the bore it sits in."
             }
             Self::AssemblyCenter => {
-                "Jedes Part wird von der Mitte der Baugruppe weg bewegt, bis es die bereits \
-                 auseinandergezogenen Parts nicht mehr überlappt."
+                "Each part is moved away from the center of the assembly until it no longer \
+                 overlaps the parts that are already spaced out."
             }
             Self::CenterPoint => {
-                "Jedes Part wird vom eingegebenen Punkt weg bewegt, umso weiter, je weiter es \
-                 schon von ihm entfernt ist."
+                "Each part is moved away from the entered point, the further the further it \
+                 already is from it."
             }
         }
     }

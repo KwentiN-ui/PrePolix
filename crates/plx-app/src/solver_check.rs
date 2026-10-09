@@ -48,7 +48,7 @@ pub fn run(solver: &plx_job::Solver, work_dir: &Path) -> Report {
     let mut checks = vec![version];
     let mut solvers = None;
     if started {
-        let dir = work_dir.join("Selbsttest");
+        let dir = work_dir.join("SelfTest");
         checks.push(tip_force(solver, &dir));
         checks.push(pressure(solver, &dir));
         let _ = std::fs::remove_dir_all(&dir);
@@ -56,12 +56,12 @@ pub fn run(solver: &plx_job::Solver, work_dir: &Path) -> Report {
         let names = solvers.iter().flatten().filter_map(|s| s.keyword());
         let names = names.collect::<Vec<_>>().join(", ");
         checks.push(check(
-            "Gleichungslöser",
+            "Equation solvers",
             solvers.is_some(),
             match &solvers {
-                Some(_) if names.is_empty() => "Kein direkter Löser gefunden".into(),
-                Some(_) => format!("Vorhanden: {names}"),
-                None => "Nicht geprüft".into(),
+                Some(_) if names.is_empty() => "No direct solver found".into(),
+                Some(_) => format!("Available: {names}"),
+                None => "Not checked".into(),
             },
         ));
     }
@@ -136,7 +136,7 @@ fn check(name: &'static str, passed: bool, message: String) -> CheckResult {
 
 /// `ccx -v` prints e.g. "This is Version 2.21".
 fn version(executable: &Path) -> CheckResult {
-    const NAME: &str = "Programm starten";
+    const NAME: &str = "Start executable";
     if let Some(message) = crate::settings::missing_executable(executable) {
         return check(NAME, false, message);
     }
@@ -152,7 +152,7 @@ fn version(executable: &Path) -> CheckResult {
                     NAME,
                     false,
                     format!(
-                        "{} startet, meldet aber keine CalculiX-Version",
+                        "{} starts but reports no CalculiX version",
                         executable.display()
                     ),
                 ),
@@ -161,7 +161,7 @@ fn version(executable: &Path) -> CheckResult {
         Err(error) => check(
             NAME,
             false,
-            format!("{} nicht gestartet: {error}", executable.display()),
+            format!("{} not started: {error}", executable.display()),
         ),
     }
 }
@@ -169,7 +169,7 @@ fn version(executable: &Path) -> CheckResult {
 /// Cantilever with a surface traction on the free end: the tip deflection must match
 /// Timoshenko beam theory and the reactions must balance the load.
 fn tip_force(solver: &plx_job::Solver, dir: &Path) -> CheckResult {
-    const NAME: &str = "Kragbalken mit Endlast";
+    const NAME: &str = "Cantilever with end load";
     let mesh = beam_mesh();
     let tip = faces_where(&mesh, |p| p[0] == LENGTH);
     let model = beam_model(
@@ -177,7 +177,7 @@ fn tip_force(solver: &plx_job::Solver, dir: &Path) -> CheckResult {
         LoadKind::SurfaceTraction([0.0, 0.0, -TIP_FORCE]),
         Region::Faces(tip),
     );
-    let frd = match solve(solver, dir, "Kragbalken", &mesh, &model) {
+    let frd = match solve(solver, dir, "Cantilever", &mesh, &model) {
         Ok(frd) => frd,
         Err(message) => return check(NAME, false, message),
     };
@@ -195,7 +195,7 @@ fn tip_force(solver: &plx_job::Solver, dir: &Path) -> CheckResult {
         NAME,
         passed,
         format!(
-            "Durchbiegung {deflection:.4} mm (Balkentheorie {expected:.4} mm, Abweichung {:.1} %), Reaktion {reaction:.3} N (Last {TIP_FORCE} N)",
+            "Deflection {deflection:.4} mm (beam theory {expected:.4} mm, deviation {:.1} %), reaction {reaction:.3} N (load {TIP_FORCE} N)",
             deviation * 100.0
         ),
     )
@@ -204,11 +204,11 @@ fn tip_force(solver: &plx_job::Solver, dir: &Path) -> CheckResult {
 /// Pressure on the free end: the axial reactions must balance pressure times area. (Loads on
 /// clamped nodes do not show up as reactions, so the end face is used, not the top.)
 fn pressure(solver: &plx_job::Solver, dir: &Path) -> CheckResult {
-    const NAME: &str = "Kragbalken mit Druck";
+    const NAME: &str = "Cantilever with pressure";
     let mesh = beam_mesh();
     let tip = faces_where(&mesh, |p| p[0] == LENGTH);
     let model = beam_model(&mesh, LoadKind::Pressure(PRESSURE), Region::Faces(tip));
-    let frd = match solve(solver, dir, "Druck", &mesh, &model) {
+    let frd = match solve(solver, dir, "Pressure", &mesh, &model) {
         Ok(frd) => frd,
         Err(message) => return check(NAME, false, message),
     };
@@ -218,7 +218,7 @@ fn pressure(solver: &plx_job::Solver, dir: &Path) -> CheckResult {
     check(
         NAME,
         passed,
-        format!("Reaktion {reaction:.3} N (Druck mal Fläche {expected} N)"),
+        format!("Reaction {reaction:.3} N (pressure times area {expected} N)"),
     )
 }
 
@@ -229,8 +229,8 @@ fn solve(
     mesh: &FeMesh,
     model: &FeModel,
 ) -> Result<FrdImport, String> {
-    let input = plx_io::inp::write_inp(mesh, model, "prepolix Selbsttest")
-        .map_err(|e| format!("Eingabedatei nicht geschrieben: {e}"))?;
+    let input = plx_io::inp::write_inp(mesh, model, "prepolix self-test")
+        .map_err(|e| format!("Input file not written: {e}"))?;
     let mut job = Job::start(solver, dir, name, &input).map_err(|e| format!("Start: {e}"))?;
     let status = job.wait();
     let output = job.new_output();
@@ -240,12 +240,12 @@ fn solve(
             .find(|l| l.contains("*ERROR"))
             .map_or_else(String::new, |l| format!(": {}", l.trim()));
         return Err(format!(
-            "Rechnung {}{error}",
+            "Analysis {}{error}",
             crate::analysis::Analysis::status_text(status)
         ));
     }
-    let path = job.results().ok_or("keine Ergebnisdatei geschrieben")?;
-    read_frd(&path).map_err(|e| format!("Ergebnisse nicht lesbar: {e}"))
+    let path = job.results().ok_or("no results file written")?;
+    read_frd(&path).map_err(|e| format!("Results not readable: {e}"))
 }
 
 /// Mean of a result component over nodes.
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn missing_program_fails_the_first_check_only() {
         let solver = plx_job::Solver {
-            executable: "plx-gibt-es-nicht".into(),
+            executable: "plx-does-not-exist".into(),
             threads: 1,
         };
         let report = run(&solver, &std::env::temp_dir());
@@ -448,10 +448,10 @@ mod tests {
     #[test]
     fn installed_calculix_passes() {
         if Command::new("ccx").arg("-v").output().is_err() {
-            eprintln!("ccx nicht gefunden, Test übersprungen");
+            eprintln!("ccx not found, test skipped");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("plx-selbsttest-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plx-selftest-{}", std::process::id()));
         let report = run(&plx_job::Solver::default(), &dir);
         let _ = std::fs::remove_dir_all(&dir);
         for result in &report.checks {
