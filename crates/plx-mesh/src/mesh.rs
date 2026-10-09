@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::element::ElementShape;
+use crate::element::{ElementShape, FaceTopology};
 use crate::fast_map::FastMap;
 
 pub type NodeId = u32;
@@ -15,6 +15,27 @@ pub struct Element {
     pub type_name: String,
     pub shape: ElementShape,
     pub nodes: Vec<NodeId>,
+}
+
+impl Element {
+    /// Whether this is a plane stress, plane strain or axisymmetric element of a 2D model.
+    /// Its faces are its edges then, see [`Self::faces`].
+    pub fn is_plane(&self) -> bool {
+        let name = self.type_name.as_bytes();
+        ["CPS", "CPE", "CAX"]
+            .iter()
+            .any(|p| name.len() >= 3 && name[..3].eq_ignore_ascii_case(p.as_bytes()))
+    }
+
+    /// Faces in CalculiX face order. A 2D element's faces are its edges, as CalculiX numbers
+    /// them in surfaces and distributed loads (S1 = P1 = edge from node 1 to 2).
+    pub fn faces(&self) -> &'static [FaceTopology] {
+        if self.is_plane() {
+            self.shape.edges()
+        } else {
+            self.shape.faces()
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -153,6 +174,30 @@ impl FeMesh {
             .flat_map(|e| e.nodes.iter().map(move |&n| (e.id, n)))
             .filter(|&(_, n)| !self.node_lookup.contains_key(&n))
             .collect()
+    }
+
+    /// Changes the type names of the elements, e.g. when the model space changes.
+    pub fn retype_elements(&mut self, mut type_name: impl FnMut(&str, ElementShape) -> String) {
+        for element in &mut self.elements {
+            element.type_name = type_name(&element.type_name, element.shape);
+        }
+    }
+
+    /// Reverses the node order of triangles and quadrilaterals for which `flip` holds, which
+    /// turns their normal around; corners and midside nodes stay matched.
+    pub fn flip_surface_elements(&mut self, mut flip: impl FnMut(&Element) -> bool) {
+        for element in &mut self.elements {
+            let order: &[usize] = match element.shape {
+                ElementShape::Tri3 => &[0, 2, 1],
+                ElementShape::Tri6 => &[0, 2, 1, 5, 4, 3],
+                ElementShape::Quad4 => &[0, 3, 2, 1],
+                ElementShape::Quad8 => &[0, 3, 2, 1, 7, 6, 5, 4],
+                _ => continue,
+            };
+            if flip(element) {
+                element.nodes = order.iter().map(|&k| element.nodes[k]).collect();
+            }
+        }
     }
 
     /// Whether a part, set or surface already has this name; CalculiX ignores case.

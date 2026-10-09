@@ -13,6 +13,7 @@ mod keywords;
 mod material_library;
 mod meshing;
 mod model;
+mod model_properties;
 mod numeric;
 mod overlay;
 mod properties;
@@ -75,6 +76,7 @@ mod tests {
             ("material_library.rs", include_str!("material_library.rs")),
             ("main.rs", include_str!("main.rs")),
             ("model.rs", include_str!("model.rs")),
+            ("model_properties.rs", include_str!("model_properties.rs")),
             ("overlay.rs", include_str!("overlay.rs")),
             ("properties.rs", include_str!("properties.rs")),
             ("results.rs", include_str!("results.rs")),

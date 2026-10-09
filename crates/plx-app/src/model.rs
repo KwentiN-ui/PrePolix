@@ -86,6 +86,8 @@ pub struct Highlight {
     pub faces: HashSet<(ElementId, u8)>,
     /// Nodes, drawn as points over the scene.
     pub nodes: Vec<NodeId>,
+    /// Lines between two nodes drawn over the scene, such as the edges of 2D elements.
+    pub lines: Vec<[NodeId; 2]>,
 }
 
 impl Highlight {
@@ -168,6 +170,8 @@ pub fn load(path: &Path) -> Result<LoadedModel, String> {
                 skipped_keywords,
                 files,
             } = read_inp(path).map_err(|e| e.to_string())?;
+            // Plane stress, plane strain or axisymmetric elements make a 2D model.
+            fe.properties.space = plx_model::ModelSpace::of_mesh(&mesh);
             let included = files.len().saturating_sub(1);
             (mesh, warnings, skipped_keywords, included, None)
         };
@@ -522,6 +526,43 @@ impl Model {
             .collect()
     }
 
+    /// Edges of 2D elements on the outline of their part, the faces of 2D models, as
+    /// (part, (element, edge number), corner and midside nodes).
+    pub fn outline_edges(&self) -> Vec<(usize, (ElementId, u8), Vec<NodeId>)> {
+        let mut edges = Vec::new();
+        for (index, part) in self.mesh.parts.iter().enumerate() {
+            let mut count: std::collections::HashMap<(NodeId, NodeId), usize> =
+                std::collections::HashMap::new();
+            let mut found = Vec::new();
+            for element in part.elements.iter().filter_map(|&id| self.mesh.element(id)) {
+                if !element.is_plane() {
+                    continue;
+                }
+                for (k, edge) in element.faces().iter().enumerate() {
+                    let [a, b] = [edge.corners[0], edge.corners[1]].map(|l| element.nodes[l]);
+                    *count.entry((a.min(b), a.max(b))).or_default() += 1;
+                    let mut nodes = vec![a, b];
+                    if element.shape.is_quadratic() {
+                        nodes.extend(edge.mids.iter().map(|&l| element.nodes[l]));
+                    }
+                    found.push(((element.id, k as u8 + 1), nodes));
+                }
+            }
+            for (face, nodes) in found {
+                let key = (nodes[0].min(nodes[1]), nodes[0].max(nodes[1]));
+                if count[&key] == 1 {
+                    edges.push((index, face, nodes));
+                }
+            }
+        }
+        edges
+    }
+
+    /// Whether the model consists of 2D elements, whose faces are their edges.
+    pub fn is_plane(&self) -> bool {
+        self.mesh.elements().first().is_some_and(|e| e.is_plane())
+    }
+
     /// Renames a part as CalculiX needs it: upper case, unique among parts, sets and
     /// surfaces. Sections, boundary conditions and loads on the part follow.
     pub fn rename_part(&mut self, index: usize, name: &str) -> Result<(), String> {
@@ -701,6 +742,7 @@ mod tests {
             name: "Section-1".into(),
             material: "Steel".into(),
             region: plx_model::Region::Parts(vec![first.clone()]),
+            thickness: 1.0,
         });
         assert!(model.rename_part(0, "").is_err());
         assert!(model.rename_part(0, "zwei wörter").is_err());
@@ -891,6 +933,7 @@ mod tests {
             kind: BoundaryKind::Displacement([Some(0.1), None, None, None, None, None]),
         });
         model.fe = FeModel {
+            properties: Default::default(),
             materials: vec![Material {
                 name: "Steel".into(),
                 density: None,
@@ -903,6 +946,7 @@ mod tests {
                 name: "Section-1".into(),
                 material: "Steel".into(),
                 region: Region::Parts(vec!["SOLID-1".into()]),
+                thickness: 1.0,
             }],
             steps: vec![step],
             user_keywords: Vec::new(),

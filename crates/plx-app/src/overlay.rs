@@ -38,6 +38,11 @@ pub struct Overlay {
     pub show_view_triad: bool,
     /// Selected nodes in render coordinates, drawn as highlighted points.
     pub nodes: Vec<Vec3>,
+    /// Selected lines in render coordinates, such as edges of 2D elements.
+    pub lines: Vec<[Vec3; 2]>,
+    /// The axis of revolution of an axisymmetric model in render coordinates, drawn as a
+    /// dash-dotted line between the two points.
+    pub axis: Option<[Vec3; 2]>,
     /// Hot spot paths in render coordinates: the toe, then the read-out points.
     pub paths: Vec<Vec<Vec3>>,
 }
@@ -88,6 +93,15 @@ pub fn draw(
             triad(&painter, camera, center, 36.0, false);
         }
     }
+    if let Some([a, b]) = overlay.axis {
+        dash_dotted(&painter, project(camera, rect, a), project(camera, rect, b));
+    }
+    for &[a, b] in &overlay.lines {
+        painter.line_segment(
+            [project(camera, rect, a), project(camera, rect, b)],
+            Stroke::new(3.0, Color32::RED),
+        );
+    }
     let view_proj = camera.view_proj(rect.aspect_ratio());
     for &node in &overlay.nodes {
         let ndc = view_proj.project_point3(node);
@@ -130,6 +144,33 @@ pub fn draw(
     }
     clicked_axis
 }
+
+/// A dash-dotted line, the technical drawing's line for axes of symmetry.
+fn dash_dotted(painter: &Painter, a: Pos2, b: Pos2) {
+    const PATTERN: [(f32, bool); 4] = [(18.0, true), (4.0, false), (3.0, true), (4.0, false)];
+    let length = a.distance(b);
+    if length < 1.0 {
+        return;
+    }
+    let direction = (b - a) / length;
+    let stroke = Stroke::new(1.5, AXIS_COLOR);
+    let mut position = 0.0;
+    'line: loop {
+        for (dash, drawn) in PATTERN {
+            let end = (position + dash).min(length);
+            if drawn {
+                painter.line_segment([a + direction * position, a + direction * end], stroke);
+            }
+            position = end;
+            if position >= length {
+                break 'line;
+            }
+        }
+    }
+}
+
+/// Colour of the axis of revolution.
+const AXIS_COLOR: Color32 = Color32::from_rgb(40, 40, 160);
 
 /// Makes the ends of the corner triad clickable: an axis tip, or the end of its faint negative
 /// part, sets the view to look down that direction.

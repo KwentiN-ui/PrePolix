@@ -15,6 +15,7 @@ use crate::meshing::{
     MeshItemEditor, MeshItemResult, MeshSetupResult, MeshSetupWindow, MeshingJob,
 };
 use crate::model::{self, Highlight, LoadedModel, Model};
+use crate::model_properties::{DialogResult, ModelPropertiesDialog};
 use crate::numeric;
 use crate::overlay::{Marker, Overlay};
 use crate::properties;
@@ -39,6 +40,10 @@ struct Workbench {
     settings: Settings,
     /// Open settings window with its unsaved draft.
     settings_window: Option<SettingsWindow>,
+    /// Open dialog of the model space and unit system, for a new or the open model.
+    model_dialog: Option<ModelPropertiesDialog>,
+    /// The new model asked for the geometry import; the app opens the file dialog.
+    import_requested: bool,
     viewport: Viewport,
     /// The FE model workspace: mesh and analysis set up from an input or project file.
     model: Option<Model>,
@@ -136,6 +141,8 @@ impl PrepolixApp {
             workbench: Workbench {
                 settings,
                 settings_window: None,
+                model_dialog: None,
+                import_requested: false,
                 viewport: Viewport::new(render_state),
                 model: None,
                 geometry: None,
@@ -216,6 +223,16 @@ impl PrepolixApp {
         });
     }
 
+    /// Geometry > Import. Without a model, PrePoMax first asks for the new model's
+    /// properties, so that a 2D geometry lands in a 2D model.
+    fn import(&mut self, ctx: &egui::Context) {
+        if self.workbench.model.is_none() {
+            self.workbench.new_model(true);
+        } else {
+            self.import_dialog(ctx);
+        }
+    }
+
     /// PrePoMax's Geometry > Import: a STEP, IGES or BREP file.
     fn import_dialog(&mut self, ctx: &egui::Context) {
         if self.loading.is_some() {
@@ -256,9 +273,9 @@ impl PrepolixApp {
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("Datei", |ui| {
-                let new = egui::Button::new("Neu").shortcut_text("Strg+N");
-                if ui.add_enabled(self.workbench.has_anything(), new).clicked() {
-                    self.workbench.close_model();
+                let new = egui::Button::new("Neu …").shortcut_text("Strg+N");
+                if ui.add(new).clicked() {
+                    self.workbench.new_model(false);
                 }
                 let open = egui::Button::new("Öffnen …").shortcut_text("Strg+O");
                 if ui.add_enabled(self.loading.is_none(), open).clicked() {
@@ -336,7 +353,7 @@ impl PrepolixApp {
             ui.menu_button("Geometrie", |ui| {
                 let import = egui::Button::new("Importieren …");
                 if ui.add_enabled(self.loading.is_none(), import).clicked() {
-                    self.import_dialog(ui.ctx());
+                    self.import(ui.ctx());
                 }
             });
             ui.menu_button("Netz", |ui| self.workbench.mesh_menu(ui));
@@ -357,9 +374,8 @@ impl PrepolixApp {
     fn tool_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 1.0;
-            let has_model = self.workbench.has_anything();
-            if icons::button(ui, Icon::New, "Neu (Strg+N)", has_model, false).clicked() {
-                self.workbench.close_model();
+            if icons::button(ui, Icon::New, "Neu (Strg+N)", true, false).clicked() {
+                self.workbench.new_model(false);
             }
             let can_open = self.loading.is_none();
             if icons::button(ui, Icon::Open, "Öffnen (Strg+O)", can_open, false).clicked() {
@@ -367,7 +383,7 @@ impl PrepolixApp {
             }
             let import = "Geometrie importieren (STEP, IGES, BREP)";
             if icons::button(ui, Icon::Import, import, can_open, false).clicked() {
-                self.import_dialog(ui.ctx());
+                self.import(ui.ctx());
             }
             let can_save = self.workbench.setup_model().is_some();
             if icons::button(ui, Icon::Save, "Speichern (Strg+S)", can_save, false).clicked() {
@@ -416,6 +432,27 @@ impl PrepolixApp {
     }
 
     fn status_bar(&self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            // PrePoMax shows the unit system of the model at the right.
+            if let Some(model) = &self.workbench.model {
+                let properties = model.fe.properties;
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(format!(
+                        "Einheitensystem: {}   Modellraum: {}",
+                        properties.units.label(),
+                        properties.space.label()
+                    ));
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        self.status_text(ui);
+                    });
+                });
+            } else {
+                self.status_text(ui);
+            }
+        });
+    }
+
+    fn status_text(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| match (&self.loading, self.workbench.shown()) {
             (Some(path), _) => {
                 ui.spinner();
@@ -513,7 +550,7 @@ impl eframe::App for PrepolixApp {
             self.workbench.save_project(false);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
-            self.workbench.close_model();
+            self.workbench.new_model(false);
         }
         let dropped = ctx.input(|i| {
             i.raw
@@ -616,6 +653,10 @@ impl eframe::App for PrepolixApp {
         self.workbench.update_hot_spot_preview();
         self.workbench.hot_spot_window(&ctx);
         self.workbench.settings_window(&ctx);
+        self.workbench.model_dialog_window(&ctx);
+        if std::mem::take(&mut self.workbench.import_requested) {
+            self.import_dialog(&ctx);
+        }
         self.workbench.rebuild_if_results_changed();
         self.workbench.update_section();
 
@@ -700,6 +741,15 @@ impl Workbench {
                         TreeItem::Component(view.field, view.component),
                     ));
                     self.set_tree_view(TreeView::Results);
+                    // Results of a 2D model are flat in z and seen from the front.
+                    if model
+                        .mesh
+                        .bounds()
+                        .is_some_and(|(min, max)| (max[2] - min[2]).abs() < 1e-9)
+                    {
+                        self.viewport
+                            .apply(ViewCommand::View(StandardView::Front), None);
+                    }
                     match self.results.iter().position(|r| r.path == model.path) {
                         Some(index) => {
                             self.results[index] = model;
@@ -726,6 +776,21 @@ impl Workbench {
                         TreeView::FeModel
                     };
                     self.set_tree_view(view);
+                    // Geometry imported into a model that has nothing yet, such as one just
+                    // created with File > New, keeps its model space and units.
+                    let mut model = model;
+                    if let Some(old) = &self.model
+                        && plx_mesher::is_cad_file(&path)
+                        && old.mesh.element_count() == 0
+                        && old.geometry.is_none()
+                    {
+                        model.fe = old.fe.clone();
+                    }
+                    // 2D models lie in the x-y plane and are seen from the front.
+                    if model.fe.properties.space.is_2d() {
+                        self.viewport
+                            .apply(ViewCommand::View(StandardView::Front), None);
+                    }
                     self.model = Some(model);
                     self.symbols_shown = None;
                     self.geometry = geometry_view;
@@ -861,6 +926,8 @@ impl Workbench {
                 field,
                 component,
             });
+        } else if let (Some(TreeItem::Model), TreeView::FeModel) = (&response.open, view) {
+            self.edit_model_properties();
         } else if let Some(TreeItem::MeshItem(index)) = response.open {
             let geometry = self.model.as_ref().and_then(|m| m.geometry.as_ref());
             self.mesh_item_editor = geometry.and_then(|g| MeshItemEditor::edit(g, index));
@@ -1024,13 +1091,33 @@ impl Workbench {
             .map_or_else(Vec::new, |(_, paths)| paths.clone())
     }
 
+    /// The y axis of an axisymmetric model as PrePoMax shows it, from below to above the
+    /// shown model, in render coordinates. Results show it when they are flat like the 2D
+    /// model they come from.
+    fn axis_line(&self, shown: &Model) -> Option<[glam::Vec3; 2]> {
+        let space = self.model.as_ref()?.fe.properties.space;
+        if space != plx_model::ModelSpace::Axisymmetric {
+            return None;
+        }
+        if shown.is_results() {
+            let (min, max) = shown.mesh.bounds()?;
+            let flat = (max[2] - min[2]).abs() <= 1e-6 * (max[0] - min[0]).abs().max(1e-30);
+            if !flat {
+                return None;
+            }
+        }
+        let (min, max) = shown.visible_bounds()?;
+        let origin = shown.global_origin();
+        let margin = 0.1 * (max.y - min.y).max(max.x - min.x);
+        Some([
+            glam::Vec3::new(origin.x, min.y - margin, origin.z),
+            glam::Vec3::new(origin.x, max.y + margin, origin.z),
+        ])
+    }
+
     /// The FE model, which can be set up.
     fn setup_model(&self) -> Option<&Model> {
         self.model.as_ref()
-    }
-
-    fn has_anything(&self) -> bool {
-        self.model.is_some() || !self.results.is_empty()
     }
 
     /// What the 3D view shows: the current results on the Results tab, else the FE model.
@@ -1368,7 +1455,13 @@ impl Workbench {
             Ok(generated) => {
                 let had_mesh = model.mesh.element_count() > 0;
                 let mut mesh = model.mesh.clone();
-                for part in generated.meshes {
+                let space = model.fe.properties.space;
+                for mut part in generated.meshes {
+                    if let Err(error) = space.prepare_generated_mesh(&mut part.mesh) {
+                        self.output
+                            .push(format!("Vernetzung fehlgeschlagen: {error}"));
+                        return;
+                    }
                     for warning in &part.warnings {
                         self.output.push(format!("Gmsh: {warning}"));
                     }
@@ -1422,8 +1515,11 @@ impl Workbench {
     /// PrePoMax's Model menu: create items of the FE model.
     fn model_menu(&mut self, ui: &mut egui::Ui) {
         if self.setup_model().is_none() {
-            ui.label("Zuerst eine .inp-Datei öffnen");
+            ui.label("Zuerst ein Modell anlegen oder öffnen");
             return;
+        }
+        if ui.button("Modelleigenschaften …").clicked() {
+            self.edit_model_properties();
         }
         if ui.button("CalculiX-Keywords bearbeiten …").clicked() {
             self.open_keyword_editor();
@@ -2402,6 +2498,87 @@ impl Workbench {
         }
     }
 
+    /// PrePoMax's File > New: asks for the model space and unit system of the new model,
+    /// with the last choice proposed. `then_import` opens the geometry import afterwards.
+    fn new_model(&mut self, then_import: bool) {
+        self.model_dialog = Some(ModelPropertiesDialog::new_model(
+            self.settings.new_model,
+            then_import,
+        ));
+    }
+
+    fn edit_model_properties(&mut self) {
+        if let Some(model) = &self.model {
+            self.model_dialog = Some(ModelPropertiesDialog::edit(model.fe.properties));
+        }
+    }
+
+    fn model_dialog_window(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.model_dialog else {
+            return;
+        };
+        let mesh = (self.model.as_ref())
+            .filter(|_| dialog.editing)
+            .map(|m| &m.mesh);
+        let result = dialog.show(ctx, mesh);
+        let (editing, then_import) = (dialog.editing, dialog.then_import);
+        match result {
+            DialogResult::Open => return,
+            DialogResult::Cancel => {}
+            DialogResult::Ok(properties) if editing => self.set_model_properties(properties),
+            DialogResult::Ok(properties) => {
+                self.settings.new_model = properties;
+                self.create_model(properties);
+                self.import_requested = then_import;
+            }
+        }
+        self.model_dialog = None;
+    }
+
+    /// Starts an empty model, to import geometry into or to save as a project.
+    fn create_model(&mut self, properties: plx_model::ModelProperties) {
+        self.close_model();
+        let mut model = Model::new(
+            std::path::Path::new("Unbenannt"),
+            plx_mesh::FeMesh::default(),
+        );
+        model.fe.properties = properties;
+        self.output.push(format!(
+            "Neues Modell: {}, {}",
+            properties.space.label(),
+            properties.units.label()
+        ));
+        self.model = Some(model);
+        self.set_tree_view(TreeView::Geometry);
+        self.viewport.set_parts(&[]);
+        self.frame_cache.clear();
+        self.update_contour();
+    }
+
+    /// Takes over changed model properties; a new model space retypes the mesh's surface
+    /// elements, as PrePoMax does.
+    fn set_model_properties(&mut self, properties: plx_model::ModelProperties) {
+        let Some(model) = &mut self.model else {
+            return;
+        };
+        let old = std::mem::replace(&mut model.fe.properties, properties);
+        if old.space != properties.space {
+            let mut mesh = model.mesh.clone();
+            if properties.space.convert_mesh(&mut mesh) {
+                model.set_mesh(mesh);
+                self.results_changed = true;
+                self.highlighted = None;
+            }
+            self.output
+                .push(format!("Modellraum: {}", properties.space.label()));
+        }
+        if old.units != properties.units {
+            self.output
+                .push(format!("Einheitensystem: {}", properties.units.label()));
+        }
+        self.results_changed = true;
+    }
+
     /// Removes the model and all results, like PrePoMax's File > New.
     fn close_model(&mut self) {
         if let Some(model) = self.model.take() {
@@ -2641,6 +2818,7 @@ impl Workbench {
             return;
         };
         let view = model.results.as_ref();
+        let axis = self.axis_line(model);
         self.viewport.options.contour_levels =
             view.filter(|v| v.current().is_some()).map(|v| v.levels);
         let (graphics, post) = (&self.settings.graphics, &self.settings.post);
@@ -2672,6 +2850,18 @@ impl Workbench {
             nodes: (model.highlight.nodes.iter())
                 .filter_map(|&id| model.node_position(model.mesh.node_index(id)?))
                 .collect(),
+            lines: (model.highlight.lines.iter())
+                .filter_map(|ends| {
+                    let [a, b] = ends.map(|id| {
+                        model
+                            .mesh
+                            .node_index(id)
+                            .and_then(|n| model.node_position(n))
+                    });
+                    Some([a?, b?])
+                })
+                .collect(),
+            axis,
             paths: self.overlay_paths(),
         };
     }

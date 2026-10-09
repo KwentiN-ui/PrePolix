@@ -8,6 +8,7 @@
 mod geometry;
 mod hot_spot;
 pub mod library;
+mod properties;
 mod region;
 mod validity;
 
@@ -16,6 +17,9 @@ pub use geometry::{
 };
 pub use hot_spot::{Extrapolation, HotSpot, HotSpotComponent, extrapolation_weights};
 pub use library::MaterialLibrary;
+pub use properties::{
+    BASE_QUANTITIES, DERIVED_QUANTITIES, ModelProperties, ModelSpace, UnitSystem,
+};
 pub use region::Region;
 pub use validity::{Invalid, ModelItem};
 
@@ -40,6 +44,9 @@ pub struct Project {
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FeModel {
+    /// Model space and unit system; projects saved before they existed are 3D.
+    #[serde(default)]
+    pub properties: ModelProperties,
     pub materials: Vec<Material>,
     pub sections: Vec<Section>,
     pub steps: Vec<Step>,
@@ -114,12 +121,20 @@ pub struct Elastic {
     pub poisson: f64,
 }
 
-/// Assigns a material to the solid elements of a region.
+/// Assigns a material to the solid elements of a region, PrePoMax's solid section.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Section {
     pub name: String,
     pub material: String,
     pub region: Region,
+    /// Thickness of plane stress and plane strain elements; other models ignore it.
+    #[serde(default = "unit_thickness")]
+    pub thickness: f64,
+}
+
+/// PrePoMax's default thickness of 2D sections.
+pub fn unit_thickness() -> f64 {
+    1.0
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -410,6 +425,7 @@ mod tests {
             name: "Section-1".into(),
             material: "Steel".into(),
             region: Region::Parts(vec!["A".into(), "B".into()]),
+            thickness: 1.0,
         });
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {

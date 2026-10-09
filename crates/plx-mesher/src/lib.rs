@@ -23,8 +23,11 @@ pub const CAD_EXTENSIONS: [&str; 5] = ["step", "stp", "iges", "igs", "brep"];
 /// Gmsh's element type numbers.
 const LINE2: i32 = 1;
 const TRI3: i32 = 2;
+const QUAD4: i32 = 3;
 const TET4: i32 = 4;
+const TRI6: i32 = 9;
 const TET10: i32 = 11;
+const QUAD8: i32 = 16;
 
 /// Gmsh numbers the last two midside nodes of a quadratic tetrahedron the other way round
 /// than CalculiX (edges 3-2, 3-1 against 2-4, 3-4 in 1-based CalculiX numbering).
@@ -136,6 +139,7 @@ pub fn tessellate(geometry: &Geometry) -> Result<GeometryDisplay, GmshError> {
             straight_midside_nodes: true,
             netgen: false,
             algorithms: Default::default(),
+            quads: false,
         };
         options.apply(gmsh)?;
         // A face Gmsh cannot mesh is left out of the display rather than failing the import.
@@ -158,13 +162,27 @@ pub fn generate_mesh(geometry: &Geometry) -> Result<GeneratedMesh, GmshError> {
     Ok(GeneratedMesh { mesh, warnings })
 }
 
-/// The names of the parts, one per solid, as the display and the meshes name them.
+/// The names of the parts, one per solid and one per face outside the solids, as the
+/// display and the meshes name them.
 pub fn part_names(geometry: &Geometry) -> Result<Vec<String>, GmshError> {
     let file = TempFile::with_contents("brep", &geometry.brep)?;
     with_gmsh(|gmsh| {
         gmsh.import_shapes(&file.0)?;
-        solid_names(gmsh, &gmsh.entities(3)?)
+        let mut names = solid_names(gmsh, &gmsh.entities(3)?)?;
+        names.extend(shell_names(gmsh, &free_faces(gmsh)?)?);
+        Ok(names)
     })
+}
+
+/// Faces that bound no solid, the shell parts of a geometry such as a 2D cross-section.
+fn free_faces(gmsh: &Gmsh) -> Result<Vec<i32>, GmshError> {
+    let mut in_solid = BTreeSet::new();
+    for volume in gmsh.entities(3)? {
+        in_solid.extend(gmsh.adjacencies(3, volume)?.1);
+    }
+    Ok((gmsh.entities(2)?.into_iter())
+        .filter(|f| !in_solid.contains(f))
+        .collect())
 }
 
 /// Meshes one part with tetrahedra after its meshing parameters, Gmsh algorithms and local
@@ -181,8 +199,9 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
         gmsh.import_shapes(&file.0)?;
         let volumes = gmsh.entities(3)?;
         let names = solid_names(gmsh, &volumes)?;
-        let index = (names.iter().position(|n| n == part))
-            .ok_or_else(|| GmshError::Other(format!("Die Geometrie hat kein Part {part}")))?;
+        let Some(index) = names.iter().position(|n| n == part) else {
+            return shell_part_mesh(gmsh, geometry, part);
+        };
         let volume = volumes[index];
         // The other solids go, so that only this one is meshed.
         let others: Vec<(i32, i32)> = (volumes.iter())
@@ -192,24 +211,12 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
         if !others.is_empty() {
             gmsh.remove(&others)?;
         }
-        let curvature = if setup.elements_per_curvature > 0.0 {
-            (std::f64::consts::TAU * setup.elements_per_curvature).round()
-        } else {
-            0.0
-        };
-        let order = if setup.second_order { 2 } else { 1 };
-        let options = MeshOptions {
-            max_size: setup.max_size,
-            min_size: setup.min_size.min(setup.max_size),
-            elements_per_2pi: curvature,
-            order,
-            straight_midside_nodes: !setup.midside_nodes_on_geometry,
-            netgen: setup.optimize,
-            algorithms: geometry.algorithms(part),
-        };
+        let options = MeshOptions::of_part(geometry, part);
         options.apply(gmsh)?;
-        local_sizes(gmsh, geometry, volume)?;
+        let faces: BTreeSet<i32> = gmsh.adjacencies(3, volume)?.1.into_iter().collect();
+        local_sizes(gmsh, geometry, &faces)?;
         gmsh.generate(3)?;
+        let order = options.order;
         let mesh = solid_mesh(gmsh, order, &[(volume, part.to_string())])?;
         Ok(GeneratedMesh {
             mesh,
@@ -218,12 +225,87 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
     })
 }
 
-/// The local mesh sizes on faces and edges of the solid as Gmsh size fields; Gmsh takes the
-/// smallest of them and the other size limits.
-fn local_sizes(gmsh: &Gmsh, geometry: &Geometry, volume: i32) -> Result<(), GmshError> {
-    let faces: BTreeSet<i32> = gmsh.adjacencies(3, volume)?.1.into_iter().collect();
+/// Meshes a face outside the solids with triangles, or mostly quadrilaterals if its meshing
+/// parameters ask for them, typed as shells (`S3`, `S6`, `S4`, `S8`); a 2D model gives them
+/// its own types. The mesh holds the one part, numbered from 1.
+fn shell_part_mesh(
+    gmsh: &Gmsh,
+    geometry: &Geometry,
+    part: &str,
+) -> Result<GeneratedMesh, GmshError> {
+    let faces = free_faces(gmsh)?;
+    let names = shell_names(gmsh, &faces)?;
+    let index = (names.iter().position(|n| n == part))
+        .ok_or_else(|| GmshError::Other(format!("Die Geometrie hat kein Part {part}")))?;
+    let face = faces[index];
+    // Only the face stays, so that only it is meshed.
+    let others: Vec<(i32, i32)> = (gmsh.entities(3)?.into_iter().map(|v| (3, v)))
+        .chain(faces.iter().filter(|&&f| f != face).map(|&f| (2, f)))
+        .collect();
+    if !others.is_empty() {
+        gmsh.remove(&others)?;
+    }
+    let options = MeshOptions::of_part(geometry, part);
+    options.apply(gmsh)?;
+    local_sizes(gmsh, geometry, &BTreeSet::from([face]))?;
+    gmsh.generate(2)?;
+    let coords = node_coords(gmsh)?;
+    let types: [(i32, ElementShape, &str); 2] = if options.order == 2 {
+        [
+            (TRI6, ElementShape::Tri6, "S6"),
+            (QUAD8, ElementShape::Quad8, "S8"),
+        ]
+    } else {
+        [
+            (TRI3, ElementShape::Tri3, "S3"),
+            (QUAD4, ElementShape::Quad4, "S4"),
+        ]
+    };
+    let mut mesh = FeMesh::default();
+    let mut part_elements = Part {
+        name: part.to_string(),
+        elements: Vec::new(),
+    };
+    for (gmsh_type, shape, type_name) in types {
+        let (_, nodes) = gmsh.elements(gmsh_type, face)?;
+        // Gmsh numbers the nodes of triangles and quadrilaterals as CalculiX does.
+        for element in nodes.chunks_exact(shape.node_count()) {
+            let mut ids = Vec::with_capacity(element.len());
+            for &tag in element {
+                let position = coords
+                    .get(&tag)
+                    .ok_or_else(|| GmshError::Other(format!("Knoten {tag} fehlt")))?;
+                let id = node_id(tag)?;
+                mesh.set_node(id, *position);
+                ids.push(id);
+            }
+            let id = ElementId::try_from(mesh.element_count() + 1)
+                .map_err(|_| GmshError::Other("zu viele Elemente".into()))?;
+            mesh.add_element(Element {
+                id,
+                type_name: type_name.into(),
+                shape,
+                nodes: ids,
+            })
+            .map_err(|e| GmshError::Other(e.to_string()))?;
+            part_elements.elements.push(id);
+        }
+    }
+    if part_elements.elements.is_empty() {
+        return Err(GmshError::Other("Gmsh hat keine Elemente erzeugt".into()));
+    }
+    mesh.parts.push(part_elements);
+    Ok(GeneratedMesh {
+        mesh,
+        warnings: gmsh.warnings()?,
+    })
+}
+
+/// The local mesh sizes on the given faces and their edges as Gmsh size fields; Gmsh takes
+/// the smallest of them and the other size limits.
+fn local_sizes(gmsh: &Gmsh, geometry: &Geometry, faces: &BTreeSet<i32>) -> Result<(), GmshError> {
     let mut edges = BTreeSet::new();
-    for &face in &faces {
+    for &face in faces {
         edges.extend(gmsh.adjacencies(2, face)?.1);
     }
     let mut fields = Vec::new();
@@ -235,7 +317,7 @@ fn local_sizes(gmsh: &Gmsh, geometry: &Geometry, volume: i32) -> Result<(), Gmsh
                 .collect()
         };
         let (local_faces, local_edges) =
-            (of_solid(local_faces, &faces), of_solid(local_edges, &edges));
+            (of_solid(local_faces, faces), of_solid(local_edges, &edges));
         if size.is_nan() || size <= 0.0 || (local_faces.is_empty() && local_edges.is_empty()) {
             continue;
         }
@@ -371,6 +453,7 @@ pub fn self_test() -> Result<(LibraryInfo, usize), GmshError> {
             straight_midside_nodes: true,
             netgen: false,
             algorithms: Default::default(),
+            quads: false,
         };
         options.apply(gmsh)?;
         gmsh.generate(3)?;
@@ -391,9 +474,31 @@ struct MeshOptions {
     straight_midside_nodes: bool,
     netgen: bool,
     algorithms: (Algorithm2d, Algorithm3d),
+    /// Recombines triangles into quadrilaterals where Gmsh can (faces only).
+    quads: bool,
 }
 
 impl MeshOptions {
+    /// The options of a part after its meshing parameters and Gmsh algorithms.
+    fn of_part(geometry: &Geometry, part: &str) -> Self {
+        let setup = geometry.parameters(part);
+        let curvature = if setup.elements_per_curvature > 0.0 {
+            (std::f64::consts::TAU * setup.elements_per_curvature).round()
+        } else {
+            0.0
+        };
+        Self {
+            max_size: setup.max_size,
+            min_size: setup.min_size.min(setup.max_size),
+            elements_per_2pi: curvature,
+            order: if setup.second_order { 2 } else { 1 },
+            straight_midside_nodes: !setup.midside_nodes_on_geometry,
+            netgen: setup.optimize,
+            algorithms: geometry.algorithms(part),
+            quads: setup.quad_dominated,
+        }
+    }
+
     /// Sets every option; Gmsh keeps options between uses.
     fn apply(&self, gmsh: &Gmsh) -> Result<(), GmshError> {
         let (algorithm_2d, algorithm_3d) = self.algorithms;
@@ -427,7 +532,9 @@ impl MeshOptions {
             ("Mesh.Algorithm3D", algorithm_3d),
             ("Mesh.Optimize", 1.0),
             ("Mesh.OptimizeNetgen", f64::from(u8::from(self.netgen))),
-            ("Mesh.RecombineAll", 0.0),
+            ("Mesh.RecombineAll", f64::from(u8::from(self.quads))),
+            // Quadratic quadrilaterals with 8 nodes, as CalculiX has them.
+            ("Mesh.SecondOrderIncomplete", 1.0),
         ] {
             gmsh.set_number(name, value)?;
         }
@@ -525,6 +632,25 @@ fn solid_names(gmsh: &Gmsh, volumes: &[i32]) -> Result<Vec<String>, GmshError> {
     Ok(names)
 }
 
+/// Names of the shell parts like [`solid_names`], "SHELL-n" where the file names none.
+fn shell_names(gmsh: &Gmsh, faces: &[i32]) -> Result<Vec<String>, GmshError> {
+    let mut names = Vec::with_capacity(faces.len());
+    let mut used = BTreeSet::new();
+    for (index, &face) in faces.iter().enumerate() {
+        let label = gmsh.entity_name(2, face)?;
+        let base = calculix_name(label.rsplit('/').next().unwrap_or_default())
+            .unwrap_or_else(|| format!("SHELL-{}", index + 1));
+        let mut name = base.clone();
+        let mut n = 2;
+        while !used.insert(name.clone()) {
+            name = format!("{base}-{n}");
+            n += 1;
+        }
+        names.push(name);
+    }
+    Ok(names)
+}
+
 /// A name CalculiX accepts: letters, digits, `-` and `_`, upper case, at most 60 characters.
 fn calculix_name(label: &str) -> Option<String> {
     let name: String = label
@@ -560,13 +686,14 @@ fn display_mesh(gmsh: &Gmsh) -> Result<GeometryDisplay, GmshError> {
         in_solid.extend(faces.iter().copied());
         groups.push((name, faces));
     }
+    // Every face outside the solids is a shell part of its own, as for 2D models.
     let free: Vec<i32> = surfaces
         .iter()
         .copied()
         .filter(|s| !in_solid.contains(s))
         .collect();
-    if !free.is_empty() {
-        groups.push(("SURFACES".into(), free));
+    for (face, name) in free.iter().zip(shell_names(gmsh, &free)?) {
+        groups.push((name, vec![*face]));
     }
 
     // Triangles and edge segments of each entity, fetched once.
