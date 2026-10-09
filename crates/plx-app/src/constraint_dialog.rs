@@ -12,7 +12,7 @@ use crate::contacts::{self, MasterSlave};
 use crate::model::{Highlight, Model};
 use crate::numeric;
 use crate::selection::Target;
-use crate::setup::{FACE_SOURCES, NODE_SOURCES, RegionDraft};
+use crate::setup::{FACE_SOURCES, NODE_SOURCES, RegionDraft, face_target};
 
 /// PrePoMax's list of constraint types, with prepolix's spring connection added; `None` for
 /// those prepolix does not have yet.
@@ -115,11 +115,13 @@ impl Type {
         }
     }
 
-    fn region_draft(self) -> RegionDraft {
+    /// Point springs and node ties sit on nodes, all other single-region constraints on
+    /// `faces`, the element faces or, in 2D models, the element edges.
+    fn region_draft(self, faces: Target) -> RegionDraft {
         if self.on_nodes() {
             RegionDraft::new(NODE_SOURCES, Target::Nodes)
         } else {
-            RegionDraft::new(FACE_SOURCES, Target::Faces)
+            RegionDraft::new(FACE_SOURCES, faces)
         }
     }
 }
@@ -131,40 +133,46 @@ pub(crate) struct ConstraintDraft {
     region: RegionDraft,
     /// Master and slave of a tie or spring connection.
     pair: MasterSlave,
+    /// What the faces of the model are: element faces, or element edges in 2D models.
+    faces: Target,
 }
 
 impl ConstraintDraft {
     pub(crate) fn new(fe: &FeModel) -> Self {
         let kind = Type::PointSpring;
+        let faces = face_target(fe);
         Self {
             constraint: kind.create(next_name(kind.prefix(), names(fe))),
-            region: kind.region_draft(),
-            pair: MasterSlave::new(),
+            region: kind.region_draft(faces),
+            pair: MasterSlave::new(faces),
+            faces,
         }
     }
 
-    pub(crate) fn edit(constraint: &Constraint, mesh: &FeMesh) -> Self {
+    /// `faces` is what the faces of the model are, see [`face_target`].
+    pub(crate) fn edit(constraint: &Constraint, faces: Target, mesh: &FeMesh) -> Self {
         let kind = Type::of(constraint);
         let regions = constraint.regions();
         let (region, pair) = match constraint.master_slave() {
             Some([master, slave]) => (
-                kind.region_draft(),
-                MasterSlave::from_regions(master, slave, mesh),
+                kind.region_draft(faces),
+                MasterSlave::from_regions(master, slave, faces, mesh),
             ),
             None => {
                 let (sources, target) = if kind.on_nodes() {
                     (NODE_SOURCES, Target::Nodes)
                 } else {
-                    (FACE_SOURCES, Target::Faces)
+                    (FACE_SOURCES, faces)
                 };
                 let region = RegionDraft::from_region(regions[0], sources, target, mesh);
-                (region, MasterSlave::new())
+                (region, MasterSlave::new(faces))
             }
         };
         Self {
             constraint: constraint.clone(),
             region,
             pair,
+            faces,
         }
     }
 
@@ -321,7 +329,7 @@ impl ConstraintDraft {
         };
         self.constraint = kind.create(name);
         if old.on_nodes() != kind.on_nodes() {
-            self.region = kind.region_draft();
+            self.region = kind.region_draft(self.faces);
         }
     }
 }
@@ -425,7 +433,7 @@ fn optional_row(
             set,
             numeric::without_unit(&mut number, units, quantity)
                 .speed(0.0)
-                .custom_formatter(|v, _| format!("{v:e}")),
+                .custom_formatter(|v, _| numeric::format_physical(v)),
         );
         ui.label(if set { unit } else { "Standard" });
         *value = set.then_some(number);
@@ -466,6 +474,18 @@ mod tests {
     }
 
     #[test]
+    fn faces_of_2d_models_are_picked_as_edges() {
+        let mut fe = FeModel::default();
+        fe.properties.space = plx_model::ModelSpace::PlaneStrain;
+        let mut draft = ConstraintDraft::new(&fe);
+        draft.switch(Type::SurfaceSpring, &[]);
+        assert_eq!(draft.region.target, Target::Edges);
+        draft.switch(Type::Tie, &[]);
+        assert_eq!(draft.pair.master.target, Target::Edges);
+        assert_eq!(draft.pair.slave.target, Target::Edges);
+    }
+
+    #[test]
     fn regions_survive_the_dialog() {
         let mesh = FeMesh::default();
         let connection = Constraint::SurfaceToSurfaceSpring(SurfaceToSurfaceSpring {
@@ -483,7 +503,7 @@ mod tests {
             stiffness: [1.0, 0.0, 0.0],
         });
         for constraint in [connection, spring] {
-            let draft = ConstraintDraft::edit(&constraint, &mesh);
+            let draft = ConstraintDraft::edit(&constraint, Target::Faces, &mesh);
             assert_eq!(draft.validate(), Ok(()));
             assert_eq!(draft.finish(), constraint);
         }

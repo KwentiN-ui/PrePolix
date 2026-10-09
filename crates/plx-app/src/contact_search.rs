@@ -17,6 +17,7 @@ use plx_model::{
 
 use crate::model::{Highlight, Model};
 use crate::numeric;
+use crate::selection::edge_lines;
 
 /// What a pair found becomes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,13 +62,16 @@ struct Row {
 }
 
 impl Row {
-    fn geometry(&self) -> &'static str {
+    /// What touches, as in PrePoMax's table: solids, the edges of a 2D model, or line ends.
+    fn geometry(&self, plane: bool) -> &'static str {
         if self.joint.is_some() {
-            "Line end-Line end"
-        } else if self.item.unresolved {
-            "Solid"
-        } else {
-            "Solid-Solid"
+            return "Line end-Line end";
+        }
+        match (plane, self.item.unresolved) {
+            (false, true) => "Solid",
+            (false, false) => "Solid-Solid",
+            (true, true) => "Shell edge",
+            (true, false) => "Shell edge-Shell edge",
         }
     }
 
@@ -99,6 +103,8 @@ pub struct ContactSearchDialog {
     part_names: Vec<String>,
     /// The search ran and found nothing.
     searched: bool,
+    /// A 2D model, whose surfaces are the edges of its elements.
+    plane: bool,
     error: Option<String>,
 }
 
@@ -127,6 +133,7 @@ impl ContactSearchDialog {
             rows: Vec::new(),
             part_names: Vec::new(),
             searched: false,
+            plane: fe.properties.space.is_2d(),
             error: None,
         }
     }
@@ -146,14 +153,22 @@ impl ContactSearchDialog {
                 slave.extend(row.item.slave.iter().copied());
             }
         }
+        let master = surface_faces(&model.mesh, model.skins(), &master);
+        let slave = surface_faces(&model.mesh, model.skins(), &slave);
+        if self.plane {
+            // The faces of 2D elements are edges, drawn as lines.
+            let lines = |faces: Vec<_>| edge_lines(model, &faces.into_iter().collect());
+            return Highlight {
+                nodes,
+                lines: lines(master),
+                secondary_lines: lines(slave),
+                ..Highlight::default()
+            };
+        }
         Highlight {
             nodes,
-            faces: surface_faces(&model.mesh, model.skins(), &master)
-                .into_iter()
-                .collect(),
-            secondary_faces: surface_faces(&model.mesh, model.skins(), &slave)
-                .into_iter()
-                .collect(),
+            faces: master.into_iter().collect(),
+            secondary_faces: slave.into_iter().collect(),
             ..Highlight::default()
         }
     }
@@ -299,14 +314,19 @@ impl ContactSearchDialog {
                 });
             });
             group(ui, "Geometriefilter", |ui| {
-                let mut solid = true;
-                ui.add_enabled(false, egui::Checkbox::new(&mut solid, "Solid"));
-                let mut shell = false;
+                // Solids are searched in 3D models, the edges of the elements in 2D ones.
+                let (mut solid, mut shell, mut edge) = (!self.plane, false, self.plane);
                 let unsupported = "Schalenelemente werden noch nicht durchsucht.";
+                ui.add_enabled(false, egui::Checkbox::new(&mut solid, "Solid"));
                 ui.add_enabled(false, egui::Checkbox::new(&mut shell, "Shell"))
                     .on_disabled_hover_text(unsupported);
-                ui.add_enabled(false, egui::Checkbox::new(&mut shell, "Shell edge"))
-                    .on_disabled_hover_text(unsupported);
+                let edges = ui.add_enabled(false, egui::Checkbox::new(&mut edge, "Shell edge"));
+                if self.plane {
+                    edges
+                        .on_disabled_hover_text("Im 2D-Modell sind die Elementkanten die Flächen.");
+                } else {
+                    edges.on_disabled_hover_text(unsupported);
+                }
                 ui.checkbox(&mut self.line_ends, "Line end")
                     .on_hover_text("Enden von Balken und Stäben, die auf einem Punkt liegen");
                 ui.checkbox(&mut self.ignore_hidden, "Ausgeblendete Parts ignorieren");
@@ -424,7 +444,7 @@ impl ContactSearchDialog {
                     let contact = row.kind == PairType::Contact;
                     let cells = [
                         row.name.clone(),
-                        row.geometry().to_string(),
+                        row.geometry(self.plane).to_string(),
                         row.type_label().to_string(),
                         if contact {
                             row.interaction.clone()

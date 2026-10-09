@@ -25,6 +25,7 @@ pub enum ModelItem {
     /// The analysis, for problems CalculiX reported.
     Analysis,
     InitialCondition(usize),
+    Amplitude(usize),
 }
 
 /// An item with a missing reference and why it is invalid.
@@ -83,7 +84,9 @@ impl FeModel {
         }
         for (s, step) in self.steps.iter().enumerate() {
             for (i, bc) in step.boundary_conditions.iter().enumerate() {
-                if let Some(reason) = bc.region.missing_reference(mesh) {
+                let reason = (bc.region.missing_reference(mesh))
+                    .or_else(|| self.missing_amplitude([&bc.amplitude]));
+                if let Some(reason) = reason {
                     invalid.push(Invalid {
                         item: ModelItem::BoundaryCondition(s, i),
                         reason,
@@ -101,7 +104,9 @@ impl FeModel {
                             .into(),
                     )
                 } else {
-                    load.region.missing_reference(mesh)
+                    (load.region.missing_reference(mesh)).or_else(|| {
+                        self.missing_amplitude([&load.amplitude, &load.factor_amplitude])
+                    })
                 };
                 if let Some(reason) = reason {
                     invalid.push(Invalid {
@@ -119,7 +124,25 @@ impl FeModel {
                 });
             }
         }
+        for (i, amplitude) in self.amplitudes.iter().enumerate() {
+            if let Some(reason) = amplitude.points_problem() {
+                invalid.push(Invalid {
+                    item: ModelItem::Amplitude(i),
+                    reason,
+                });
+            }
+        }
         invalid
+    }
+
+    /// The first of the amplitude references that names no amplitude of the model.
+    fn missing_amplitude<'a>(
+        &self,
+        references: impl IntoIterator<Item = &'a Option<String>>,
+    ) -> Option<String> {
+        (references.into_iter().flatten())
+            .find(|name| self.amplitude(name).is_none())
+            .map(|name| format!("Amplitude {name} existiert nicht"))
     }
 }
 
@@ -254,6 +277,7 @@ mod tests {
             active: true,
             region: Region::NodeSet("FIX".into()),
             kind: BoundaryKind::Fixed,
+            amplitude: None,
         });
         FeModel {
             properties: Default::default(),
@@ -291,6 +315,23 @@ mod tests {
         assert!(invalid[0].reason.contains("Steel"));
         model.materials.push(steel);
         assert_eq!(model.invalid_items(&mesh()), []);
+    }
+
+    #[test]
+    fn references_follow_amplitudes() {
+        let mesh = mesh();
+        let mut model = model();
+        model.steps[0].boundary_conditions[0].amplitude = Some("Ramp".into());
+        let invalid = model.invalid_items(&mesh);
+        assert_eq!(invalid[0].item, ModelItem::BoundaryCondition(0, 0));
+        assert!(invalid[0].reason.contains("Ramp"));
+        model.amplitudes.push(crate::Amplitude::new("Ramp"));
+        assert_eq!(model.invalid_items(&mesh), []);
+        model.rename_amplitude("Ramp", "Ramp-2");
+        model.amplitudes[0].name = "Ramp-2".into();
+        assert_eq!(model.invalid_items(&mesh), []);
+        model.amplitudes[0].points.clear();
+        assert_eq!(model.invalid_items(&mesh)[0].item, ModelItem::Amplitude(0));
     }
 
     #[test]

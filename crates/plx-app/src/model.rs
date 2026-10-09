@@ -145,6 +145,8 @@ pub struct Highlight {
     pub nodes: Vec<NodeId>,
     /// Lines between two nodes drawn over the scene, such as the edges of 2D elements.
     pub lines: Vec<[NodeId; 2]>,
+    /// Lines in the secondary highlight colour, e.g. the slave edges of a 2D contact.
+    pub secondary_lines: Vec<[NodeId; 2]>,
 }
 
 impl Highlight {
@@ -1419,12 +1421,14 @@ mod tests {
             active: true,
             region: Region::Nodes(fixed),
             kind: BoundaryKind::Fixed,
+            amplitude: None,
         });
         step.boundary_conditions.push(BoundaryCondition {
             name: "Pull".into(),
             active: true,
             region: Region::Nodes(pulled),
             kind: BoundaryKind::Displacement([Some(0.1), None, None, None, None, None]),
+            amplitude: None,
         });
         model.fe = FeModel {
             properties: Default::default(),

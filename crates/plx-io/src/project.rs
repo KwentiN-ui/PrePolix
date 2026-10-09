@@ -141,6 +141,11 @@ mod tests {
                 master_color: [255, 0, 0],
                 ..ContactPair::new("Contact_Pair-1", "Surface_Interaction-1")
             }],
+            amplitudes: vec![plx_model::Amplitude {
+                time_span: plx_model::AmplitudeTime::Total,
+                points: vec![[0.0, 0.0], [1.0, 2.5]],
+                ..plx_model::Amplitude::new("Amplitude-1")
+            }],
             initial_conditions: vec![plx_model::InitialCondition {
                 name: "Initial_Temperature-1".into(),
                 active: true,

@@ -3,7 +3,8 @@
 //! `ContactGraph`.
 //!
 //! Surfaces are the smooth patches of the part skins, which stand for the CAD faces the way
-//! PrePoMax's geometry surfaces do. Two surfaces are in contact where triangles of both face
+//! PrePoMax's geometry surfaces do. In 2D models the surfaces are chains of outline edges of
+//! the plane elements, split at corners, the way CalculiX takes the edges as faces. Two surfaces are in contact where triangles of both face
 //! each other within the search distance and angle. The pairs found are grouped (by parts,
 //! by the contact graph or not at all) and resolved so that a slave surface is a slave only
 //! once, which CalculiX requires of ties.
@@ -84,8 +85,9 @@ impl MasterSlaveItem {
 /// One surface patch prepared for the search.
 struct Surface {
     id: SurfaceId,
-    /// Corner node indices of each face, normals pointing out of the material.
-    faces: Vec<Vec<usize>>,
+    /// Corner points of each face, normals pointing out of the material. An edge of a 2D
+    /// element is drawn out along z into a quadrilateral, so that it is searched like a face.
+    faces: Vec<Vec<[f64; 3]>>,
     /// Bounds of each face, enlarged by half the search distance.
     face_bounds: Vec<Bounds>,
     bounds: Bounds,
@@ -151,25 +153,20 @@ pub fn find_contact_pairs(
 ) -> Vec<MasterSlaveItem> {
     let surfaces = contact_surfaces(mesh, skins, searched, parameters.distance);
     let angle = parameters.angle_deg.to_radians();
-    let coords = mesh.coords();
     let mut touching = Vec::new();
     for i in 0..surfaces.len() {
         for j in i + 1..surfaces.len() {
-            if surfaces_touch(
-                coords,
-                &surfaces[i],
-                &surfaces[j],
-                parameters.distance,
-                angle,
-            ) {
+            if surfaces_touch(&surfaces[i], &surfaces[j], parameters.distance, angle) {
                 touching.push((surfaces[i].id, surfaces[j].id));
             }
         }
     }
-    let areas = surface_areas(coords, &surfaces);
+    let areas = surface_areas(&surfaces);
     let names: Vec<&str> = mesh.parts.iter().map(|p| p.name.as_str()).collect();
+    let nodes: HashMap<SurfaceId, BTreeSet<usize>> =
+        (surfaces.iter()).map(|s| (s.id, s.nodes.clone())).collect();
     let context = Context {
-        skins,
+        nodes: &nodes,
         areas: &areas,
         names: &names,
     };
@@ -210,20 +207,139 @@ pub fn surface_faces(
     skins: &[PartSkin],
     surfaces: &BTreeSet<SurfaceId>,
 ) -> Vec<(ElementId, u8)> {
-    let elements = mesh.elements();
-    let mut faces = Vec::new();
-    for (part, skin) in skins.iter().enumerate() {
-        for face in &skin.faces {
-            if surfaces.contains(&(part, face.region)) {
-                faces.push((elements[face.element].id, face.face as u8 + 1));
-            }
-        }
-    }
+    let mut faces: Vec<(ElementId, u8)> = (patch_faces(mesh, skins).into_iter())
+        .filter(|f| surfaces.contains(&f.surface))
+        .map(|f| (f.element, f.face))
+        .collect();
     faces.sort_unstable();
     faces
 }
 
-/// The solid surface patches of the searched parts.
+/// An element face on a contact surface.
+struct PatchFace {
+    surface: SurfaceId,
+    element: ElementId,
+    /// CalculiX face number, S1 = 1.
+    face: u8,
+    /// Corner node indices in order, the normal pointing out of the material; the two ends
+    /// of the edge for 2D elements.
+    corners: Vec<usize>,
+    /// Corner and midside node indices.
+    nodes: Vec<usize>,
+}
+
+/// The faces of all surface patches: those of solid elements from the skins, and the
+/// outline edges of the plane elements of 2D models.
+fn patch_faces(mesh: &FeMesh, skins: &[PartSkin]) -> Vec<PatchFace> {
+    let elements = mesh.elements();
+    let mut faces = Vec::new();
+    for (part, skin) in skins.iter().enumerate() {
+        for face in &skin.faces {
+            if elements[face.element].shape.family() != ElementFamily::Solid
+                || face.corners.len() < 3
+            {
+                continue;
+            }
+            faces.push(PatchFace {
+                surface: (part, face.region),
+                element: elements[face.element].id,
+                face: face.face as u8 + 1,
+                // Element faces are numbered with their normal into the element.
+                corners: face.corners.iter().rev().copied().collect(),
+                nodes: face.corners.iter().chain(&face.mids).copied().collect(),
+            });
+        }
+    }
+    for (part, entry) in mesh.parts.iter().enumerate() {
+        faces.extend(plane_outline(mesh, part, &entry.elements));
+    }
+    faces
+}
+
+/// Largest angle between neighbouring outline edges of one 2D surface, like the feature angle
+/// of the skins.
+const PLANE_FEATURE_ANGLE_DEG: f64 = 30.0;
+
+/// The outline edges of the plane elements of a part, grouped into chains between corners.
+fn plane_outline(mesh: &FeMesh, part: usize, ids: &[ElementId]) -> Vec<PatchFace> {
+    let coords = mesh.coords();
+    let mut edges: Vec<PatchFace> = Vec::new();
+    let mut count: HashMap<(usize, usize), usize> = HashMap::new();
+    for element in ids.iter().filter_map(|&id| mesh.element(id)) {
+        if !element.is_plane() {
+            continue;
+        }
+        let Some(nodes) = (element.nodes.iter())
+            .map(|&id| mesh.node_index(id))
+            .collect::<Option<Vec<usize>>>()
+        else {
+            continue;
+        };
+        // Counter-clockwise elements have their outward edge normals to the right of the
+        // edge direction; clockwise ones are walked the other way round.
+        let corners = element.shape.edges().len();
+        let area: f64 = (0..corners)
+            .map(|k| {
+                let (p, q) = (coords[nodes[k]], coords[nodes[(k + 1) % corners]]);
+                p[0] * q[1] - q[0] * p[1]
+            })
+            .sum();
+        for (k, edge) in element.faces().iter().enumerate() {
+            let [a, b] = [edge.corners[0], edge.corners[1]].map(|l| nodes[l]);
+            *count.entry((a.min(b), a.max(b))).or_default() += 1;
+            let mut all = vec![a, b];
+            if element.shape.is_quadratic() {
+                all.extend(edge.mids.iter().map(|&l| nodes[l]));
+            }
+            edges.push(PatchFace {
+                surface: (part, 0),
+                element: element.id,
+                face: k as u8 + 1,
+                corners: if area >= 0.0 { vec![a, b] } else { vec![b, a] },
+                nodes: all,
+            });
+        }
+    }
+    edges.retain(|e| {
+        let (a, b) = (e.corners[0], e.corners[1]);
+        count[&(a.min(b), a.max(b))] == 1
+    });
+    // Neighbouring edges meeting at a small angle belong to the same surface.
+    let mut parent: Vec<usize> = (0..edges.len()).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let mut at_node: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, edge) in edges.iter().enumerate() {
+        for &node in &edge.corners {
+            at_node.entry(node).or_default().push(i);
+        }
+    }
+    let direction = |e: &PatchFace| normalize(sub(coords[e.corners[1]], coords[e.corners[0]]));
+    let limit = PLANE_FEATURE_ANGLE_DEG.to_radians().cos();
+    for touching in at_node.values() {
+        if let [i, j] = touching[..]
+            && dot(direction(&edges[i]), direction(&edges[j])) >= limit
+        {
+            let (ri, rj) = (root(&mut parent, i), root(&mut parent, j));
+            parent[ri] = rj;
+        }
+    }
+    let mut numbers: BTreeMap<usize, usize> = BTreeMap::new();
+    for (i, edge) in edges.iter_mut().enumerate() {
+        let r = root(&mut parent, i);
+        let next = numbers.len();
+        let number = *numbers.entry(r).or_insert(next);
+        edge.surface = (part, number);
+    }
+    edges
+}
+
+/// The surface patches of the searched parts.
 fn contact_surfaces(
     mesh: &FeMesh,
     skins: &[PartSkin],
@@ -231,41 +347,37 @@ fn contact_surfaces(
     distance: f64,
 ) -> Vec<Surface> {
     let coords = mesh.coords();
-    let elements = mesh.elements();
-    let mut surfaces = Vec::new();
-    for (part, skin) in skins.iter().enumerate() {
-        if !searched.get(part).copied().unwrap_or(false) {
+    // Edges of 2D elements are drawn out by a length of the model's size.
+    let depth = model_size(coords).max(distance * 10.0);
+    let mut patches: BTreeMap<SurfaceId, Surface> = BTreeMap::new();
+    for face in patch_faces(mesh, skins) {
+        if !searched.get(face.surface.0).copied().unwrap_or(false) {
             continue;
         }
-        let mut patches: BTreeMap<usize, Surface> = BTreeMap::new();
-        for face in &skin.faces {
-            if elements[face.element].shape.family() != ElementFamily::Solid
-                || face.corners.len() < 3
-            {
-                continue;
-            }
-            let surface = patches.entry(face.region).or_insert_with(|| Surface {
-                id: (part, face.region),
-                faces: Vec::new(),
-                face_bounds: Vec::new(),
-                bounds: Bounds::empty(),
-                nodes: BTreeSet::new(),
-                internal: false,
-            });
-            // Element faces are numbered with their normal into the element.
-            let corners: Vec<usize> = face.corners.iter().rev().copied().collect();
-            let mut bounds = Bounds::empty();
-            for &corner in &corners {
-                bounds.include(coords[corner]);
-            }
-            bounds.inflate(distance * 0.5);
-            surface.bounds.union(&bounds);
-            surface.nodes.extend(face.corners.iter().chain(&face.mids));
-            surface.faces.push(corners);
-            surface.face_bounds.push(bounds);
+        let surface = patches.entry(face.surface).or_insert_with(|| Surface {
+            id: face.surface,
+            faces: Vec::new(),
+            face_bounds: Vec::new(),
+            bounds: Bounds::empty(),
+            nodes: BTreeSet::new(),
+            internal: false,
+        });
+        let mut points: Vec<[f64; 3]> = face.corners.iter().map(|&n| coords[n]).collect();
+        if let [a, b] = points[..] {
+            let up = |p: [f64; 3]| [p[0], p[1], p[2] + depth];
+            points = vec![a, b, up(b), up(a)];
         }
-        surfaces.extend(patches.into_values());
+        let mut bounds = Bounds::empty();
+        for &point in &points {
+            bounds.include(point);
+        }
+        bounds.inflate(distance * 0.5);
+        surface.bounds.union(&bounds);
+        surface.nodes.extend(&face.nodes);
+        surface.faces.push(points);
+        surface.face_bounds.push(bounds);
     }
+    let mut surfaces: Vec<Surface> = patches.into_values().collect();
     // The same faces in two parts are the interface of parts meshed together.
     for i in 0..surfaces.len() {
         for j in i + 1..surfaces.len() {
@@ -282,14 +394,25 @@ fn contact_surfaces(
     surfaces
 }
 
-fn surface_areas(coords: &[[f64; 3]], surfaces: &[Surface]) -> HashMap<SurfaceId, f64> {
+/// The diagonal of the bounding box of the nodes.
+fn model_size(coords: &[[f64; 3]]) -> f64 {
+    let mut bounds = Bounds::empty();
+    for &point in coords {
+        bounds.include(point);
+    }
+    if coords.is_empty() {
+        return 0.0;
+    }
+    length(sub(bounds.max, bounds.min))
+}
+
+fn surface_areas(surfaces: &[Surface]) -> HashMap<SurfaceId, f64> {
     surfaces
         .iter()
         .map(|s| {
             let area = (s.faces.iter())
-                .map(|f| {
-                    let points: Vec<[f64; 3]> = f.iter().map(|&n| coords[n]).collect();
-                    triangles(&points)
+                .map(|points| {
+                    triangles(points)
                         .map(|t| 0.5 * length(cross(sub(t[1], t[0]), sub(t[2], t[0]))))
                         .sum::<f64>()
                 })
@@ -301,13 +424,7 @@ fn surface_areas(coords: &[[f64; 3]], surfaces: &[Surface]) -> HashMap<SurfaceId
 
 /// Whether two surfaces face each other somewhere within the distance and angle,
 /// PrePoMax's `CheckSurfaceToSurfaceDistance`.
-fn surfaces_touch(
-    coords: &[[f64; 3]],
-    a: &Surface,
-    b: &Surface,
-    distance: f64,
-    angle: f64,
-) -> bool {
+fn surfaces_touch(a: &Surface, b: &Surface, distance: f64, angle: f64) -> bool {
     if a.internal || b.internal || a.id.0 == b.id.0 || !a.bounds.intersects(&b.bounds) {
         return false;
     }
@@ -316,14 +433,12 @@ fn surfaces_touch(
         if !bounds_a.intersects(&common) {
             continue;
         }
-        let points_a: Vec<[f64; 3]> = face_a.iter().map(|&n| coords[n]).collect();
         for (face_b, bounds_b) in b.faces.iter().zip(&b.face_bounds) {
             if !bounds_a.intersects(bounds_b) {
                 continue;
             }
-            let points_b: Vec<[f64; 3]> = face_b.iter().map(|&n| coords[n]).collect();
-            for t1 in triangles(&points_a) {
-                for t2 in triangles(&points_b) {
+            for t1 in triangles(face_a) {
+                for t2 in triangles(face_b) {
                     if triangles_touch(&t1, &t2, distance, angle) {
                         return true;
                     }
@@ -552,7 +667,8 @@ fn normalize(a: [f64; 3]) -> [f64; 3] {
 
 /// What the grouping needs to know about the surfaces.
 struct Context<'a> {
-    skins: &'a [PartSkin],
+    /// Mesh nodes of each surface patch.
+    nodes: &'a HashMap<SurfaceId, BTreeSet<usize>>,
     areas: &'a HashMap<SurfaceId, f64>,
     names: &'a [&'a str],
 }
@@ -580,13 +696,7 @@ impl Context<'_> {
 
     /// Mesh nodes of a surface patch.
     fn nodes(&self, id: SurfaceId) -> BTreeSet<usize> {
-        let mut nodes = BTreeSet::new();
-        if let Some(skin) = self.skins.get(id.0) {
-            for face in skin.faces.iter().filter(|f| f.region == id.1) {
-                nodes.extend(face.corners.iter().chain(&face.mids));
-            }
-        }
-        nodes
+        self.nodes.get(&id).cloned().unwrap_or_default()
     }
 }
 
@@ -1085,6 +1195,89 @@ mod tests {
             resolve,
         };
         find_contact_pairs(mesh, &skins, &vec![true; mesh.parts.len()], &parameters)
+    }
+
+    /// A 2D plane strain model: a beam of 4 × 1 CPE4 quads from (0, 0) to (4, 1) and a disc
+    /// of CPE3 triangles below it touching its bottom edge at (1, 0), with clockwise elements
+    /// in the disc.
+    fn beam_on_disc() -> FeMesh {
+        let mut mesh = FeMesh::default();
+        for i in 0..5 {
+            mesh.set_node(i + 1, [i as f64, 0.0, 0.0]);
+            mesh.set_node(i + 6, [i as f64, 1.0, 0.0]);
+        }
+        for i in 0..4 {
+            mesh.add_element(Element {
+                id: i + 1,
+                type_name: "CPE4".into(),
+                shape: ElementShape::Quad4,
+                nodes: vec![i + 1, i + 2, i + 7, i + 6],
+            })
+            .unwrap();
+        }
+        mesh.parts.push(Part {
+            name: "BEAM".into(),
+            elements: (1..=4).collect(),
+        });
+        let (center, radius, n) = ([1.0, -0.5], 0.5, 24);
+        mesh.set_node(100, [center[0], center[1], 0.0]);
+        for k in 0..n {
+            // The first rim node is the top of the disc, where it touches the beam.
+            let phi = std::f64::consts::FRAC_PI_2 + std::f64::consts::TAU * k as f64 / n as f64;
+            let point = [
+                center[0] + radius * phi.cos(),
+                center[1] + radius * phi.sin(),
+                0.0,
+            ];
+            mesh.set_node(101 + k, point);
+        }
+        for k in 0..n {
+            mesh.add_element(Element {
+                id: 101 + k,
+                type_name: "CPE3".into(),
+                shape: ElementShape::Tri3,
+                nodes: vec![100, 101 + (k + 1) % n, 101 + k],
+            })
+            .unwrap();
+        }
+        mesh.parts.push(Part {
+            name: "DISC".into(),
+            elements: (101..101 + n).collect(),
+        });
+        mesh
+    }
+
+    #[test]
+    fn finds_the_edges_where_a_disc_touches_a_beam_in_2d() {
+        let mesh = beam_on_disc();
+        let items = search(&mesh, GroupBy::Parts, false);
+        assert_eq!(items.len(), 1, "{items:?}");
+        let item = &items[0];
+        assert_eq!(item.name(), "BEAM_to_DISC");
+        let skins: Vec<PartSkin> = (mesh.parts.iter())
+            .map(|p| extract_part_skin(&mesh, p, 30.0))
+            .collect();
+        // The bottom edges of the beam and the rim of the disc, edges S1 of both.
+        let master = surface_faces(&mesh, &skins, &item.master);
+        assert_eq!(master, [(1, 1), (2, 1), (3, 1), (4, 1)]);
+        let slave = surface_faces(&mesh, &skins, &item.slave);
+        assert_eq!(slave.len(), 24);
+        assert!(
+            slave
+                .iter()
+                .all(|&(element, face)| element > 100 && face == 2)
+        );
+    }
+
+    #[test]
+    fn a_disc_below_a_gap_is_no_contact_in_2d() {
+        let mut mesh = beam_on_disc();
+        for k in 0..25 {
+            let id = 100 + k;
+            let p = mesh.coords()[mesh.node_index(id).unwrap()];
+            mesh.set_node(id, [p[0], p[1] - 0.1, 0.0]);
+        }
+        assert!(search(&mesh, GroupBy::Parts, false).is_empty());
     }
 
     #[test]

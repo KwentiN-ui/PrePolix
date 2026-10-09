@@ -206,7 +206,7 @@ fn form(
     ui.label("Name");
     ui.add(egui::TextEdit::singleline(&mut hot_spot.name).desired_width(200.0));
     ui.end_row();
-    toe.ui_labeled(ui, model, "Nahtübergang", "toe");
+    toe.ui_labeled(ui, model, "Nahtübergang", "toe", true);
     ui.label("");
     ui.weak("Knoten am Nahtübergang, z. B. als Kante.");
     ui.end_row();

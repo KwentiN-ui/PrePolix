@@ -405,12 +405,15 @@ mod tests {
             active: true,
             region: fixed.clone(),
             kind: BoundaryKind::Fixed,
+            amplitude: None,
         });
         step.loads.push(Load {
             name: "Pull".into(),
             active: true,
             region: pulled.clone(),
             kind: LoadKind::Pressure(-100.0),
+            amplitude: None,
+            factor_amplitude: None,
         });
 
         let check = |model: &Model| {

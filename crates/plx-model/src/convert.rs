@@ -125,6 +125,29 @@ impl FeModel {
                 }
             }
         }
+        for amplitude in &mut self.amplitudes {
+            c.value(&mut amplitude.shift_time, Quantity::Time);
+            for point in &mut amplitude.points {
+                c.value(&mut point[0], Quantity::Time);
+            }
+        }
+        // An amplitude scales a temperature from the zero of its unit, which moves with
+        // another temperature unit such as Kelvin instead of degrees Celsius.
+        let zero_moves = c.from.convert(0.0, Quantity::Temperature, c.to) != 0.0;
+        let scaled_temperature = self.steps.iter().any(|step| {
+            (step.boundary_conditions.iter()).any(|b| b.amplitude.is_some() && b.kind.is_thermal())
+                || (step.loads.iter()).any(|l| {
+                    l.amplitude.is_some()
+                        && matches!(l.kind, LoadKind::Film { .. } | LoadKind::Radiation { .. })
+                })
+        });
+        if zero_moves && scaled_temperature {
+            notes.push(
+                "Temperaturen mit Amplitude beziehen sich jetzt auf einen anderen Nullpunkt; \
+                 bitte die Amplituden prüfen."
+                    .into(),
+            );
+        }
         if !self.user_keywords.is_empty() {
             notes.push(
                 "Eigene Keywords des Keyword-Editors wurden nicht umgerechnet; bitte prüfen."
@@ -282,12 +305,16 @@ mod tests {
             active: true,
             region: Region::Surface("A".into()),
             kind: LoadKind::Pressure(2.0),
+            amplitude: None,
+            factor_amplitude: None,
         });
         step.loads.push(Load {
             name: "Force-1".into(),
             active: true,
             region: Region::Nodes(Vec::new()),
             kind: LoadKind::ConcentratedForce([1000.0, 0.0, 0.0]),
+            amplitude: None,
+            factor_amplitude: None,
         });
         model.steps.push(step);
         assert!(model.convert_units(UnitSystem::MTonSC).is_empty());
