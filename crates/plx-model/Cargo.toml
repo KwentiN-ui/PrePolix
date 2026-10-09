@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 plx-core.workspace = true
 plx-mesh.workspace = true
+serde.workspace = true
 
 [lints]
 workspace = true
