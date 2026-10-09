@@ -99,6 +99,18 @@ mod tests {
                 extrapolation: Extrapolation::Custom(vec![2.0, 6.0]),
                 ..HotSpot::new("Hot_Spot-1")
             }],
+            reference_points: vec![plx_model::ReferencePoint {
+                name: "RP-1".into(),
+                position: [1.0, 2.0, 3.0],
+            }],
+            coordinate_systems: vec![plx_model::CoordinateSystem {
+                kind: plx_model::CoordinateSystemKind::Cylindrical,
+                ..plx_model::CoordinateSystem::new("Coordinate_System-1")
+            }],
+            result_paths: vec![plx_model::ResultPath {
+                start: plx_model::PointRef::ReferencePoint("RP-1".into()),
+                ..plx_model::ResultPath::new("Path-1")
+            }],
             constraints: vec![Constraint::Tie(Tie {
                 master: Region::Faces(vec![(1, 2)]),
                 slave: Region::Surface("TOP".into()),

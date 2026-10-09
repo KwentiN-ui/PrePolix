@@ -11,7 +11,7 @@ use plx_model::{FeModel, Geometry};
 use plx_render::contour::normalize;
 use plx_render::{
     ClipPlane, RenderMesh, SectionCells, Vertex, lighten, part_color, part_render_mesh,
-    section_mesh, wireframe_edges,
+    section_extremes, section_mesh, wireframe_edges,
 };
 
 use crate::exploded::{Assembly, Explosion, Parameters, PartShape};
@@ -628,6 +628,24 @@ impl Model {
             }
         }
         meshes
+    }
+
+    /// Smallest and largest shown result value where a plane in model coordinates cuts the
+    /// parts, with the points where they are, `[min, max]`.
+    pub fn section_extremes(&self, point: DVec3, normal: DVec3) -> Option<[(DVec3, f32); 2]> {
+        let values = self.results.as_ref()?.shown_values()?;
+        let cells = self.section_cells.get_or_init(|| {
+            self.mesh
+                .parts
+                .iter()
+                .map(|part| SectionCells::new(&self.mesh, part))
+                .collect()
+        });
+        let (coords, _, _) = self.shown_state();
+        (cells.iter().zip(&self.parts))
+            .filter(|(_, info)| info.visible)
+            .filter_map(|(cells, _)| section_extremes(cells, &coords, point, normal, &values))
+            .reduce(|[a, b], [c, d]| [if c.1 < a.1 { c } else { a }, if d.1 > b.1 { d } else { b }])
     }
 
     /// The model origin in global coordinates; render positions are relative to it.

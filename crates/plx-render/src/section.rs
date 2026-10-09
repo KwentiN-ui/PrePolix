@@ -246,6 +246,67 @@ pub fn section_mesh(
     render
 }
 
+/// Smallest and largest value where the plane cuts the elements, with the points where they
+/// are, `[min, max]`. Values are interpolated along the cut element edges like the colours of
+/// the section faces; edges with a node without value are skipped.
+pub fn section_extremes(
+    cells: &SectionCells,
+    coords: &[[f64; 3]],
+    point: DVec3,
+    normal: DVec3,
+    values: &[f32],
+) -> Option<[(DVec3, f32); 2]> {
+    let normal = normal.normalize_or_zero();
+    if normal == DVec3::ZERO {
+        return None;
+    }
+    let mut extremes: Option<[(DVec3, f32); 2]> = None;
+    let mut distance = [0.0; 8];
+    for cell in &cells.cells {
+        let corners = &cell.corners[..corner_count(cell.shape)];
+        let (mut below, mut above) = (false, false);
+        for (d, &node) in distance.iter_mut().zip(corners) {
+            *d = normal.dot(DVec3::from(coords[node as usize]) - point);
+            if *d < 0.0 {
+                below = true;
+            } else {
+                above = true;
+            }
+        }
+        if !(below && above) {
+            continue;
+        }
+        for face in cell.shape.faces() {
+            let n = face.corners.len();
+            for k in 0..n {
+                let (a, b) = (face.corners[k], face.corners[(k + 1) % n]);
+                let (da, db) = (distance[a], distance[b]);
+                if (da < 0.0) == (db < 0.0) {
+                    continue;
+                }
+                let (na, nb) = (corners[a] as usize, corners[b] as usize);
+                let (Some(&va), Some(&vb)) = (values.get(na), values.get(nb)) else {
+                    continue;
+                };
+                if !(va.is_finite() && vb.is_finite()) {
+                    continue;
+                }
+                let t = da / (da - db);
+                let (pa, pb) = (DVec3::from(coords[na]), DVec3::from(coords[nb]));
+                let at = (pa + (pb - pa) * t, va + (vb - va) * t as f32);
+                extremes = Some(match extremes {
+                    None => [at, at],
+                    Some([min, max]) => [
+                        if at.1 < min.1 { at } else { min },
+                        if at.1 > max.1 { at } else { max },
+                    ],
+                });
+            }
+        }
+    }
+    extremes
+}
+
 /// A point where the plane crosses an element edge.
 #[derive(Clone, Copy, Debug)]
 struct CutPoint {
@@ -390,6 +451,29 @@ mod tests {
                 .iter()
                 .all(|v| (v.scalar - 0.25).abs() < 1e-6)
         );
+    }
+
+    #[test]
+    fn extremes_on_the_section_are_interpolated() {
+        let mesh = cubes(2);
+        let cells = SectionCells::new(&mesh, &mesh.parts[0]);
+        // Value y + 10 z on the nodes; the plane z = 0.25 sees 2.5 to 3.5.
+        let values: Vec<f32> = (mesh.coords().iter())
+            .map(|p| (p[1] + 10.0 * p[2]) as f32)
+            .collect();
+        let [min, max] = section_extremes(
+            &cells,
+            mesh.coords(),
+            DVec3::new(0.0, 0.0, 0.25),
+            DVec3::Z,
+            &values,
+        )
+        .unwrap();
+        assert!((min.1 - 2.5).abs() < 1e-6 && (max.1 - 3.5).abs() < 1e-6);
+        assert!((min.0.z - 0.25).abs() < 1e-9 && min.0.y.abs() < 1e-9);
+        assert!((max.0.y - 1.0).abs() < 1e-9);
+        let beside = section_extremes(&cells, mesh.coords(), DVec3::Z * 5.0, DVec3::Z, &values);
+        assert!(beside.is_none());
     }
 
     #[test]

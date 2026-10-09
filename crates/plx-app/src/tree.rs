@@ -8,8 +8,9 @@ use egui::collapsing_header::CollapsingState;
 use egui::epaint::Mesh;
 use egui::{Color32, Pos2, Rect, Response, Shape, Ui, Vec2, WidgetText, pos2, vec2};
 use plx_job::JobStatus;
-use plx_model::ModelItem;
+use plx_model::{FeModel, ModelItem};
 
+use crate::features::{FeatureItem, FeatureKind};
 use crate::model::{Model, PartInfo};
 use crate::setup::NewItem;
 use crate::tree_icons::{self, TreeIcon};
@@ -57,6 +58,11 @@ pub enum TreeItem {
     FieldOutput(usize, usize),
     Analysis,
     HotSpot(usize),
+    /// Features of the FE model or of the shown results, by index.
+    ReferencePoint(usize),
+    CoordinateSystem(usize),
+    /// A result path of the shown results, by index.
+    ResultPath(usize),
     FieldOutputs,
     /// Field of the current increment, by index.
     Field(usize),
@@ -248,6 +254,11 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
         TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
         TreeItem::Group(HOT_SPOTS) => Some(NewItem::HotSpot),
+        TreeItem::Group(REFERENCE_POINTS) => Some(NewItem::Feature(FeatureKind::ReferencePoint)),
+        TreeItem::Group(COORDINATE_SYSTEMS) => {
+            Some(NewItem::Feature(FeatureKind::CoordinateSystem))
+        }
+        TreeItem::Group(PATHS) => Some(NewItem::Feature(FeatureKind::ResultPath)),
         TreeItem::Group("Mesh Setup") => Some(NewItem::MeshSetupItem),
         TreeItem::FieldOutputs => Some(NewItem::ResultFieldOutput),
         TreeItem::Group("History Outputs") => Some(NewItem::ResultHistoryOutput),
@@ -478,6 +489,7 @@ impl Tree<'_> {
             }
         }
         let editable = is_fe_item(&item)
+            || feature(&item).is_some()
             || matches!(
                 item,
                 TreeItem::ResultFieldOutput(_) | TreeItem::HistorySet(_) | TreeItem::MeshItem(_)
@@ -773,19 +785,6 @@ impl Tree<'_> {
         Shape::mesh(mesh)
     }
 
-    /// Group node that may be empty: a placeholder leaf without children.
-    fn group(&mut self, ui: &mut Ui, name: &'static str, children: &[&'static str]) {
-        if children.is_empty() {
-            self.leaf(ui, TreeItem::Group(name), name);
-        } else {
-            self.branch(ui, TreeItem::Group(name), name, true, |tree, ui| {
-                for &child in children {
-                    tree.leaf(ui, TreeItem::Group(child), child);
-                }
-            });
-        }
-    }
-
     /// Parts with visibility and colour; of the mesh, or of the geometry.
     fn parts(&mut self, ui: &mut Ui, model: &mut Model) {
         let parts = counted("Parts", model.parts.len());
@@ -897,8 +896,25 @@ impl Tree<'_> {
         });
     }
 
-    fn features(&mut self, ui: &mut Ui) {
-        self.group(ui, "Features", &["Reference Points", "Coordinate Systems"]);
+    /// PrePoMax's features: reference points and coordinate systems.
+    fn features(&mut self, ui: &mut Ui, fe: &FeModel) {
+        let open = !fe.reference_points.is_empty() || !fe.coordinate_systems.is_empty();
+        self.branch(
+            ui,
+            TreeItem::Group("Features"),
+            "Features",
+            open,
+            |tree, ui| {
+                let points = (fe.reference_points.iter().enumerate())
+                    .map(|(i, r)| (TreeItem::ReferencePoint(i), r.name.as_str()))
+                    .collect();
+                tree.container(ui, REFERENCE_POINTS, points);
+                let systems = (fe.coordinate_systems.iter().enumerate())
+                    .map(|(i, c)| (TreeItem::CoordinateSystem(i), c.name.as_str()))
+                    .collect();
+                tree.container(ui, COORDINATE_SYSTEMS, systems);
+            },
+        );
     }
 }
 
@@ -987,7 +1003,7 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
     let has_model = model.is_some();
     tree.branch(ui, TreeItem::Model, "Model", true, |tree, ui| {
         tree.mesh(ui, model);
-        tree.features(ui);
+        tree.features(ui, &fe);
         let materials: Vec<(TreeItem, &str)> = (fe.materials.iter().enumerate())
             .map(|(i, m)| (TreeItem::Material(i), m.name.as_str()))
             .collect();
@@ -1089,6 +1105,21 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
 
 /// Container of the hot spot definitions.
 pub const HOT_SPOTS: &str = "Hot Spot Stresses";
+pub const REFERENCE_POINTS: &str = "Reference Points";
+pub const COORDINATE_SYSTEMS: &str = "Coordinate Systems";
+/// Container of the result paths in the Results tree.
+pub const PATHS: &str = "Paths";
+
+/// The feature a tree item stands for.
+pub fn feature(item: &TreeItem) -> Option<FeatureItem> {
+    let (kind, index) = match *item {
+        TreeItem::ReferencePoint(i) => (FeatureKind::ReferencePoint, i),
+        TreeItem::CoordinateSystem(i) => (FeatureKind::CoordinateSystem, i),
+        TreeItem::ResultPath(i) => (FeatureKind::ResultPath, i),
+        _ => return None,
+    };
+    Some(FeatureItem { kind, index })
+}
 
 /// Name of the analysis job, PrePoMax's first default.
 pub const ANALYSIS_NAME: &str = "Analysis-1";
@@ -1127,9 +1158,10 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
         }
         active = Some((view.field, view.component));
     }
+    let fe = model.as_ref().map(|m| m.fe.clone()).unwrap_or_default();
     tree.branch(ui, TreeItem::Model, "Model", true, |tree, ui| {
         tree.mesh(ui, model);
-        tree.features(ui);
+        tree.features(ui, &fe);
     });
     tree.branch(
         ui,
@@ -1165,23 +1197,29 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
             let group = TreeItem::Group("History Outputs");
             if history.is_empty() {
                 tree.leaf(ui, group, "History Outputs");
-                return;
+            } else {
+                let text = counted("History Outputs", history.len());
+                tree.branch(ui, group, text, true, |tree, ui| {
+                    for (s, (name, fields)) in history.into_iter().enumerate() {
+                        tree.branch(ui, TreeItem::HistorySet(s), name, true, |tree, ui| {
+                            for (f, (name, components)) in fields.into_iter().enumerate() {
+                                let item = TreeItem::HistoryField(s, f);
+                                tree.branch(ui, item, name, true, |tree, ui| {
+                                    for (c, component) in components.into_iter().enumerate() {
+                                        let item = TreeItem::HistoryComponent(s, f, c);
+                                        tree.leaf(ui, item, component);
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
             }
-            let text = counted("History Outputs", history.len());
-            tree.branch(ui, group, text, true, |tree, ui| {
-                for (s, (name, fields)) in history.into_iter().enumerate() {
-                    tree.branch(ui, TreeItem::HistorySet(s), name, true, |tree, ui| {
-                        for (f, (name, components)) in fields.into_iter().enumerate() {
-                            let item = TreeItem::HistoryField(s, f);
-                            tree.branch(ui, item, name, true, |tree, ui| {
-                                for (c, component) in components.into_iter().enumerate() {
-                                    tree.leaf(ui, TreeItem::HistoryComponent(s, f, c), component);
-                                }
-                            });
-                        }
-                    });
-                }
-            });
+            // Not in PrePoMax: results along straight lines through the model.
+            let paths = (fe.result_paths.iter().enumerate())
+                .map(|(i, p)| (TreeItem::ResultPath(i), p.name.as_str()))
+                .collect();
+            tree.container(ui, PATHS, paths);
         },
     );
 }

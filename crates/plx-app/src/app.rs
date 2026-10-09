@@ -7,6 +7,7 @@ use crate::analysis::{Analysis, MonitorEvent};
 use crate::animation::{AnimationKind, ColorLimits, Playback};
 use crate::contact_search::{ContactSearchDialog, SearchResult};
 use crate::exploded::{ExplodedDialog, ExplodedResult};
+use crate::features::{FeatureDialog, FeatureKind, FeatureResult};
 use crate::field_output_dialog::{DialogAction, FieldOutputDialog};
 use crate::history_output_dialog::HistoryOutputDialog;
 use crate::history_table::HistoryTable;
@@ -123,6 +124,11 @@ struct Workbench {
     last_exploded: crate::exploded::Parameters,
     /// Version of the exploded view of the FE model the hot spot paths were drawn for.
     hot_spot_explosion: u64,
+    /// Open dialog of a reference point, coordinate system or result path.
+    feature_dialog: Option<FeatureDialog>,
+    /// Where the shown values are smallest and largest on the section plane, `[min, max]`
+    /// in model coordinates, while only the section is shown.
+    section_extremes: Option<[(glam::DVec3, f32); 2]>,
 }
 
 /// Which model the 3D view shows: the geometry, the FE model or one of the results.
@@ -198,6 +204,8 @@ impl PrepolixApp {
                 section: None,
                 section_dialog: None,
                 transformation_dialog: None,
+                feature_dialog: None,
+                section_extremes: None,
                 section_shown: None,
                 symbols_shown: None,
                 exploded_dialog: None,
@@ -702,7 +710,8 @@ impl eframe::App for PrepolixApp {
         egui::CentralPanel::no_frame().show(ui, |ui| {
             self.workbench.viewport.selecting = self.workbench.picking()
                 || self.workbench.section_picks()
-                || self.workbench.transformation_picks();
+                || self.workbench.transformation_picks()
+                || self.workbench.feature_picks();
             self.workbench.viewport.gizmo =
                 match (&self.workbench.section_dialog, self.workbench.shown()) {
                     (Some(dialog), Some(model)) => Some(dialog.gizmo(model)),
@@ -749,6 +758,8 @@ impl eframe::App for PrepolixApp {
         self.workbench.history_output_window(&ctx);
         self.workbench.history_table_window(&ctx);
         self.workbench.transformation_window(&ctx);
+        self.workbench.feature_window(&ctx);
+        self.workbench.sync_result_features();
         self.workbench.run_analysis(&ctx);
         if let Some(path) = self.workbench.open_results.take() {
             self.open_path(path, &ctx);
@@ -765,6 +776,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.update_explosion(&ctx);
         self.workbench.rebuild_if_results_changed();
         self.workbench.update_section();
+        self.workbench.update_feature_overlay();
 
         if let Some(command) = self.workbench.view_command.take() {
             let bounds = self.workbench.shown().and_then(Model::visible_bounds);
@@ -856,7 +868,18 @@ impl Workbench {
                         self.viewport
                             .apply(ViewCommand::View(StandardView::Front), None);
                     }
-                    match self.results.iter().position(|r| r.path == model.path) {
+                    let mut model = model;
+                    // Results get the features of the FE model; reloaded ones keep their own
+                    // and their paths.
+                    let previous = self.results.iter().position(|r| r.path == model.path);
+                    if let Some(old) = previous.map(|i| &self.results[i].fe) {
+                        model.fe.add_missing_features(old);
+                        model.fe.result_paths = old.result_paths.clone();
+                    }
+                    if let Some(project) = &self.model {
+                        model.fe.add_missing_features(&project.fe);
+                    }
+                    match previous {
                         Some(index) => {
                             self.results[index] = model;
                             self.current_result = index;
@@ -1041,6 +1064,11 @@ impl Workbench {
         } else if let Some(TreeItem::MeshItem(index)) = response.open {
             let geometry = self.model.as_ref().and_then(|m| m.geometry.as_ref());
             self.mesh_item_editor = geometry.and_then(|g| MeshItemEditor::edit(g, index));
+        } else if let Some(feature) = response.open.as_ref().and_then(tree::feature) {
+            let results = (view == TreeView::Results).then_some(self.current_result);
+            if let Some(model) = self.feature_model(results) {
+                self.feature_dialog = FeatureDialog::edit(feature, results, model);
+            }
         } else if let Some(item) = response.open {
             let model = self.model.as_ref().filter(|_| view != TreeView::Results);
             match model.and_then(|m| Editor::edit(&item, &m.fe, &m.mesh)) {
@@ -1062,6 +1090,18 @@ impl Workbench {
                 geometry.mesh_items.remove(index);
                 self.tree.selected = None;
                 self.mesh_item_editor = None;
+            }
+        } else if let Some(feature) = response.delete.as_ref().and_then(tree::feature) {
+            let results = (view == TreeView::Results).then_some(self.current_result);
+            let model = match results {
+                Some(index) => self.results.get_mut(index),
+                None => self.model.as_mut(),
+            };
+            if let Some(model) = model
+                && crate::features::delete(&mut model.fe, feature)
+            {
+                self.tree.selected = None;
+                self.feature_dialog = None;
             }
         } else if let (Some(item), Some(model)) = (response.delete, self.model.as_mut())
             && crate::setup::delete(&mut model.fe, &item)
@@ -1508,6 +1548,18 @@ impl Workbench {
     }
 
     fn create(&mut self, kind: NewItem) {
+        if let NewItem::Feature(kind) = kind {
+            // Paths read results; features belong to the tab they are created on.
+            let results = (kind == FeatureKind::ResultPath || self.tree_view == TreeView::Results)
+                .then_some(self.current_result);
+            if let Some(model) = self.feature_model(results) {
+                self.feature_dialog = Some(FeatureDialog::create(kind, results, model));
+                if results.is_some() {
+                    self.set_tree_view(TreeView::Results);
+                }
+            }
+            return;
+        }
         if kind == NewItem::ResultHistoryOutput {
             if let Some(view) = self.shown_results_view() {
                 self.history_dialog = Some(HistoryOutputDialog::create(view));
@@ -2028,6 +2080,22 @@ impl Workbench {
     /// selects it in the tree, as in PrePoMax, and a click into empty space clears the tree
     /// selection and with it the highlighted region.
     fn click(&mut self, click: Click) {
+        if self.feature_picks()
+            && let Some(dialog) = &mut self.feature_dialog
+        {
+            let model = match dialog.results {
+                Some(index) => self.results.get(index),
+                None => self.model.as_ref(),
+            };
+            if let Some(model) = model {
+                let hit = model.pick(click.origin, click.direction);
+                dialog.click(
+                    model,
+                    hit.as_ref().map(|h| (h, click.precision_at(h.point))),
+                );
+            }
+            return;
+        }
         if self.transformation_picks()
             && let (Some(dialog), Some(model)) = (
                 &mut self.transformation_dialog,
@@ -2175,6 +2243,18 @@ impl Workbench {
 
     /// Shows what a click would select where the mouse rests.
     fn hover(&mut self, hover: Option<Click>) {
+        if self.feature_picks()
+            && let Some(dialog) = &self.feature_dialog
+            && let Some(model) = self.feature_model(dialog.results)
+        {
+            self.viewport.preview = hover
+                .and_then(|click| {
+                    let hit = model.pick(click.origin, click.direction)?;
+                    Some(dialog.preview(model, &hit, click.precision_at(hit.point)))
+                })
+                .unwrap_or_default();
+            return;
+        }
         if self.transformation_picks()
             && let (Some(dialog), Some(model)) = (
                 &self.transformation_dialog,
@@ -2470,7 +2550,10 @@ impl Workbench {
             let dialog = (self.history_dialog.as_ref()).filter(|_| on_results && index == current);
             let transformation = (self.transformation_dialog.as_ref())
                 .filter(|d| on_results && d.result == index && index == current);
+            let feature = (self.feature_dialog.as_ref())
+                .filter(|d| on_results && d.results == Some(index) && index == current);
             let highlight = match (dialog, &self.tree.selected) {
+                _ if feature.is_some() => feature.map(FeatureDialog::highlight).unwrap_or_default(),
                 _ if transformation.is_some() => transformation
                     .map(TransformationDialog::highlight)
                     .unwrap_or_default(),
@@ -2489,7 +2572,11 @@ impl Workbench {
         let Some(model) = &mut self.model else {
             return;
         };
+        let feature = self.feature_dialog.as_ref().filter(|d| d.results.is_none());
         let highlight = if let Some(dialog) = &self.section_dialog {
+            self.highlighted = None;
+            dialog.highlight()
+        } else if let Some(dialog) = feature {
             self.highlighted = None;
             dialog.highlight()
         } else if let Some(dialog) = &self.contact_search {
@@ -2802,9 +2889,111 @@ impl Workbench {
         self.viewport.preview = Default::default();
     }
 
+    /// The model whose features a dialog edits: a results file, or the FE model.
+    fn feature_model(&self, results: Option<usize>) -> Option<&Model> {
+        match results {
+            Some(index) => self.results.get(index),
+            None => self.model.as_ref(),
+        }
+    }
+
+    fn feature_picks(&self) -> bool {
+        (self.feature_dialog.as_ref()).is_some_and(|d| d.picks() && self.feature_dialog_shown())
+    }
+
+    /// Whether the open feature dialog belongs to what the 3D view shows.
+    fn feature_dialog_shown(&self) -> bool {
+        match self.feature_dialog.as_ref().map(|d| d.results) {
+            Some(Some(index)) => {
+                self.tree_view == TreeView::Results && index == self.current_result
+            }
+            Some(None) => self.tree_view == TreeView::FeModel,
+            None => false,
+        }
+    }
+
+    fn feature_window(&mut self, ctx: &egui::Context) {
+        if self.feature_dialog.is_some() && !self.feature_dialog_shown() {
+            self.feature_dialog = None;
+            self.viewport.preview = Default::default();
+        }
+        let Some(mut dialog) = self.feature_dialog.take() else {
+            return;
+        };
+        let model = match dialog.results {
+            Some(index) => self.results.get_mut(index),
+            None => self.model.as_mut(),
+        };
+        let Some(model) = model else {
+            return;
+        };
+        match dialog.show(ctx, model) {
+            FeatureResult::Open => self.feature_dialog = Some(dialog),
+            FeatureResult::Ok => {
+                dialog.apply(&mut model.fe);
+                self.viewport.preview = Default::default();
+            }
+            FeatureResult::Cancel => self.viewport.preview = Default::default(),
+        }
+    }
+
+    /// Results take the coordinate systems of their features, for transformed field outputs.
+    fn sync_result_features(&mut self) {
+        for model in &mut self.results {
+            let Some(view) = &mut model.results else {
+                continue;
+            };
+            if view.coordinate_systems == model.fe.coordinate_systems {
+                continue;
+            }
+            let systems = model.fe.coordinate_systems.clone();
+            let warnings = view.set_coordinate_systems(systems, &model.mesh);
+            self.output.extend(warnings);
+            self.results_changed = true;
+        }
+    }
+
+    /// Reference points, coordinate systems and the result path drawn over the shown model.
+    fn update_feature_overlay(&mut self) {
+        let Some(model) = self.shown() else {
+            self.viewport.overlay.features.clear();
+            self.viewport.overlay.result_path = None;
+            return;
+        };
+        let dialog = self
+            .feature_dialog
+            .as_ref()
+            .filter(|_| self.feature_dialog_shown());
+        let selected = match &self.tree.selected {
+            Some((view, item)) if *view == self.tree_view => tree::feature(item),
+            _ => None,
+        };
+        let edited = dialog.and_then(FeatureDialog::item);
+        let mut features = crate::features::marks(model, selected, edited);
+        features.extend(dialog.and_then(|d| d.mark(model)));
+        let result_path = match dialog {
+            Some(dialog) if dialog.kind() == FeatureKind::ResultPath => dialog.path_line(model),
+            _ => selected
+                .filter(|s| s.kind == FeatureKind::ResultPath)
+                .and_then(|s| model.fe.result_paths.get(s.index))
+                .and_then(|p| crate::features::path_line(model, p)),
+        };
+        self.viewport.overlay.features = features;
+        self.viewport.overlay.result_path = result_path;
+    }
+
     /// Cuts the scene at the section plane being edited or shown, when it or the scene
     /// changed.
     fn update_section(&mut self) {
+        // Planes of coordinate systems follow them.
+        if let Some(fe) = self.shown().map(|m| m.fe.clone()) {
+            if let Some(dialog) = &mut self.section_dialog {
+                dialog.draft.resolve(&fe);
+            }
+            if let Some(section) = &mut self.section {
+                section.resolve(&fe);
+            }
+        }
         // As in PrePoMax, the section view rests while the exploded view is edited or moves.
         let exploding = self.exploded_dialog.is_some()
             || self.shown().is_some_and(|m| m.explosion.is_animating());
@@ -2828,6 +3017,8 @@ impl Workbench {
             TreeView::Geometry => self.geometry.as_mut(),
             TreeView::FeModel => self.model.as_mut(),
         };
+        let mut extremes = None;
+        let mut shown_range = None;
         match (shown, &wanted) {
             (Some(model), Some((_, section))) => {
                 // The model origin is the centre of its bounds, where a principal plane's
@@ -2838,9 +3029,33 @@ impl Workbench {
                 let faces = model.section_meshes(anchor, normal, section.lighten);
                 model.clip = Some(clip);
                 self.viewport.set_section(Some((clip, &faces)));
+                let only = section.only_section && model.results.is_some();
+                self.viewport.set_sections_only(only);
+                if only {
+                    extremes = model.section_extremes(anchor, normal);
+                    shown_range = Some(extremes.map(|[min, max]| (min.1, max.1)));
+                }
             }
-            _ => self.viewport.set_section(None),
+            _ => {
+                self.viewport.set_section(None);
+                self.viewport.set_sections_only(false);
+            }
         }
+        // The legend of the shown results takes the range on the plane; the others their own.
+        let on_results = self.tree_view == TreeView::Results;
+        for (index, model) in self.results.iter_mut().enumerate() {
+            let range = match shown_range {
+                Some(range) if on_results && index == self.current_result => range,
+                _ => None,
+            };
+            if let Some(view) = &mut model.results
+                && view.section_range != range
+            {
+                view.section_range = range;
+                self.results_changed = true;
+            }
+        }
+        self.section_extremes = extremes;
         self.section_shown = wanted;
     }
 
@@ -3275,17 +3490,29 @@ impl Workbench {
                 ),
             })
         };
+        // On the section plane the extremes lie between nodes.
+        let section = self
+            .section_extremes
+            .filter(|_| view.is_some_and(|v| v.section_range.is_some()));
+        let section_marker = |label: &str, (position, value): (glam::DVec3, f32)| {
+            Some(Marker {
+                position: model.to_render(position.to_array()),
+                text: format!("{label}: {}\nSection plane", format_legend_value(value)),
+            })
+        };
         self.viewport.overlay = Overlay {
             legend: view.and_then(ResultsView::legend),
             status: view
                 .filter(|_| post.status_block)
                 .map_or_else(Vec::new, |v| v.status_lines(&model.file_name())),
-            maximum: view
-                .filter(|_| post.max_label)
-                .and_then(|v| marker("Max", v.maximum())),
-            minimum: view
-                .filter(|_| post.min_label)
-                .and_then(|v| marker("Min", v.minimum())),
+            maximum: view.filter(|_| post.max_label).and_then(|v| match section {
+                Some([_, max]) => section_marker("Max", max),
+                None => marker("Max", v.maximum()),
+            }),
+            minimum: view.filter(|_| post.min_label).and_then(|v| match section {
+                Some([min, _]) => section_marker("Min", min),
+                None => marker("Min", v.minimum()),
+            }),
             global_origin: graphics.global_axes.then(|| model.global_origin()),
             show_scale_bar: graphics.scale_bar,
             show_view_triad: graphics.view_triad,
@@ -3307,7 +3534,10 @@ impl Workbench {
             axis,
             paths: self.overlay_paths(),
             lines: transformation.map_or_else(Vec::new, |d| d.lines(model)),
+            features: Vec::new(),
+            result_path: None,
         };
+        self.update_feature_overlay();
     }
 }
 

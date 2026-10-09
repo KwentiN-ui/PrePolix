@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use egui::Ui;
 use glam::{DMat3, DVec3};
 use plx_mesh::NodeId;
+use plx_model::{CoordinatePlane, FeModel};
 
 use crate::gizmo::{GizmoDrag, PlaneGizmo};
 use crate::model::{Highlight, Hit, Model};
@@ -59,6 +60,16 @@ pub enum PlaneDefinition {
     Principal { plane: PrincipalPlane, offset: f64 },
     /// Any plane through a point, as in PrePoMax. The normal need not be a unit vector.
     PointNormal { point: DVec3, normal: DVec3 },
+    /// A plane of a coordinate system of the model's features, shifted along its normal; it
+    /// follows the coordinate system when that changes.
+    CoordinateSystem {
+        system: String,
+        plane: CoordinatePlane,
+        offset: f64,
+        /// The coordinate system's origin and the plane's unit normal, as last resolved;
+        /// `None` while the coordinate system is missing or degenerate.
+        frame: Option<(DVec3, DVec3)>,
+    },
 }
 
 /// A section view: the plane in model coordinates and how the cut faces look. The side the
@@ -71,6 +82,8 @@ pub struct SectionView {
     pub flipped: bool,
     /// PrePoMax's "lighten section colors".
     pub lighten: bool,
+    /// Shows only the section faces, and results with the range of the values on them.
+    pub only_section: bool,
 }
 
 impl SectionView {
@@ -91,7 +104,28 @@ impl SectionView {
             },
             flipped: view_direction[axis] < 0.0,
             lighten: true,
+            only_section: false,
         }
+    }
+
+    /// Takes the current coordinate system a plane refers to; returns whether the plane
+    /// moved.
+    pub fn resolve(&mut self, fe: &FeModel) -> bool {
+        let PlaneDefinition::CoordinateSystem {
+            system,
+            plane,
+            frame,
+            ..
+        } = &mut self.definition
+        else {
+            return false;
+        };
+        let resolved = (fe.coordinate_system(system))
+            .and_then(|c| c.plane(*plane, 0.0).ok())
+            .map(|(point, normal)| (DVec3::from(point), DVec3::from(normal)));
+        let moved = *frame != resolved;
+        *frame = resolved;
+        moved
     }
 
     /// Unit normal pointing into the visible half.
@@ -99,6 +133,7 @@ impl SectionView {
         let normal = match &self.definition {
             PlaneDefinition::Principal { plane, .. } => plane.unit_normal(),
             PlaneDefinition::PointNormal { normal, .. } => normal.normalize_or(DVec3::Z),
+            PlaneDefinition::CoordinateSystem { frame, .. } => frame.map_or(DVec3::Z, |f| f.1),
         };
         if self.flipped { -normal } else { normal }
     }
@@ -113,6 +148,9 @@ impl SectionView {
                 p
             }
             PlaneDefinition::PointNormal { point, .. } => *point,
+            PlaneDefinition::CoordinateSystem { offset, frame, .. } => {
+                frame.map_or(DVec3::ZERO, |(origin, normal)| origin + normal * *offset)
+            }
         }
     }
 
@@ -122,6 +160,9 @@ impl SectionView {
         match &mut self.definition {
             PlaneDefinition::Principal { plane, offset } => *offset += shift[plane.axis()],
             PlaneDefinition::PointNormal { point, .. } => *point += shift,
+            PlaneDefinition::CoordinateSystem { offset, frame, .. } => {
+                *offset += shift.dot(frame.map_or(DVec3::Z, |f| f.1));
+            }
         }
     }
 
@@ -140,7 +181,9 @@ impl SectionView {
     /// Shows the other side.
     pub fn flip(&mut self) {
         match &mut self.definition {
-            PlaneDefinition::Principal { .. } => self.flipped = !self.flipped,
+            PlaneDefinition::Principal { .. } | PlaneDefinition::CoordinateSystem { .. } => {
+                self.flipped = !self.flipped;
+            }
             // Adding zero turns -0 into 0, so the dialog shows no "-0.00".
             PlaneDefinition::PointNormal { normal, .. } => *normal = -*normal + DVec3::ZERO,
         }
@@ -333,7 +376,7 @@ impl SectionDialog {
             .pivot(egui::Align2::LEFT_TOP)
             .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
             .show(ctx, |ui| {
-                self.form(ui);
+                self.form(ui, &model.fe, model.results.is_some());
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                     if ui.button("Abbrechen").clicked() {
@@ -364,12 +407,16 @@ impl SectionDialog {
         result
     }
 
-    fn form(&mut self, ui: &mut Ui) {
+    fn form(&mut self, ui: &mut Ui, fe: &FeModel, results: bool) {
         let speed = self.half_diagonal.length() * 0.005;
-        let principal = matches!(self.draft.definition, PlaneDefinition::Principal { .. });
+        let kind = match self.draft.definition {
+            PlaneDefinition::Principal { .. } => 0,
+            PlaneDefinition::CoordinateSystem { .. } => 1,
+            PlaneDefinition::PointNormal { .. } => 2,
+        };
         ui.horizontal(|ui| {
             ui.label("Ebene:");
-            if ui.radio(principal, "Grundebene").clicked() && !principal {
+            if ui.radio(kind == 0, "Grundebene").clicked() && kind != 0 {
                 let visible = self.draft.normal();
                 let plane = closest_principal(visible);
                 let offset = self.draft.anchor(self.center)[plane.axis()];
@@ -377,7 +424,26 @@ impl SectionDialog {
                 self.draft.flipped = visible[plane.axis()] < 0.0;
                 self.picking = None;
             }
-            if ui.radio(!principal, "Punkt und Normale").clicked() && principal {
+            let systems = !fe.coordinate_systems.is_empty();
+            let radio = ui
+                .add_enabled(
+                    systems,
+                    egui::RadioButton::new(kind == 1, "Koordinatensystem"),
+                )
+                .on_disabled_hover_text("Zuerst unter Features ein Coordinate System anlegen.");
+            if radio.clicked() && kind != 1 {
+                let system = fe.coordinate_systems[0].name.clone();
+                self.draft.definition = PlaneDefinition::CoordinateSystem {
+                    system,
+                    plane: CoordinatePlane::Xy,
+                    offset: 0.0,
+                    frame: None,
+                };
+                self.draft.flipped = false;
+                self.draft.resolve(fe);
+                self.picking = None;
+            }
+            if ui.radio(kind == 2, "Punkt und Normale").clicked() && kind != 2 {
                 let (point, normal) = self.draft.as_point_normal(self.center);
                 self.draft.set_point_normal(point, normal);
             }
@@ -406,6 +472,49 @@ impl SectionDialog {
                     ui.label(format!("Lage {}", plane.axis_label()));
                     ui.add(egui::DragValue::new(offset).speed(speed));
                     ui.end_row();
+                }
+                PlaneDefinition::CoordinateSystem {
+                    system,
+                    plane,
+                    offset,
+                    frame,
+                } => {
+                    ui.label("Koordinatensystem");
+                    egui::ComboBox::from_id_salt("section system")
+                        .selected_text(system.as_str())
+                        .show_ui(ui, |ui| {
+                            for candidate in &fe.coordinate_systems {
+                                ui.selectable_value(
+                                    system,
+                                    candidate.name.clone(),
+                                    &candidate.name,
+                                );
+                            }
+                        });
+                    ui.end_row();
+                    ui.label("Ebene");
+                    ui.horizontal(|ui| {
+                        for candidate in CoordinatePlane::ALL {
+                            let button =
+                                egui::Button::selectable(*plane == candidate, candidate.label())
+                                    .frame_when_inactive(true);
+                            if ui.add(button).clicked() {
+                                *plane = candidate;
+                            }
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Abstand");
+                    ui.add(egui::DragValue::new(offset).speed(speed));
+                    ui.end_row();
+                    if frame.is_none() {
+                        ui.label("");
+                        ui.colored_label(
+                            egui::Color32::from_rgb(200, 0, 0),
+                            "Das Koordinatensystem fehlt oder ist ungültig.",
+                        );
+                        ui.end_row();
+                    }
                 }
                 PlaneDefinition::PointNormal { point, normal } => {
                     ui.label("Punkt");
@@ -491,6 +600,19 @@ impl SectionDialog {
             }
             ui.checkbox(&mut self.draft.lighten, "Schnittflächen aufhellen");
         });
+        ui.add_enabled(
+            results,
+            egui::Checkbox::new(
+                &mut self.draft.only_section,
+                "Ergebnisse nur in der Schnittebene",
+            ),
+        )
+        .on_hover_text(
+            "Zeigt nur die Schnittfläche; Legende, Min und Max beziehen sich auf die Werte in \
+             der Ebene.",
+        );
+        // A changed coordinate system or plane takes effect at once.
+        self.draft.resolve(fe);
         ui.weak("Pfeil ziehen: verschieben, Bögen ziehen: kippen");
     }
 }
@@ -556,6 +678,7 @@ mod tests {
             },
             flipped: false,
             lighten: true,
+            only_section: false,
         };
         tilted.translate(5.0);
         assert!((tilted.anchor(DVec3::ZERO) - DVec3::new(0.0, 3.0, 4.0)).length() < EPS);
@@ -575,6 +698,41 @@ mod tests {
         assert!((section.anchor(DVec3::ZERO) - center).length() < EPS);
         let expected = DMat3::from_rotation_z(std::f64::consts::FRAC_PI_2) * before;
         assert!((section.normal() - expected).length() < 1e-9);
+    }
+
+    #[test]
+    fn coordinate_system_planes_follow_their_system() {
+        let mut fe = FeModel::default();
+        let mut system = plx_model::CoordinateSystem::new("CS");
+        system.origin = [0.0, 0.0, 5.0];
+        system.point_x = [1.0, 0.0, 5.0];
+        system.point_xy = [0.0, 1.0, 5.0];
+        fe.coordinate_systems.push(system);
+        let mut section = SectionView {
+            definition: PlaneDefinition::CoordinateSystem {
+                system: "CS".into(),
+                plane: CoordinatePlane::Xy,
+                offset: 1.0,
+                frame: None,
+            },
+            flipped: false,
+            lighten: true,
+            only_section: true,
+        };
+        assert!(section.resolve(&fe));
+        assert!(!section.resolve(&fe));
+        assert!((section.anchor(DVec3::ZERO) - DVec3::new(0.0, 0.0, 6.0)).length() < EPS);
+        section.translate(2.0);
+        assert!((section.anchor(DVec3::ZERO).z - 8.0).abs() < EPS);
+        section.flip();
+        section.translate(2.0);
+        assert!((section.anchor(DVec3::ZERO).z - 6.0).abs() < EPS);
+        // The plane moves with its coordinate system.
+        let system = &mut fe.coordinate_systems[0];
+        (system.origin, system.point_x, system.point_xy) =
+            ([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        assert!(section.resolve(&fe));
+        assert!((section.anchor(DVec3::ZERO).z - 1.0).abs() < EPS);
     }
 
     #[test]
