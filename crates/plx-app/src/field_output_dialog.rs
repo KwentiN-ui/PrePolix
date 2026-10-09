@@ -402,7 +402,11 @@ impl FieldOutputDialog {
                 tabs.push((Tab::LimitValues, "Grenzwerte"));
             }
             for (tab, label) in tabs {
-                if ui.selectable_label(self.tab == tab, label).clicked() {
+                // Framed also when inactive, so hovering a tab does not widen it and push the
+                // tabs to its right.
+                let button =
+                    egui::Button::selectable(self.tab == tab, label).frame_when_inactive(true);
+                if ui.add(button).clicked() {
                     self.tab = tab;
                 }
             }
