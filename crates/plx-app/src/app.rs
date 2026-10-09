@@ -222,6 +222,13 @@ impl PrepolixApp {
                         }
                     }
                 });
+                ui.menu_button("Isometrisch, Achse oben", |ui| {
+                    for axis in Axis::ALL {
+                        if ui.button(axis.label()).clicked() {
+                            self.workbench.view_command = Some(ViewCommand::IsometricAxis(axis));
+                        }
+                    }
+                });
                 ui.separator();
                 ui.checkbox(
                     &mut self.workbench.viewport.options.mesh_edges,
