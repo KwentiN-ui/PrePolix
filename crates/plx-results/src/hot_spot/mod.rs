@@ -6,8 +6,11 @@
 //! the IIW recommendations. Read-out points are placed on the surface triangles of the mesh,
 //! so their weights only depend on the mesh and are computed once for all increments.
 
+mod definition;
+
+pub use definition::{Extrapolation, HotSpot, HotSpotComponent, extrapolation_weights};
+
 use plx_mesh::{FeMesh, NodeId, SkinFace};
-use plx_model::{HotSpot, HotSpotComponent, extrapolation_weights};
 
 use crate::{Increment, principal_values};
 
@@ -498,7 +501,7 @@ fn normalize(a: [f64; 3]) -> Option<[f64; 3]> {
 #[cfg(test)]
 mod tests {
     use plx_mesh::{Element, ElementShape, Part, extract_part_skin};
-    use plx_model::{Extrapolation, Region};
+    use plx_model::Region;
 
     use super::*;
     use crate::{AnalysisKind, Component, Field};

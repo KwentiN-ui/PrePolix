@@ -9,10 +9,9 @@ use std::collections::BTreeSet;
 use egui::Ui;
 use plx_mesh::{ElementId, FeMesh, NodeId};
 use plx_model::{
-    BoundaryCondition, BoundaryKind, Constraint, ContactPair, Elastic, EquationSolver,
-    Extrapolation, FeModel, FieldOutput, FrequencyStep, HotSpot, HotSpotComponent, Incrementation,
-    Load, LoadKind, Material, ModelSpace, OutputKind, Region, Section, StaticStep, Step, StepKind,
-    SurfaceInteraction, extrapolation_weights, next_name,
+    BoundaryCondition, BoundaryKind, Constraint, ContactPair, Elastic, EquationSolver, FeModel,
+    FieldOutput, FrequencyStep, Incrementation, Load, LoadKind, Material, ModelSpace, OutputKind,
+    Region, Section, StaticStep, Step, StepKind, SurfaceInteraction, next_name,
 };
 
 use crate::constraint_dialog::ConstraintDraft;
@@ -31,7 +30,6 @@ pub enum NewItem {
     Step,
     BoundaryCondition(usize),
     Load(usize),
-    HotSpot,
     /// A spring, support or tie, chosen in the dialog.
     Constraint,
     SurfaceInteraction,
@@ -40,6 +38,8 @@ pub enum NewItem {
     ResultFieldOutput,
     /// A history output derived from results, created in the Results tree.
     ResultHistoryOutput,
+    /// A hot spot definition of results, created in the Results tree.
+    ResultHotSpot,
     /// An item of the geometry's mesh setup, created in the Geometry tree.
     MeshSetupItem,
 }
@@ -470,7 +470,6 @@ enum Draft {
     BoundaryCondition(usize, BoundaryCondition, RegionDraft),
     Load(usize, Load, RegionDraft),
     FieldOutput(usize, FieldOutput),
-    HotSpot(HotSpot, RegionDraft, HotSpotText),
     Constraint(ConstraintDraft),
     /// The interaction with the index of the model whose properties are shown.
     SurfaceInteraction(SurfaceInteraction, usize),
@@ -480,10 +479,7 @@ enum Draft {
 /// The region clicks in the 3D view pick for, if the dialog has one.
 fn draft_region(draft: &Draft) -> Option<&RegionDraft> {
     match draft {
-        Draft::Section(_, r)
-        | Draft::BoundaryCondition(_, _, r)
-        | Draft::Load(_, _, r)
-        | Draft::HotSpot(_, r, _) => Some(r),
+        Draft::Section(_, r) | Draft::BoundaryCondition(_, _, r) | Draft::Load(_, _, r) => Some(r),
         Draft::ContactPair(_, regions) => Some(regions.current()),
         Draft::Constraint(c) => Some(c.region()),
         _ => None,
@@ -492,20 +488,11 @@ fn draft_region(draft: &Draft) -> Option<&RegionDraft> {
 
 fn draft_region_mut(draft: &mut Draft) -> Option<&mut RegionDraft> {
     match draft {
-        Draft::Section(_, r)
-        | Draft::BoundaryCondition(_, _, r)
-        | Draft::Load(_, _, r)
-        | Draft::HotSpot(_, r, _) => Some(r),
+        Draft::Section(_, r) | Draft::BoundaryCondition(_, _, r) | Draft::Load(_, _, r) => Some(r),
         Draft::ContactPair(_, regions) => Some(regions.current_mut()),
         Draft::Constraint(c) => Some(c.region_mut()),
         _ => None,
     }
-}
-
-/// Text fields of the hot spot dialog that are parsed on every change.
-struct HotSpotText {
-    /// Own read-out distances, e.g. "2, 6".
-    distances: String,
 }
 
 /// An open item dialog.
@@ -609,16 +596,6 @@ impl Editor {
                     region,
                 )
             }
-            NewItem::HotSpot => {
-                let name = next_name("Hot_Spot", names(&fe.hot_spots, |h| &h.name));
-                Draft::HotSpot(
-                    HotSpot::new(name),
-                    RegionDraft::new(NODE_SOURCES, Target::Nodes),
-                    HotSpotText {
-                        distances: String::new(),
-                    },
-                )
-            }
             NewItem::Constraint => Draft::Constraint(ConstraintDraft::new(fe)),
             NewItem::SurfaceInteraction => {
                 let existing = names(&fe.surface_interactions, |s| &s.name);
@@ -640,7 +617,10 @@ impl Editor {
                     MasterSlave::new(),
                 )
             }
-            NewItem::ResultFieldOutput | NewItem::ResultHistoryOutput | NewItem::MeshSetupItem => {
+            NewItem::ResultFieldOutput
+            | NewItem::ResultHistoryOutput
+            | NewItem::ResultHotSpot
+            | NewItem::MeshSetupItem => {
                 return None;
             }
         };
@@ -697,19 +677,6 @@ impl Editor {
                 let regions = MasterSlave::from_regions(&pair.master, &pair.slave, mesh);
                 (Draft::ContactPair(pair, regions), i)
             }
-            TreeItem::HotSpot(i) => {
-                let hot_spot = fe.hot_spots.get(i)?.clone();
-                let region =
-                    RegionDraft::from_region(&hot_spot.toe, NODE_SOURCES, Target::Nodes, mesh);
-                let distances = match &hot_spot.extrapolation {
-                    Extrapolation::Custom(d) => format_distances(d),
-                    _ => String::new(),
-                };
-                (
-                    Draft::HotSpot(hot_spot, region, HotSpotText { distances }),
-                    i,
-                )
-            }
             _ => return None,
         };
         Some(Self {
@@ -728,7 +695,6 @@ impl Editor {
             Draft::BoundaryCondition(_, b, _) => ("Randbedingung", &b.name),
             Draft::Load(_, l, _) => ("Last", &l.name),
             Draft::FieldOutput(_, f) => ("Field Output", &f.name),
-            Draft::HotSpot(h, ..) => ("Hot Spot", &h.name),
             Draft::Constraint(c) => ("Constraint", c.name()),
             Draft::SurfaceInteraction(s, _) => ("Surface Interaction", &s.name),
             Draft::ContactPair(c, _) => ("Contact Pair", &c.name),
@@ -990,9 +956,6 @@ impl Editor {
                 });
                 ui.end_row();
             }
-            Draft::HotSpot(hot_spot, region, text) => {
-                hot_spot_form(ui, model, hot_spot, region, text)
-            }
             Draft::Constraint(c) => c.form(ui, model, &taken, self.index.is_none()),
             Draft::SurfaceInteraction(interaction, selected) => {
                 name_row(ui, &mut interaction.name);
@@ -1002,17 +965,6 @@ impl Editor {
                 name_row(ui, &mut pair.name);
                 contacts::contact_pair_form(ui, model, pair, regions);
             }
-        }
-    }
-
-    /// The hot spot as currently entered, for showing its paths while the dialog is open.
-    pub fn hot_spot(&self) -> Option<HotSpot> {
-        match &self.draft {
-            Draft::HotSpot(hot_spot, region, _) => Some(HotSpot {
-                toe: region.region(),
-                ..hot_spot.clone()
-            }),
-            _ => None,
         }
     }
 
@@ -1027,7 +979,6 @@ impl Editor {
             }
             Draft::Load(step, ..) => names(&fe.steps[*step].loads, |l| &l.name),
             Draft::FieldOutput(step, _) => names(&fe.steps[*step].field_outputs, |f| &f.name),
-            Draft::HotSpot(..) => names(&fe.hot_spots, |h| &h.name),
             Draft::Constraint(_) => fe.constraints.iter().map(Constraint::name).collect(),
             Draft::SurfaceInteraction(..) => names(&fe.surface_interactions, |s| &s.name),
             Draft::ContactPair(..) => names(&fe.contact_pairs, |c| &c.name),
@@ -1046,7 +997,6 @@ impl Editor {
             Draft::BoundaryCondition(_, b, _) => &b.name,
             Draft::Load(_, l, _) => &l.name,
             Draft::FieldOutput(_, f) => &f.name,
-            Draft::HotSpot(h, ..) => &h.name,
             Draft::Constraint(c) => c.name(),
             Draft::SurfaceInteraction(s, _) => &s.name,
             Draft::ContactPair(c, _) => &c.name,
@@ -1087,9 +1037,6 @@ impl Editor {
         }) = &self.draft
         {
             validate_frequency_step(settings)?;
-        }
-        if let Some(hot_spot) = self.hot_spot() {
-            validate_hot_spot(&hot_spot)?;
         }
         Ok(())
     }
@@ -1148,10 +1095,6 @@ impl Editor {
                 put(list, index, load);
             }
             Draft::FieldOutput(s, output) => put(&mut fe.steps[s].field_outputs, index, output),
-            Draft::HotSpot(mut hot_spot, region, _) => {
-                hot_spot.toe = region.region();
-                put(&mut fe.hot_spots, index, hot_spot);
-            }
             Draft::Constraint(draft) => {
                 let mut constraint = draft.finish();
                 if let Some(existing) = index.and_then(|i| fe.constraints.get(i)) {
@@ -1201,7 +1144,6 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
             .steps
             .get_mut(s)
             .is_some_and(|st| remove(&mut st.field_outputs, i)),
-        TreeItem::HotSpot(i) => remove(&mut fe.hot_spots, i),
         TreeItem::Constraint(i) => remove(&mut fe.constraints, i),
         TreeItem::SurfaceInteraction(i) => remove(&mut fe.surface_interactions, i),
         TreeItem::ContactPair(i) => remove(&mut fe.contact_pairs, i),
@@ -1254,7 +1196,6 @@ pub fn item_region<'a>(fe: &'a FeModel, item: &TreeItem) -> Option<&'a Region> {
             .get(i)
             .map(|b| &b.region),
         TreeItem::Load(s, i) => fe.steps.get(s)?.loads.get(i).map(|l| &l.region),
-        TreeItem::HotSpot(i) => fe.hot_spots.get(i).map(|h| &h.toe),
         TreeItem::Constraint(i) => fe.constraints.get(i)?.regions().first().copied(),
         _ => None,
     }
@@ -1474,138 +1415,6 @@ fn static_form(ui: &mut Ui, settings: &mut StaticStep) {
     }
 }
 
-fn hot_spot_form(
-    ui: &mut Ui,
-    model: &Model,
-    hot_spot: &mut HotSpot,
-    region: &mut RegionDraft,
-    text: &mut HotSpotText,
-) {
-    name_row(ui, &mut hot_spot.name);
-    ui.label("Extrapolation");
-    let custom = matches!(hot_spot.extrapolation, Extrapolation::Custom(_));
-    egui::ComboBox::from_id_salt("hot spot extrapolation")
-        .selected_text(hot_spot.extrapolation.label())
-        .width(240.0)
-        .show_ui(ui, |ui| {
-            for method in Extrapolation::IIW {
-                let label = method.label();
-                ui.selectable_value(&mut hot_spot.extrapolation, method, label);
-            }
-            if ui.selectable_label(custom, "Eigene Lesepunkte").clicked() && !custom {
-                let distances = hot_spot.distances();
-                text.distances = format_distances(&distances);
-                hot_spot.extrapolation = Extrapolation::Custom(distances);
-            }
-        });
-    ui.end_row();
-    if let Extrapolation::Custom(distances) = &mut hot_spot.extrapolation {
-        ui.label("Abstände");
-        let edit = egui::TextEdit::singleline(&mut text.distances)
-            .hint_text("z. B. 2, 6, 10")
-            .desired_width(200.0);
-        if ui.add(edit).changed() {
-            *distances = parse_distances(&text.distances);
-        }
-        ui.end_row();
-    }
-    ui.label("Blechdicke t");
-    ui.add_enabled(
-        hot_spot.extrapolation.uses_thickness(),
-        numeric::drag_value(&mut hot_spot.thickness)
-            .range(0.0..=f64::MAX)
-            .speed(0.1),
-    );
-    ui.end_row();
-    ui.label("Lesepunkte");
-    let distances = hot_spot.distances();
-    let weights = extrapolation_weights(&distances);
-    let mut formula = String::from("S_hs =");
-    for (i, (d, w)) in distances.iter().zip(&weights).enumerate() {
-        let sign = match (i, *w < 0.0) {
-            (0, false) => "",
-            (0, true) => " -",
-            (_, false) => " +",
-            (_, true) => " -",
-        };
-        formula += &format!("{sign} {:.3} S({})", w.abs(), crate::hot_spots::short(*d));
-    }
-    ui.vertical(|ui| {
-        ui.label(formula);
-        if matches!(
-            hot_spot.extrapolation,
-            Extrapolation::IiwTypeBFine | Extrapolation::IiwTypeBCoarse
-        ) {
-            ui.weak("Abstände in mm: das Modell muss in mm sein.");
-        }
-    });
-    ui.end_row();
-    ui.label("Spannung");
-    egui::ComboBox::from_id_salt("hot spot component")
-        .selected_text(hot_spot.component.label())
-        .width(240.0)
-        .show_ui(ui, |ui| {
-            for component in HotSpotComponent::ALL {
-                ui.selectable_value(&mut hot_spot.component, component, component.label());
-            }
-        });
-    ui.end_row();
-    ui.label("Pfadrichtung");
-    ui.vertical(|ui| {
-        ui.horizontal(|ui| {
-            for (value, label) in hot_spot.direction.iter_mut().zip(["X", "Y", "Z"]) {
-                ui.label(label);
-                ui.add(numeric::drag_value(value).speed(0.05));
-            }
-        });
-        ui.weak("Vom Nahtübergang weg; wird quer zur Naht in die Blechoberfläche gedreht.");
-    });
-    ui.end_row();
-    region.ui(ui, model);
-    ui.label("");
-    ui.weak("Knoten am Nahtübergang, z. B. als Kante.");
-    ui.end_row();
-}
-
-fn validate_hot_spot(hot_spot: &HotSpot) -> Result<(), String> {
-    let distances = hot_spot.distances();
-    if hot_spot.extrapolation.uses_thickness()
-        && hot_spot.thickness.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
-    {
-        return Err("Die Blechdicke muss größer als null sein.".into());
-    }
-    if distances.len() < 2 {
-        return Err("Mindestens zwei Lesepunkte angeben.".into());
-    }
-    let mut sorted = distances.clone();
-    sorted.sort_by(f64::total_cmp);
-    if sorted[0] <= 0.0 || sorted.windows(2).any(|w| w[0] == w[1]) {
-        return Err("Die Abstände müssen positiv und verschieden sein.".into());
-    }
-    if hot_spot.direction.iter().all(|&v| v == 0.0) {
-        return Err("Bitte eine Pfadrichtung angeben.".into());
-    }
-    Ok(())
-}
-
-fn format_distances(distances: &[f64]) -> String {
-    let parts: Vec<String> = distances
-        .iter()
-        .map(|&d| crate::hot_spots::short(d))
-        .collect();
-    parts.join(", ")
-}
-
-/// Distances separated by spaces or semicolons; a comma right after a number separates
-/// as well, a comma inside one is a decimal comma ("2, 6" are two, "2,5" is one).
-fn parse_distances(text: &str) -> Vec<f64> {
-    text.split(|c: char| c == ';' || c.is_whitespace())
-        .map(|part| part.trim_end_matches(','))
-        .filter(|part| !part.is_empty())
-        .filter_map(numeric::parse_number)
-        .collect()
-}
-
 fn solver_label(solver: EquationSolver) -> &'static str {
     match solver {
         EquationSolver::Default => "Standard (Pardiso, falls vorhanden)",
@@ -1808,35 +1617,5 @@ mod tests {
         assert!(fe.steps[0].boundary_conditions[0].active);
         assert!(!toggle_active(&mut fe, &TreeItem::Load(0, 0)));
         assert!(!toggle_active(&mut fe, &TreeItem::Material(0)));
-    }
-
-    #[test]
-    fn hot_spots_are_created_and_checked() {
-        let mut fe = FeModel::default();
-        let mut editor = Editor::create(NewItem::HotSpot, &fe).unwrap();
-        if let Draft::HotSpot(hot_spot, region, _) = &mut editor.draft {
-            region.nodes.push(Operation::Replace, BTreeSet::from([7]));
-            hot_spot.extrapolation = Extrapolation::Custom(vec![3.0, 3.0]);
-        }
-        assert!(editor.validate(&fe).is_err(), "equal distances");
-        if let Draft::HotSpot(hot_spot, ..) = &mut editor.draft {
-            hot_spot.extrapolation = Extrapolation::IiwTypeBCoarse;
-        }
-        assert_eq!(editor.validate(&fe), Ok(()));
-        editor.apply(&mut fe);
-        assert_eq!(fe.hot_spots[0].name, "Hot_Spot-1");
-        assert_eq!(fe.hot_spots[0].toe, Region::Nodes(vec![7]));
-        assert_eq!(
-            item_region(&fe, &TreeItem::HotSpot(0)),
-            Some(&Region::Nodes(vec![7]))
-        );
-    }
-
-    #[test]
-    fn distances_accept_lists_and_decimal_commas() {
-        assert_eq!(parse_distances("2, 6, 10"), [2.0, 6.0, 10.0]);
-        assert_eq!(parse_distances("0,4; 1,5"), [0.4, 1.5]);
-        assert_eq!(parse_distances("4 8 x 12"), [4.0, 8.0, 12.0]);
-        assert_eq!(format_distances(&[0.4 * 12.0, 12.0]), "4.8, 12");
     }
 }

@@ -4,13 +4,12 @@
 //! the picked toe nodes, run along the plate surface away from the weld, and the surface
 //! stress at fixed distances on them is extrapolated back to the toe, as in the IIW
 //! recommendations for fatigue design of welded joints (Hobbacher, 2016, section 2.2.3).
-//! Nothing of it goes into the input file.
+//! It belongs to a results file: defined and evaluated in post-processing, it is no part
+//! of the FE model and nothing of it goes into the input file.
 
-use serde::{Deserialize, Serialize};
+use plx_model::Region;
 
-use crate::Region;
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct HotSpot {
     pub name: String,
     /// Nodes on the weld toe or at the notch; a path starts at each of them.
@@ -43,7 +42,7 @@ impl HotSpot {
 }
 
 /// Read-out points and extrapolation, IIW's surface stress extrapolation.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Extrapolation {
     /// Type a, fine mesh: linear through 0.4 t and 1.0 t.
     IiwFineLinear,
@@ -122,7 +121,7 @@ pub fn extrapolation_weights(distances: &[f64]) -> Vec<f64> {
 }
 
 /// Which stress is extrapolated.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HotSpotComponent {
     /// Normal stress perpendicular to the weld toe, along the path (IIW's default).
     #[default]

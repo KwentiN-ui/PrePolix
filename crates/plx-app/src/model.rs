@@ -68,8 +68,8 @@ pub struct Model {
     /// For the display of CAD geometry, the CAD face or edge of each element; element ids
     /// count from 1.
     cad_entities: Vec<CadEntity>,
-    /// Hot spot values of a results file, evaluated with the hot spots of the FE model.
-    pub hot_spots: Option<crate::hot_spots::Evaluation>,
+    /// Hot spots defined on a results file, with their values.
+    pub hot_spots: crate::hot_spots::HotSpots,
     /// Faces and parts drawn in the highlight colour.
     pub highlight: Highlight,
     /// The section view plane in render coordinates; picking ignores what it cuts off.
@@ -310,7 +310,7 @@ impl Model {
             geometry: None,
             is_geometry: false,
             cad_entities: Vec::new(),
-            hot_spots: None,
+            hot_spots: Default::default(),
             highlight: Highlight::default(),
             clip: None,
             origin,

@@ -11,6 +11,7 @@ mod field_output_dialog;
 mod gizmo;
 mod history_output_dialog;
 mod history_table;
+mod hot_spot_dialog;
 mod hot_spots;
 mod icons;
 mod keywords;

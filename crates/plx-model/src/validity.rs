@@ -195,7 +195,6 @@ mod tests {
             }],
             steps: vec![step],
             user_keywords: Vec::new(),
-            hot_spots: Vec::new(),
             ..FeModel::default()
         }
     }

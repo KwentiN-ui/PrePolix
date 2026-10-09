@@ -8,7 +8,6 @@
 mod constraint;
 mod contact;
 mod geometry;
-mod hot_spot;
 pub mod library;
 mod properties;
 mod region;
@@ -22,7 +21,6 @@ pub use contact::{
 pub use geometry::{
     Algorithm2d, Algorithm3d, Geometry, MeshSetupItem, MeshSetupKind, MeshingParameters,
 };
-pub use hot_spot::{Extrapolation, HotSpot, HotSpotComponent, extrapolation_weights};
 pub use library::MaterialLibrary;
 pub use properties::{
     BASE_QUANTITIES, DERIVED_QUANTITIES, ModelProperties, ModelSpace, UnitSystem,
@@ -68,9 +66,6 @@ pub struct FeModel {
     /// they appear in it. They cover what the model cannot express yet.
     #[serde(default)]
     pub user_keywords: Vec<UserKeyword>,
-    /// Hot spot stress evaluations, done on the results; not part of the input file.
-    #[serde(default)]
-    pub hot_spots: Vec<HotSpot>,
 }
 
 impl FeModel {

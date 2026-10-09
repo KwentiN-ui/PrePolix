@@ -1,17 +1,20 @@
-//! Hot spot stresses in the GUI: the paths in the 3D view, the evaluation of a results file
-//! with the hot spots of the FE model, the output file and the table of values.
+//! Hot spot stresses in the Results workspace: the definitions of a results file, their
+//! paths in the 3D view, the evaluation, the output file and the table of values.
 
 use std::path::{Path, PathBuf};
 
 use glam::Vec3;
 use plx_mesh::SkinFace;
-use plx_model::{HotSpot, Region};
-use plx_results::hot_spot::{self, HotSpotReport};
+use plx_results::hot_spot::{self, HotSpot, HotSpotPath, HotSpotReport};
 
 use crate::model::Model;
 
-/// Hot spot values of one results file.
-pub struct Evaluation {
+/// The hot spots of one results file: defined on it, like its derived outputs, and
+/// evaluated whenever they change.
+#[derive(Default)]
+pub struct HotSpots {
+    pub definitions: Vec<HotSpot>,
+    /// Values of the definitions, in their order.
     pub reports: Vec<HotSpotReport>,
     /// The output file, once written.
     pub file: Option<PathBuf>,
@@ -23,32 +26,24 @@ fn surface_faces(model: &Model) -> Vec<&SkinFace> {
         .collect()
 }
 
-/// The paths of a definition on the model in render coordinates, each starting at its toe,
-/// for showing them while the definition is edited or selected.
-pub fn preview(model: &Model, hot_spot: &HotSpot) -> Vec<Vec<Vec3>> {
-    let (paths, _) = hot_spot::hot_spot_paths(&model.mesh, surface_faces(model), hot_spot);
-    paths
-        .iter()
-        .map(|path| {
-            // The path moves with its part in an exploded view.
-            let offset = model.explosion_offset(path.index).as_vec3();
-            std::iter::once(path.position)
-                .chain(path.points.iter().map(|p| p.position))
-                .map(|p| model.to_render(p) + offset)
-                .collect()
-        })
-        .collect()
+/// The paths of a definition on the results, for showing them while it is edited or
+/// selected.
+pub fn paths(model: &Model, hot_spot: &HotSpot) -> Vec<HotSpotPath> {
+    hot_spot::hot_spot_paths(&model.mesh, surface_faces(model), hot_spot).0
 }
 
-/// The paths of the evaluated hot spots on the shown results, deformed like the mesh.
-pub fn result_paths(model: &Model, evaluation: &Evaluation) -> Vec<Vec<Vec3>> {
+/// Paths in render coordinates, deformed like the shown mesh, each starting at its toe.
+pub fn render_paths<'a>(
+    model: &Model,
+    paths: impl IntoIterator<Item = &'a HotSpotPath>,
+) -> Vec<Vec<Vec3>> {
     let position = |weights: &[(usize, f64)]| {
         weights.iter().try_fold(Vec3::ZERO, |sum, &(node, weight)| {
             Some(sum + model.node_position(node)? * weight as f32)
         })
     };
-    (evaluation.reports.iter())
-        .flat_map(|r| &r.paths)
+    paths
+        .into_iter()
         .filter_map(|path| {
             std::iter::once(model.node_position(path.index))
                 .chain(path.points.iter().map(|p| position(&p.weights)))
@@ -57,47 +52,17 @@ pub fn result_paths(model: &Model, evaluation: &Evaluation) -> Vec<Vec<Vec3>> {
         .collect()
 }
 
-/// Evaluates the hot spots of the FE model `fe` on `results`, a results file of it.
-pub fn evaluate(fe: &Model, results: &Model) -> Result<Vec<HotSpotReport>, String> {
-    let view = results
-        .results
-        .as_ref()
-        .ok_or("Keine Ergebnisse geladen.")?;
-    // The results file has no sets, so toe regions become their nodes; they must be the
-    // same nodes in the same places.
-    let size = fe.mesh.bounds().map_or(1.0, |(min, max)| {
-        (0..3).map(|k| max[k] - min[k]).fold(0.0, f64::max)
-    });
-    let mut definitions = Vec::with_capacity(fe.fe.hot_spots.len());
-    for hot_spot in &fe.fe.hot_spots {
-        let nodes = hot_spot.toe.nodes(&fe.mesh);
-        for &id in &nodes {
-            let here = fe.mesh.node(id);
-            let there = results.mesh.node(id);
-            let moved = match (here, there) {
-                (Some(a), Some(b)) => (0..3).any(|k| (a[k] - b[k]).abs() > 1e-6 * size),
-                _ => true,
-            };
-            if moved {
-                return Err(format!(
-                    "{} passt nicht zum Modell: Knoten {id} von {} fehlt oder liegt anders.",
-                    results.file_name(),
-                    hot_spot.name
-                ));
-            }
-        }
-        definitions.push(HotSpot {
-            toe: Region::Nodes(nodes),
-            ..hot_spot.clone()
-        });
-    }
-    let faces = surface_faces(results);
-    Ok(hot_spot::evaluate(
-        &results.mesh,
-        &faces,
-        &definitions,
+/// Evaluates the hot spot definitions of the results file over all its increments.
+pub fn evaluate(model: &Model) -> Vec<HotSpotReport> {
+    let Some(view) = &model.results else {
+        return Vec::new();
+    };
+    hot_spot::evaluate(
+        &model.mesh,
+        &surface_faces(model),
+        &model.hot_spots.definitions,
         &view.increments,
-    ))
+    )
 }
 
 /// Where the values of a results file are written: next to it, e.g. `Analysis-1.frd` gives
@@ -141,7 +106,7 @@ pub fn summary(reports: &[HotSpotReport]) -> Vec<String> {
 }
 
 /// The table of the values in the shown increment. Returns false when it was closed.
-pub fn window(ctx: &egui::Context, evaluation: &Evaluation, step: Option<(u32, u32)>) -> bool {
+pub fn window(ctx: &egui::Context, evaluation: &HotSpots, step: Option<(u32, u32)>) -> bool {
     let mut open = true;
     egui::Window::new("Hot-Spot-Spannungen")
         .open(&mut open)
@@ -222,7 +187,8 @@ pub fn short(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use plx_model::{Extrapolation, HotSpotComponent};
+    use plx_model::Region;
+    use plx_results::hot_spot::{Extrapolation, HotSpotComponent};
 
     use super::*;
     use crate::model::load;
@@ -246,10 +212,10 @@ mod tests {
         // Cantilever 100 x 10 x 10, 100 N across at its end, solved by CalculiX 2.21 with
         // C3D20R. On top the bending stress rises linearly towards the support:
         // S11 = F (100 - x) (h / 2) / I = 0.6 (100 - x), so 30 at x = 50.
-        let mut fe = load(&testdata("kragbalken_c3d20r.inp")).unwrap().model;
-        let toe = [40.0, 50.0, 60.0].map(|x| node_at(&fe, [x, 5.0, 10.0]));
+        let mut results = load(&testdata("kragbalken_c3d20r.frd")).unwrap().model;
+        let toe = [40.0, 50.0, 60.0].map(|x| node_at(&results, [x, 5.0, 10.0]));
         for (i, extrapolation) in Extrapolation::IIW[..3].iter().enumerate() {
-            fe.fe.hot_spots.push(HotSpot {
+            results.hot_spots.definitions.push(HotSpot {
                 toe: Region::Nodes(toe.to_vec()),
                 direction: [1.0, 0.0, 0.0],
                 thickness: 10.0,
@@ -258,8 +224,7 @@ mod tests {
                 ..HotSpot::new(format!("Hot_Spot-{}", i + 1))
             });
         }
-        let results = load(&testdata("kragbalken_c3d20r.frd")).unwrap().model;
-        let reports = evaluate(&fe, &results).unwrap();
+        let reports = evaluate(&results);
         assert_eq!(reports.len(), 3);
         for report in &reports {
             assert!(report.warnings.is_empty(), "{:?}", report.warnings);
@@ -273,19 +238,10 @@ mod tests {
         }
         let csv = hot_spot::to_csv(&reports);
         assert_eq!(csv.lines().count(), 1 + 3 * 3);
-    }
-
-    #[test]
-    fn results_of_another_mesh_are_refused() {
-        let mut fe = load(&testdata("kragbalken_c3d8.inp")).unwrap().model;
-        fe.fe.hot_spots.push(HotSpot {
-            toe: Region::Nodes(vec![1, 3]),
-            ..HotSpot::new("Hot_Spot-1")
-        });
-        // Node 1 is at the origin in both meshes, node 3 is not.
-        let results = load(&testdata("block_c3d20r.frd")).unwrap().model;
-        let error = evaluate(&fe, &results).unwrap_err();
-        assert!(error.contains("Knoten 3"), "{error}");
+        // The paths start at the toe and run along the top in +x.
+        let paths = paths(&results, &results.hot_spots.definitions[0]);
+        assert_eq!(paths.len(), 3);
+        assert_eq!(render_paths(&results, &paths)[0].len(), 3);
     }
 
     #[test]

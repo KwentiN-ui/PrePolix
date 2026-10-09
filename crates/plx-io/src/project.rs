@@ -66,9 +66,9 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
 #[cfg(test)]
 mod tests {
     use plx_model::{
-        Algorithm2d, Algorithm3d, Constraint, ContactPair, Extrapolation, Friction, HotSpot,
-        InteractionProperty, Material, MeshSetupItem, MeshSetupKind, MeshingParameters, Region,
-        Step, SurfaceBehavior, SurfaceInteraction, Tie, UserKeyword,
+        Algorithm2d, Algorithm3d, Constraint, ContactPair, Friction, InteractionProperty, Material,
+        MeshSetupItem, MeshSetupKind, MeshingParameters, Region, Step, SurfaceBehavior,
+        SurfaceInteraction, Tie, UserKeyword,
     };
 
     use super::*;
@@ -93,11 +93,6 @@ mod tests {
                 position: vec![14, 0],
                 text: "*Amplitude, Name=A\n0, 0, 1, 1".into(),
                 active: false,
-            }],
-            hot_spots: vec![HotSpot {
-                toe: Region::Nodes(vec![3, 7]),
-                extrapolation: Extrapolation::Custom(vec![2.0, 6.0]),
-                ..HotSpot::new("Hot_Spot-1")
             }],
             constraints: vec![Constraint::Tie(Tie {
                 master: Region::Faces(vec![(1, 2)]),
@@ -175,5 +170,19 @@ mod tests {
         assert!(text.contains("active:false,"), "{text}");
         let older: Step = ron::from_str(&text.replace("active:false,", "")).unwrap();
         assert!(older.active);
+    }
+
+    #[test]
+    fn hot_spots_of_older_projects_are_skipped() {
+        // Hot spots were part of the FE model for a while; they are defined on the results
+        // now, and projects saved with them still open.
+        let text = ron::to_string(&FeModel::default()).unwrap();
+        let hot_spots = "hot_spots:[(name:\"Hot_Spot-1\",toe:Nodes([3,7]),\
+            direction:(1.0,0.0,0.0),thickness:10.0,extrapolation:Custom([2.0,6.0]),\
+            component:Perpendicular)],";
+        let older = text.replacen("user_keywords:", &format!("{hot_spots}user_keywords:"), 1);
+        assert_ne!(older, text);
+        let model: FeModel = ron::from_str(&older).unwrap();
+        assert_eq!(model, FeModel::default());
     }
 }
