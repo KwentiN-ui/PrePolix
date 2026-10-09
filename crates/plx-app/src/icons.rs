@@ -40,6 +40,8 @@ pub enum Icon {
 
 /// Flat toolbar button in the Windows style: frame only while hovered or checked.
 pub fn button(ui: &mut Ui, icon: Icon, tooltip: &str, enabled: bool, checked: bool) -> Response {
+    // Inside a disabled area, e.g. the greyed-out results row, the icon is greyed out too.
+    let enabled = enabled && ui.is_enabled();
     let sense = if enabled {
         Sense::click()
     } else {
