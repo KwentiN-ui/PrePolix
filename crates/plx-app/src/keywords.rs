@@ -409,7 +409,9 @@ impl KeywordEditor {
                         Some(&mut self.root_expanded),
                         root_selected,
                         egui::RichText::new("CalculiX inp file"),
-                    ) {
+                    )
+                    .clicked()
+                    {
                         clicked = Some(Vec::new());
                     }
                     if self.root_expanded {
@@ -553,7 +555,7 @@ const SELECTED_LINE: egui::Color32 = egui::Color32::from_rgb(255, 236, 160);
 /// Colour of the user's keywords in the tree, like PrePoMax's added-keyword icon.
 const USER_KEYWORD: egui::Color32 = egui::Color32::from_rgb(0, 110, 0);
 
-fn frame() -> egui::Frame {
+pub(crate) fn frame() -> egui::Frame {
     egui::Frame::new()
         .fill(crate::style::WINDOW)
         .stroke(egui::Stroke::new(1.0, crate::style::BORDER))
@@ -588,7 +590,9 @@ fn tree_ui(
             expanded,
             selected == Some(path.as_slice()),
             label,
-        ) {
+        )
+        .clicked()
+        {
             *clicked = Some(path.clone());
         }
         if has_children && node.expanded {
@@ -599,13 +603,15 @@ fn tree_ui(
 }
 
 /// One row of the tree with its expand arrow; returns whether the label was clicked.
-fn tree_row(
+/// Row of a tree drawn from data: indentation, expand button for nodes with children and a
+/// selectable label, whose response is returned.
+pub(crate) fn tree_row(
     ui: &mut egui::Ui,
     depth: usize,
     expanded: Option<&mut bool>,
     selected: bool,
     label: egui::RichText,
-) -> bool {
+) -> egui::Response {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         ui.add_space(depth as f32 * 14.0);
@@ -633,7 +639,7 @@ fn tree_row(
         if selected && response.gained_focus() {
             response.scroll_to_me(None);
         }
-        response.clicked()
+        response
     })
     .inner
 }
