@@ -873,3 +873,85 @@ fn added_files_keep_the_old_parts_with_names_sizes_and_faces() {
     );
     assert!(addition.renumbered.is_empty());
 }
+
+/// A 2D geometry of two rectangles in the x-y plane: a beam (0..40 x 0..5) lying on a block
+/// (10..30 x -10..0), touching along y = 0.
+fn beam_on_block() -> Geometry {
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        gmsh.add_rectangle([0.0, 0.0, 0.0], [40.0, 5.0], 0.0)?;
+        gmsh.add_rectangle([10.0, -10.0, 0.0], [20.0, 10.0], 0.0)?;
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    Geometry {
+        source: "balken.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters::for_diagonal(40.0),
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+    }
+}
+
+/// The contact search on a 2D mesh finds the edges along y = 0; they are whole CAD edges,
+/// so a contact pair keeps them by geometry and finds them again on a finer mesh.
+#[test]
+fn contact_edges_found_in_2d_survive_remeshing() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = beam_on_block();
+    let mesh_with = |size: f64, geometry: &mut Geometry| {
+        geometry.meshing.max_size = size;
+        let mut mesh = generate_mesh(geometry).unwrap().mesh;
+        plx_model::ModelSpace::PlaneStrain
+            .prepare_generated_mesh(&mut mesh)
+            .unwrap();
+        mesh
+    };
+    let coarse = mesh_with(5.0, &mut geometry);
+    let skins: Vec<_> = (coarse.parts.iter())
+        .map(|p| plx_mesh::extract_part_skin(&coarse, p, 30.0))
+        .collect();
+    let parameters = plx_mesh::SearchParameters {
+        distance: 0.01,
+        angle_deg: 35.0,
+        group_by: plx_mesh::GroupBy::Parts,
+        stiffness: Vec::new(),
+    };
+    let searched = vec![true; coarse.parts.len()];
+    let items = plx_mesh::find_contact_pairs(&coarse, &skins, &searched, &parameters);
+    assert_eq!(items.len(), 1, "{items:?}");
+    let on_contact = |mesh: &FeMesh, faces: &[(ElementId, u8)]| {
+        assert!(!faces.is_empty());
+        for &(element, face) in faces {
+            let element = mesh.element(element).unwrap();
+            let edge = &element.faces()[usize::from(face) - 1];
+            for &corner in edge.corners {
+                let y = mesh.node(element.nodes[corner]).unwrap()[1];
+                assert!(y.abs() < 1e-6, "Kante bei y = {y}");
+            }
+        }
+    };
+    let mut entities = Vec::new();
+    for side in [&items[0].master, &items[0].slave] {
+        let faces = plx_mesh::surface_faces(&coarse, &skins, side);
+        on_contact(&coarse, &faces);
+        let whole = coarse.whole_cad_faces(&faces).expect("ganze CAD-Kanten");
+        assert!(
+            whole.iter().all(|e| matches!(e, CadEntity::Edge(_))),
+            "{whole:?}"
+        );
+        entities.push((whole, faces.len()));
+    }
+    let fine = mesh_with(1.0, &mut geometry);
+    for (whole, coarse_count) in entities {
+        let faces = fine.cad_faces(&whole);
+        on_contact(&fine, &faces);
+        assert!(
+            faces.len() > coarse_count,
+            "{} <= {coarse_count}",
+            faces.len()
+        );
+    }
+}
