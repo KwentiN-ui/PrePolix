@@ -2892,17 +2892,22 @@ impl Workbench {
         };
         match dialog.show(ctx, model) {
             SearchResult::Open => {}
-            SearchResult::Ok(ties, pairs) => {
-                let created = format!(
+            SearchResult::Ok(ties, pairs, joints) => {
+                let mut created = format!(
                     "Kontaktsuche: {} Ties und {} Kontaktpaare erstellt",
                     ties.len(),
                     pairs.len()
                 );
+                if !joints.is_empty() {
+                    created.push_str(&format!(", {} Node Ties", joints.len()));
+                }
                 // The first new item shows in the tree, even in a collapsed branch.
-                let first = if pairs.is_empty() {
-                    (!ties.is_empty()).then_some(TreeItem::Constraint(model.fe.constraints.len()))
-                } else {
+                let first = if !pairs.is_empty() {
                     Some(TreeItem::ContactPair(model.fe.contact_pairs.len()))
+                } else if !joints.is_empty() {
+                    Some(TreeItem::NodeTie(model.fe.node_ties.len()))
+                } else {
+                    (!ties.is_empty()).then_some(TreeItem::Constraint(model.fe.constraints.len()))
                 };
                 if let Some(item) = first {
                     self.tree.selected = Some((TreeView::FeModel, item));
@@ -2910,6 +2915,7 @@ impl Workbench {
                 }
                 model.fe.constraints.extend(ties);
                 model.fe.contact_pairs.extend(pairs);
+                model.fe.node_ties.extend(joints);
                 self.output.push(created);
                 self.contact_search = None;
                 self.highlighted = None;

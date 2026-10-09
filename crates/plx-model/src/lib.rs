@@ -80,6 +80,9 @@ pub struct FeModel {
     pub surface_interactions: Vec<SurfaceInteraction>,
     #[serde(default)]
     pub contact_pairs: Vec<ContactPair>,
+    /// Ends of beams and trusses tied node to node, shown among the contact pairs.
+    #[serde(default)]
+    pub node_ties: Vec<NodeTie>,
     /// Time curves boundary conditions and loads refer to by name.
     #[serde(default)]
     pub amplitudes: Vec<Amplitude>,
@@ -124,6 +127,7 @@ impl FeModel {
         (self.sections.iter().map(|s| &s.region))
             .chain(self.constraints.iter().flat_map(Constraint::regions))
             .chain((self.contact_pairs.iter()).flat_map(|c| [&c.master, &c.slave]))
+            .chain(self.node_ties.iter().map(|t| &t.region))
             .chain(self.steps.iter().flat_map(|step| {
                 (step.boundary_conditions.iter().map(|b| &b.region))
                     .chain(step.loads.iter().map(|l| &l.region))
@@ -171,11 +175,25 @@ impl FeModel {
                     .flat_map(Constraint::regions_mut),
             )
             .chain((self.contact_pairs.iter_mut()).flat_map(|c| [&mut c.master, &mut c.slave]))
+            .chain(self.node_ties.iter_mut().map(|t| &mut t.region))
             .chain(self.steps.iter_mut().flat_map(|step| {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
                     .chain((step.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
             }))
+    }
+
+    /// Brings a model read from an older project up to date: node ties saved among the
+    /// constraints move to [`FeModel::node_ties`], in their order.
+    pub fn migrate(&mut self) {
+        let mut constraints = Vec::with_capacity(self.constraints.len());
+        for constraint in std::mem::take(&mut self.constraints) {
+            match constraint {
+                Constraint::NodeTie(tie) => self.node_ties.push(tie),
+                other => constraints.push(other),
+            }
+        }
+        self.constraints = constraints;
     }
 
     /// Follows a renamed amplitude: boundary conditions and loads keep referring to it.

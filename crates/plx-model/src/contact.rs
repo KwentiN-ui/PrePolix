@@ -220,6 +220,8 @@ pub enum Constraint {
     CompressionOnly(CompressionOnly),
     Tie(Tie),
     SurfaceToSurfaceSpring(SurfaceToSurfaceSpring),
+    /// Only in projects saved while node ties were constraints; [`crate::FeModel::migrate`]
+    /// moves them to the model's node ties, where they belong with the contact pairs.
     NodeTie(NodeTie),
 }
 

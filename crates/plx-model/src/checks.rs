@@ -800,6 +800,11 @@ impl FeModel {
                 }
             }
         }
+        for tie in self.node_ties.iter().filter(|t| t.active) {
+            let tied = pieces(&tie.region);
+            join(&mut ties, &tied, &[]);
+            join(&mut contacts, &tied, &[]);
+        }
         for pair in self.contact_pairs.iter().filter(|c| c.active) {
             join(&mut contacts, &pieces(&pair.master), &pieces(&pair.slave));
         }
@@ -910,16 +915,18 @@ impl FeModel {
         };
         let axis =
             |d: usize| -> [f64; 3] { std::array::from_fn(|i| if i == d { 1.0 } else { 0.0 }) };
+        for tie in self.node_ties.iter().filter(|t| t.active) {
+            let nodes: Vec<usize> = (tie.region.nodes(mesh).into_iter())
+                .filter_map(|n| mesh.node_index(n))
+                .collect();
+            for pair in nodes.windows(2) {
+                joined.join(pair[0], pair[1]);
+            }
+        }
         for constraint in self.constraints.iter().filter(|c| c.active()) {
             match constraint {
-                Constraint::NodeTie(c) => {
-                    let nodes: Vec<usize> = (c.region.nodes(mesh).into_iter())
-                        .filter_map(|n| mesh.node_index(n))
-                        .collect();
-                    for pair in nodes.windows(2) {
-                        joined.join(pair[0], pair[1]);
-                    }
-                }
+                // Moved to the node ties when the project was read.
+                Constraint::NodeTie(_) => {}
                 Constraint::PointSpring(c) => {
                     for node in c.region.nodes(mesh) {
                         for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
@@ -1856,12 +1863,12 @@ mod tests {
         });
         model.steps[0].loads[0].region = Region::Nodes(vec![3]);
         if tied {
-            model.constraints.push(Constraint::NodeTie(crate::NodeTie {
+            model.node_ties.push(crate::NodeTie {
                 name: "Node_Tie-1".into(),
                 active: true,
                 region: Region::Nodes(vec![3, 9]),
                 rotations: true,
-            }));
+            });
         }
         (mesh, model)
     }

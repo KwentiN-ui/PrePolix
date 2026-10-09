@@ -259,13 +259,14 @@ pub fn model_keywords(
     let materials = materials(model);
     let mut sections = sections(&mut sets, model)?;
     let generated = constraints::springs(&mut sets, model)?;
-    let mut constraints = constraints(&mut sets, model, &lines)?;
+    let mut constraints = constraints(&mut sets, model)?;
     constraints.extend(generated.equations);
     sections.extend(generated.sections);
     let mut materials = materials;
     materials.extend(generated.material);
     let interactions = model.surface_interactions.iter().map(interaction).collect();
-    let (contact_pairs, pair_surfaces) = contact_pairs(&mut sets, model)?;
+    let (mut contact_pairs, pair_surfaces) = contact_pairs(&mut sets, model)?;
+    contact_pairs.extend(node_ties(&mut sets, model, &lines)?);
     let initial_conditions = initial_conditions(&mut sets, model)?;
     let amplitudes = amplitudes(model)?;
     let flux_kinds = FluxKinds::of(model);
@@ -943,11 +944,7 @@ fn beam_groups(sets: &mut Sets, section: &Section) -> Result<Vec<([f64; 3], Stri
 
 /// Tie constraints as PrePoMax's `CalTie` writes them: slave surface first. Springs and
 /// supports are written as elements, see [`constraints::springs`].
-fn constraints(
-    sets: &mut Sets,
-    model: &FeModel,
-    lines: &LineElements,
-) -> Result<Vec<Keyword>, WriteError> {
+fn constraints(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
     let mut keywords = Vec::new();
     for constraint in &model.constraints {
         if !constraint.active() {
@@ -959,7 +956,8 @@ fn constraints(
             | Constraint::SurfaceSpring(_)
             | Constraint::CompressionOnly(_)
             | Constraint::SurfaceToSurfaceSpring(_) => {}
-            Constraint::NodeTie(tie) => keywords.push(node_tie(sets, tie, lines)?),
+            // Moved to the model's node ties when the project was read.
+            Constraint::NodeTie(_) => {}
             Constraint::Tie(tie) => {
                 let master = sets.surface(&tie.name, "Master", &tie.master)?;
                 let slave = sets.surface(&tie.name, "Slave", &tie.slave)?;
@@ -978,6 +976,25 @@ fn constraints(
     Ok(keywords)
 }
 
+/// The node ties, listed with the contact pairs.
+fn node_ties(
+    sets: &mut Sets,
+    model: &FeModel,
+    lines: &LineElements,
+) -> Result<Vec<Keyword>, WriteError> {
+    model
+        .node_ties
+        .iter()
+        .map(|tie| {
+            if tie.active {
+                node_tie(sets, tie, lines)
+            } else {
+                Ok(deactivated(&tie.name))
+            }
+        })
+        .collect()
+}
+
 /// Whether a node tie is a hinge between beams, written as equations of the translations.
 /// Every other tie is written as one shared node (see [`node_merges`]): CalculiX 2.21 does
 /// not couple the rotations of beam nodes through equations, and nodes without rotations
@@ -990,10 +1007,7 @@ fn hinge_between_beams(tie: &NodeTie, nodes: &[NodeId], lines: &LineElements) ->
 /// node that stays.
 fn node_merges(mesh: &FeMesh, model: &FeModel, lines: &LineElements) -> BTreeMap<NodeId, NodeId> {
     let mut replaced = BTreeMap::new();
-    for constraint in model.constraints.iter().filter(|c| c.active()) {
-        let Constraint::NodeTie(tie) = constraint else {
-            continue;
-        };
+    for tie in model.node_ties.iter().filter(|t| t.active) {
         let nodes = tie.region.nodes(mesh);
         if hinge_between_beams(tie, &nodes, lines) {
             continue;
