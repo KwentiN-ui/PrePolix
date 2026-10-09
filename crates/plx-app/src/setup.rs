@@ -342,20 +342,33 @@ impl RegionDraft {
         }
     }
 
+    /// The rows of the only region of a dialog, which clicks in the 3D view always fill.
     pub(crate) fn ui(&mut self, ui: &mut Ui, model: &Model) {
-        self.ui_labeled(ui, model, "Region", "region");
+        self.ui_labeled(ui, model, "Region", "region", true);
     }
 
     /// The region's rows under its own label; `id` keeps its widgets apart from those of
-    /// another region in the same dialog.
-    pub(crate) fn ui_labeled(&mut self, ui: &mut Ui, model: &Model, label: &str, id: &str) {
+    /// another region in the same dialog. `active` tells whether clicks in the 3D view fill
+    /// this region; returns whether the user wants them to, by its "..." button or by
+    /// changing where the region comes from.
+    pub(crate) fn ui_labeled(
+        &mut self,
+        ui: &mut Ui,
+        model: &Model,
+        label: &str,
+        id: &str,
+        active: bool,
+    ) -> bool {
         ui.label(label);
-        ui.push_id(id, |ui| self.ui_body(ui, model));
+        let wanted = ui.push_id(id, |ui| self.ui_body(ui, model, active)).inner;
         ui.end_row();
+        wanted
     }
 
-    fn ui_body(&mut self, ui: &mut Ui, model: &Model) {
+    fn ui_body(&mut self, ui: &mut Ui, model: &Model, active: bool) -> bool {
+        let mut wanted = false;
         ui.vertical(|ui| {
+            let source = self.source;
             egui::ComboBox::from_id_salt("region source")
                 .selected_text(self.source.label())
                 .width(200.0)
@@ -364,9 +377,11 @@ impl RegionDraft {
                         ui.selectable_value(&mut self.source, source, source.label());
                     }
                 });
+            wanted |= self.source != source;
             match self.source {
                 Source::Selection => {
                     ui.horizontal(|ui| {
+                        wanted |= pick_button(ui, active);
                         let count = self.count();
                         let geometry = self.geometry.items();
                         let what = match self.target {
@@ -389,6 +404,10 @@ impl RegionDraft {
                     ui.weak("Im Fenster \"Auswahl\" wählen, was ein Klick auswählt.");
                 }
                 Source::Parts => {
+                    ui.horizontal(|ui| {
+                        wanted |= pick_button(ui, active);
+                        ui.weak("Ein Klick auf ein Part im 3D-Fenster wählt es ebenfalls.");
+                    });
                     for part in &model.parts {
                         let mut checked = self.parts.contains(&part.name);
                         if ui.checkbox(&mut checked, &part.name).changed() {
@@ -399,7 +418,6 @@ impl RegionDraft {
                             }
                         }
                     }
-                    ui.weak("Ein Klick auf ein Part im 3D-Fenster wählt es ebenfalls.");
                 }
                 Source::NodeSet | Source::ElementSet | Source::Surface => {
                     let names: Vec<&String> = match self.source {
@@ -421,6 +439,7 @@ impl RegionDraft {
                 }
             }
         });
+        wanted
     }
 
     pub(crate) fn highlight(&self, model: &Model) -> Highlight {
@@ -456,6 +475,18 @@ impl RegionDraft {
     }
 }
 
+/// The "..." button of a field filled by clicks in the 3D view, shown pressed while it
+/// is the field they fill. Returns whether it was clicked.
+pub(crate) fn pick_button(ui: &mut Ui, active: bool) -> bool {
+    let hint = if active {
+        "Klicks im 3D-Fenster wählen in dieses Feld."
+    } else {
+        "In dieses Feld im 3D-Fenster wählen"
+    };
+    let button = egui::Button::new("...").selected(active);
+    ui.add(button).on_hover_text(hint).clicked()
+}
+
 /// Edges of the outline of the visible parts, the faces of a 2D model.
 fn visible_edges(model: &Model) -> BTreeSet<(ElementId, u8)> {
     (model.outline_edges().into_iter())
@@ -465,7 +496,7 @@ fn visible_edges(model: &Model) -> BTreeSet<(ElementId, u8)> {
 }
 
 /// Pressure and surface traction act on element faces, in 2D models on their edges.
-fn face_target(fe: &FeModel) -> Target {
+pub(crate) fn face_target(fe: &FeModel) -> Target {
     if fe.properties.space.is_2d() {
         Target::Edges
     } else {
@@ -831,7 +862,7 @@ impl Editor {
                     .unwrap_or_default();
                 Draft::ContactPair(
                     ContactPair::new(next_name("Contact_Pair", existing), interaction),
-                    MasterSlave::new(),
+                    MasterSlave::new(face_target(fe)),
                 )
             }
             NewItem::ResultFieldOutput
@@ -885,7 +916,11 @@ impl Editor {
                 (Draft::FieldOutput(s, output), i)
             }
             TreeItem::Constraint(i) => (
-                Draft::Constraint(ConstraintDraft::edit(fe.constraints.get(i)?, mesh)),
+                Draft::Constraint(ConstraintDraft::edit(
+                    fe.constraints.get(i)?,
+                    face_target(fe),
+                    mesh,
+                )),
                 i,
             ),
             TreeItem::SurfaceInteraction(i) => {
@@ -895,7 +930,8 @@ impl Editor {
             }
             TreeItem::ContactPair(i) => {
                 let pair = fe.contact_pairs.get(i)?.clone();
-                let regions = MasterSlave::from_regions(&pair.master, &pair.slave, mesh);
+                let regions =
+                    MasterSlave::from_regions(&pair.master, &pair.slave, face_target(fe), mesh);
                 (Draft::ContactPair(pair, regions), i)
             }
             TreeItem::HotSpot(i) => {

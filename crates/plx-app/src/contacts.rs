@@ -1,7 +1,7 @@
 //! The forms of PrePoMax's interaction dialogs: tie constraints, surface interactions and
-//! contact pairs. Master and slave surfaces are picked in the 3D view one after the other,
-//! as in PrePoMax; the master shows in the primary, the slave in the secondary highlight
-//! colour.
+//! contact pairs. Clicks in the 3D view fill the master or the slave surface, whichever
+//! field's "..." button is pressed; in 2D models the surfaces are element edges. The master
+//! shows in the primary, the slave in the secondary highlight colour.
 
 use egui::{RichText, Ui};
 use plx_mesh::FeMesh;
@@ -34,18 +34,19 @@ pub struct MasterSlave {
 }
 
 impl MasterSlave {
-    pub fn new() -> Self {
+    /// `faces` is what the 3D view picks: element faces, or element edges in 2D models.
+    pub fn new(faces: Target) -> Self {
         Self {
-            master: RegionDraft::new(FACE_SOURCES, Target::Faces),
-            slave: RegionDraft::new(FACE_SOURCES, Target::Faces),
+            master: RegionDraft::new(FACE_SOURCES, faces),
+            slave: RegionDraft::new(FACE_SOURCES, faces),
             side: Side::Master,
         }
     }
 
-    pub fn from_regions(master: &Region, slave: &Region, mesh: &FeMesh) -> Self {
+    pub fn from_regions(master: &Region, slave: &Region, faces: Target, mesh: &FeMesh) -> Self {
         Self {
-            master: RegionDraft::from_region(master, FACE_SOURCES, Target::Faces, mesh),
-            slave: RegionDraft::from_region(slave, FACE_SOURCES, Target::Faces, mesh),
+            master: RegionDraft::from_region(master, FACE_SOURCES, faces, mesh),
+            slave: RegionDraft::from_region(slave, FACE_SOURCES, faces, mesh),
             side: Side::Master,
         }
     }
@@ -69,14 +70,13 @@ impl MasterSlave {
     }
 
     pub fn ui(&mut self, ui: &mut Ui, model: &Model) {
-        ui.label("Auswahl im 3D-Fenster");
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut self.side, Side::Master, "Master");
-            ui.radio_value(&mut self.side, Side::Slave, "Slave");
-        });
-        ui.end_row();
-        self.master.ui_labeled(ui, model, "Master-Region", "master");
-        self.slave.ui_labeled(ui, model, "Slave-Region", "slave");
+        let master = self.side == Side::Master;
+        if (self.master).ui_labeled(ui, model, "Master-Region", "master", master) {
+            self.side = Side::Master;
+        }
+        if (self.slave).ui_labeled(ui, model, "Slave-Region", "slave", !master) {
+            self.side = Side::Slave;
+        }
     }
 
     /// The master in the primary, the slave in the secondary highlight colour.

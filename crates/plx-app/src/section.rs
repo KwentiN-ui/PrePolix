@@ -492,16 +492,8 @@ impl SectionDialog {
                     ui.label("Punkt");
                     vector_row(ui, point, speed);
                     ui.end_row();
-                    ui.label("");
-                    let label = if self.picking == Some(Picking::Point) {
-                        "Punkt im 3D-Fenster wählen …"
-                    } else {
-                        "Punkt wählen"
-                    };
-                    if ui
-                        .selectable_label(self.picking == Some(Picking::Point), label)
-                        .clicked()
-                    {
+                    ui.label("Aus Auswahl");
+                    if crate::setup::pick_button(ui, self.picking == Some(Picking::Point)) {
                         self.picking = match self.picking {
                             Some(Picking::Point) => None,
                             _ => Some(Picking::Point),
