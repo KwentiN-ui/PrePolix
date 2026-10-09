@@ -11,8 +11,8 @@ use std::fmt::Write as _;
 
 use plx_mesh::{ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
-    BoundaryKind, FeModel, FieldOutput, Incrementation, LoadKind, OutputKind, Region, StaticStep,
-    Step, StepKind, UserKeyword,
+    BoundaryKind, FeModel, FieldOutput, FrequencyStep, Incrementation, LoadKind, OutputKind,
+    Region, StaticStep, Step, StepKind, UserKeyword,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -507,6 +507,7 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError
 fn write_step(sets: &mut Sets, step: &Step) -> Result<Keyword, WriteError> {
     let (header, procedure) = match &step.kind {
         StepKind::Static(settings) => static_step(settings),
+        StepKind::Frequency(settings) => frequency_step(settings),
     };
     let mut boundaries = vec![Keyword::generated("*Boundary, op=New\n".into())];
     for bc in &step.boundary_conditions {
@@ -526,11 +527,16 @@ fn write_step(sets: &mut Sets, step: &Step) -> Result<Keyword, WriteError> {
         }
         boundaries.push(Keyword::generated(out));
     }
-    let mut loads = vec![
-        Keyword::generated("*Cload, op=New\n".into()),
-        Keyword::generated("*Dload, op=New\n".into()),
-    ];
-    for load in &step.loads {
+    let mut loads = Vec::new();
+    // Like PrePoMax, a step that takes no loads gets none written, not even the reset.
+    let step_loads: &[_] = if step.kind.supports_loads() {
+        loads.push(Keyword::generated("*Cload, op=New\n".into()));
+        loads.push(Keyword::generated("*Dload, op=New\n".into()));
+        &step.loads
+    } else {
+        &[]
+    };
+    for load in step_loads {
         let mut out = format!("** Name: {}\n", load.name);
         match load.kind {
             LoadKind::ConcentratedForce(force) => {
@@ -685,6 +691,36 @@ fn static_step(settings: &StaticStep) -> (String, String) {
             number(settings.time_period)
         ),
     };
+    (header, procedure)
+}
+
+/// The `*Step` line and the procedure keyword of a frequency step, as PrePoMax writes them:
+/// the lower bound is written as 0 when only an upper bound is given.
+fn frequency_step(settings: &FrequencyStep) -> (String, String) {
+    let mut header = String::from("*Step");
+    if settings.perturbation {
+        header.push_str(", Perturbation");
+    }
+    header.push('\n');
+    let mut procedure = String::from("*Frequency");
+    if let Some(solver) = settings.solver.keyword() {
+        let _ = write!(procedure, ", Solver={solver}");
+    }
+    if settings.storage {
+        procedure.push_str(", Storage=Yes");
+    }
+    let _ = write!(procedure, "\n{}", settings.num_frequencies);
+    match (settings.lower_frequency, settings.upper_frequency) {
+        (None, None) => {}
+        (lower, None) => {
+            let _ = write!(procedure, ", {}", number(lower.unwrap_or(0.0)));
+        }
+        (lower, Some(upper)) => {
+            let lower = number(lower.unwrap_or(0.0));
+            let _ = write!(procedure, ", {lower}, {}", number(upper));
+        }
+    }
+    procedure.push('\n');
     (header, procedure)
 }
 
