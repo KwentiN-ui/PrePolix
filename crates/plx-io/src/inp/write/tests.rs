@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use plx_model::{BoundaryCondition, Elastic, EquationSolver, Load, Material, Section, UserKeyword};
+use plx_model::{
+    BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, Elastic, EquationSolver, Load,
+    Material, Section, SectionKind, UserKeyword,
+};
 
 use super::*;
 use crate::frd::{FrdImport, read_frd};
@@ -45,6 +48,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
             material: "Steel".into(),
             region: Region::Parts(vec!["EALL".into()]),
             thickness: 1.0,
+            kind: SectionKind::Solid,
         }],
         steps: vec![step],
         user_keywords: Vec::new(),
@@ -668,6 +672,7 @@ fn plane_model(
             material: "Steel".into(),
             region: Region::Parts(vec!["PLATE".into()]),
             thickness,
+            kind: SectionKind::Solid,
         }],
         steps: vec![step],
         ..FeModel::default()
@@ -919,6 +924,7 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
         material: "Steel".into(),
         region: Region::Parts(vec!["LOWER".into(), "UPPER".into()]),
         thickness: 1.0,
+        kind: SectionKind::Solid,
     });
     model.steps.push(step);
     model
@@ -1183,6 +1189,7 @@ fn blocks_model(
             material: "Steel".into(),
             region: Region::Parts(vec!["A".into(), "B".into()]),
             thickness: 1.0,
+            kind: SectionKind::Solid,
         }],
         constraints,
         steps: vec![step],
@@ -1298,6 +1305,339 @@ fn calculix_compression_only_support_takes_only_pressure() {
     // Pushed down, the gaps carry the load.
     let sink = mean_top(&blocks, &frd, "U3");
     assert!(sink.abs() < 0.002, "{sink}");
+}
+
+/// A straight chain of `n` line elements along `axis` from 0 to `length`, numbered from 1;
+/// quadratic ones have a midside node.
+fn line_chain(n: u32, axis: usize, length: f64, quadratic: bool) -> FeMesh {
+    use plx_mesh::{Element, ElementShape, Part};
+    let mut mesh = FeMesh::default();
+    let per_element = if quadratic { 2 } else { 1 };
+    let count = n * per_element;
+    for i in 0..=count {
+        let mut coords = [0.0; 3];
+        coords[axis] = length * f64::from(i) / f64::from(count);
+        mesh.set_node(i + 1, coords);
+    }
+    let mut elements = Vec::new();
+    for e in 0..n {
+        let first = e * per_element + 1;
+        let (shape, type_name, nodes) = if quadratic {
+            (
+                ElementShape::Line3,
+                "B32",
+                vec![first, first + 1, first + 2],
+            )
+        } else {
+            (ElementShape::Line2, "B31", vec![first, first + 1])
+        };
+        mesh.add_element(Element {
+            id: e + 1,
+            type_name: type_name.into(),
+            shape,
+            nodes,
+        })
+        .unwrap();
+        elements.push(e + 1);
+    }
+    mesh.parts.push(Part {
+        name: "BEAM".into(),
+        elements,
+    });
+    mesh
+}
+
+/// Steel on part BEAM with the given section, node 1 fixed and `load` at the last node.
+fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
+    let tip = *mesh.node_ids().last().unwrap();
+    let mut step = Step::new_static("Step-1");
+    step.boundary_conditions.push(BoundaryCondition {
+        name: "Fixed-1".into(),
+        active: true,
+        region: Region::Nodes(vec![1]),
+        kind: BoundaryKind::Fixed,
+    });
+    step.loads.push(Load {
+        name: "Force-1".into(),
+        active: true,
+        region: Region::Nodes(vec![tip]),
+        kind: load,
+    });
+    FeModel {
+        materials: vec![Material {
+            name: "Steel".into(),
+            density: None,
+            elastic: Some(Elastic {
+                young: 210_000.0,
+                poisson: 0.3,
+            }),
+            conductivity: None,
+            specific_heat: None,
+            expansion: None,
+        }],
+        sections: vec![Section {
+            name: "Beam-1".into(),
+            material: "Steel".into(),
+            region: Region::Parts(vec!["BEAM".into()]),
+            thickness: 1.0,
+            kind,
+        }],
+        steps: vec![step],
+        ..FeModel::default()
+    }
+}
+
+fn rect_beam(orientation: BeamOrientation) -> SectionKind {
+    SectionKind::Beam(BeamSection {
+        profile: BeamProfile::Rect { a: 10.0, b: 5.0 },
+        orientation,
+        offset: [0.0, 0.0],
+    })
+}
+
+#[test]
+fn beam_sections_type_their_elements_and_write_the_normal() {
+    let mesh = line_chain(2, 0, 100.0, true);
+    let model = line_model(
+        &mesh,
+        rect_beam(BeamOrientation::Direction([0.0, 1.0, 0.0])),
+        LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Element, Type=B32, Elset=BEAM\n1, 1, 2, 3\n2, 3, 4, 5\n",
+        "*Beam section, Elset=Internal_Selection-1_Beam-1, Material=Steel, Section=RECT\n\
+         10, 5\n0, 1, 0\n",
+        "*Boundary\nInternal_Selection-1_Fixed-1, 1, 6, 0\n",
+    ] {
+        assert!(text.contains(line), "{line} fehlt in\n{text}");
+    }
+    // Pipes and boxes need B32R and carry the offsets.
+    let mut model = model;
+    model.sections[0].kind = SectionKind::Beam(BeamSection {
+        profile: BeamProfile::Pipe {
+            radius: 5.0,
+            thickness: 1.0,
+        },
+        orientation: BeamOrientation::Automatic,
+        offset: [0.5, 0.0],
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Element, Type=B32R, Elset=BEAM\n"), "{text}");
+    // CalculiX 2.21 reads the set name of a pipe or box 20 characters wide, so it is short.
+    assert!(text.contains("*Elset, Elset=Beam-1\n1, 2\n"), "{text}");
+    assert!(
+        text.contains(
+            "*Beam section, Elset=Beam-1, Material=Steel, Section=PIPE, Offset1=0.5\n\
+             5, 1\n0, 0, 1\n"
+        ),
+        "{text}"
+    );
+    // A circle is written by its diameter, as CalculiX reads it.
+    model.sections[0].kind = SectionKind::Beam(BeamSection {
+        profile: BeamProfile::Circ { radius: 2.0 },
+        ..BeamSection::DEFAULT
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("Section=CIRC\n4, 4\n0, 0, 1\n"), "{text}");
+}
+
+#[test]
+fn automatic_normals_split_a_frame_into_groups() {
+    use plx_mesh::{Element, ElementShape};
+    // An L: two elements along x, then two up along z.
+    let mut mesh = line_chain(2, 0, 100.0, false);
+    mesh.set_node(4, [100.0, 0.0, 50.0]);
+    mesh.set_node(5, [100.0, 0.0, 100.0]);
+    for (id, nodes) in [(3, vec![3, 4]), (4, vec![4, 5])] {
+        mesh.add_element(Element {
+            id,
+            type_name: "B31".into(),
+            shape: ElementShape::Line2,
+            nodes,
+        })
+        .unwrap();
+        mesh.parts[0].elements.push(id);
+    }
+    let model = line_model(
+        &mesh,
+        rect_beam(BeamOrientation::Automatic),
+        LoadKind::ConcentratedForce([100.0, 0.0, 0.0]),
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Elset, Elset=Internal_Selection-1_Beam-1\n1, 2\n",
+        "*Elset, Elset=Internal_Selection-2_Beam-1\n3, 4\n",
+        "*Beam section, Elset=Internal_Selection-1_Beam-1, Material=Steel, Section=RECT\n\
+         10, 5\n0, 0, 1\n\
+         *Beam section, Elset=Internal_Selection-2_Beam-1, Material=Steel, Section=RECT\n\
+         10, 5\n1, 0, 0\n",
+    ] {
+        assert!(text.contains(line), "{line} fehlt in\n{text}");
+    }
+    // A given normal parallel to the columns is refused.
+    let mut model = model;
+    model.sections[0].kind = rect_beam(BeamOrientation::Direction([0.0, 0.0, 1.0]));
+    let error = write_inp(&mesh, &model, "").unwrap_err();
+    assert_eq!(
+        error,
+        WriteError::InvalidSection {
+            item: "Beam-1".into(),
+            reason: "Die Normale ist parallel zur Achse von Element 3".into()
+        }
+    );
+}
+
+#[test]
+fn sections_must_fit_their_elements() {
+    let mesh = line_chain(2, 0, 100.0, false);
+    let mut model = line_model(
+        &mesh,
+        SectionKind::Solid,
+        LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+    );
+    let error = write_inp(&mesh, &model, "").unwrap_err();
+    assert!(
+        matches!(&error, WriteError::InvalidSection { item, reason }
+            if item == "Beam-1" && reason.contains("Linienelement")),
+        "{error}"
+    );
+    model.sections[0].kind = SectionKind::Beam(BeamSection {
+        profile: BeamProfile::ALL[3],
+        ..BeamSection::DEFAULT
+    });
+    let error = write_inp(&mesh, &model, "").unwrap_err();
+    assert!(
+        matches!(&error, WriteError::InvalidSection { reason, .. } if reason.contains("B32R")),
+        "{error}"
+    );
+    let (solid_mesh, mut solid_model) = cantilever(tip_force());
+    solid_model.sections[0].kind = SectionKind::Truss { area: 1.0 };
+    let error = write_inp(&solid_mesh, &solid_model, "").unwrap_err();
+    assert!(
+        matches!(&error, WriteError::InvalidSection { reason, .. }
+            if reason.contains("kein Linienelement")),
+        "{error}"
+    );
+}
+
+#[test]
+fn trusses_are_written_as_t3d2_with_translations_only() {
+    let mesh = line_chain(2, 0, 100.0, true);
+    let model = line_model(
+        &mesh,
+        SectionKind::Truss { area: 50.0 },
+        LoadKind::ConcentratedForce([1000.0, 0.0, 0.0]),
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        // The midside nodes of the quadratic lines are dropped.
+        "*Element, Type=T3D2, Elset=BEAM\n1, 1, 3\n2, 3, 5\n",
+        "*Solid section, Elset=Internal_Selection-1_Beam-1, Material=Steel\n50\n",
+        "*Boundary\nInternal_Selection-1_Fixed-1, 1, 3, 0\n",
+    ] {
+        assert!(text.contains(line), "{line} fehlt in\n{text}");
+    }
+}
+
+/// Deflection of a cantilever of length `l` under a tip force `f` after beam theory.
+fn cantilever_deflection(f: f64, l: f64, inertia: f64) -> f64 {
+    f * l.powi(3) / (3.0 * 210_000.0 * inertia)
+}
+
+/// The most negative `U2` in the results: the tip of a beam bent down.
+fn min_u2(frd: &FrdImport) -> f64 {
+    let increment = frd.increments.last().unwrap();
+    let u2 = increment.field("DISP").unwrap().component("U2").unwrap();
+    f64::from(u2.values.iter().copied().fold(f32::MAX, f32::min))
+}
+
+#[test]
+fn calculix_bends_a_rectangular_beam_like_beam_theory() {
+    // Rectangle 10 high (1-direction z) and 5 wide, loaded in y: I = 10 * 5^3 / 12.
+    let expected = cantilever_deflection(100.0, 100.0, 10.0 * 125.0 / 12.0);
+    for (quadratic, tolerance) in [(false, 0.005), (true, 0.03)] {
+        let mesh = line_chain(10, 0, 100.0, quadratic);
+        let model = line_model(
+            &mesh,
+            rect_beam(BeamOrientation::Automatic),
+            LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+        );
+        let name = if quadratic {
+            "balken_b32"
+        } else {
+            "balken_b31"
+        };
+        let Some(frd) = run_ccx(name, &write_inp(&mesh, &model, "").unwrap()) else {
+            return;
+        };
+        // CalculiX expands the beam to solids with new node numbers.
+        assert!(frd.mesh.element_count() == 10 && frd.mesh.node(1).is_none());
+        let deflection = -min_u2(&frd);
+        assert!(
+            (deflection - expected).abs() < tolerance * expected,
+            "{name}: {deflection} statt {expected}"
+        );
+    }
+}
+
+#[test]
+fn calculix_bends_a_pipe_like_beam_theory() {
+    let (r, t) = (5.0f64, 1.0f64);
+    let inertia = std::f64::consts::PI * (r.powi(4) - (r - t).powi(4)) / 4.0;
+    let expected = cantilever_deflection(100.0, 100.0, inertia);
+    let mesh = line_chain(10, 0, 100.0, true);
+    let model = line_model(
+        &mesh,
+        SectionKind::Beam(BeamSection {
+            profile: BeamProfile::Pipe {
+                radius: r,
+                thickness: t,
+            },
+            ..BeamSection::DEFAULT
+        }),
+        LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+    );
+    let Some(frd) = run_ccx("rohr_b32r", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let deflection = -min_u2(&frd);
+    assert!(
+        (deflection - expected).abs() < 0.01 * expected,
+        "{deflection} statt {expected}"
+    );
+}
+
+#[test]
+fn calculix_stretches_a_truss_by_f_l_over_e_a() {
+    let mesh = line_chain(5, 0, 100.0, true);
+    let mut model = line_model(
+        &mesh,
+        SectionKind::Truss { area: 50.0 },
+        LoadKind::ConcentratedForce([1000.0, 0.0, 0.0]),
+    );
+    // A straight chain of trusses is a mechanism sideways; hold the nodes in the axis.
+    let nodes: Vec<NodeId> = mesh
+        .node_ids()
+        .iter()
+        .copied()
+        .filter(|&n| n % 2 == 1)
+        .collect();
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Sideways".into(),
+        active: true,
+        region: Region::Nodes(nodes),
+        kind: BoundaryKind::Displacement([None, Some(0.0), Some(0.0), None, None, None]),
+    });
+    let Some(frd) = run_ccx("stab_t3d2", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let expected = 1000.0 * 100.0 / (210_000.0 * 50.0);
+    let stretch = node_value(&frd, "DISP", "U1", 11);
+    assert!(
+        (stretch - expected).abs() < 1e-6 * expected,
+        "{stretch} statt {expected}"
+    );
 }
 
 /// The cantilever bar (x from 0 to 100, 5 x 5 cross-section) as a thermal model of steel in

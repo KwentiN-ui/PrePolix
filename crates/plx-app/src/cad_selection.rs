@@ -86,6 +86,12 @@ impl CadIndex {
 /// edge near the click for regions of nodes, else the face under it; for the edges of 2D
 /// models the nearest edge of the face. `None` where the mesh has no CAD entities.
 pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<CadEntity> {
+    if hit.line {
+        // A line part is the mesh of a free CAD edge: the hit names one of its elements.
+        let element = *model.skin(hit.part).line_elements.get(hit.face)?;
+        let entity = model.cad_entity(model.mesh.elements()[element].id)?;
+        return (target != Target::Faces).then_some(entity);
+    }
     let index = model.cad_index();
     let skin_face = model.skin(hit.part).faces.get(hit.face)?;
     let element = model.mesh.elements()[skin_face.element].id;
@@ -240,7 +246,7 @@ mod tests {
     use plx_io::frd::read_frd;
     use plx_model::{
         BoundaryCondition, BoundaryKind, Elastic, FeModel, Load, LoadKind, Material, Region,
-        Section, Step,
+        Section, SectionKind, Step,
     };
 
     use super::*;
@@ -359,12 +365,16 @@ mod tests {
                     young: 210000.0,
                     poisson: 0.3,
                 }),
+                conductivity: None,
+                specific_heat: None,
+                expansion: None,
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
                 material: "Steel".into(),
                 region: Region::Parts(vec!["SOLID-1".into()]),
                 thickness: 1.0,
+                kind: SectionKind::Solid,
             }],
             steps: vec![Step::new_static("Step-1")],
             ..FeModel::default()

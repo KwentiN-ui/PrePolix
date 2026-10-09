@@ -401,6 +401,9 @@ impl Picker {
         {
             return Items::Geometry(BTreeSet::from([entity]));
         }
+        if hit.line {
+            return self.pick_line(model, hit, target);
+        }
         let picker = MeshPicker::new(model, hit.part);
         if target == Target::Edges {
             // Edges of the outline whose nodes the same click would select.
@@ -478,6 +481,30 @@ impl Picker {
     /// elements in the element mode) inside the box, or crossing it when dragged from right
     /// to left. Only visible parts count.
     pub fn pick_box(&self, model: &Model, area: &BoxSelect, target: Target) -> Items {
+        self.pick_box_inner(model, area, target)
+    }
+
+    /// What a click on a line segment (beam, truss) selects: the nearest node, the nodes of
+    /// the element or of the part's lines; lines have no faces.
+    fn pick_line(&self, model: &Model, hit: &Hit, target: Target) -> Items {
+        if target != Target::Nodes {
+            return Items::Faces(BTreeSet::new());
+        }
+        let skin = model.skin(hit.part);
+        let elements = model.mesh.elements();
+        let nodes: BTreeSet<NodeId> = match self.select_by {
+            SelectBy::Node => BTreeSet::from([model.hit_node(hit)]),
+            SelectBy::GeometryPart | SelectBy::Part => (skin.line_elements.iter())
+                .flat_map(|&e| elements[e].nodes.iter().copied())
+                .collect(),
+            _ => (elements[skin.line_elements[hit.face]].nodes.iter())
+                .copied()
+                .collect(),
+        };
+        Items::Nodes(nodes)
+    }
+
+    fn pick_box_inner(&self, model: &Model, area: &BoxSelect, target: Target) -> Items {
         let mesh = &model.mesh;
         if target == Target::Edges {
             let edges = (model.outline_edges().into_iter())

@@ -7,6 +7,8 @@ use plx_io::frd::{FrdImport, read_frd};
 use plx_io::inp::{InpImport, read_inp};
 use plx_mesh::{ElementId, FeMesh, NodeId, PartSkin, extract_part_skin};
 use plx_mesher::{CadEntity, GeometryDisplay};
+#[cfg(test)]
+use plx_model::SectionKind;
 use plx_model::{FeModel, Geometry, UnitSystem};
 use plx_render::contour::normalize;
 use plx_render::{
@@ -146,14 +148,16 @@ impl Highlight {
     }
 }
 
-/// A visible face under the mouse.
+/// A visible face or line under the mouse.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hit {
     pub part: usize,
-    /// Index into the part's skin faces.
+    /// Index into the part's skin faces, or into its skin lines when `line` is set.
     pub face: usize,
     /// Hit point relative to the model origin.
     pub point: Vec3,
+    /// A segment of a line element (beam, truss, CAD edge) was hit instead of a face.
+    pub line: bool,
 }
 
 /// Node coordinates as drawn, normalized contour values and whether the shape is deformed.
@@ -848,6 +852,7 @@ impl Model {
                                 part,
                                 face: index,
                                 point,
+                                line: false,
                             },
                         ));
                     }
@@ -857,20 +862,87 @@ impl Model {
         best.map(|(_, hit)| hit)
     }
 
-    /// The node of the hit face nearest to the hit point.
+    /// The nearest visible line segment within the pick tolerance of a ray; `tolerance`
+    /// gives the tolerance at a point of the ray. Returns the distance along the ray too.
+    pub fn pick_line(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        tolerance: impl Fn(Vec3) -> f32,
+    ) -> Option<(f32, Hit)> {
+        let coords = self.shown_coords();
+        let position = |node: usize| (DVec3::from(coords[node]) - self.origin).as_vec3();
+        let u = direction.normalize_or_zero();
+        let mut best: Option<(f32, Hit)> = None;
+        for (part, skin) in self.skins.iter().enumerate() {
+            if !self.parts[part].visible {
+                continue;
+            }
+            for (index, &[a, b]) in skin.lines.iter().enumerate() {
+                let (a, b) = (position(a), position(b));
+                let Some((t, s)) = ray_segment(origin, u, a, b) else {
+                    continue;
+                };
+                let on_ray = origin + u * t;
+                let on_line = a + (b - a) * s;
+                if on_ray.distance(on_line) > tolerance(on_ray)
+                    || self.clip.is_some_and(|clip| clip.distance(on_line) < 0.0)
+                {
+                    continue;
+                }
+                if best.is_none_or(|(nearest, _)| t < nearest) {
+                    best = Some((
+                        t,
+                        Hit {
+                            part,
+                            face: index,
+                            point: on_line,
+                            line: true,
+                        },
+                    ));
+                }
+            }
+        }
+        best
+    }
+
+    /// What a click hits: the nearest face, or a line in front of it or where no face is.
+    pub fn pick_click(&self, click: &crate::viewport::Click) -> Option<Hit> {
+        let face = self.pick(click.origin, click.direction);
+        let line = self.pick_line(click.origin, click.direction, |p| click.precision_at(p));
+        match (face, line) {
+            (Some(face), Some((t, line))) => {
+                let face_t = (face.point - click.origin).dot(click.direction.normalize_or_zero());
+                // A line on a face, such as a CAD edge, wins by the pick tolerance.
+                Some(if t <= face_t + click.precision_at(line.point) {
+                    line
+                } else {
+                    face
+                })
+            }
+            (face, line) => face.or(line.map(|(_, hit)| hit)),
+        }
+    }
+
+    /// The node of the hit face or line segment nearest to the hit point.
     pub fn hit_node(&self, hit: &Hit) -> NodeId {
-        let face = &self.skins[hit.part].faces[hit.face];
         let coords = self.shown_coords();
         let distance = |node: usize| {
             ((DVec3::from(coords[node]) - self.origin).as_vec3() - hit.point).length_squared()
         };
-        let nearest = face
-            .corners
-            .iter()
-            .chain(&face.mids)
-            .copied()
-            .min_by(|&a, &b| distance(a).total_cmp(&distance(b)))
-            .unwrap_or(face.corners[0]);
+        let skin = &self.skins[hit.part];
+        let nearest = if hit.line {
+            let [a, b] = skin.lines[hit.face];
+            if distance(a) <= distance(b) { a } else { b }
+        } else {
+            let face = &skin.faces[hit.face];
+            face.corners
+                .iter()
+                .chain(&face.mids)
+                .copied()
+                .min_by(|&a, &b| distance(a).total_cmp(&distance(b)))
+                .unwrap_or(face.corners[0])
+        };
         self.mesh.node_ids()[nearest]
     }
 
@@ -939,6 +1011,24 @@ fn transform_coords(coords: &[[f64; 3]], instance: &DAffine3) -> Vec<[f64; 3]> {
         .collect()
 }
 
+/// Closest approach of a ray (unit direction `u`, `t >= 0`) and a segment `a`-`b`: the
+/// distance `t` along the ray and the parameter `s` in 0..=1 along the segment. `None` when
+/// the closest point of the segment lies behind the ray's origin.
+fn ray_segment(origin: Vec3, u: Vec3, a: Vec3, b: Vec3) -> Option<(f32, f32)> {
+    let v = b - a;
+    let w = origin - a;
+    let (uv, vv, uw, vw) = (u.dot(v), v.dot(v), u.dot(w), v.dot(w));
+    let denominator = vv - uv * uv;
+    let s = if denominator <= f32::EPSILON * vv.max(f32::MIN_POSITIVE) {
+        // Parallel: the segment's start is as close as any point of it.
+        0.0
+    } else {
+        ((vw - uv * uw) / denominator).clamp(0.0, 1.0)
+    };
+    let t = (a + v * s - origin).dot(u);
+    (t >= 0.0).then_some((t, s))
+}
+
 /// Distance along the ray to a triangle (Möller-Trumbore), seen from either side.
 fn ray_triangle(origin: Vec3, direction: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
     let (ab, ac) = (b - a, c - a);
@@ -990,6 +1080,7 @@ mod tests {
             material: "Steel".into(),
             region: plx_model::Region::Parts(vec![first.clone()]),
             thickness: 1.0,
+            kind: SectionKind::Solid,
         });
         assert!(model.rename_part(0, "").is_err());
         assert!(model.rename_part(0, "zwei wörter").is_err());
@@ -1122,6 +1213,47 @@ mod tests {
         assert!(model.pick(origin, Vec3::Z).is_none());
     }
 
+    #[test]
+    fn picking_finds_lines_within_the_tolerance() {
+        use plx_mesh::{Element, ElementShape, Part};
+        // A beam of two quadratic lines along x from 0 to 100 at y = z = 0.
+        let mut mesh = FeMesh::default();
+        for i in 0..5u32 {
+            mesh.set_node(i + 1, [25.0 * f64::from(i), 0.0, 0.0]);
+        }
+        for (id, nodes) in [(1, vec![1, 2, 3]), (2, vec![3, 4, 5])] {
+            mesh.add_element(Element {
+                id,
+                type_name: "B32".into(),
+                shape: ElementShape::Line3,
+                nodes,
+            })
+            .unwrap();
+        }
+        mesh.parts.push(Part {
+            name: "BEAM".into(),
+            elements: vec![1, 2],
+        });
+        let model = Model::new(Path::new("balken.inp"), mesh);
+        assert!(
+            model.pick(Vec3::ZERO, Vec3::NEG_Z).is_none(),
+            "lines have no faces"
+        );
+        // Looking down 2 units beside the beam at x = 60: within a tolerance of 3, not 1.
+        let origin = Vec3::new(60.0, 2.0, 50.0) - model.origin.as_vec3();
+        let (t, hit) = model
+            .pick_line(origin, Vec3::NEG_Z, |_| 3.0)
+            .expect("line within tolerance");
+        assert!(hit.line && hit.part == 0);
+        assert!((t - 50.0).abs() < 1e-4, "{t}");
+        assert!((hit.point.x + model.origin.x as f32 - 60.0).abs() < 1e-4);
+        // Node 3 at x = 50 is the nearest node of the hit segment (50..75).
+        assert_eq!(model.hit_node(&hit), 3);
+        assert!(model.pick_line(origin, Vec3::NEG_Z, |_| 1.0).is_none());
+        // Behind the origin nothing is hit.
+        assert!(model.pick_line(origin, Vec3::Z, |_| 3.0).is_none());
+    }
+
     /// Whether Gmsh can be used; tests that need it pass with a note otherwise, unless
     /// `PREPOLIX_REQUIRE_GMSH` is set.
     fn gmsh_available() -> bool {
@@ -1236,6 +1368,7 @@ mod tests {
                 material: "Steel".into(),
                 region: Region::Parts(vec!["SOLID-1".into()]),
                 thickness: 1.0,
+                kind: SectionKind::Solid,
             }],
             steps: vec![step],
             user_keywords: Vec::new(),

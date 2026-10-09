@@ -2101,7 +2101,7 @@ impl Workbench {
                 self.results.get(self.current_result),
             )
         {
-            let hit = model.pick(click.origin, click.direction);
+            let hit = model.pick_click(&click);
             dialog.click(
                 model,
                 hit.as_ref().map(|h| (h, click.precision_at(h.point))),
@@ -2117,7 +2117,7 @@ impl Workbench {
                 TreeView::FeModel => self.model.as_ref(),
             };
             if let Some(model) = model {
-                let hit = model.pick(click.origin, click.direction);
+                let hit = model.pick_click(&click);
                 dialog.click(
                     model,
                     hit.as_ref().map(|h| (h, click.precision_at(h.point))),
@@ -2126,9 +2126,7 @@ impl Workbench {
             return;
         }
         if !self.picking() {
-            let hit = self
-                .shown()
-                .and_then(|model| model.pick(click.origin, click.direction));
+            let hit = self.shown().and_then(|model| model.pick_click(&click));
             match hit {
                 Some(hit) => self.select_part(hit.part),
                 // On the Results tab the tree shows the current field, which stays.
@@ -2145,7 +2143,7 @@ impl Workbench {
                 &mut self.history_dialog,
                 self.results.get(self.current_result),
             ) {
-                let hit = model.pick(click.origin, click.direction);
+                let hit = model.pick_click(&click);
                 let pick = hit.as_ref().map(|hit| (hit, click.precision_at(hit.point)));
                 let operation = Operation::from_modifiers(click.shift, click.ctrl);
                 dialog.click(model, pick, operation);
@@ -2154,7 +2152,7 @@ impl Workbench {
         }
         if self.tree_view == TreeView::Geometry {
             if let (Some(editor), Some(view)) = (&mut self.mesh_item_editor, &self.geometry) {
-                let hit = view.pick(click.origin, click.direction);
+                let hit = view.pick_click(&click);
                 let pick = hit.as_ref().map(|hit| (hit, click.precision_at(hit.point)));
                 editor.click(
                     view,
@@ -2167,7 +2165,7 @@ impl Workbench {
         let (Some(editor), Some(model)) = (&mut self.editor, &self.model) else {
             return;
         };
-        let hit = model.pick(click.origin, click.direction);
+        let hit = model.pick_click(&click);
         let pick = hit.as_ref().map(|hit| (hit, click.precision_at(hit.point)));
         editor.click(
             model,
@@ -2190,7 +2188,7 @@ impl Workbench {
             self.menu_part = None;
             if !self.picking() {
                 self.menu_part = (self.shown())
-                    .and_then(|model| model.pick(click.origin, click.direction))
+                    .and_then(|model| model.pick_click(&click))
                     .map(|hit| hit.part);
             }
             if let Some(part) = self.menu_part {
@@ -2249,7 +2247,7 @@ impl Workbench {
         {
             self.viewport.preview = hover
                 .and_then(|click| {
-                    let hit = model.pick(click.origin, click.direction)?;
+                    let hit = model.pick_click(&click)?;
                     Some(dialog.preview(model, &hit, click.precision_at(hit.point)))
                 })
                 .unwrap_or_default();
@@ -2260,7 +2258,7 @@ impl Workbench {
         {
             self.viewport.preview = hover
                 .and_then(|click| {
-                    let hit = model.pick(click.origin, click.direction)?;
+                    let hit = model.pick_click(&click)?;
                     Some(dialog.preview(model, &hit, click.precision_at(hit.point)))
                 })
                 .unwrap_or_default();
@@ -2271,7 +2269,7 @@ impl Workbench {
             let shown = (self.history_dialog.as_ref()).zip(self.results.get(self.current_result));
             self.viewport.preview = match (hover, shown) {
                 (Some(click), Some((dialog, model))) => model
-                    .pick(click.origin, click.direction)
+                    .pick_click(&click)
                     .map(|hit| dialog.preview(model, &hit, click.precision_at(hit.point)))
                     .unwrap_or_default(),
                 _ => Default::default(),
@@ -2282,7 +2280,7 @@ impl Workbench {
             let shown = (self.mesh_item_editor.as_ref()).zip(self.geometry.as_ref());
             self.viewport.preview = match (hover, shown) {
                 (Some(click), Some((editor, view))) => view
-                    .pick(click.origin, click.direction)
+                    .pick_click(&click)
                     .map(|hit| editor.preview(view, &hit, click.precision_at(hit.point)))
                     .unwrap_or_default(),
                 _ => Default::default(),
@@ -2291,7 +2289,7 @@ impl Workbench {
         }
         let preview = match (hover, &self.editor, &self.model) {
             (Some(click), Some(editor), Some(model)) => model
-                .pick(click.origin, click.direction)
+                .pick_click(&click)
                 .map(|hit| editor.preview(model, &hit, click.precision_at(hit.point)))
                 .unwrap_or_default(),
             _ => Default::default(),

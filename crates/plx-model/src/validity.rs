@@ -4,7 +4,7 @@
 
 use plx_mesh::FeMesh;
 
-use crate::{FeModel, LoadKind, Region};
+use crate::{FeModel, LoadKind, Region, Section, SectionKind, line_tangent};
 
 /// An item of the model that can refer to something else.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -34,7 +34,7 @@ impl FeModel {
             let reason = if !self.materials.iter().any(|m| m.name == section.material) {
                 Some(format!("Material {} existiert nicht", section.material))
             } else {
-                section.region.missing_reference(mesh)
+                (section.region.missing_reference(mesh)).or_else(|| section.kind_problem(mesh))
             };
             if let Some(reason) = reason {
                 invalid.push(Invalid {
@@ -112,6 +112,45 @@ impl FeModel {
             }
         }
         invalid
+    }
+}
+
+impl Section {
+    /// Why the section's kind does not fit its elements or its own values, if it does not:
+    /// a beam section on solids, a solid section on lines, a pipe on 2-node lines, a normal
+    /// parallel to a beam, or dimensions CalculiX would reject.
+    pub fn kind_problem(&self, mesh: &FeMesh) -> Option<String> {
+        match &self.kind {
+            SectionKind::Solid => {}
+            SectionKind::Truss { area } => {
+                if !(area.is_finite() && *area > 0.0) {
+                    return Some("Die Querschnittsfläche muss größer als 0 sein".into());
+                }
+            }
+            SectionKind::Beam(beam) => {
+                if !beam.profile.is_valid() {
+                    return Some("Die Profilmaße sind ungültig".into());
+                }
+            }
+        }
+        let elements = self.region.elements(mesh);
+        for element in elements.iter().filter_map(|&id| mesh.element(id)) {
+            if let Some(reason) = self.kind.rejects(element) {
+                return Some(reason);
+            }
+            if let SectionKind::Beam(beam) = &self.kind
+                && beam
+                    .orientation
+                    .normal_for(line_tangent(mesh, element))
+                    .is_none()
+            {
+                return Some(format!(
+                    "Die Normale ist parallel zur Achse von Element {}",
+                    element.id
+                ));
+            }
+        }
+        None
     }
 }
 
@@ -221,6 +260,7 @@ mod tests {
                 material: "Steel".into(),
                 region: Region::Parts(vec!["PART-1".into()]),
                 thickness: 1.0,
+                kind: SectionKind::Solid,
             }],
             steps: vec![step],
             user_keywords: Vec::new(),

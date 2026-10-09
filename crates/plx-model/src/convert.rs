@@ -259,7 +259,7 @@ impl MeshingParameters {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Elastic, Load, Region, Section, Step};
+    use crate::{Elastic, Load, Region, Section, SectionKind, Step};
 
     #[test]
     fn a_converted_model_stays_the_same_physically() {
@@ -279,6 +279,7 @@ mod tests {
             material: "Steel".into(),
             region: Region::Parts(Vec::new()),
             thickness: 5.0,
+            kind: SectionKind::Solid,
         });
         let mut step = Step::new_static("Step-1");
         step.loads.push(Load {

@@ -9,11 +9,12 @@ use std::collections::BTreeSet;
 use egui::Ui;
 use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
-    BoundaryCondition, BoundaryKind, Constraint, ContactPair, Elastic, EquationSolver,
-    Extrapolation, FeModel, FieldOutput, FrequencyStep, HeatTransferStep, HotSpot,
-    HotSpotComponent, Incrementation, InitialCondition, InitialConditionKind, Load, LoadKind,
-    Material, ModelSpace, OutputKind, Quantity, Region, Section, StaticStep, Step, StepKind,
-    SurfaceInteraction, UnitSystem, extrapolation_weights, next_name,
+    BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, BoundaryKind, Constraint,
+    ContactPair, Elastic, EquationSolver, Extrapolation, FeModel, FieldOutput, FrequencyStep,
+    HeatTransferStep, HotSpot, HotSpotComponent, Incrementation, InitialCondition,
+    InitialConditionKind, Load, LoadKind, Material, ModelSpace, OutputKind, Quantity, Region,
+    Section, SectionKind, StaticStep, Step, StepKind, SurfaceInteraction, UnitSystem,
+    extrapolation_weights, next_name,
 };
 
 use crate::constraint_dialog::ConstraintDraft;
@@ -744,6 +745,7 @@ impl Editor {
                         .unwrap_or_default(),
                     region: Region::Parts(Vec::new()),
                     thickness: 1.0,
+                    kind: SectionKind::Solid,
                 },
                 RegionDraft::new(ELEMENT_SOURCES, Target::Faces),
             ),
@@ -1068,6 +1070,28 @@ impl Editor {
             Draft::Material(material) => material_form(ui, material, units),
             Draft::Section(section, region) => {
                 name_row(ui, &mut section.name);
+                ui.label("Art");
+                let before = section.kind.prefix();
+                egui::ComboBox::from_id_salt("section kind")
+                    .selected_text(section.kind.label())
+                    .width(200.0)
+                    .show_ui(ui, |ui| {
+                        for kind in SectionKind::ALL {
+                            let selected = kind.prefix() == section.kind.prefix();
+                            if ui.selectable_label(selected, kind.label()).clicked() && !selected {
+                                section.kind = kind;
+                            }
+                        }
+                    });
+                ui.end_row();
+                // Another kind keeps a name the user chose and renumbers a default one.
+                if section.kind.prefix() != before
+                    && (section.name.strip_prefix(before))
+                        .and_then(|n| n.strip_prefix('-'))
+                        .is_some_and(|n| n.parse::<u32>().is_ok())
+                {
+                    section.name = next_name(section.kind.prefix(), taken.iter().copied());
+                }
                 ui.label("Material");
                 egui::ComboBox::from_id_salt("section material")
                     .selected_text(section.material.as_str())
@@ -1079,14 +1103,27 @@ impl Editor {
                         }
                     });
                 ui.end_row();
-                // Plane stress and plane strain sections have a thickness, as in PrePoMax.
-                if model.fe.properties.space.has_thickness() {
-                    ui.label("Dicke");
-                    ui.add(
-                        numeric::quantity(&mut section.thickness, units, Quantity::Length)
-                            .range(0.0..=f64::MAX),
-                    );
-                    ui.end_row();
+                match &mut section.kind {
+                    SectionKind::Solid => {
+                        // Plane stress and plane strain sections have a thickness, as in
+                        // PrePoMax.
+                        if model.fe.properties.space.has_thickness() {
+                            ui.label("Dicke");
+                            ui.add(
+                                numeric::quantity(&mut section.thickness, units, Quantity::Length)
+                                    .range(0.0..=f64::MAX),
+                            );
+                            ui.end_row();
+                        }
+                    }
+                    SectionKind::Truss { area } => {
+                        ui.label("Querschnittsfläche");
+                        ui.add(
+                            numeric::quantity(area, units, Quantity::Area).range(0.0..=f64::MAX),
+                        );
+                        ui.end_row();
+                    }
+                    SectionKind::Beam(beam) => beam_form(ui, beam, units),
                 }
                 region.ui(ui, model);
             }
@@ -1365,10 +1402,31 @@ impl Editor {
         if duplicate {
             return Err(format!("Der Name {name} ist schon vergeben."));
         }
-        if let Draft::Section(section, _) = &self.draft
-            && !fe.materials.iter().any(|m| m.name == section.material)
-        {
-            return Err("Bitte ein Material wählen; zuerst unter Materials anlegen.".into());
+        if let Draft::Section(section, _) = &self.draft {
+            if !fe.materials.iter().any(|m| m.name == section.material) {
+                return Err("Bitte ein Material wählen; zuerst unter Materials anlegen.".into());
+            }
+            match &section.kind {
+                SectionKind::Solid => {}
+                SectionKind::Truss { area } if !(area.is_finite() && *area > 0.0) => {
+                    return Err("Die Querschnittsfläche muss größer als 0 sein.".into());
+                }
+                SectionKind::Truss { .. } => {}
+                SectionKind::Beam(beam) => {
+                    if !beam.profile.is_valid() {
+                        return Err(
+                            "Die Profilmaße müssen größer als 0 sein; Wände dünner als das \
+                             Profil."
+                                .into(),
+                        );
+                    }
+                    if let BeamOrientation::Direction(n) = beam.orientation
+                        && n.iter().all(|v| *v == 0.0)
+                    {
+                        return Err("Die Normale darf nicht der Nullvektor sein.".into());
+                    }
+                }
+            }
         }
         match &self.draft {
             Draft::Constraint(c) => c.validate()?,
@@ -1605,6 +1663,97 @@ fn rename_default(name: &mut String, from: &str, to: &str, taken: &[&str]) {
 fn name_row(ui: &mut Ui, name: &mut String) {
     ui.label("Name");
     ui.add(egui::TextEdit::singleline(name).desired_width(200.0));
+    ui.end_row();
+}
+
+/// Profile, normal and offsets of a beam section, with CalculiX's directions: the
+/// 1-direction is the normal, the 2-direction the beam axis crossed with it.
+fn beam_form(ui: &mut Ui, beam: &mut BeamSection, units: UnitSystem) {
+    ui.label("Profil");
+    egui::ComboBox::from_id_salt("beam profile")
+        .selected_text(beam.profile.label())
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            for profile in BeamProfile::ALL {
+                let selected = profile.keyword() == beam.profile.keyword();
+                if ui.selectable_label(selected, profile.label()).clicked() && !selected {
+                    beam.profile = profile;
+                }
+            }
+        });
+    ui.end_row();
+    let positive = |ui: &mut Ui, label: &str, value: &mut f64| {
+        ui.label(label);
+        ui.add(numeric::quantity(value, units, Quantity::Length).range(0.0..=f64::MAX));
+        ui.end_row();
+    };
+    match &mut beam.profile {
+        BeamProfile::Rect { a, b } => {
+            positive(ui, "Dicke in 1-Richtung (a)", a);
+            positive(ui, "Dicke in 2-Richtung (b)", b);
+        }
+        BeamProfile::Circ { radius } => positive(ui, "Radius", radius),
+        BeamProfile::Pipe { radius, thickness } => {
+            positive(ui, "Außenradius", radius);
+            positive(ui, "Wanddicke", thickness);
+        }
+        BeamProfile::Box { a, b, t } => {
+            positive(ui, "Breite in 1-Richtung (a)", a);
+            positive(ui, "Breite in 2-Richtung (b)", b);
+            let [t1, t2, t3, t4] = t;
+            positive(ui, "Wanddicke bei +1", t1);
+            positive(ui, "Wanddicke bei +2", t2);
+            positive(ui, "Wanddicke bei -1", t3);
+            positive(ui, "Wanddicke bei -2", t4);
+        }
+    }
+    if beam.profile.needs_reduced_integration() {
+        ui.label("");
+        ui.label(
+            egui::RichText::new("Rohr und Kasten brauchen Linien mit 3 Knoten (B32R).")
+                .small()
+                .weak(),
+        );
+        ui.end_row();
+    }
+    ui.label("Normale (1-Richtung)");
+    ui.horizontal(|ui| {
+        let automatic = matches!(beam.orientation, BeamOrientation::Automatic);
+        if ui.radio(automatic, "Automatisch").clicked() && !automatic {
+            beam.orientation = BeamOrientation::Automatic;
+        }
+        if ui.radio(!automatic, "Vektor").clicked() && automatic {
+            beam.orientation = BeamOrientation::Direction([0.0, 0.0, 1.0]);
+        }
+    });
+    ui.end_row();
+    match &mut beam.orientation {
+        BeamOrientation::Automatic => {
+            ui.label("");
+            ui.label(
+                egui::RichText::new("Globale z-Achse, bei Balken entlang z die x-Achse.")
+                    .small()
+                    .weak(),
+            );
+            ui.end_row();
+        }
+        BeamOrientation::Direction(normal) => {
+            ui.label("");
+            ui.horizontal(|ui| {
+                for (axis, value) in ["x", "y", "z"].iter().zip(normal.iter_mut()) {
+                    ui.label(*axis);
+                    ui.add(numeric::drag_value(value));
+                }
+            });
+            ui.end_row();
+        }
+    }
+    let [offset_1, offset_2] = &mut beam.offset;
+    ui.label("Versatz in 1-Richtung");
+    ui.add(numeric::drag_value(offset_1));
+    ui.end_row();
+    ui.label("Versatz in 2-Richtung");
+    ui.add(numeric::drag_value(offset_2));
     ui.end_row();
 }
 

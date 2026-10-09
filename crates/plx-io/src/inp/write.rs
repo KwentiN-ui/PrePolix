@@ -9,12 +9,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use plx_mesh::{ElementId, FeMesh, NodeId, SurfaceDefinition};
+use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
     BoundaryKind, Constraint, ContactMethod, ContactPair, FeModel, FieldOutput, FrequencyStep,
     GapConductance, HeatTransferStep, Incrementation, InitialConditionKind, InteractionProperty,
-    LoadKind, ModelSpace, OutputKind, Region, StaticStep, Step, StepKind, SurfaceBehavior,
-    SurfaceInteraction, UserKeyword,
+    LoadKind, ModelSpace, OutputKind, Region, Section, SectionKind, StaticStep, Step, StepKind,
+    SurfaceBehavior, SurfaceInteraction, UserKeyword, line_tangent,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -27,6 +27,9 @@ pub enum WriteError {
     UnknownInteraction { item: String, interaction: String },
     #[error("{item}: Surface {surface} existiert nicht")]
     UnknownSurface { item: String, surface: String },
+    /// A section that does not fit its elements, see [`Section::kind_problem`].
+    #[error("{item}: {reason}")]
+    InvalidSection { item: String, reason: String },
 }
 
 /// One entry of the keyword tree of an input file, the structure PrePoMax's keyword editor
@@ -228,6 +231,7 @@ pub fn model_keywords(
         mesh
     };
     let mut sets = Sets::new(mesh);
+    let lines = LineElements::new(mesh, model)?;
     // Regions are resolved first: their sets must precede the materials and steps.
     let materials = materials(model);
     let mut sections = sections(&mut sets, model)?;
@@ -250,6 +254,7 @@ pub fn model_keywords(
                 step,
                 generated.boundary.as_ref(),
                 space,
+                &lines,
                 flux_kinds,
             )
         })
@@ -262,7 +267,7 @@ pub fn model_keywords(
     for (id, [x, y, z]) in &generated.nodes {
         let _ = writeln!(nodes, "{id}, {:.8E}, {:.8E}, {:.8E}", x, y, z);
     }
-    let mut element_blocks = elements(mesh, space);
+    let mut element_blocks = elements(mesh, space, &lines);
     element_blocks.extend(generated.elements);
     let node_sets = sets
         .node_sets
@@ -319,13 +324,79 @@ pub fn model_keywords(
     ])
 }
 
+/// The line elements of beam and truss sections: the CalculiX type each one is written
+/// with, and the nodes that have no rotations because they belong to trusses only.
+struct LineElements {
+    types: BTreeMap<ElementId, &'static str>,
+    truss_nodes: BTreeSet<NodeId>,
+}
+
+impl LineElements {
+    fn new(mesh: &FeMesh, model: &FeModel) -> Result<Self, WriteError> {
+        let mut types = BTreeMap::new();
+        for section in &model.sections {
+            if let Some(reason) = section.kind_problem(mesh) {
+                return Err(WriteError::InvalidSection {
+                    item: section.name.clone(),
+                    reason,
+                });
+            }
+            if !section.kind.is_line() {
+                continue;
+            }
+            for element in
+                (section.region.elements(mesh).into_iter()).filter_map(|id| mesh.element(id))
+            {
+                if let Some(type_name) = section.kind.element_type(element.shape) {
+                    types.insert(element.id, type_name);
+                }
+            }
+        }
+        // A node of a truss has translations only; a beam or solid at the same node adds
+        // its rotations back.
+        let mut truss_nodes = BTreeSet::new();
+        let mut other_nodes = BTreeSet::new();
+        for element in mesh.elements() {
+            let truss = types.get(&element.id) == Some(&"T3D2");
+            let nodes = if truss {
+                &mut truss_nodes
+            } else {
+                &mut other_nodes
+            };
+            nodes.extend(element.nodes.iter().copied());
+        }
+        truss_nodes.retain(|n| !other_nodes.contains(n));
+        Ok(Self { types, truss_nodes })
+    }
+
+    /// Type and nodes an element is written with. A truss is always `T3D2`, so a 3-node line
+    /// keeps its end nodes only; see [`SectionKind::element_type`].
+    fn written(&self, element: &plx_mesh::Element, space: ModelSpace) -> (String, Vec<NodeId>) {
+        match self.types.get(&element.id) {
+            Some(&"T3D2") if element.nodes.len() == 3 => {
+                ("T3D2".into(), vec![element.nodes[0], element.nodes[2]])
+            }
+            Some(&type_name) => (type_name.into(), element.nodes.clone()),
+            None => (
+                space.element_type(&element.type_name, element.shape),
+                element.nodes.clone(),
+            ),
+        }
+    }
+
+    /// Whether every node of the list belongs to trusses only.
+    fn all_truss(&self, nodes: &[NodeId]) -> bool {
+        !nodes.is_empty() && nodes.iter().all(|n| self.truss_nodes.contains(n))
+    }
+}
+
 /// One `*Element` block per part and element type; the part name is the element set.
-/// Surface elements get the type of the model space, e.g. `CAX6` in an axisymmetric model.
-fn elements(mesh: &FeMesh, space: ModelSpace) -> Vec<Keyword> {
+/// Surface elements get the type of the model space, e.g. `CAX6` in an axisymmetric model,
+/// line elements the type of their beam or truss section.
+fn elements(mesh: &FeMesh, space: ModelSpace, lines: &LineElements) -> Vec<Keyword> {
     let mut written = vec![false; mesh.element_count()];
     let mut groups: Vec<(Option<&str>, String, Vec<ElementId>)> = Vec::new();
-    let type_name =
-        |element: &plx_mesh::Element| space.element_type(&element.type_name, element.shape);
+    let type_name = |element: &plx_mesh::Element| lines.written(element, space).0;
     for part in &mesh.parts {
         for &id in &part.elements {
             let Some(index) = mesh.element_index(id) else {
@@ -351,8 +422,9 @@ fn elements(mesh: &FeMesh, space: ModelSpace) -> Vec<Keyword> {
         ids.sort_unstable();
         for element in ids.iter().filter_map(|&id| mesh.element(id)) {
             let _ = write!(out, "{}", element.id);
+            let (_, nodes) = lines.written(element, space);
             // A line holds 16 entries; the rest continues on the next line.
-            for (entry, node) in (2..).zip(&element.nodes) {
+            for (entry, node) in (2..).zip(&nodes) {
                 let separator = if entry == 17 { ",\n" } else { ", " };
                 let _ = write!(out, "{separator}{node}");
             }
@@ -458,6 +530,14 @@ impl<'a> Sets<'a> {
         }
         (2..)
             .map(|n| format!("{name}-{n}"))
+            .find(|name| self.used.insert(name.to_ascii_uppercase()))
+            .expect("unbounded range")
+    }
+
+    /// Next free name `<prefix>-<n>`.
+    fn unique_numbered(&mut self, prefix: &str) -> String {
+        (1..)
+            .map(|n| format!("{prefix}-{n}"))
             .find(|name| self.used.insert(name.to_ascii_uppercase()))
             .expect("unbounded range")
     }
@@ -670,19 +750,106 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError
                 material: section.material.clone(),
             });
         }
-        let set = sets.element_set(&section.name, &section.region)?;
         let material = name(&section.material);
-        let mut out = format!(
-            "** Name: {}\n*Solid section, Elset={set}, Material={material}\n",
-            section.name
-        );
-        // Plane stress and plane strain sections have a thickness, as in PrePoMax.
-        if model.properties.space.has_thickness() {
-            let _ = writeln!(out, "{}", number(section.thickness));
+        let mut out = format!("** Name: {}\n", section.name);
+        match &section.kind {
+            SectionKind::Solid => {
+                let set = sets.element_set(&section.name, &section.region)?;
+                let _ = writeln!(out, "*Solid section, Elset={set}, Material={material}");
+                // Plane stress and plane strain sections have a thickness, as in PrePoMax.
+                if model.properties.space.has_thickness() {
+                    let _ = writeln!(out, "{}", number(section.thickness));
+                }
+            }
+            SectionKind::Truss { area } => {
+                let set = sets.element_set(&section.name, &section.region)?;
+                let _ = writeln!(out, "*Solid section, Elset={set}, Material={material}");
+                let _ = writeln!(out, "{}", number(*area));
+            }
+            SectionKind::Beam(beam) => {
+                let mut options = format!("Section={}", beam.profile.keyword());
+                for (k, offset) in (1..).zip(beam.offset) {
+                    if offset != 0.0 {
+                        let _ = write!(options, ", Offset{k}={}", number(offset));
+                    }
+                }
+                let dimensions: Vec<String> = beam
+                    .profile
+                    .data_line()
+                    .iter()
+                    .map(|&v| number(v))
+                    .collect();
+                // One keyword per normal: CalculiX takes one normal per section, and an
+                // automatic orientation may differ between the beams of the region.
+                for (normal, set) in beam_groups(sets, section)? {
+                    let _ = writeln!(
+                        out,
+                        "*Beam section, Elset={set}, Material={material}, {options}"
+                    );
+                    let _ = writeln!(out, "{}", dimensions.join(", "));
+                    let _ = writeln!(
+                        out,
+                        "{}, {}, {}",
+                        number(normal[0]),
+                        number(normal[1]),
+                        number(normal[2])
+                    );
+                }
+            }
         }
         keywords.push(Keyword::generated(out));
     }
     Ok(keywords)
+}
+
+/// The beams of a section grouped by the normal they are written with, each group as an
+/// element set. A region whose beams all share one normal keeps its own set.
+fn beam_groups(sets: &mut Sets, section: &Section) -> Result<Vec<([f64; 3], String)>, WriteError> {
+    let SectionKind::Beam(beam) = &section.kind else {
+        return Ok(Vec::new());
+    };
+    let mesh = sets.mesh;
+    let mut groups: Vec<([f64; 3], Vec<ElementId>)> = Vec::new();
+    for element in (section.region.elements(mesh).into_iter()).filter_map(|id| mesh.element(id)) {
+        if element.shape.family() != ElementFamily::Line {
+            continue;
+        }
+        let normal =
+            (beam.orientation.normal_for(line_tangent(mesh, element))).ok_or_else(|| {
+                WriteError::InvalidSection {
+                    item: section.name.clone(),
+                    reason: format!(
+                        "Die Normale ist parallel zur Achse von Element {}",
+                        element.id
+                    ),
+                }
+            })?;
+        match groups.iter_mut().find(|(n, _)| *n == normal) {
+            Some((_, ids)) => ids.push(element.id),
+            None => groups.push((normal, vec![element.id])),
+        }
+    }
+    if groups.is_empty() {
+        return Err(empty(&section.name, "Linienelemente"));
+    }
+    // CalculiX 2.21 reads the element set of a pipe or box section 20 characters wide and
+    // fails on longer names, so those get short sets of their own.
+    let short = beam.profile.needs_reduced_integration();
+    if groups.len() == 1 && !short {
+        let set = sets.element_set(&section.name, &section.region)?;
+        return Ok(vec![(groups[0].0, set)]);
+    }
+    let mut named = Vec::new();
+    for (normal, ids) in groups {
+        let set = if short {
+            sets.unique_numbered("Beam")
+        } else {
+            sets.free_name("Internal_Selection", &name(&section.name))
+        };
+        sets.element_sets.push((set.clone(), Members::Ids(ids)));
+        named.push((normal, set));
+    }
+    Ok(named)
 }
 
 /// Tie constraints as PrePoMax's `CalTie` writes them: slave surface first. Springs and
@@ -832,6 +999,7 @@ fn write_step(
     step: &Step,
     extra_boundary: Option<&Keyword>,
     space: ModelSpace,
+    lines: &LineElements,
     flux_kinds: FluxKinds,
 ) -> Result<Keyword, WriteError> {
     // Nodes of 2D models move in the x-y plane only; CalculiX fails on rotations there.
@@ -855,6 +1023,12 @@ fn write_step(
             boundaries.push(deactivated(&bc.name));
             continue;
         }
+        // Truss nodes have no rotations either; CalculiX fails when they are fixed.
+        let dofs = if dofs == 6 && lines.all_truss(&bc.region.nodes(sets.mesh)) {
+            3
+        } else {
+            dofs
+        };
         let set = sets.node_set(&bc.name, &bc.region)?;
         let mut out = format!("** Name: {}\n*Boundary\n", bc.name);
         match bc.kind {
