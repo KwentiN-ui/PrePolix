@@ -2201,6 +2201,9 @@ impl Workbench {
         let Some(sound) = &mut view.sound else {
             // Closing the window releases the audio device.
             self.audio = None;
+            if view.superposition.take().is_some() {
+                self.results_changed = true;
+            }
             return;
         };
         let playing = self.audio.as_ref().is_some_and(|a| a.synth().sounding());
@@ -2244,6 +2247,42 @@ impl Workbench {
         if playing || actions.play {
             // The play button turns back when a struck sound has died away.
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        let now = ctx.input(|i| i.time);
+        if actions.play {
+            sound.started = Some(now);
+        }
+        if actions.play || actions.changed {
+            sound.mix = None;
+        }
+        let audible = self.audio.as_ref().is_some_and(|a| a.synth().sounding());
+        let overlay = sound.show_shape && audible && !actions.close;
+        // The overlay takes the place of an animation.
+        if overlay && view.animation.is_some() {
+            view.stop_animation();
+        }
+        if overlay
+            && let Some((field, component)) =
+                (view.current()).map(|(f, c)| (f.name.clone(), c.name.clone()))
+            && let Some(sound) = &mut view.sound
+        {
+            if sound
+                .mix
+                .as_ref()
+                .is_some_and(|m| !m.shows(&field, &component))
+            {
+                sound.mix = None;
+            }
+            if sound.mix.is_none() {
+                let mix = sound::ShapeMix::new(sound, &view.increments, &field, &component);
+                sound.mix = mix;
+            }
+            let time = now - sound.started.unwrap_or(now);
+            view.superposition = sound.mix.as_ref().map(|m| m.frame(time));
+            self.results_changed = true;
+            ctx.request_repaint();
+        } else if view.superposition.take().is_some() {
+            self.results_changed = true;
         }
         if let Some(increment) = actions.show
             && view.animation.is_none()
