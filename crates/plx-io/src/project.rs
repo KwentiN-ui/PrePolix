@@ -157,6 +157,7 @@ mod tests {
                     },
                 },
             ],
+            part_names: vec!["SOLID-1".into()],
         };
         save_project(&path, Some(&geometry), &mesh, &model).unwrap();
         let project = read_project(&path).unwrap();

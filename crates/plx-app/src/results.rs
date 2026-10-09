@@ -4,6 +4,7 @@ use crate::animation::{Animation, AnimationKind, ColorLimits};
 use crate::sound::ModeSound;
 use glam::{DAffine3, DMat3};
 use plx_mesh::FeMesh;
+use plx_model::{Quantity, UnitSystem};
 use plx_results::field_output::{self, FieldOutput};
 use plx_results::history_output::{self, HistoryOutput, HistorySet};
 use plx_results::transformation::{self, Transformation};
@@ -76,6 +77,9 @@ pub struct ResultsView {
     /// Range of the shown values on the section plane, which replaces the model's range in
     /// the legend while only the section is shown.
     pub section_range: Option<(f32, f32)>,
+    /// Unit system of the values, PrePoMax's results unit system: that of the FE model the
+    /// results belong to; the legend shows units after it.
+    pub units: UnitSystem,
     /// Characteristic model size for the automatic scale (PrePoMax: cube root of the bounding
     /// box volume, square root of the area for flat models).
     model_size: f64,
@@ -125,6 +129,7 @@ impl ResultsView {
             transformations: Vec::new(),
             coordinate_systems: Vec::new(),
             section_range: None,
+            units: UnitSystem::default(),
             model_size: bounds.map_or(1.0, model_size),
         };
         view.increment = view.default_increment();
@@ -629,11 +634,14 @@ impl ResultsView {
         };
         // PrePoMax writes names with blanks instead of underscores and dashes.
         let name = |n: &str| n.replace(['_', '-'], " ");
-        let unit = (self.field_outputs.iter())
-            .find(|o| o.name == field.name)
-            .and_then(FieldOutput::unit)
-            .filter(|u| !u.trim().is_empty() && u.trim() != "/")
-            .map(|u| format!("\nUnit: {}", u.trim()))
+        let derived = self.field_outputs.iter().find(|o| o.name == field.name);
+        let unit = match derived {
+            Some(output) => output.unit().map(|u| u.trim().to_string()),
+            None => field_unit(&field.name, &component.name, self.units),
+        };
+        let unit = unit
+            .filter(|u| !u.is_empty() && u != "/")
+            .map(|u| format!("\nUnit: {u}"))
             .unwrap_or_default();
         Some(Legend {
             title: format!(
@@ -645,6 +653,33 @@ impl ResultsView {
             max,
             levels: self.levels,
         })
+    }
+}
+
+/// The unit of a field of CalculiX's results in `units`, as PrePoMax shows it in the legend;
+/// `None` for fields without a unit, such as strains, and for unknown fields.
+pub fn field_unit(field: &str, component: &str, units: UnitSystem) -> Option<String> {
+    let unit = |quantity| Some(units.unit(quantity).to_string()).filter(|u| !u.is_empty());
+    let per = |a, b| Some(format!("{}/{}", unit(a)?, unit(b)?));
+    match field.to_ascii_uppercase().as_str() {
+        "DISP" | "DISPR" | "DISPI" | "NORM" => unit(Quantity::Length),
+        "STRESS" | "STRESSR" | "STRESSI" | "ZZSTR" | "ZZSTRR" | "ZZSTRI" => {
+            unit(Quantity::Pressure)
+        }
+        "FORC" | "FORCR" | "FORCI" => unit(Quantity::Force),
+        "VELO" => unit(Quantity::Velocity),
+        "ENER" => per(Quantity::Energy, Quantity::Volume),
+        "CELS" => unit(Quantity::Energy),
+        "NDTEMP" => unit(Quantity::Temperature),
+        "FLUX" => per(Quantity::Power, Quantity::Area),
+        "RFL" => unit(Quantity::Power),
+        "ERROR" | "ERRORR" | "ERRORI" | "HERROR" | "HERRORR" | "HERRORI" => Some("%".into()),
+        "CONTACT" => match component.to_ascii_uppercase().as_str() {
+            "COPEN" | "CSLIP1" | "CSLIP2" => unit(Quantity::Length),
+            "CPRESS" | "CSHEAR1" | "CSHEAR2" => unit(Quantity::Pressure),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -747,6 +782,28 @@ mod tests {
         let expected = round_significant(0.25 * 10.0 / max as f64, 2) as f32;
         assert_eq!(view.scale(), expected);
         assert_eq!(view.scale(), 18.0);
+    }
+
+    #[test]
+    fn the_legend_shows_the_unit_of_the_results() {
+        let mut view = ResultsView::new(
+            vec![increment(1, 1, AnalysisKind::Static, &[[0.0, 0.0, 1.0]])],
+            None,
+        );
+        assert!(view.legend().unwrap().title.contains("\nUnit: mm\n"));
+        view.units = UnitSystem::InLbSF;
+        assert!(view.legend().unwrap().title.contains("Unit: in"));
+        view.units = UnitSystem::Unitless;
+        assert!(!view.legend().unwrap().title.contains("Unit"));
+        let units = UnitSystem::MTonSC;
+        assert_eq!(field_unit("STRESS", "MISES", units).as_deref(), Some("kPa"));
+        assert_eq!(field_unit("FORC", "F1", units).as_deref(), Some("kN"));
+        assert_eq!(field_unit("ENER", "ENER", units).as_deref(), Some("kJ/m³"));
+        assert_eq!(
+            field_unit("CONTACT", "CPRESS", units).as_deref(),
+            Some("kPa")
+        );
+        assert_eq!(field_unit("TOSTRAIN", "EXX", units), None);
     }
 
     #[test]
