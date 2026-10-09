@@ -23,6 +23,22 @@ pub struct Viewport {
     pub labels: LabelOffsets,
 }
 
+/// A click into the scene as a ray in render coordinates.
+#[derive(Clone, Copy, Debug)]
+pub struct Click {
+    pub origin: Vec3,
+    pub direction: Vec3,
+    /// Ctrl was held: remove from the selection instead of adding.
+    pub remove: bool,
+}
+
+/// What happened in the 3D view this frame.
+#[derive(Default)]
+pub struct ViewportResponse {
+    pub command: Option<ViewCommand>,
+    pub click: Option<Click>,
+}
+
 /// Camera requests from toolbar, menu or tree, applied by the owner of the model bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewCommand {
@@ -68,9 +84,9 @@ impl Viewport {
         }
     }
 
-    /// Draws the scene with its annotations; returns a camera command the user asked for.
-    pub fn ui(&mut self, ui: &mut Ui) -> Option<ViewCommand> {
-        let mut command = None;
+    /// Draws the scene with its annotations; reports camera commands and clicks.
+    pub fn ui(&mut self, ui: &mut Ui) -> ViewportResponse {
+        let mut result = ViewportResponse::default();
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let delta = response.drag_delta();
         if response.dragged_by(PointerButton::Primary) {
@@ -88,7 +104,21 @@ impl Viewport {
             }
         }
         if response.double_clicked() {
-            command = Some(ViewCommand::Fit);
+            result.command = Some(ViewCommand::Fit);
+        } else if response.clicked()
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            // Ray through the pixel from the near to the far plane.
+            let inverse = self.camera.view_proj(rect.aspect_ratio()).inverse();
+            let x = (pointer.x - rect.center().x) / (rect.width() * 0.5);
+            let y = (rect.center().y - pointer.y) / (rect.height() * 0.5);
+            let near = inverse.project_point3(Vec3::new(x, y, 0.0));
+            let far = inverse.project_point3(Vec3::new(x, y, 1.0));
+            result.click = Some(Click {
+                origin: near,
+                direction: (far - near).normalize_or_zero(),
+                remove: ui.input(|i| i.modifiers.command),
+            });
         }
 
         let pixels_per_point = ui.ctx().pixels_per_point();
@@ -116,6 +146,6 @@ impl Viewport {
             Color32::WHITE,
         );
         overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels);
-        command
+        result
     }
 }

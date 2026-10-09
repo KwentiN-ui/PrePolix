@@ -1,11 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use glam::{DVec3, Vec3};
 use plx_io::frd::{FrdImport, read_frd};
 use plx_io::inp::{InpImport, read_inp};
-use plx_mesh::{FeMesh, PartSkin, extract_part_skin};
+use plx_mesh::{ElementId, FeMesh, NodeId, PartSkin, extract_part_skin};
+use plx_model::FeModel;
 use plx_render::contour::normalize;
 use plx_render::{RenderMesh, part_color, part_render_mesh, wireframe_edges};
 
@@ -17,6 +18,9 @@ const FEATURE_ANGLE_DEG: f64 = 30.0;
 /// Within a surface patch, coarse meshes of curved surfaces can fold more than the feature
 /// angle between neighbouring faces; shading still blends across such folds.
 const SMOOTH_ANGLE_DEG: f64 = 60.0;
+
+/// Colour of selected faces and nodes, PrePoMax's highlight red.
+pub const HIGHLIGHT_COLOR: [f32; 3] = [1.0, 0.0, 0.0];
 
 /// Summary of one part, computed once on load so the GUI never iterates large meshes.
 pub struct PartInfo {
@@ -41,9 +45,37 @@ pub struct Model {
     pub load_time: Duration,
     /// Results read from an `.frd` file, with what the user currently looks at.
     pub results: Option<ResultsView>,
+    /// Whether the results are drawn; the FE Model tab shows the plain mesh.
+    pub show_results: bool,
+    /// Opened from a results file: there is no FE model to set up.
+    pub results_only: bool,
+    /// The analysis set up on this mesh.
+    pub fe: FeModel,
+    /// Faces and parts drawn in the highlight colour.
+    pub highlight: Highlight,
     /// Centre of the mesh; render positions are relative to it.
     origin: DVec3,
     skins: Vec<PartSkin>,
+}
+
+/// What is shown selected: whole parts, element faces and nodes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Highlight {
+    pub parts: HashSet<usize>,
+    /// Element faces as (element, CalculiX face number).
+    pub faces: HashSet<(ElementId, u8)>,
+    /// Nodes, drawn as points over the scene.
+    pub nodes: Vec<NodeId>,
+}
+
+/// A visible face under the mouse.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hit {
+    pub part: usize,
+    /// Index into the part's skin faces.
+    pub face: usize,
+    /// Hit point relative to the model origin.
+    pub point: Vec3,
 }
 
 /// Result of loading on a worker thread: the model plus one GPU-ready mesh per part.
@@ -127,7 +159,11 @@ pub fn load(path: &Path) -> Result<LoadedModel, String> {
         skipped_keywords,
         included_files,
         load_time: Duration::ZERO,
+        results_only: results.is_some(),
+        show_results: true,
         results,
+        fe: FeModel::default(),
+        highlight: Highlight::default(),
         origin,
         skins,
     };
@@ -143,12 +179,55 @@ pub fn load(path: &Path) -> Result<LoadedModel, String> {
 }
 
 impl Model {
+    /// The results, when they are drawn.
+    pub fn shown_results(&self) -> Option<&ResultsView> {
+        self.results.as_ref().filter(|_| self.show_results)
+    }
+
+    pub fn shown_results_mut(&mut self) -> Option<&mut ResultsView> {
+        self.results.as_mut().filter(|_| self.show_results)
+    }
+
+    /// Takes the results of an analysis of this model. Values are matched by node id, since
+    /// CalculiX may number its result nodes differently, e.g. after expanding shells.
+    pub fn attach_results(&mut self, frd: FrdImport) {
+        let FrdImport {
+            mesh: result_mesh,
+            mut increments,
+            date,
+            time,
+            ..
+        } = frd;
+        let indices: Vec<Option<usize>> = self
+            .mesh
+            .node_ids()
+            .iter()
+            .map(|&id| result_mesh.node_index(id))
+            .collect();
+        for component in increments
+            .iter_mut()
+            .flat_map(|i| &mut i.fields)
+            .flat_map(|f| &mut f.components)
+        {
+            component.values = indices
+                .iter()
+                .map(|index| index.and_then(|i| component.values.get(i).copied()))
+                .map(|value| value.unwrap_or(f32::NAN))
+                .collect();
+        }
+        let mut view = ResultsView::new(increments, self.mesh.bounds());
+        view.date = date;
+        view.time = time;
+        self.results = Some(view);
+        self.show_results = true;
+    }
+
     /// GPU-ready meshes of all parts, deformed and coloured by the selected result if any.
     pub fn render_meshes(&self) -> Vec<RenderMesh> {
         let mut coords = std::borrow::Cow::Borrowed(self.mesh.coords());
         let mut scalars = None;
         let mut deformed = false;
-        if let Some(view) = &self.results {
+        if let Some(view) = self.shown_results() {
             let scale = (view.scale() * view.amplitude()) as f64;
             let displacements = view.current_increment().and_then(|i| i.displacements());
             if let (Some(displacements), true) = (displacements, scale != 0.0) {
@@ -172,7 +251,8 @@ impl Model {
             .iter()
             .zip(&self.parts)
             .zip(&self.skins)
-            .map(|((_, info), skin)| {
+            .enumerate()
+            .map(|(index, ((_, info), skin))| {
                 let mut mesh = part_render_mesh(
                     &coords,
                     skin,
@@ -181,6 +261,7 @@ impl Model {
                     SMOOTH_ANGLE_DEG,
                     scalars.as_deref(),
                 );
+                self.highlight_faces(index, skin, &mut mesh);
                 if deformed {
                     mesh.wireframe_edges = wireframe_edges(self.mesh.coords(), skin, self.origin);
                 }
@@ -189,10 +270,107 @@ impl Model {
             .collect()
     }
 
+    /// Recolours the vertices of highlighted faces; vertices are laid out face by face.
+    fn highlight_faces(&self, part: usize, skin: &PartSkin, mesh: &mut RenderMesh) {
+        if self.highlight.faces.is_empty() && !self.highlight.parts.contains(&part) {
+            return;
+        }
+        let whole = self.highlight.parts.contains(&part);
+        let elements = self.mesh.elements();
+        let mut start = 0;
+        for face in &skin.faces {
+            let count = face.corners.len() + face.mids.len();
+            let key = (elements[face.element].id, face.face as u8 + 1);
+            if whole || self.highlight.faces.contains(&key) {
+                for vertex in &mut mesh.vertices[start..start + count] {
+                    vertex.color = HIGHLIGHT_COLOR;
+                }
+            }
+            start += count;
+        }
+    }
+
+    /// All element faces on the surface of the parts.
+    pub fn skin_faces(&self) -> impl Iterator<Item = (ElementId, u8)> + '_ {
+        let elements = self.mesh.elements();
+        self.skins
+            .iter()
+            .flat_map(|skin| &skin.faces)
+            .map(|f| (elements[f.element].id, f.face as u8 + 1))
+    }
+
+    /// The nearest visible face hit by a ray, both relative to the model origin.
+    pub fn pick(&self, origin: Vec3, direction: Vec3) -> Option<Hit> {
+        let coords = self.mesh.coords();
+        let position = |node: usize| (DVec3::from(coords[node]) - self.origin).as_vec3();
+        let mut best: Option<(f32, Hit)> = None;
+        for (part, skin) in self.skins.iter().enumerate() {
+            if !self.parts[part].visible {
+                continue;
+            }
+            for (index, face) in skin.faces.iter().enumerate() {
+                let a = position(face.corners[0]);
+                for pair in face.corners[1..].windows(2) {
+                    let (b, c) = (position(pair[0]), position(pair[1]));
+                    let Some(t) = ray_triangle(origin, direction, a, b, c) else {
+                        continue;
+                    };
+                    if best.is_none_or(|(nearest, _)| t < nearest) {
+                        let point = origin + direction * t;
+                        best = Some((
+                            t,
+                            Hit {
+                                part,
+                                face: index,
+                                point,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        best.map(|(_, hit)| hit)
+    }
+
+    /// Element and CalculiX face number of a hit.
+    pub fn hit_face(&self, hit: &Hit) -> (ElementId, u8) {
+        let face = &self.skins[hit.part].faces[hit.face];
+        (self.mesh.elements()[face.element].id, face.face as u8 + 1)
+    }
+
+    /// All faces of the smooth surface patch around a hit, bounded by feature edges.
+    pub fn hit_patch(&self, hit: &Hit) -> Vec<(ElementId, u8)> {
+        let skin = &self.skins[hit.part];
+        let region = skin.faces[hit.face].region;
+        let elements = self.mesh.elements();
+        skin.faces
+            .iter()
+            .filter(|f| f.region == region)
+            .map(|f| (elements[f.element].id, f.face as u8 + 1))
+            .collect()
+    }
+
+    /// The node of the hit face nearest to the hit point.
+    pub fn hit_node(&self, hit: &Hit) -> NodeId {
+        let face = &self.skins[hit.part].faces[hit.face];
+        let coords = self.mesh.coords();
+        let distance = |node: usize| {
+            ((DVec3::from(coords[node]) - self.origin).as_vec3() - hit.point).length_squared()
+        };
+        let nearest = face
+            .corners
+            .iter()
+            .chain(&face.mids)
+            .copied()
+            .min_by(|&a, &b| distance(a).total_cmp(&distance(b)))
+            .unwrap_or(face.corners[0]);
+        self.mesh.node_ids()[nearest]
+    }
+
     /// Where a node is drawn, relative to the model origin, including the shown deformation.
     pub fn node_position(&self, index: usize) -> Option<Vec3> {
         let mut p = DVec3::from(*self.mesh.coords().get(index)?);
-        if let Some(view) = &self.results {
+        if let Some(view) = self.shown_results() {
             let scale = (view.scale() * view.amplitude()) as f64;
             let displacement = view
                 .current_increment()
@@ -227,6 +405,22 @@ impl Model {
             .filter_map(|p| p.bounds)
             .reduce(|(min_a, max_a), (min_b, max_b)| (min_a.min(min_b), max_a.max(max_b)))
     }
+}
+
+/// Distance along the ray to a triangle (Möller-Trumbore), seen from either side.
+fn ray_triangle(origin: Vec3, direction: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
+    let (ab, ac) = (b - a, c - a);
+    let p = direction.cross(ac);
+    let det = ab.dot(p);
+    if det.abs() < f32::EPSILON * ab.length() * ac.length() {
+        return None;
+    }
+    let s = origin - a;
+    let u = s.dot(p) / det;
+    let q = s.cross(ab);
+    let v = direction.dot(q) / det;
+    let t = ac.dot(q) / det;
+    (u >= 0.0 && v >= 0.0 && u + v <= 1.0 && t >= 0.0).then_some(t)
 }
 
 #[cfg(test)]
@@ -278,6 +472,43 @@ mod tests {
                 .vertices
                 .iter()
                 .all(|v| v.scalar >= 0.0)
+        );
+    }
+
+    #[test]
+    fn picking_finds_faces_patches_and_nodes() {
+        let model = load(&testdata("kragbalken_c3d8.inp")).unwrap().model;
+        // The beam spans 0..100 x 0..10 x 0..10; look straight down at x = 95, y = 5.
+        let origin = Vec3::new(95.0, 5.0, 50.0) - model.origin.as_vec3();
+        let hit = model.pick(origin, Vec3::NEG_Z).unwrap();
+        assert!((hit.point.z + model.origin.z as f32 - 10.0).abs() < 1e-4);
+        let (element, face) = model.hit_face(&hit);
+        assert_eq!(face, 2, "top face of a hex is S2");
+        assert!(model.mesh.element(element).is_some());
+        // The top of the beam is one patch of 10 x 2 element faces.
+        assert_eq!(model.hit_patch(&hit).len(), 20);
+        let node = model.mesh.node(model.hit_node(&hit)).unwrap();
+        assert_eq!(node[2], 10.0);
+        assert!(model.pick(origin, Vec3::Z).is_none());
+    }
+
+    #[test]
+    fn analysis_results_attach_to_the_input_model() {
+        let mut model = load(&testdata("kragbalken_c3d8.inp")).unwrap().model;
+        let plain = load(&testdata("kragbalken_c3d8.inp"))
+            .unwrap()
+            .render_meshes;
+        let frd = read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
+        model.attach_results(frd);
+        let view = model.results.as_ref().unwrap();
+        let tip = model.mesh.node_index(99).unwrap();
+        let displacements = view.increments[0].displacements().unwrap();
+        assert!(displacements[tip][2] < 0.0);
+        model.show_results = false;
+        let meshes = model.render_meshes();
+        assert_eq!(
+            meshes[0].vertices, plain[0].vertices,
+            "FE Model tab shows the plain mesh"
         );
     }
 

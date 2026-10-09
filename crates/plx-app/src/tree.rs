@@ -6,6 +6,7 @@ use egui::collapsing_header::CollapsingState;
 use egui::{Response, Ui, WidgetText};
 
 use crate::model::Model;
+use crate::setup::NewItem;
 
 /// Which of the three trees is shown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -35,6 +36,15 @@ pub enum TreeItem {
     NodeSet(String),
     ElementSet(String),
     Surface(String),
+    Material(usize),
+    Section(usize),
+    Step(usize),
+    /// A container inside a step, such as "BCs".
+    StepGroup(usize, &'static str),
+    BoundaryCondition(usize, usize),
+    Load(usize, usize),
+    FieldOutput(usize, usize),
+    Analysis,
     FieldOutputs,
     /// Field of the current increment, by index.
     Field(usize),
@@ -55,6 +65,11 @@ pub struct TreeResponse {
     pub component: Option<(usize, usize)>,
     /// An item was double-clicked: show its properties.
     pub open: Option<TreeItem>,
+    /// Create a new item from a container's context menu or by double-clicking it.
+    pub create: Option<NewItem>,
+    pub delete: Option<TreeItem>,
+    /// Run the analysis.
+    pub run: bool,
 }
 
 /// Tree label with a fixed size: highlight and hover frame are painted over the same area, so
@@ -93,6 +108,31 @@ fn row_label(ui: &mut Ui, selected: bool, text: impl Into<WidgetText>) -> Respon
     response
 }
 
+/// What double-clicking a container creates.
+fn creates(item: &TreeItem) -> Option<NewItem> {
+    match *item {
+        TreeItem::Group("Materials") => Some(NewItem::Material),
+        TreeItem::Group("Sections") => Some(NewItem::Section),
+        TreeItem::Group("Steps") => Some(NewItem::Step),
+        TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
+        TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
+        _ => None,
+    }
+}
+
+/// Items of the FE model that have an edit dialog.
+fn is_fe_item(item: &TreeItem) -> bool {
+    matches!(
+        item,
+        TreeItem::Material(_)
+            | TreeItem::Section(_)
+            | TreeItem::Step(_)
+            | TreeItem::BoundaryCondition(..)
+            | TreeItem::Load(..)
+            | TreeItem::FieldOutput(..)
+    )
+}
+
 /// "Name (n)" when there are entries, as PrePoMax labels its containers.
 fn counted(name: &str, count: usize) -> String {
     if count > 0 {
@@ -122,8 +162,35 @@ impl Tree<'_> {
         if response.clicked() || response.double_clicked() {
             self.state.selected = Some((self.view, item.clone()));
         }
+        let creates = creates(&item);
         if response.double_clicked() {
-            self.response.open = Some(item);
+            match creates {
+                // PrePoMax creates an item when its container is double-clicked.
+                Some(kind) => self.response.create = Some(kind),
+                None => self.response.open = Some(item.clone()),
+            }
+        }
+        let editable = is_fe_item(&item);
+        if creates.is_some() || editable || item == TreeItem::Analysis {
+            response.context_menu(|ui| {
+                if let Some(kind) = creates
+                    && ui.button("Erstellen …").clicked()
+                {
+                    self.response.create = Some(kind);
+                }
+                if editable {
+                    if ui.button("Bearbeiten …").clicked() {
+                        self.response.open = Some(item.clone());
+                    }
+                    let deletable = !matches!(item, TreeItem::FieldOutput(..));
+                    if deletable && ui.button("Löschen").clicked() {
+                        self.response.delete = Some(item.clone());
+                    }
+                }
+                if item == TreeItem::Analysis && ui.button("Starten").clicked() {
+                    self.response.run = true;
+                }
+            });
         }
         response
     }
@@ -243,6 +310,40 @@ impl Tree<'_> {
         });
     }
 
+    /// Container of model items, e.g. "Materials (2)".
+    fn container(&mut self, ui: &mut Ui, name: &'static str, items: Vec<(TreeItem, &str)>) {
+        if items.is_empty() {
+            self.leaf(ui, TreeItem::Group(name), name);
+            return;
+        }
+        let text = counted(name, items.len());
+        self.branch(ui, TreeItem::Group(name), text, true, |tree, ui| {
+            for (item, label) in items {
+                tree.leaf(ui, item, label);
+            }
+        });
+    }
+
+    fn step_container(
+        &mut self,
+        ui: &mut Ui,
+        step: usize,
+        name: &'static str,
+        items: Vec<(TreeItem, &str)>,
+    ) {
+        let group = TreeItem::StepGroup(step, name);
+        if items.is_empty() {
+            self.leaf(ui, group, name);
+            return;
+        }
+        let text = counted(name, items.len());
+        self.branch(ui, group, text, true, |tree, ui| {
+            for (item, label) in items {
+                tree.leaf(ui, item, label);
+            }
+        });
+    }
+
     fn features(&mut self, ui: &mut Ui) {
         self.group(ui, "Features", &["Reference Points", "Coordinate Systems"]);
     }
@@ -274,13 +375,21 @@ pub fn show(
 
 fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
     // A results file has no FE model, as in PrePoMax; its mesh lives in the Results tree.
-    let model = model.filter(|m| m.results.is_none());
+    let model = model.filter(|m| !m.results_only);
+    let fe = model.as_ref().map(|m| m.fe.clone()).unwrap_or_default();
+    let has_model = model.is_some();
     tree.branch(ui, TreeItem::Model, "Model", true, |tree, ui| {
         tree.mesh(ui, model);
         tree.features(ui);
-        for name in ["Materials", "Sections", "Constraints"] {
-            tree.leaf(ui, TreeItem::Group(name), name);
-        }
+        let materials: Vec<(TreeItem, &str)> = (fe.materials.iter().enumerate())
+            .map(|(i, m)| (TreeItem::Material(i), m.name.as_str()))
+            .collect();
+        tree.container(ui, "Materials", materials);
+        let sections: Vec<(TreeItem, &str)> = (fe.sections.iter().enumerate())
+            .map(|(i, s)| (TreeItem::Section(i), s.name.as_str()))
+            .collect();
+        tree.container(ui, "Sections", sections);
+        tree.leaf(ui, TreeItem::Group("Constraints"), "Constraints");
         let id = ui.make_persistent_id((tree.view, "Contacts"));
         CollapsingState::load_with_default_open(ui.ctx(), id, false)
             .show_header(ui, |ui| {
@@ -291,12 +400,53 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                     tree.leaf(ui, TreeItem::Group(name), name);
                 }
             });
-        for name in ["Distributions", "Amplitudes", "Initial Conditions", "Steps"] {
+        for name in ["Distributions", "Amplitudes", "Initial Conditions"] {
             tree.leaf(ui, TreeItem::Group(name), name);
         }
+        let steps = TreeItem::Group("Steps");
+        if fe.steps.is_empty() {
+            tree.leaf(ui, steps, "Steps");
+            return;
+        }
+        let text = counted("Steps", fe.steps.len());
+        tree.branch(ui, steps, text, true, |tree, ui| {
+            for (s, step) in fe.steps.iter().enumerate() {
+                tree.branch(ui, TreeItem::Step(s), &step.name, true, |tree, ui| {
+                    let outputs = (step.field_outputs.iter().enumerate())
+                        .map(|(i, f)| (TreeItem::FieldOutput(s, i), f.name.as_str()))
+                        .collect();
+                    tree.step_container(ui, s, "Field Outputs", outputs);
+                    tree.step_container(ui, s, "History Outputs", Vec::new());
+                    let bcs = (step.boundary_conditions.iter().enumerate())
+                        .map(|(i, b)| (TreeItem::BoundaryCondition(s, i), b.name.as_str()))
+                        .collect();
+                    tree.step_container(ui, s, "BCs", bcs);
+                    let loads = (step.loads.iter().enumerate())
+                        .map(|(i, l)| (TreeItem::Load(s, i), l.name.as_str()))
+                        .collect();
+                    tree.step_container(ui, s, "Loads", loads);
+                    tree.step_container(ui, s, "Defined Fields", Vec::new());
+                });
+            }
+        });
     });
-    tree.leaf(ui, TreeItem::Group("Analyses"), "Analyses");
+    if has_model {
+        tree.branch(
+            ui,
+            TreeItem::Group("Analyses"),
+            "Analyses (1)",
+            true,
+            |tree, ui| {
+                tree.leaf(ui, TreeItem::Analysis, ANALYSIS_NAME);
+            },
+        );
+    } else {
+        tree.leaf(ui, TreeItem::Group("Analyses"), "Analyses");
+    }
 }
+
+/// Name of the analysis job, PrePoMax's first default.
+pub const ANALYSIS_NAME: &str = "Analysis-1";
 
 fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
     let model = model.filter(|m| m.results.is_some());

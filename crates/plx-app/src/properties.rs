@@ -77,7 +77,15 @@ pub fn show(ui: &mut egui::Ui, model: Option<&Model>, item: &TreeItem) {
 fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)>) {
     let mesh = &model.mesh;
     match item {
-        TreeItem::Group(_) => {}
+        TreeItem::Group(_)
+        | TreeItem::Material(_)
+        | TreeItem::Section(_)
+        | TreeItem::Step(_)
+        | TreeItem::StepGroup(..)
+        | TreeItem::BoundaryCondition(..)
+        | TreeItem::Load(..)
+        | TreeItem::FieldOutput(..)
+        | TreeItem::Analysis => {}
         TreeItem::Model => {
             rows.push(("Datei", model.path.display().to_string()));
             rows.push(("Knoten", mesh.node_count().to_string()));

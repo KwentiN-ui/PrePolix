@@ -11,6 +11,7 @@ pub const STORAGE_KEY: &str = "settings";
 pub struct Settings {
     pub graphics: Graphics,
     pub post: PostProcessing,
+    pub solver: Solver,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -60,20 +61,80 @@ impl Default for PostProcessing {
     }
 }
 
+/// How CalculiX is run, PrePoMax's "CalculiX" settings page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Solver {
+    /// The CalculiX executable; a bare name is looked up on `PATH`.
+    pub executable: String,
+    /// Threads for the solver (`OMP_NUM_THREADS`).
+    pub threads: u32,
+    /// Where analyses run; empty for the default, see [`default_work_dir`].
+    pub work_dir: String,
+}
+
+impl Default for Solver {
+    fn default() -> Self {
+        Self {
+            executable: "ccx".into(),
+            threads: 1,
+            work_dir: String::new(),
+        }
+    }
+}
+
+impl Solver {
+    pub fn work_dir(&self) -> std::path::PathBuf {
+        if self.work_dir.trim().is_empty() {
+            default_work_dir()
+        } else {
+            std::path::PathBuf::from(self.work_dir.trim())
+        }
+    }
+
+    pub fn job_solver(&self) -> plx_job::Solver {
+        plx_job::Solver {
+            executable: self.executable.trim().into(),
+            threads: self.threads.max(1),
+        }
+    }
+}
+
+/// PrePoMax's default work directory: a `Temp` folder next to the program. Where that is
+/// not writable, e.g. for a binary installed to `/usr/bin`, a `prepolix` folder in the
+/// system's temporary directory.
+pub fn default_work_dir() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join("Temp")))
+        .filter(|dir| is_writable(dir))
+        .unwrap_or_else(|| std::env::temp_dir().join("prepolix"))
+}
+
+/// Creates the directory if needed and checks that files can be written into it.
+fn is_writable(dir: &std::path::Path) -> bool {
+    let probe = dir.join(".prepolix-schreibtest");
+    let writable = std::fs::create_dir_all(dir).is_ok() && std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(probe);
+    writable
+}
+
 /// Pages of the settings window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Graphics,
     PostProcessing,
+    Solver,
 }
 
 impl Page {
-    const ALL: [Page; 2] = [Page::Graphics, Page::PostProcessing];
+    const ALL: [Page; 3] = [Page::Graphics, Page::PostProcessing, Page::Solver];
 
     fn title(self) -> &'static str {
         match self {
             Page::Graphics => "Grafik",
             Page::PostProcessing => "Postprocessing",
+            Page::Solver => "CalculiX",
         }
     }
 }
@@ -82,6 +143,7 @@ impl Page {
 pub struct SettingsWindow {
     page: Page,
     draft: Settings,
+    default_work_dir: String,
 }
 
 /// What the user decided in the settings window.
@@ -99,6 +161,7 @@ impl SettingsWindow {
         Self {
             page: Page::PostProcessing,
             draft: settings.clone(),
+            default_work_dir: default_work_dir().display().to_string(),
         }
     }
 
@@ -187,6 +250,26 @@ impl SettingsWindow {
                     );
                 });
             }
+            Page::Solver => {
+                let solver = &mut self.draft.solver;
+                egui::Grid::new("solver settings")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Programm");
+                        ui.text_edit_singleline(&mut solver.executable);
+                        ui.end_row();
+                        ui.label("Threads");
+                        ui.add(egui::DragValue::new(&mut solver.threads).range(1..=256));
+                        ui.end_row();
+                        ui.label("Arbeitsverzeichnis");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut solver.work_dir)
+                                .hint_text(self.default_work_dir.as_str()),
+                        );
+                        ui.end_row();
+                    });
+            }
         }
     }
 }
@@ -202,5 +285,16 @@ mod tests {
         assert!(settings.post.min_label);
         assert!(settings.post.max_label);
         assert!(settings.graphics.global_axes);
+    }
+
+    #[test]
+    fn default_work_dir_is_next_to_the_binary_if_writable() {
+        let dir = default_work_dir();
+        let next_to_binary = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("Temp");
+        assert_eq!(dir, next_to_binary, "the test binary's folder is writable");
     }
 }

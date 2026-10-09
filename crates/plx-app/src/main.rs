@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod analysis;
 mod animation;
 mod app;
 mod icons;
@@ -8,6 +9,7 @@ mod overlay;
 mod properties;
 mod results;
 mod settings;
+mod setup;
 mod style;
 mod tree;
 mod viewport;
@@ -39,6 +41,7 @@ mod tests {
     #[test]
     fn gui_sources_only_use_glyphs_of_the_default_font() {
         let sources = [
+            ("analysis.rs", include_str!("analysis.rs")),
             ("animation.rs", include_str!("animation.rs")),
             ("app.rs", include_str!("app.rs")),
             ("icons.rs", include_str!("icons.rs")),
@@ -48,6 +51,7 @@ mod tests {
             ("properties.rs", include_str!("properties.rs")),
             ("results.rs", include_str!("results.rs")),
             ("settings.rs", include_str!("settings.rs")),
+            ("setup.rs", include_str!("setup.rs")),
             ("style.rs", include_str!("style.rs")),
             ("tree.rs", include_str!("tree.rs")),
             ("viewport.rs", include_str!("viewport.rs")),
