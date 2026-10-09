@@ -406,7 +406,7 @@ fn optional_row(
             set,
             numeric::without_unit(&mut number, units, quantity)
                 .speed(0.0)
-                .custom_formatter(|v, _| format!("{v:e}")),
+                .custom_formatter(|v, _| numeric::format_physical(v)),
         );
         ui.label(if set { unit } else { "Standard" });
         *value = set.then_some(number);
