@@ -93,24 +93,7 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
     }
     let brep_file = TempFile::new("brep");
     let (diagonal, warnings) = with_gmsh(|gmsh| {
-        let unit = match units {
-            UnitSystem::MKgSC | UnitSystem::MTonSC => "M",
-            UnitSystem::InLbSF => "INCH",
-            UnitSystem::MmTonSC | UnitSystem::Unitless => "MM",
-        };
-        gmsh.set_string("Geometry.OCCTargetUnit", unit)?;
-        let imported = paths.iter().try_for_each(|path| {
-            let shapes = gmsh.import_shapes(path)?;
-            if shapes.is_empty() {
-                return Err(GmshError::Other(format!(
-                    "{} enthält keine Geometrie",
-                    path.display()
-                )));
-            }
-            Ok(())
-        });
-        gmsh.set_string("Geometry.OCCTargetUnit", "MM")?;
-        imported?;
+        read_files(gmsh, paths, units)?;
         gmsh.write(&brep_file.0)?;
         let (min, max) = gmsh.bounding_box()?;
         let diagonal = (0..3)
@@ -122,16 +105,7 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
     let brep = std::fs::read_to_string(&brep_file.0)
         .map_err(|e| GmshError::Other(format!("{}: {e}", brep_file.0.display())))?;
     let geometry = Geometry {
-        source: paths
-            .iter()
-            .map(|path| {
-                path.file_name().map_or_else(
-                    || path.display().to_string(),
-                    |n| n.to_string_lossy().into_owned(),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", "),
+        source: file_names(paths),
         brep,
         meshing: MeshingParameters::for_diagonal(diagonal),
         mesh_items: Vec::new(),
@@ -142,6 +116,135 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         geometry,
         display,
         warnings,
+    })
+}
+
+/// Reads CAD files into the open Gmsh model, STEP and IGES in the length unit of `units`.
+fn read_files(gmsh: &Gmsh, paths: &[PathBuf], units: UnitSystem) -> Result<(), GmshError> {
+    let unit = match units {
+        UnitSystem::MKgSC | UnitSystem::MTonSC => "M",
+        UnitSystem::InLbSF => "INCH",
+        UnitSystem::MmTonSC | UnitSystem::Unitless => "MM",
+    };
+    gmsh.set_string("Geometry.OCCTargetUnit", unit)?;
+    let imported = paths.iter().try_for_each(|path| {
+        let shapes = gmsh.import_shapes(path)?;
+        if shapes.is_empty() {
+            return Err(GmshError::Other(format!(
+                "{} enthält keine Geometrie",
+                path.display()
+            )));
+        }
+        Ok(())
+    });
+    gmsh.set_string("Geometry.OCCTargetUnit", "MM")?;
+    imported
+}
+
+/// The files' names, for [`Geometry::source`].
+fn file_names(paths: &[PathBuf]) -> String {
+    (paths.iter())
+        .map(|path| {
+            path.file_name().map_or_else(
+                || path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// CAD files added to a geometry by [`add_cad_files`].
+#[derive(Debug)]
+pub struct CadAddition {
+    /// The geometry with the old and the new parts.
+    pub import: CadImport,
+    /// The new tag of every face, edge and vertex of the old geometry, by its old one.
+    pub renumbered: BTreeMap<CadEntity, CadEntity>,
+    /// Names of the new parts.
+    pub added: Vec<String>,
+}
+
+/// Adds the parts of CAD files to a geometry, PrePoMax's import into a model that has
+/// one, or into a model with a mesh but no geometry (`None`). The parts already there keep
+/// their names, local mesh sizes and selections (through [`CadAddition::renumbered`]); the
+/// new ones get names neither the geometry nor `taken`, e.g. the mesh parts of the model,
+/// uses.
+pub fn add_cad_files(
+    geometry: Option<&Geometry>,
+    paths: &[PathBuf],
+    units: UnitSystem,
+    taken: &[String],
+) -> Result<CadAddition, GmshError> {
+    let Some(geometry) = geometry else {
+        let mut import = import_cad_files(paths, units)?;
+        let taken = taken.iter().cloned().collect();
+        let added = fresh_names(&default_part_kinds(&import.geometry)?, taken);
+        import.geometry.part_names.clone_from(&added);
+        return Ok(CadAddition {
+            import,
+            renumbered: BTreeMap::new(),
+            added,
+        });
+    };
+    if paths.is_empty() {
+        return Err(GmshError::Other("Keine Datei gewählt".into()));
+    }
+    let file = TempFile::with_contents("brep", &geometry.brep)?;
+    let combined = TempFile::new("brep");
+    let (old_parts, old_boxes, warnings) = with_gmsh(|gmsh| {
+        gmsh.import_shapes(&file.0)?;
+        let parts = part_boxes(gmsh, parts(gmsh, geometry)?)?;
+        let boxes = entity_boxes(gmsh)?;
+        read_files(gmsh, paths, units)?;
+        gmsh.write(&combined.0)?;
+        Ok((parts, boxes, gmsh.warnings()?))
+    })?;
+    let brep = std::fs::read_to_string(&combined.0)
+        .map_err(|e| GmshError::Other(format!("{}: {e}", combined.0.display())))?;
+    let (new_parts, new_boxes) = with_gmsh(|gmsh| {
+        gmsh.import_shapes(&combined.0)?;
+        Ok((part_boxes(gmsh, default_parts(gmsh)?)?, entity_boxes(gmsh)?))
+    })?;
+    // The old parts are found again by where they lie, the new ones are numbered on.
+    let mut used: BTreeSet<String> = (old_parts.iter().map(|(_, n, _)| n.clone()))
+        .chain(taken.iter().cloned())
+        .collect();
+    let mut old_parts: Vec<_> = old_parts.into_iter().map(Some).collect();
+    let mut names = Vec::with_capacity(new_parts.len());
+    let mut added = Vec::new();
+    for ((dim, _), _, bounds) in &new_parts {
+        let found = old_parts.iter_mut().find(|old| {
+            old.as_ref()
+                .is_some_and(|((d, _), _, b)| d == dim && same_box(b, bounds))
+        });
+        if let Some((_, name, _)) = found.and_then(Option::take) {
+            names.push(name);
+            continue;
+        }
+        let name = fresh_name(*dim, &used);
+        used.insert(name.clone());
+        names.push(name.clone());
+        added.push(name);
+    }
+    let mut mesh_items = geometry.mesh_items.clone();
+    renumber_mesh_items(&mut mesh_items, &old_boxes, &new_boxes);
+    let combined = Geometry {
+        source: format!("{}, {}", geometry.source, file_names(paths)),
+        brep,
+        mesh_items,
+        part_names: names,
+        ..geometry.clone()
+    };
+    let display = tessellate(&combined)?;
+    Ok(CadAddition {
+        import: CadImport {
+            geometry: combined,
+            display,
+            warnings,
+        },
+        renumbered: renumbering(&old_boxes, &new_boxes),
+        added,
     })
 }
 
@@ -220,15 +323,23 @@ pub fn part_names(geometry: &Geometry) -> Result<Vec<String>, GmshError> {
 /// the faces outside them, then the edges outside the faces. Names the geometry keeps since
 /// a part was deleted take precedence over those Gmsh gives.
 fn parts(gmsh: &Gmsh, geometry: &Geometry) -> Result<Vec<(Entity, String)>, GmshError> {
+    let mut parts = default_parts(gmsh)?;
+    if geometry.part_names.len() == parts.len() {
+        for ((_, name), kept) in parts.iter_mut().zip(&geometry.part_names) {
+            name.clone_from(kept);
+        }
+    }
+    Ok(parts)
+}
+
+/// The parts Gmsh read, as [`parts`], with the names Gmsh gives.
+fn default_parts(gmsh: &Gmsh) -> Result<Vec<(Entity, String)>, GmshError> {
     let volumes = gmsh.entities(3)?;
     let faces = free_faces(gmsh)?;
     let edges = free_edges(gmsh)?;
     let mut names = solid_names(gmsh, &volumes)?;
     names.extend(shell_names(gmsh, &faces)?);
     names.extend(line_names(gmsh, &edges)?);
-    if geometry.part_names.len() == names.len() {
-        names.clone_from(&geometry.part_names);
-    }
     let entities = (volumes.iter().map(|&v| (3, v)))
         .chain(faces.iter().map(|&f| (2, f)))
         .chain(edges.iter().map(|&e| (1, e)));
@@ -283,35 +394,9 @@ pub fn delete_part_renumbered(
         gmsh.import_shapes(&smaller.0)?;
         entity_boxes(gmsh)
     })?;
-    let renumber = |dim: i32, tags: &mut Vec<i32>| {
-        *tags = (tags.iter())
-            .filter_map(|tag| {
-                let (_, old) = old_boxes.iter().find(|(e, _)| *e == (dim, *tag))?;
-                (new_boxes.iter())
-                    .find(|((d, _), new)| *d == dim && same_box(old, new))
-                    .map(|((_, t), _)| *t)
-            })
-            .collect();
-    };
     let mut mesh_items = geometry.mesh_items.clone();
-    for item in &mut mesh_items {
-        if let plx_model::MeshSetupKind::LocalMeshSize { faces, edges, .. } = &mut item.kind {
-            renumber(2, faces);
-            renumber(1, edges);
-        }
-    }
-    let entity = |(dim, tag): Entity| match dim {
-        0 => CadEntity::Vertex(tag),
-        1 => CadEntity::Edge(tag),
-        _ => CadEntity::Face(tag),
-    };
-    let renumbered = (old_boxes.iter())
-        .filter_map(|&((dim, tag), ref old)| {
-            let (new, _) =
-                (new_boxes.iter()).find(|((d, _), new)| *d == dim && same_box(old, new))?;
-            Some((entity((dim, tag)), entity(*new)))
-        })
-        .collect();
+    renumber_mesh_items(&mut mesh_items, &old_boxes, &new_boxes);
+    let renumbered = renumbering(&old_boxes, &new_boxes);
     let smaller = Geometry {
         brep,
         mesh_items,
@@ -335,6 +420,96 @@ fn entity_boxes(gmsh: &Gmsh) -> Result<Vec<(Entity, BoundingBox)>, GmshError> {
         }
     }
     Ok(boxes)
+}
+
+/// The first "SOLID-n", "SHELL-n" or "LINE-n" for a part of dimension `dim` not yet used.
+fn fresh_name(dim: i32, used: &BTreeSet<String>) -> String {
+    let prefix = match dim {
+        3 => "SOLID",
+        2 => "SHELL",
+        _ => "LINE",
+    };
+    (1..)
+        .map(|n| format!("{prefix}-{n}"))
+        .find(|name| !used.contains(name))
+        .unwrap_or_default()
+}
+
+/// Names for parts of the given dimensions that `used` does not have yet.
+fn fresh_names(dims: &[i32], mut used: BTreeSet<String>) -> Vec<String> {
+    (dims.iter())
+        .map(|&dim| {
+            let name = fresh_name(dim, &used);
+            used.insert(name.clone());
+            name
+        })
+        .collect()
+}
+
+/// The dimension of each part of the geometry, in the order of [`parts`].
+fn default_part_kinds(geometry: &Geometry) -> Result<Vec<i32>, GmshError> {
+    let file = TempFile::with_contents("brep", &geometry.brep)?;
+    with_gmsh(|gmsh| {
+        gmsh.import_shapes(&file.0)?;
+        Ok((default_parts(gmsh)?.into_iter())
+            .map(|((dim, _), _)| dim)
+            .collect())
+    })
+}
+
+/// Bounding box of every part, as [`parts`] lists them.
+fn part_boxes(
+    gmsh: &Gmsh,
+    parts: Vec<(Entity, String)>,
+) -> Result<Vec<(Entity, String, BoundingBox)>, GmshError> {
+    (parts.into_iter())
+        .map(|((dim, tag), name)| Ok(((dim, tag), name, gmsh.entity_bounding_box(dim, tag)?)))
+        .collect()
+}
+
+/// The new entity of every old one that lies where it did, after Gmsh numbered the faces,
+/// edges and vertices anew.
+fn renumbering(
+    old_boxes: &[(Entity, BoundingBox)],
+    new_boxes: &[(Entity, BoundingBox)],
+) -> BTreeMap<CadEntity, CadEntity> {
+    let entity = |(dim, tag): Entity| match dim {
+        0 => CadEntity::Vertex(tag),
+        1 => CadEntity::Edge(tag),
+        _ => CadEntity::Face(tag),
+    };
+    (old_boxes.iter())
+        .filter_map(|&((dim, tag), ref old)| {
+            let (new, _) =
+                (new_boxes.iter()).find(|((d, _), new)| *d == dim && same_box(old, new))?;
+            Some((entity((dim, tag)), entity(*new)))
+        })
+        .collect()
+}
+
+/// Renumbers the faces and edges of the local mesh sizes after [`renumbering`]; those
+/// without a new tag are dropped.
+fn renumber_mesh_items(
+    items: &mut [plx_model::MeshSetupItem],
+    old_boxes: &[(Entity, BoundingBox)],
+    new_boxes: &[(Entity, BoundingBox)],
+) {
+    let renumber = |dim: i32, tags: &mut Vec<i32>| {
+        *tags = (tags.iter())
+            .filter_map(|tag| {
+                let (_, old) = old_boxes.iter().find(|(e, _)| *e == (dim, *tag))?;
+                (new_boxes.iter())
+                    .find(|((d, _), new)| *d == dim && same_box(old, new))
+                    .map(|((_, t), _)| *t)
+            })
+            .collect();
+    };
+    for item in items {
+        if let plx_model::MeshSetupKind::LocalMeshSize { faces, edges, .. } = &mut item.kind {
+            renumber(2, faces);
+            renumber(1, edges);
+        }
+    }
 }
 
 /// Whether two bounding boxes are those of the same entity, read twice.
