@@ -325,6 +325,26 @@ fn dotted(mesh: &mut Mesh, ppp: f32, a: Pos2, b: Pos2) {
 }
 
 /// The plus and minus box of the classic Windows tree view, on whole pixels.
+/// Whether `item` lies in the branch `branch`, which opens to reveal it.
+fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
+    use TreeItem::*;
+    match branch {
+        Model => !matches!(item, Model),
+        Mesh | Group("Parts") => matches!(item, Part(_)),
+        Group("Constraints") => matches!(item, Constraint(_)),
+        Group("Contacts") => matches!(
+            item,
+            SurfaceInteraction(_)
+                | ContactPair(_)
+                | Group("Surface Interactions")
+                | Group("Contact Pairs")
+        ),
+        Group("Surface Interactions") => matches!(item, SurfaceInteraction(_)),
+        Group("Contact Pairs") => matches!(item, ContactPair(_)),
+        _ => false,
+    }
+}
+
 fn expander(ui: &mut Ui, openness: f32, response: &Response) {
     let ppp = ui.pixels_per_point();
     let snap = |v: f32| (v * ppp).floor() / ppp;
@@ -716,13 +736,12 @@ impl Tree<'_> {
         {
             self.forced_open = Some(*open);
         }
-        let revealing_part = self.state.reveal
-            && matches!(&self.state.selected, Some((view, TreeItem::Part(_))) if *view == self.view);
-        if revealing_part
-            && matches!(
-                item,
-                TreeItem::Model | TreeItem::Mesh | TreeItem::Group("Parts")
-            )
+        let revealing = (self.state.reveal)
+            .then_some(self.state.selected.as_ref())
+            .flatten()
+            .filter(|(view, _)| *view == self.view);
+        if let Some((_, selected)) = revealing
+            && contains(&item, selected)
         {
             state.set_open(true);
         }
@@ -1189,6 +1208,24 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revealed_items_open_their_branches() {
+        let pair = TreeItem::ContactPair(0);
+        for branch in [
+            TreeItem::Model,
+            TreeItem::Group("Contacts"),
+            TreeItem::Group("Contact Pairs"),
+        ] {
+            assert!(contains(&branch, &pair), "{branch:?}");
+        }
+        assert!(!contains(&TreeItem::Group("Constraints"), &pair));
+        assert!(contains(
+            &TreeItem::Group("Constraints"),
+            &TreeItem::Constraint(1)
+        ));
+        assert!(contains(&TreeItem::Group("Parts"), &TreeItem::Part(2)));
+    }
 
     #[test]
     fn containers_have_no_properties_dialog() {
