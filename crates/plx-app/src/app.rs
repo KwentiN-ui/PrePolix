@@ -2379,6 +2379,7 @@ impl Workbench {
         let now = ctx.input(|i| i.time);
         if actions.play {
             sound.started = Some(now);
+            sound.shape_clock = (0.0, f64::NEG_INFINITY);
         }
         if actions.play || actions.changed {
             sound.mix = None;
@@ -2405,10 +2406,22 @@ impl Workbench {
                 let mix = sound::ShapeMix::new(sound, &view.increments, &field, &component);
                 sound.mix = mix;
             }
-            let time = now - sound.started.unwrap_or(now);
-            view.superposition = sound.mix.as_ref().map(|m| m.frame(time));
-            self.results_changed = true;
-            ctx.request_repaint();
+            // A new frame at the chosen rate; the swings advance with the chosen speed, so
+            // changing it while playing does not make the shape jump.
+            let period = 1.0 / sound.shape_fps.max(1.0) as f64;
+            let (swings, last) = sound.shape_clock;
+            let since = now - last;
+            if since >= period || view.superposition.is_none() {
+                let step = if last.is_finite() { since } else { 0.0 };
+                let swings = swings + step * sound.shape_speed as f64;
+                sound.shape_clock = (swings, now);
+                let time = now - sound.started.unwrap_or(now);
+                view.superposition = sound.mix.as_ref().map(|m| m.frame(swings, time));
+                self.results_changed = true;
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(period));
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(period - since));
+            }
         } else if view.superposition.take().is_some() {
             self.results_changed = true;
         }
