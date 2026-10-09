@@ -102,6 +102,39 @@ pub fn write_inp(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<String
     Ok(write_keywords(&tree))
 }
 
+/// The input file for PrePoMax's "Check Model": every step's procedure is replaced by
+/// `*No analysis`, so that CalculiX only reads and checks the model. A model without steps
+/// gets PrePoMax's `CheckModel` step.
+pub fn write_check_inp(
+    mesh: &FeMesh,
+    model: &FeModel,
+    heading: &str,
+) -> Result<String, WriteError> {
+    let mut tree = model_keywords(mesh, model, heading)?;
+    let no_analysis = || Keyword::generated("*No analysis\n".into());
+    if let Some(steps) = tree
+        .iter_mut()
+        .find(|k| matches!(&k.kind, KeywordKind::Title(name) if name == "Steps"))
+    {
+        for step in &mut steps.children {
+            if let Some(procedure) =
+                (step.children.first_mut()).and_then(|header| header.children.first_mut())
+            {
+                *procedure = no_analysis();
+            }
+        }
+        if steps.children.is_empty() {
+            let end = Keyword::title("End step", vec![Keyword::generated("*End step\n".into())]);
+            let header = Keyword::parent("*Step\n".into(), vec![no_analysis(), end]);
+            steps
+                .children
+                .push(Keyword::title("CheckModel", vec![header]));
+        }
+    }
+    insert_user_keywords(&mut tree, &model.user_keywords);
+    Ok(write_keywords(&tree))
+}
+
 /// The text of a keyword tree.
 pub fn write_keywords(tree: &[Keyword]) -> String {
     fn write(out: &mut String, keyword: &Keyword) {

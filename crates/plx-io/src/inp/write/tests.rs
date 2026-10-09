@@ -381,3 +381,17 @@ fn run_ccx_dat(name: &str, text: &str) -> Option<String> {
     let _ = std::fs::remove_dir_all(&dir);
     Some(dat)
 }
+
+#[test]
+fn check_model_replaces_the_procedures_by_no_analysis() {
+    let (mesh, mut model) = cantilever(tip_force());
+    let text = write_check_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Step\n*No analysis\n"), "{text}");
+    assert!(!text.contains("*Static"), "{text}");
+    // The loads are still checked.
+    assert!(text.contains("*Cload\nInternal_Selection-1_Force-1, 3, -100\n"));
+    model.steps.clear();
+    let text = write_check_inp(&mesh, &model, "").unwrap();
+    let step = text.find("*Step\n*No analysis\n").expect(&text);
+    assert!(text[step..].contains("*End step\n"), "{text}");
+}

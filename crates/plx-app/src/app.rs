@@ -23,7 +23,7 @@ use crate::selection::Operation;
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::setup::{Editor, EditorResult, NewItem};
 use crate::sound::{self, ModeSound};
-use crate::tree::{self, TreeItem, TreeResponse, TreeState, TreeView};
+use crate::tree::{self, AnalysisAction, TreeItem, TreeResponse, TreeState, TreeView};
 use crate::viewport::{Axis, BoxSelect, Click, ViewCommand, Viewport};
 use plx_render::RenderMesh;
 
@@ -807,7 +807,10 @@ impl Workbench {
             TreeView::Geometry => self.geometry.as_mut(),
             TreeView::FeModel => self.model.as_mut(),
         };
-        let job = self.analysis.as_ref().map(Analysis::status);
+        let job = self.analysis.as_ref().map(|a| tree::JobState {
+            status: a.status(),
+            results: a.results().is_some(),
+        });
         let response = tree::show(ui, view, shown, job, &mut self.tree);
         self.tree_response(ui.ctx(), view, response);
     }
@@ -861,8 +864,8 @@ impl Workbench {
             self.tree.selected = None;
             self.editor = None;
         }
-        if response.run {
-            self.start_analysis();
+        if let Some(action) = response.analysis {
+            self.analysis_action(action);
         }
         if response.material_library {
             self.open_material_library();
@@ -1423,7 +1426,13 @@ impl Workbench {
             )
             .clicked()
         {
-            self.start_analysis();
+            self.start_analysis(false);
+        }
+        if ui
+            .add_enabled(can_start, egui::Button::new("Modell prüfen"))
+            .clicked()
+        {
+            self.start_analysis(true);
         }
         if ui
             .add_enabled(running, egui::Button::new("Analyse abbrechen"))
@@ -1451,7 +1460,33 @@ impl Workbench {
         }
     }
 
-    fn start_analysis(&mut self) {
+    /// An entry of the analysis' context menu in the tree.
+    fn analysis_action(&mut self, action: AnalysisAction) {
+        match action {
+            AnalysisAction::Edit => {
+                let window = SettingsWindow::with_page(&self.settings, settings::Page::Solver);
+                self.settings_window = Some(window);
+            }
+            AnalysisAction::Run => self.start_analysis(false),
+            AnalysisAction::CheckModel => self.start_analysis(true),
+            AnalysisAction::Monitor => match &mut self.analysis {
+                Some(analysis) => analysis.monitor = true,
+                None => self.output.push(
+                    "Die Analyse wurde noch nicht gestartet (Analyse > Analyse starten).".into(),
+                ),
+            },
+            AnalysisAction::Results => {
+                self.open_results = self.analysis.as_ref().and_then(Analysis::results);
+            }
+            AnalysisAction::Kill => {
+                if let Some(analysis) = &mut self.analysis {
+                    analysis.kill();
+                }
+            }
+        }
+    }
+
+    fn start_analysis(&mut self, check_model: bool) {
         if self.analysis.as_ref().is_some_and(Analysis::is_running) {
             return;
         }
@@ -1467,10 +1502,15 @@ impl Workbench {
                 .push("Das Modell hat noch kein Netz: Netz > Netz erzeugen".into());
             return;
         }
-        match Analysis::start(&self.settings.solver, model, default_solver) {
+        match Analysis::start(&self.settings.solver, model, default_solver, check_model) {
             Ok(analysis) => {
                 self.output.push(format!(
-                    "Analyse gestartet: {}",
+                    "{} gestartet: {}",
+                    if check_model {
+                        "Modellprüfung"
+                    } else {
+                        "Analyse"
+                    },
                     self.settings.solver.work_dir().display()
                 ));
                 self.analysis = Some(analysis);
@@ -1482,7 +1522,7 @@ impl Workbench {
     /// Polls the running analysis and shows its monitor.
     fn run_analysis(&mut self, ctx: &egui::Context) {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F5)) {
-            self.start_analysis();
+            self.start_analysis(false);
         }
         let Some(analysis) = &mut self.analysis else {
             return;
