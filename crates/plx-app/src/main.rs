@@ -4,6 +4,8 @@ mod analysis;
 mod animation;
 mod app;
 mod field_output_dialog;
+mod history_output_dialog;
+mod history_table;
 mod icons;
 mod keywords;
 mod material_library;

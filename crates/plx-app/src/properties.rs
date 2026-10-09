@@ -84,6 +84,9 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
         | TreeItem::BoundaryCondition(..)
         | TreeItem::Load(..)
         | TreeItem::FieldOutput(..)
+        | TreeItem::HistorySet(_)
+        | TreeItem::HistoryField(..)
+        | TreeItem::HistoryComponent(..)
         | TreeItem::Analysis => {}
         TreeItem::Model => {
             rows.push(("Datei", model.path.display().to_string()));

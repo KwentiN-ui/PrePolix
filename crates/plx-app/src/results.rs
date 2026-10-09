@@ -3,6 +3,7 @@ use plx_render::contour::DEFAULT_LEVELS;
 use crate::animation::{Animation, AnimationKind, ColorLimits};
 use plx_mesh::FeMesh;
 use plx_results::field_output::{self, FieldOutput};
+use plx_results::history_output::{self, HistoryOutput, HistorySet};
 use plx_results::{AnalysisKind, Component, Field, Increment};
 
 /// How the deformed shape is scaled, as in PrePoMax's results toolbar.
@@ -56,6 +57,10 @@ pub struct ResultsView {
     pub animation: Option<Animation>,
     /// Field outputs the user derived from the results, in the order they are computed.
     pub field_outputs: Vec<FieldOutput>,
+    /// History outputs the user derived, in the order they are computed.
+    pub history_outputs: Vec<HistoryOutput>,
+    /// Data of the history outputs that could be computed, by name.
+    pub history: Vec<HistorySet>,
     /// Characteristic model size for the automatic scale (PrePoMax: cube root of the bounding
     /// box volume, square root of the area for flat models).
     model_size: f64,
@@ -84,6 +89,8 @@ impl ResultsView {
             time: None,
             animation: None,
             field_outputs: Vec::new(),
+            history_outputs: Vec::new(),
+            history: Vec::new(),
             model_size: bounds.map_or(1.0, model_size),
         };
         view.increment = view.default_increment();
@@ -166,7 +173,8 @@ impl ResultsView {
                 self.field_outputs.len() - 1
             }
         };
-        let warnings = self.recompute_from(at + 1, mesh);
+        let mut warnings = self.recompute_from(at + 1, mesh);
+        warnings.extend(self.recompute_history(mesh));
         self.restore_selection(shown);
         Ok(warnings)
     }
@@ -179,7 +187,8 @@ impl ResultsView {
         let shown = self.shown_names();
         let output = self.field_outputs.remove(index);
         field_output::remove(&output.name, &mut self.increments);
-        let warnings = self.recompute_from(index, mesh);
+        let mut warnings = self.recompute_from(index, mesh);
+        warnings.extend(self.recompute_history(mesh));
         self.restore_selection(shown);
         warnings
     }
@@ -213,6 +222,57 @@ impl ResultsView {
             Some((f, c.unwrap_or(0)))
         });
         (self.field, self.component) = found.unwrap_or((0, 0));
+    }
+
+    /// Creates (`index` is `None`) or replaces a history output and computes it; the history
+    /// outputs after it are computed again. Their failures are returned.
+    pub fn set_history_output(
+        &mut self,
+        index: Option<usize>,
+        output: HistoryOutput,
+        mesh: &FeMesh,
+    ) -> Result<Vec<String>, String> {
+        let at = index.filter(|&i| i < self.history_outputs.len());
+        // An equation sees the outputs before it.
+        let before = at.unwrap_or(self.history_outputs.len());
+        let earlier: Vec<HistorySet> = (self.history.iter())
+            .filter(|set| (self.history_outputs[..before].iter()).any(|o| o.name == set.name))
+            .cloned()
+            .collect();
+        history_output::compute(&output, &self.increments, mesh, &earlier)?;
+        match at {
+            Some(i) => self.history_outputs[i] = output,
+            None => self.history_outputs.push(output),
+        }
+        Ok(self.recompute_history(mesh))
+    }
+
+    pub fn remove_history_output(&mut self, index: usize, mesh: &FeMesh) -> Vec<String> {
+        if index >= self.history_outputs.len() {
+            return Vec::new();
+        }
+        self.history_outputs.remove(index);
+        self.recompute_history(mesh)
+    }
+
+    /// Computes all history outputs again, in order; failures leave an output without data.
+    pub fn recompute_history(&mut self, mesh: &FeMesh) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let mut sets = Vec::new();
+        for output in &self.history_outputs {
+            match history_output::compute(output, &self.increments, mesh, &sets) {
+                Ok(set) => sets.push(set),
+                Err(error) => warnings.push(format!("{}: {error}", output.name)),
+            }
+        }
+        self.history = sets;
+        warnings
+    }
+
+    /// Index of the history output of a computed set.
+    pub fn history_output_index(&self, set: usize) -> Option<usize> {
+        let name = &self.history.get(set)?.name;
+        self.history_outputs.iter().position(|o| o.name == *name)
     }
 
     /// Entry of the increment list, "step, increment" as in PrePoMax's results toolbar.

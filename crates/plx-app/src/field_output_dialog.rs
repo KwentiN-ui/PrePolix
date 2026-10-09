@@ -81,12 +81,12 @@ impl Row {
 }
 
 /// What the user did in the dialog this frame.
-pub enum DialogAction {
+pub enum DialogAction<T> {
     Open,
     Cancel,
     /// Create or replace the output; `next` keeps the dialog open for another one (OK - Neu).
     Ok {
-        output: FieldOutput,
+        output: T,
         next: bool,
     },
 }
@@ -308,7 +308,7 @@ impl FieldOutputDialog {
         self.error = None;
     }
 
-    pub fn show(&mut self, ctx: &egui::Context) -> DialogAction {
+    pub fn show(&mut self, ctx: &egui::Context) -> DialogAction<FieldOutput> {
         let mut action = DialogAction::Open;
         let mut open = true;
         egui::Window::new(self.title())
