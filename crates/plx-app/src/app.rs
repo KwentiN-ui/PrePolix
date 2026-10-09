@@ -9,6 +9,7 @@ use crate::model::{self, LoadedModel, Model};
 use crate::overlay::{Marker, Overlay};
 use crate::properties;
 use crate::results::{Deformation, ResultsView, format_legend_value};
+use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::tree::{self, TreeItem, TreeState, TreeView};
 use crate::viewport::{ViewCommand, Viewport};
 use plx_render::RenderMesh;
@@ -19,6 +20,9 @@ enum LoadEvent {
 }
 
 struct Workbench {
+    settings: Settings,
+    /// Open settings window with its unsaved draft.
+    settings_window: Option<SettingsWindow>,
     viewport: Viewport,
     model: Option<Model>,
     tree: TreeState,
@@ -60,6 +64,11 @@ impl PrepolixApp {
         )];
         let mut app = Self {
             workbench: Workbench {
+                settings: cc
+                    .storage
+                    .and_then(|s| eframe::get_value(s, settings::STORAGE_KEY))
+                    .unwrap_or_default(),
+                settings_window: None,
                 viewport: Viewport::new(render_state),
                 model: None,
                 tree: TreeState::default(),
@@ -156,17 +165,16 @@ impl PrepolixApp {
                     "Netzkanten",
                 );
             });
-            for menu in [
-                "Geometrie",
-                "Netz",
-                "Modell",
-                "Analyse",
-                "Ergebnisse",
-                "Werkzeuge",
-                "Hilfe",
-            ] {
+            for menu in ["Geometrie", "Netz", "Modell", "Analyse", "Ergebnisse"] {
                 ui.menu_button(menu, not_implemented);
             }
+            ui.menu_button("Werkzeuge", |ui| {
+                if ui.button("Einstellungen …").clicked() {
+                    self.workbench.settings_window =
+                        Some(SettingsWindow::new(&self.workbench.settings));
+                }
+            });
+            ui.menu_button("Hilfe", not_implemented);
         });
     }
 
@@ -255,6 +263,10 @@ const STANDARD_VIEWS: [(StandardView, &str); 7] = [
 ];
 
 impl eframe::App for PrepolixApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, settings::STORAGE_KEY, &self.workbench.settings);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.handle_load_events();
         let ctx = ui.ctx().clone();
@@ -322,6 +334,7 @@ impl eframe::App for PrepolixApp {
             }
         });
         self.workbench.properties_window(&ctx);
+        self.workbench.settings_window(&ctx);
         self.workbench.rebuild_if_results_changed();
 
         if let Some(command) = self.workbench.view_command.take() {
@@ -340,9 +353,18 @@ impl Workbench {
         match result {
             Ok(loaded) => {
                 let LoadedModel {
-                    model,
+                    mut model,
                     render_meshes,
                 } = *loaded;
+                if let Some(view) = &mut model.results {
+                    let post = &self.settings.post;
+                    if (view.levels, view.show_undeformed) != (post.levels, post.undeformed_outline)
+                    {
+                        view.levels = post.levels;
+                        view.show_undeformed = post.undeformed_outline;
+                        self.results_changed = true;
+                    }
+                }
                 self.output.push(format!(
                     "{} geladen: {} Knoten, {} Elemente, {} Parts ({} ms)",
                     path.display(),
@@ -388,6 +410,7 @@ impl Workbench {
                     .as_ref()
                     .map(|v| (TreeView::Results, TreeItem::Component(v.field, v.component)));
                 self.dialog = None;
+                self.viewport.labels = Default::default();
                 self.model = Some(model);
                 self.update_contour();
             }
@@ -471,6 +494,28 @@ impl Workbench {
         }
         if let Some(item) = response.open {
             self.dialog = Some(item);
+        }
+    }
+
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        let Some(window) = &mut self.settings_window else {
+            return;
+        };
+        let new = match window.show(ctx) {
+            WindowResult::Open => return,
+            WindowResult::Apply(settings) => settings,
+            WindowResult::Ok(settings) => {
+                self.settings_window = None;
+                settings
+            }
+            WindowResult::Cancel => {
+                self.settings_window = None;
+                return;
+            }
+        };
+        if new != self.settings {
+            self.settings = new;
+            self.update_contour();
         }
     }
 
@@ -580,29 +625,42 @@ impl Workbench {
     fn update_contour(&mut self) {
         let Some(model) = &self.model else {
             self.viewport.options.contour_levels = None;
-            self.viewport.overlay = Overlay::default();
+            self.viewport.overlay = Overlay {
+                show_view_triad: self.settings.graphics.view_triad,
+                ..Overlay::default()
+            };
             return;
         };
         let view = model.results.as_ref();
         self.viewport.options.contour_levels =
             view.filter(|v| v.current().is_some()).map(|v| v.levels);
+        let (graphics, post) = (&self.settings.graphics, &self.settings.post);
+        let marker = |label: &str, extreme: Option<(usize, f32)>| {
+            let (index, value) = extreme?;
+            let value = value * view.map_or(1.0, ResultsView::amplitude);
+            Some(Marker {
+                position: model.node_position(index)?,
+                text: format!(
+                    "{label}: {}\nNode id: {}",
+                    format_legend_value(value),
+                    model.mesh.node_ids()[index]
+                ),
+            })
+        };
         self.viewport.overlay = Overlay {
             legend: view.and_then(ResultsView::legend),
-            status: view.map_or_else(Vec::new, |v| v.status_lines(&model.file_name())),
+            status: view
+                .filter(|_| post.status_block)
+                .map_or_else(Vec::new, |v| v.status_lines(&model.file_name())),
             maximum: view
-                .and_then(ResultsView::maximum)
-                .and_then(|(index, value)| {
-                    let value = value * view.map_or(1.0, ResultsView::amplitude);
-                    Some(Marker {
-                        position: model.node_position(index)?,
-                        text: format!(
-                            "Max: {}\nNode id: {}",
-                            format_legend_value(value),
-                            model.mesh.node_ids()[index]
-                        ),
-                    })
-                }),
-            global_origin: Some(model.global_origin()),
+                .filter(|_| post.max_label)
+                .and_then(|v| marker("Max", v.maximum())),
+            minimum: view
+                .filter(|_| post.min_label)
+                .and_then(|v| marker("Min", v.minimum())),
+            global_origin: graphics.global_axes.then(|| model.global_origin()),
+            show_scale_bar: graphics.scale_bar,
+            show_view_triad: graphics.view_triad,
         };
     }
 }

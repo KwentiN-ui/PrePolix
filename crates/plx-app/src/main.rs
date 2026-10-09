@@ -7,6 +7,7 @@ mod model;
 mod overlay;
 mod properties;
 mod results;
+mod settings;
 mod style;
 mod tree;
 mod viewport;
@@ -16,9 +17,11 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("prepolix")
+            .with_app_id("prepolix")
             .with_inner_size([1400.0, 900.0])
             .with_min_inner_size([640.0, 400.0]),
         renderer: eframe::Renderer::Wgpu,
+        persist_window: true,
         ..Default::default()
     };
     eframe::run_native(
@@ -44,6 +47,7 @@ mod tests {
             ("overlay.rs", include_str!("overlay.rs")),
             ("properties.rs", include_str!("properties.rs")),
             ("results.rs", include_str!("results.rs")),
+            ("settings.rs", include_str!("settings.rs")),
             ("style.rs", include_str!("style.rs")),
             ("tree.rs", include_str!("tree.rs")),
             ("viewport.rs", include_str!("viewport.rs")),

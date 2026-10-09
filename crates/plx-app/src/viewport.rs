@@ -4,7 +4,7 @@ use glam::Vec3;
 use plx_render::wgpu::FilterMode;
 use plx_render::{Camera, DisplayOptions, RenderMesh, StandardView, ViewportRenderer};
 
-use crate::overlay::{self, Overlay};
+use crate::overlay::{self, LabelOffsets, Overlay};
 
 const ZOOM_PER_SCROLL_POINT: f32 = 0.002;
 
@@ -19,6 +19,8 @@ pub struct Viewport {
     pub options: DisplayOptions,
     /// Legend, information block and markers drawn over the scene.
     pub overlay: Overlay,
+    /// Where the user dragged the labels.
+    pub labels: LabelOffsets,
 }
 
 /// Camera requests from toolbar, menu or tree, applied by the owner of the model bounds.
@@ -43,6 +45,7 @@ impl Viewport {
             camera: Camera::default(),
             options: DisplayOptions::default(),
             overlay: Overlay::default(),
+            labels: LabelOffsets::default(),
         }
     }
 
@@ -112,7 +115,7 @@ impl Viewport {
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
             Color32::WHITE,
         );
-        overlay::draw(&painter, rect, &self.camera, &self.overlay);
+        overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels);
         command
     }
 }
