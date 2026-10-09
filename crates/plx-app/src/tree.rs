@@ -2,11 +2,17 @@
 //! node names. Nodes for features prepolix does not support yet are shown as empty
 //! placeholders, so that the structure is already the familiar one.
 
-use egui::collapsing_header::CollapsingState;
-use egui::{Response, Ui, WidgetText};
+use std::collections::{HashMap, HashSet};
 
-use crate::model::Model;
+use egui::collapsing_header::CollapsingState;
+use egui::epaint::Mesh;
+use egui::{Color32, Pos2, Rect, Response, Shape, Ui, Vec2, WidgetText, pos2, vec2};
+use plx_job::JobStatus;
+use plx_model::ModelItem;
+
+use crate::model::{Model, PartInfo};
 use crate::setup::NewItem;
+use crate::tree_icons::{self, TreeIcon};
 
 /// Which of the three trees is shown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -84,9 +90,18 @@ pub struct TreeResponse {
 
 /// Tree label with a fixed size: highlight and hover frame are painted over the same area, so
 /// that hovering never moves the rows below (egui's selectable label grows by its frame).
-fn row_label(ui: &mut Ui, selected: bool, text: impl Into<WidgetText>) -> Response {
+fn row_label(
+    ui: &mut Ui,
+    selected: bool,
+    color: Option<Color32>,
+    text: impl Into<WidgetText>,
+) -> Response {
     let padding = egui::vec2(3.0, 1.0);
-    let galley = text.into().into_galley(
+    let mut text = text.into();
+    if let Some(color) = color.filter(|_| !selected) {
+        text = text.color(color);
+    }
+    let galley = text.into_galley(
         ui,
         Some(egui::TextWrapMode::Extend),
         f32::INFINITY,
@@ -116,6 +131,41 @@ fn row_label(ui: &mut Ui, selected: bool, text: impl Into<WidgetText>) -> Respon
         ui.painter().galley(rect.min + padding, galley, text_color);
     }
     response
+}
+
+/// Text colour of invalid items and of the containers holding them, Windows' red as in
+/// PrePoMax.
+const INVALID: Color32 = Color32::from_rgb(255, 0, 0);
+
+/// Warning sign next to an invalid item, PrePoMax's warning icon.
+fn warning_sign(ui: &mut Ui) -> Response {
+    ui.add_space(3.0);
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::splat(tree_icons::SIZE), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        tree_icons::paint(ui.painter(), rect.min, TreeIcon::Warning);
+    }
+    response
+}
+
+/// Tree item of an item of the FE model and the containers it is shown in, innermost first.
+fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
+    let step = |s: usize, group: &'static str| {
+        vec![
+            TreeItem::StepGroup(s, group),
+            TreeItem::Step(s),
+            TreeItem::Group("Steps"),
+            TreeItem::Model,
+        ]
+    };
+    match item {
+        ModelItem::Section(i) => (
+            TreeItem::Section(i),
+            vec![TreeItem::Group("Sections"), TreeItem::Model],
+        ),
+        ModelItem::BoundaryCondition(s, i) => (TreeItem::BoundaryCondition(s, i), step(s, "BCs")),
+        ModelItem::Load(s, i) => (TreeItem::Load(s, i), step(s, "Loads")),
+    }
 }
 
 /// What double-clicking a container creates.
@@ -167,12 +217,101 @@ fn counted(name: &str, count: usize) -> String {
     }
 }
 
+/// Colour of the dotted lines that connect the nodes, as in the Windows tree view.
+const LINE: Color32 = Color32::from_rgb(160, 160, 160);
+
+/// Height of the connector line below the top of a row's icon: PrePoMax's dotted images
+/// have their line in pixel row 9.
+const LINE_OFFSET: f32 = 9.0;
+
+/// Dotted line between two points on a horizontal or vertical, one screen pixel wide with a
+/// dot on every second pixel, so that crossing lines share their dots. Drawn as a plain mesh,
+/// as egui would blur rectangles of a single pixel.
+fn dotted(mesh: &mut Mesh, ppp: f32, a: Pos2, b: Pos2) {
+    let px = |v: f32| (v * ppp).floor() as i32;
+    let mut dot = |x: i32, y: i32| {
+        let min = pos2(x as f32 / ppp, y as f32 / ppp);
+        mesh.add_colored_rect(Rect::from_min_size(min, Vec2::splat(1.0 / ppp)), LINE);
+    };
+    let (x0, y0, x1, y1) = (px(a.x), px(a.y), px(b.x), px(b.y));
+    if x0 == x1 {
+        let first = y0.min(y1);
+        for y in (first + first.rem_euclid(2)..=y0.max(y1)).step_by(2) {
+            dot(x0, y);
+        }
+    } else {
+        let first = x0.min(x1);
+        for x in (first + first.rem_euclid(2)..=x0.max(x1)).step_by(2) {
+            dot(x, y0);
+        }
+    }
+}
+
+/// The plus and minus box of the classic Windows tree view, on whole pixels.
+fn expander(ui: &mut Ui, openness: f32, response: &Response) {
+    let ppp = ui.pixels_per_point();
+    let snap = |v: f32| (v * ppp).floor() / ppp;
+    let center = response.rect.center();
+    // Centred on the connector line of the row.
+    let min = pos2(
+        snap(center.x) - 4.0,
+        snap(center.y - 8.0 + LINE_OFFSET) - 4.0,
+    );
+    let mut mesh = Mesh::default();
+    let mut fill = |x: f32, y: f32, w: f32, h: f32, color: Color32| {
+        let rect = Rect::from_min_size(min + vec2(x, y), vec2(w, h));
+        mesh.add_colored_rect(rect, color);
+    };
+    fill(0.0, 0.0, 9.0, 9.0, Color32::from_rgb(145, 145, 145));
+    fill(1.0, 1.0, 7.0, 7.0, Color32::WHITE);
+    fill(2.0, 4.0, 5.0, 1.0, Color32::BLACK);
+    if openness < 0.5 {
+        fill(4.0, 2.0, 1.0, 5.0, Color32::BLACK);
+    }
+    ui.painter().add(Shape::mesh(mesh));
+}
+
+/// Icon of a part after its element types, as PrePoMax tells solid, shell and beam parts apart.
+fn part_icon(part: &PartInfo) -> TreeIcon {
+    if !part.visible {
+        return TreeIcon::Hidden;
+    }
+    let is = |prefixes: &[&str]| {
+        (part.element_types.iter())
+            .any(|(name, _)| prefixes.iter().any(|p| name.to_uppercase().starts_with(p)))
+    };
+    if is(&["C3D", "F3D"]) {
+        TreeIcon::Solid
+    } else if is(&["S", "M3D", "CPS", "CPE", "CAX"]) {
+        TreeIcon::Shell
+    } else if is(&["B", "T"]) {
+        TreeIcon::Wire
+    } else {
+        TreeIcon::Solid
+    }
+}
+
+/// A row of a branch: the height of its connector line and the left edge of the row.
+#[derive(Clone, Copy)]
+struct Row {
+    y: f32,
+    left: f32,
+}
+
 struct Tree<'a> {
     view: TreeView,
     state: &'a mut TreeState,
     response: TreeResponse,
+    /// Status of the analysis job, shown as the icon of the analysis.
+    job: Option<JobStatus>,
+    /// Rows of the open branches, innermost last, for the connector lines.
+    levels: Vec<Vec<Row>>,
     /// Inside an item being expanded or collapsed: the state all branches take.
     forced_open: Option<bool>,
+    /// Items whose references are gone, with the reason, shown red with a warning sign.
+    invalid: HashMap<TreeItem, String>,
+    /// Containers holding invalid items, shown red so that they are found when collapsed.
+    holds_invalid: HashSet<TreeItem>,
 }
 
 impl Tree<'_> {
@@ -185,7 +324,13 @@ impl Tree<'_> {
 
     /// Selectable label of an item: a click selects it, a double click opens its properties.
     fn label(&mut self, ui: &mut Ui, item: TreeItem, text: impl Into<WidgetText>) -> Response {
-        let response = row_label(ui, self.is_selected(&item), text);
+        let reason = self.invalid.get(&item).cloned();
+        let red = reason.is_some() || self.holds_invalid.contains(&item);
+        let mut response = row_label(ui, self.is_selected(&item), red.then_some(INVALID), text);
+        if let Some(reason) = reason {
+            warning_sign(ui).on_hover_text(&reason);
+            response = response.on_hover_text(reason);
+        }
         if response.clicked() || response.double_clicked() {
             self.state.selected = Some((self.view, item.clone()));
         }
@@ -244,13 +389,103 @@ impl Tree<'_> {
         response
     }
 
-    /// Node without children, aligned with the labels of sibling branches.
-    fn leaf(&mut self, ui: &mut Ui, item: TreeItem, text: impl Into<WidgetText>) -> Response {
+    /// PrePoMax's image of a node; containers without an own image get the dotted line.
+    fn icon(&self, item: &TreeItem, open: bool) -> TreeIcon {
+        let dots = if open {
+            TreeIcon::DotsOpen
+        } else {
+            TreeIcon::Dots
+        };
+        match item {
+            TreeItem::Mesh => TreeIcon::Mesh,
+            TreeItem::Group("Parts") if self.view == TreeView::Geometry => TreeIcon::Geometry,
+            TreeItem::Group("Parts") => TreeIcon::Part,
+            TreeItem::Group("Mesh Setup") => TreeIcon::MeshSetup,
+            TreeItem::Group("Node Sets") => TreeIcon::NodeSet,
+            TreeItem::Group("Element Sets") => TreeIcon::ElementSet,
+            TreeItem::Group("Surfaces") => TreeIcon::Surface,
+            TreeItem::Group("Features") => TreeIcon::Features,
+            TreeItem::Group("Reference Points") => TreeIcon::ReferencePoint,
+            TreeItem::Group("Coordinate Systems") => TreeIcon::CoordinateSystem,
+            TreeItem::Group("Materials") => TreeIcon::Material,
+            TreeItem::Group("Sections") => TreeIcon::Section,
+            TreeItem::Group("Constraints") => TreeIcon::Constraints,
+            TreeItem::Group("Contacts") => TreeIcon::Contacts,
+            TreeItem::Group("Surface Interactions") => TreeIcon::SurfaceInteraction,
+            TreeItem::Group("Contact Pairs") => TreeIcon::ContactPair,
+            TreeItem::Group("Distributions") => TreeIcon::Distribution,
+            TreeItem::Group("Amplitudes") => TreeIcon::Amplitude,
+            TreeItem::Group("Initial Conditions") => TreeIcon::InitialConditions,
+            TreeItem::Group("Steps") => TreeIcon::Steps,
+            TreeItem::Step(_) => TreeIcon::Step,
+            TreeItem::StepGroup(_, "Field Outputs") | TreeItem::FieldOutputs => {
+                TreeIcon::FieldOutput
+            }
+            TreeItem::StepGroup(_, "History Outputs") | TreeItem::Group("History Outputs") => {
+                TreeIcon::HistoryOutput
+            }
+            TreeItem::StepGroup(_, "BCs") => TreeIcon::BoundaryCondition,
+            TreeItem::StepGroup(_, "Loads") => TreeIcon::Load,
+            TreeItem::StepGroup(_, "Defined Fields") => TreeIcon::DefinedField,
+            TreeItem::Group("Analyses") => TreeIcon::Analysis,
+            TreeItem::Analysis => match self.job {
+                Some(JobStatus::Running) => TreeIcon::Running,
+                Some(JobStatus::Completed) => TreeIcon::Finished,
+                Some(JobStatus::FailedWithResults) => TreeIcon::Warning,
+                _ => TreeIcon::NoResult,
+            },
+            _ => dots,
+        }
+    }
+
+    /// A row: plus and minus box (or its space), icon and label. `check` adds a check box in
+    /// front of the icon. Records the row for the connector lines of its branch.
+    fn row(
+        &mut self,
+        ui: &mut Ui,
+        state: Option<&mut CollapsingState>,
+        check: Option<&mut bool>,
+        icon: TreeIcon,
+        item: TreeItem,
+        text: impl Into<WidgetText>,
+    ) -> (Row, Response, bool) {
         ui.horizontal(|ui| {
-            ui.add_space(ui.spacing().icon_width + ui.spacing().icon_spacing);
-            self.label(ui, item, text)
+            let left = ui.cursor().left();
+            ui.spacing_mut().item_spacing.x = 0.0;
+            match state {
+                Some(state) => {
+                    state.show_toggle_button(ui, expander);
+                }
+                None => ui.add_space(ui.spacing().indent),
+            }
+            let changed = check.is_some_and(|checked| {
+                let changed = ui.checkbox(checked, "").changed();
+                ui.add_space(2.0);
+                changed
+            });
+            let (rect, _) =
+                ui.allocate_exact_size(Vec2::splat(tree_icons::SIZE), egui::Sense::hover());
+            if ui.is_rect_visible(rect) {
+                tree_icons::paint(ui.painter(), rect.min, icon);
+            }
+            ui.add_space(3.0);
+            let response = self.label(ui, item, text);
+            let row = Row {
+                y: rect.top() + LINE_OFFSET,
+                left,
+            };
+            if let Some(level) = self.levels.last_mut() {
+                level.push(row);
+            }
+            (row, response, changed)
         })
         .inner
+    }
+
+    /// Node without children, aligned with the labels of sibling branches.
+    fn leaf(&mut self, ui: &mut Ui, item: TreeItem, text: impl Into<WidgetText>) -> Response {
+        let icon = self.icon(&item, false);
+        self.row(ui, None, None, icon, item, text).1
     }
 
     fn branch(
@@ -276,15 +511,45 @@ impl Tree<'_> {
             state.set_open(open);
         }
         let toggles = creates(&item).is_none() && !has_properties(&item);
-        let (_, header, _) = state
-            .show_header(ui, |ui| self.label(ui, item, text))
-            .body(|ui| body(self, ui));
+        let icon = self.icon(&item, state.is_open());
+        let (row, header, _) = self.row(ui, Some(&mut state), None, icon, item, text);
+        // Lines go below the rows of the body, so that the boxes of sub-branches cover them.
+        let lines = ui.painter().add(Shape::Noop);
+        self.levels.push(Vec::new());
+        let body = state.show_body_indented(&header, ui, |ui| body(self, ui));
+        let rows = self.levels.pop().unwrap_or_default();
+        if let Some(body) = body {
+            let x = row.left + ui.spacing().indent / 2.0;
+            let shapes = self.connectors(ui, x, row.y + 5.0, &rows, body.response.rect.bottom());
+            ui.painter().set(lines, shapes);
+        }
         self.forced_open = outer;
-        if toggles && header.inner.double_clicked() {
+        if toggles && header.double_clicked() {
             let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, default_open);
             state.toggle(ui);
             state.store(ui.ctx());
         }
+    }
+
+    /// Dotted lines from a vertical at `x`, starting at `top`, to the icons of `rows`; rows
+    /// below `bottom` are hidden by the opening animation.
+    fn connectors(&self, ui: &Ui, x: f32, top: f32, rows: &[Row], bottom: f32) -> Shape {
+        let ppp = ui.pixels_per_point();
+        let indent = ui.spacing().indent;
+        let mut mesh = Mesh::default();
+        let rows: Vec<Row> = rows.iter().copied().filter(|r| r.y <= bottom).collect();
+        if let Some(last) = rows.last() {
+            dotted(&mut mesh, ppp, pos2(x, top), pos2(x, last.y));
+        }
+        for row in rows {
+            dotted(
+                &mut mesh,
+                ppp,
+                pos2(x, row.y),
+                pos2(row.left + indent - 1.0, row.y),
+            );
+        }
+        Shape::mesh(mesh)
     }
 
     /// Group node that may be empty: a placeholder leaf without children.
@@ -314,24 +579,13 @@ impl Tree<'_> {
             let parts = counted("Parts", model.parts.len());
             tree.branch(ui, TreeItem::Group("Parts"), parts, true, |tree, ui| {
                 for (index, part) in model.parts.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.add_space(ui.spacing().icon_width + ui.spacing().icon_spacing);
-                        if ui.checkbox(&mut part.visible, "").changed() {
-                            tree.response.visibility.push((index, part.visible));
-                        }
-                        let (swatch, _) =
-                            ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                        let [r, g, b] = part.color.map(|c| (c * 255.0).round() as u8);
-                        ui.painter()
-                            .rect_filled(swatch, 0.0, egui::Color32::from_rgb(r, g, b));
-                        ui.painter().rect_stroke(
-                            swatch,
-                            0.0,
-                            egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
-                            egui::StrokeKind::Inside,
-                        );
-                        tree.label(ui, TreeItem::Part(index), &part.name);
-                    });
+                    let icon = part_icon(part);
+                    let item = TreeItem::Part(index);
+                    let (_, _, changed) =
+                        tree.row(ui, None, Some(&mut part.visible), icon, item, &part.name);
+                    if changed {
+                        tree.response.visibility.push((index, part.visible));
+                    }
                 }
             });
             let mesh = &model.mesh;
@@ -422,24 +676,41 @@ pub fn show(
     ui: &mut Ui,
     view: TreeView,
     model: Option<&mut Model>,
+    job: Option<JobStatus>,
     state: &mut TreeState,
 ) -> TreeResponse {
     let mut tree = Tree {
         view,
         state,
         response: TreeResponse::default(),
+        job,
+        levels: vec![Vec::new()],
         forced_open: None,
+        invalid: HashMap::new(),
+        holds_invalid: HashSet::new(),
     };
     let expanding = tree.state.expand.clone();
     egui::ScrollArea::both()
         .auto_shrink([false, false])
-        .show(ui, |ui| match view {
-            TreeView::Geometry => {
-                tree.leaf(ui, TreeItem::Group("Parts"), "Parts");
-                tree.leaf(ui, TreeItem::Group("Mesh Setup"), "Mesh Setup");
+        .show(ui, |ui| {
+            // The dotted connectors replace egui's indent line.
+            ui.visuals_mut().indent_has_left_vline = false;
+            // The root nodes are connected too, as with PrePoMax's root lines.
+            let lines = ui.painter().add(Shape::Noop);
+            match view {
+                TreeView::Geometry => {
+                    tree.leaf(ui, TreeItem::Group("Parts"), "Parts");
+                    tree.leaf(ui, TreeItem::Group("Mesh Setup"), "Mesh Setup");
+                }
+                TreeView::FeModel => fe_model(&mut tree, ui, model),
+                TreeView::Results => results(&mut tree, ui, model),
             }
-            TreeView::FeModel => fe_model(&mut tree, ui, model),
-            TreeView::Results => results(&mut tree, ui, model),
+            let roots = tree.levels.pop().unwrap_or_default();
+            if let Some(first) = roots.first() {
+                let x = first.left + ui.spacing().indent / 2.0;
+                let shapes = tree.connectors(ui, x, first.y, &roots, f32::INFINITY);
+                ui.painter().set(lines, shapes);
+            }
         });
     // Applied for one frame; a request made in this frame's context menu waits for the next.
     if tree.state.expand == expanding {
@@ -451,6 +722,13 @@ pub fn show(
 fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
     // A results file has no FE model, as in PrePoMax; its mesh lives in the Results tree.
     let model = model.filter(|m| !m.is_results());
+    if let Some(model) = &model {
+        for invalid in model.fe.invalid_items(&model.mesh) {
+            let (item, containers) = tree_items(invalid.item);
+            tree.invalid.insert(item, invalid.reason);
+            tree.holds_invalid.extend(containers);
+        }
+    }
     let fe = model.as_ref().map(|m| m.fe.clone()).unwrap_or_default();
     let has_model = model.is_some();
     tree.branch(ui, TreeItem::Model, "Model", true, |tree, ui| {
@@ -465,16 +743,12 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
             .collect();
         tree.container(ui, "Sections", sections);
         tree.leaf(ui, TreeItem::Group("Constraints"), "Constraints");
-        let id = ui.make_persistent_id((tree.view, "Contacts"));
-        CollapsingState::load_with_default_open(ui.ctx(), id, false)
-            .show_header(ui, |ui| {
-                tree.label(ui, TreeItem::Group("Contacts"), "Contacts")
-            })
-            .body(|ui| {
-                for name in ["Surface Interactions", "Contact Pairs"] {
-                    tree.leaf(ui, TreeItem::Group(name), name);
-                }
-            });
+        let contacts = TreeItem::Group("Contacts");
+        tree.branch(ui, contacts, "Contacts", false, |tree, ui| {
+            for name in ["Surface Interactions", "Contact Pairs"] {
+                tree.leaf(ui, TreeItem::Group(name), name);
+            }
+        });
         for name in ["Distributions", "Amplitudes", "Initial Conditions"] {
             tree.leaf(ui, TreeItem::Group(name), name);
         }

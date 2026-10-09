@@ -4,6 +4,7 @@ mod analysis;
 mod animation;
 mod app;
 mod field_output_dialog;
+mod gizmo;
 mod history_output_dialog;
 mod history_table;
 mod icons;
@@ -15,12 +16,14 @@ mod overlay;
 mod properties;
 mod results;
 mod screenshot;
+mod section;
 mod selection;
 mod settings;
 mod setup;
 mod solver_check;
 mod style;
 mod tree;
+mod tree_icons;
 mod viewport;
 
 fn main() -> eframe::Result {
@@ -57,6 +60,12 @@ mod tests {
                 "field_output_dialog.rs",
                 include_str!("field_output_dialog.rs"),
             ),
+            ("gizmo.rs", include_str!("gizmo.rs")),
+            (
+                "history_output_dialog.rs",
+                include_str!("history_output_dialog.rs"),
+            ),
+            ("history_table.rs", include_str!("history_table.rs")),
             ("icons.rs", include_str!("icons.rs")),
             ("keywords.rs", include_str!("keywords.rs")),
             ("material_library.rs", include_str!("material_library.rs")),
@@ -71,6 +80,7 @@ mod tests {
             ("solver_check.rs", include_str!("solver_check.rs")),
             ("style.rs", include_str!("style.rs")),
             ("tree.rs", include_str!("tree.rs")),
+            ("tree_icons.rs", include_str!("tree_icons.rs")),
             ("viewport.rs", include_str!("viewport.rs")),
         ];
         for (file, text) in sources {

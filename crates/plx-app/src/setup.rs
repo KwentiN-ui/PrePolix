@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 use egui::Ui;
 use plx_mesh::{ElementId, FeMesh, NodeId};
 use plx_model::{
-    BoundaryCondition, BoundaryKind, Elastic, FeModel, FieldOutput, Incrementation, Load, LoadKind,
-    Material, OutputKind, Region, Section, Step, StepKind, next_name,
+    BoundaryCondition, BoundaryKind, Elastic, EquationSolver, FeModel, FieldOutput, Incrementation,
+    Load, LoadKind, Material, OutputKind, Region, Section, Step, StepKind, next_name,
 };
 
 use crate::model::{Highlight, Hit, Model};
@@ -972,6 +972,15 @@ fn step_form(ui: &mut Ui, step: &mut Step) {
     ui.label("");
     ui.checkbox(&mut settings.nlgeom, "Geometrisch nichtlinear (Nlgeom)");
     ui.end_row();
+    ui.label("Gleichungslöser");
+    egui::ComboBox::from_id_salt("equation solver")
+        .selected_text(solver_label(settings.solver))
+        .show_ui(ui, |ui| {
+            for choice in EquationSolver::ALL {
+                ui.selectable_value(&mut settings.solver, choice, solver_label(choice));
+            }
+        });
+    ui.end_row();
     ui.label("Inkrementierung");
     egui::ComboBox::from_id_salt("incrementation")
         .selected_text(incrementation_label(settings.incrementation))
@@ -1003,6 +1012,17 @@ fn step_form(ui: &mut Ui, step: &mut Step) {
         ui.label(label);
         ui.add_enabled(enabled, number(value));
         ui.end_row();
+    }
+}
+
+fn solver_label(solver: EquationSolver) -> &'static str {
+    match solver {
+        EquationSolver::Default => "Standard (Pardiso, falls vorhanden)",
+        EquationSolver::Pardiso => "Pardiso",
+        EquationSolver::Spooles => "Spooles",
+        EquationSolver::PaStiX => "PaStiX",
+        EquationSolver::IterativeScaling => "Iterative scaling",
+        EquationSolver::IterativeCholesky => "Iterative Cholesky",
     }
 }
 
