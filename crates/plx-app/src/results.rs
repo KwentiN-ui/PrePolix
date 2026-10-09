@@ -1,6 +1,7 @@
 use plx_render::contour::DEFAULT_LEVELS;
 
 use crate::animation::{Animation, AnimationKind, ColorLimits};
+use crate::sound::ModeSound;
 use plx_mesh::FeMesh;
 use plx_results::field_output::{self, FieldOutput};
 use plx_results::history_output::{self, HistoryOutput, HistorySet};
@@ -55,6 +56,8 @@ pub struct ResultsView {
     pub time: Option<String>,
     /// Running animation, if the animation window is open.
     pub animation: Option<Animation>,
+    /// Settings of the sound window, if it is open.
+    pub sound: Option<ModeSound>,
     /// Field outputs the user derived from the results, in the order they are computed.
     pub field_outputs: Vec<FieldOutput>,
     /// History outputs the user derived, in the order they are computed.
@@ -88,6 +91,7 @@ impl ResultsView {
             date: None,
             time: None,
             animation: None,
+            sound: None,
             field_outputs: Vec::new(),
             history_outputs: Vec::new(),
             history: Vec::new(),

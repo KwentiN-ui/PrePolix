@@ -21,6 +21,7 @@ use crate::section::{SectionDialog, SectionResult, SectionView};
 use crate::selection::Operation;
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::setup::{Editor, EditorResult, NewItem};
+use crate::sound::{self, ModeSound};
 use crate::tree::{self, TreeItem, TreeResponse, TreeState, TreeView};
 use crate::viewport::{Axis, BoxSelect, Click, ViewCommand, Viewport};
 use plx_render::RenderMesh;
@@ -78,6 +79,8 @@ struct Workbench {
     /// Results file the user asked to open; read by the app on a worker thread.
     open_results: Option<PathBuf>,
     screenshot: Screenshot,
+    /// Audio output of the sound window, opened when it first plays.
+    audio: Option<sound::Player>,
     /// The section view, while it is on; it cuts whatever the 3D view shows.
     section: Option<SectionView>,
     section_dialog: Option<SectionDialog>,
@@ -139,6 +142,7 @@ impl PrepolixApp {
                 analysis: None,
                 open_results: None,
                 screenshot: Screenshot::default(),
+                audio: None,
                 section: None,
                 section_dialog: None,
                 section_shown: None,
@@ -444,6 +448,7 @@ impl eframe::App for PrepolixApp {
             self.workbench.results_tool_bar(ui);
         });
         self.workbench.animate(&ctx);
+        self.workbench.play_sound(&ctx);
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         // PrePoMax's fixed layout: tree on the left over the full height, 3D view with the
         // output below it; only the separators move.
@@ -1810,6 +1815,77 @@ impl Workbench {
         }
     }
 
+    /// Shows the sound window of the shown results and drives its audio output.
+    fn play_sound(&mut self, ctx: &egui::Context) {
+        let model = match self.tree_view {
+            TreeView::Results => self.results.get_mut(self.current_result),
+            _ => self.model.as_mut(),
+        };
+        let Some(view) = model.and_then(|m| m.results.as_mut()) else {
+            self.audio = None;
+            return;
+        };
+        let shown = view.increment;
+        let Some(sound) = &mut view.sound else {
+            // Closing the window releases the audio device.
+            self.audio = None;
+            return;
+        };
+        let playing = self.audio.as_ref().is_some_and(|a| a.synth().sounding());
+        let actions = sound::window(ctx, sound, shown, playing);
+        if actions.play {
+            if self.audio.is_none() {
+                match sound::Player::open() {
+                    Ok(player) => self.audio = Some(player),
+                    Err(error) => sound.message = Some(error),
+                }
+            }
+            if let Some(audio) = &self.audio {
+                audio.synth().start(sound.tones());
+                sound.message = None;
+            }
+        }
+        if let Some(audio) = &self.audio {
+            if actions.stop {
+                audio.synth().stop();
+            } else if actions.changed && playing {
+                audio.synth().update(sound.tones());
+            }
+        }
+        if actions.export {
+            let picked = rfd::FileDialog::new()
+                .set_title("Klang speichern")
+                .add_filter("WAV-Datei (*.wav)", &["wav"])
+                .set_file_name(format!("Moden-Step-{}.wav", sound.step))
+                .save_file();
+            if let Some(mut path) = picked {
+                if path.extension().is_none() {
+                    path.set_extension("wav");
+                }
+                let data = sound::wav(sound.tones(), sound.export_seconds());
+                match std::fs::write(&path, data) {
+                    Ok(()) => self.output.push(format!("{} gespeichert", path.display())),
+                    Err(error) => sound.message = Some(format!("Nicht gespeichert: {error}")),
+                }
+            }
+        }
+        if playing || actions.play {
+            // The play button turns back when a struck sound has died away.
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if let Some(increment) = actions.show
+            && view.animation.is_none()
+            && increment != view.increment
+        {
+            view.select_increment(increment);
+            self.results_changed = true;
+        }
+        if actions.close {
+            view.sound = None;
+            self.audio = None;
+        }
+    }
+
     /// Rebuilds the scene after the result selection or deformation changed.
     fn rebuild_if_results_changed(&mut self) {
         let frame_only = !self.results_changed && self.frame_changed;
@@ -1985,6 +2061,18 @@ fn results_tool_bar(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
                 view.start_animation(AnimationKind::ScaleFactor);
             }
             changed = true;
+        }
+        // Only modes of a frequency step have a sound; otherwise the button is greyed out.
+        let sounding = view.sound.is_some();
+        let is_mode = view
+            .current_increment()
+            .is_some_and(|i| i.kind == plx_results::AnalysisKind::Frequency);
+        let tip = "Klang der Eigenformen";
+        if icons::button(ui, Icon::Sound, tip, sounding || is_mode, sounding).clicked() {
+            view.sound = match view.sound {
+                Some(_) => None,
+                None => ModeSound::new(&view.increments, view.increment),
+            };
         }
     });
     changed
