@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use plx_job::{Job, JobStatus};
+use plx_model::EquationSolver;
 
 use crate::model::Model;
 use crate::settings::Solver;
@@ -27,8 +28,13 @@ pub enum MonitorEvent {
 }
 
 impl Analysis {
-    /// Writes `Analysis-1.inp` into the work directory and starts CalculiX on it.
-    pub fn start(solver: &Solver, model: &Model) -> Result<Self, String> {
+    /// Writes `Analysis-1.inp` into the work directory and starts CalculiX on it; steps left
+    /// at the default solver use `default_solver`, see [`Solver::default_solver`].
+    pub fn start(
+        solver: &Solver,
+        model: &Model,
+        default_solver: EquationSolver,
+    ) -> Result<Self, String> {
         if model.fe.steps.is_empty() {
             return Err(
                 "Analyse nicht gestartet: Das Modell hat keinen Step (Modell > Step erstellen)."
@@ -36,7 +42,9 @@ impl Analysis {
             );
         }
         let heading = format!("prepolix: {}", model.file_name());
-        let input = plx_io::inp::write_inp(&model.mesh, &model.fe, &heading)
+        let mut fe = model.fe.clone();
+        fe.resolve_default_solver(default_solver);
+        let input = plx_io::inp::write_inp(&model.mesh, &fe, &heading)
             .map_err(|e| format!("Eingabedatei nicht geschrieben: {e}"))?;
         let work_dir = solver.work_dir();
         let job_solver = solver.job_solver();
