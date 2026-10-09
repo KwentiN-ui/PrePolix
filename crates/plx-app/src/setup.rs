@@ -10,11 +10,11 @@ use egui::Ui;
 use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
     Amplitude, BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, BoundaryKind,
-    Constraint, ContactPair, Elastic, EquationSolver, FeModel, FieldOutput, FrequencyStep,
-    HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
-    InitialConditionKind, Load, LoadKind, Material, ModelSpace, NodeTie, OutputKind, Quantity,
-    Region, Section, SectionKind, StaticStep, Step, StepKind, SurfaceInteraction, UnitSystem,
-    next_name,
+    Constraint, ContactPair, DefinedField, DefinedFieldKind, Elastic, EquationSolver, FeModel,
+    FieldOutput, FrequencyStep, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
+    InitialCondition, InitialConditionKind, Load, LoadKind, Material, ModelSpace, NodeTie,
+    OutputKind, Quantity, Region, Section, SectionKind, StaticStep, Step, StepKind,
+    SurfaceInteraction, UnitSystem, next_name,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row};
@@ -37,6 +37,8 @@ pub enum NewItem {
     Load(usize),
     /// A history output of a step, printed into the `.dat` file.
     HistoryOutput(usize),
+    /// A defined temperature of a step.
+    DefinedField(usize),
     /// A spring, support or tie, chosen in the dialog.
     Constraint,
     SurfaceInteraction,
@@ -604,6 +606,8 @@ enum Draft {
     FieldOutput(usize, FieldOutput),
     /// The region draft is unused by contact history outputs.
     HistoryOutput(usize, HistoryOutput, RegionDraft),
+    /// The region draft is unused by temperatures read from a file.
+    DefinedField(usize, DefinedField, RegionDraft),
     Constraint(ConstraintDraft),
     SurfaceInteraction(SurfaceInteraction, contacts::InteractionView),
     ContactPair(ContactPair, MasterSlave),
@@ -622,6 +626,7 @@ fn draft_region(draft: &Draft) -> Option<&RegionDraft> {
         Draft::ContactPair(_, regions) => Some(regions.current()),
         Draft::Constraint(c) => Some(c.region()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
+        Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
         _ => None,
     }
 }
@@ -636,6 +641,7 @@ fn draft_region_mut(draft: &mut Draft) -> Option<&mut RegionDraft> {
         Draft::ContactPair(_, regions) => Some(regions.current_mut()),
         Draft::Constraint(c) => Some(c.region_mut()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
+        Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
         _ => None,
     }
 }
@@ -663,6 +669,7 @@ fn names<'a, T: 'a>(items: &'a [T], name: impl Fn(&T) -> &str + 'a) -> Vec<&'a s
 const FIXED: &str = "Fixed";
 const DISPLACEMENT: &str = "Displacement_Rotation";
 const TEMPERATURE: &str = "Temperature";
+const DEFINED_TEMPERATURE: &str = "Defined_Temperature";
 const FORCE: &str = "Concentrated_Force";
 const PRESSURE: &str = "Pressure";
 const TRACTION: &str = "Surface_Traction";
@@ -815,6 +822,22 @@ impl Editor {
                     RegionDraft::new(NODE_PART_SOURCES, Target::Nodes),
                 )
             }
+            NewItem::DefinedField(step) => {
+                // A thermal step solves for the temperatures and takes no defined field.
+                let target = (fe.steps.get(step)).filter(|s| s.kind.supports_defined_fields())?;
+                let existing = names(&target.defined_fields, |f| &f.name);
+                Draft::DefinedField(
+                    step,
+                    DefinedField {
+                        name: next_name(DEFINED_TEMPERATURE, existing),
+                        active: true,
+                        region: Region::Nodes(Vec::new()),
+                        kind: DefinedFieldKind::Temperature(20.0),
+                        amplitude: None,
+                    },
+                    RegionDraft::new(NODE_PART_SOURCES, Target::Nodes),
+                )
+            }
             NewItem::Step => {
                 let mut step = Step::new_static(next_name("Step", names(&fe.steps, |s| &s.name)));
                 step.kind = StepKind::Static(previous_static(fe));
@@ -955,6 +978,12 @@ impl Editor {
                 let region = history_region(&output.kind, fe, mesh);
                 (Draft::HistoryOutput(s, output, region), i)
             }
+            TreeItem::DefinedField(s, i) => {
+                let field = fe.steps.get(s)?.defined_fields.get(i)?.clone();
+                let region =
+                    RegionDraft::from_region(&field.region, NODE_PART_SOURCES, Target::Nodes, mesh);
+                (Draft::DefinedField(s, field, region), i)
+            }
             TreeItem::Constraint(i) => (
                 Draft::Constraint(ConstraintDraft::edit(
                     fe.constraints.get(i)?,
@@ -1004,6 +1033,7 @@ impl Editor {
             Draft::InitialCondition(c, _) => ("Anfangsbedingung", &c.name),
             Draft::FieldOutput(_, f) => ("Field Output", &f.name),
             Draft::HistoryOutput(_, h, _) => ("History Output", &h.name),
+            Draft::DefinedField(_, f, _) => ("Defined Field", &f.name),
             Draft::Constraint(c) => ("Constraint", c.name()),
             Draft::SurfaceInteraction(s, _) => ("Surface Interaction", &s.name),
             Draft::ContactPair(c, _) => ("Contact Pair", &c.name),
@@ -1393,6 +1423,80 @@ impl Editor {
                 ui.weak("Temperatur vor dem ersten Step, z. B. für Wärmedehnung.");
                 ui.end_row();
             }
+            Draft::DefinedField(_, field, region) => {
+                name_row(ui, &mut field.name);
+                ui.label("Type");
+                ui.label("Temperature");
+                ui.end_row();
+                ui.label("Source");
+                let by_value = field.kind.takes_region();
+                ui.horizontal(|ui| {
+                    if ui.radio(by_value, "By value").clicked() && !by_value {
+                        field.kind = DefinedFieldKind::Temperature(20.0);
+                    }
+                    if ui.radio(!by_value, "From result file").clicked() && by_value {
+                        field.kind = DefinedFieldKind::TemperatureFromFile {
+                            file: Default::default(),
+                            step: 1,
+                        };
+                    }
+                });
+                ui.end_row();
+                match &mut field.kind {
+                    DefinedFieldKind::Temperature(t) => {
+                        ui.label("Temperature");
+                        ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0));
+                        ui.end_row();
+                        amplitude_row(
+                            ui,
+                            "Amplitude",
+                            "defined field amplitude",
+                            &mut field.amplitude,
+                            &model.fe,
+                        );
+                        region.ui(ui, model);
+                    }
+                    DefinedFieldKind::TemperatureFromFile { file, step } => {
+                        ui.label("Result file");
+                        ui.horizontal(|ui| {
+                            let name = file.file_name().map_or_else(
+                                || "(none)".to_string(),
+                                |n| n.to_string_lossy().into_owned(),
+                            );
+                            ui.label(name).on_hover_text(file.display().to_string());
+                            if ui.button("...").clicked() {
+                                let mut dialog = rfd::FileDialog::new()
+                                    .set_title("Result file of the heat transfer analysis")
+                                    .add_filter("CalculiX results (*.frd)", &["frd"]);
+                                if let Some(dir) = file.parent().filter(|d| d.is_dir()) {
+                                    dialog = dialog.set_directory(dir);
+                                }
+                                if let Some(picked) = dialog.pick_file() {
+                                    *file = picked;
+                                }
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Step");
+                        ui.add(numeric::drag_value(step).range(1..=9999).speed(0.1));
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak("Temperatures of all nodes from the .frd file of a heat");
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak("transfer analysis on the same mesh (step counted from 1).");
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak(
+                            "The file is copied next to the input file when the analysis starts.",
+                        );
+                        ui.end_row();
+                    }
+                }
+                ui.label("");
+                ui.weak("Needs an initial temperature and a thermal expansion of the material.");
+                ui.end_row();
+            }
             Draft::NodeTie(tie, region) => {
                 name_row(ui, &mut tie.name);
                 region.ui(ui, model);
@@ -1464,6 +1568,7 @@ impl Editor {
             Draft::InitialCondition(..) => names(&fe.initial_conditions, |i| &i.name),
             Draft::FieldOutput(step, _) => names(&fe.steps[*step].field_outputs, |f| &f.name),
             Draft::HistoryOutput(step, ..) => names(&fe.steps[*step].history_outputs, |h| &h.name),
+            Draft::DefinedField(step, ..) => names(&fe.steps[*step].defined_fields, |f| &f.name),
             Draft::Constraint(_) => fe.constraints.iter().map(Constraint::name).collect(),
             Draft::SurfaceInteraction(..) => names(&fe.surface_interactions, |s| &s.name),
             Draft::ContactPair(..) => names(&fe.contact_pairs, |c| &c.name),
@@ -1486,6 +1591,7 @@ impl Editor {
             Draft::InitialCondition(c, _) => &c.name,
             Draft::FieldOutput(_, f) => &f.name,
             Draft::HistoryOutput(_, h, _) => &h.name,
+            Draft::DefinedField(_, f, _) => &f.name,
             Draft::Constraint(c) => c.name(),
             Draft::SurfaceInteraction(s, _) => &s.name,
             Draft::ContactPair(c, _) => &c.name,
@@ -1501,6 +1607,16 @@ impl Editor {
             .any(|other| other.eq_ignore_ascii_case(name));
         if duplicate {
             return Err(format!("Der Name {name} ist schon vergeben."));
+        }
+        if let Draft::DefinedField(_, field, _) = &self.draft
+            && let DefinedFieldKind::TemperatureFromFile { file, step } = &field.kind
+        {
+            if file.as_os_str().is_empty() {
+                return Err("Choose the result file (.frd) of a heat transfer analysis.".into());
+            }
+            if *step == 0 {
+                return Err("The step to read counts from 1.".into());
+            }
         }
         if let Draft::Section(section, _) = &self.draft {
             if !fe.materials.iter().any(|m| m.name == section.material) {
@@ -1644,6 +1760,21 @@ impl Editor {
                 put(&mut fe.initial_conditions, index, condition);
             }
             Draft::FieldOutput(s, output) => put(&mut fe.steps[s].field_outputs, index, output),
+            Draft::DefinedField(s, mut field, region) => {
+                if field.kind.takes_region() {
+                    field.region = region.region();
+                } else {
+                    field.region = Region::Nodes(Vec::new());
+                }
+                if !field.kind.takes_amplitude() {
+                    field.amplitude = None;
+                }
+                let list = &mut fe.steps[s].defined_fields;
+                if let Some(existing) = index.and_then(|i| list.get(i)) {
+                    field.active = existing.active;
+                }
+                put(list, index, field);
+            }
             Draft::NodeTie(mut tie, region) => {
                 tie.region = region.region();
                 if let Some(existing) = index.and_then(|i| fe.node_ties.get(i)) {
@@ -1726,6 +1857,10 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
             .steps
             .get_mut(s)
             .is_some_and(|st| remove(&mut st.history_outputs, i)),
+        TreeItem::DefinedField(s, i) => fe
+            .steps
+            .get_mut(s)
+            .is_some_and(|st| remove(&mut st.defined_fields, i)),
         TreeItem::InitialCondition(i) => remove(&mut fe.initial_conditions, i),
         TreeItem::Constraint(i) => remove(&mut fe.constraints, i),
         TreeItem::SurfaceInteraction(i) => remove(&mut fe.surface_interactions, i),
@@ -1750,6 +1885,9 @@ pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::HistoryOutput(s, i) => (fe.steps.get_mut(s))
             .and_then(|st| st.history_outputs.get_mut(i))
             .map(|h| &mut h.active),
+        TreeItem::DefinedField(s, i) => (fe.steps.get_mut(s))
+            .and_then(|st| st.defined_fields.get_mut(i))
+            .map(|f| &mut f.active),
         TreeItem::Constraint(i) => fe.constraints.get_mut(i).map(Constraint::active_mut),
         TreeItem::ContactPair(i) => fe.contact_pairs.get_mut(i).map(|c| &mut c.active),
         TreeItem::NodeTie(i) => fe.node_ties.get_mut(i).map(|t| &mut t.active),
@@ -1840,6 +1978,9 @@ pub fn item_region<'a>(fe: &'a FeModel, item: &TreeItem) -> Option<&'a Region> {
             .map(|b| &b.region),
         TreeItem::Load(s, i) => fe.steps.get(s)?.loads.get(i).map(|l| &l.region),
         TreeItem::HistoryOutput(s, i) => fe.steps.get(s)?.history_outputs.get(i)?.kind.region(),
+        TreeItem::DefinedField(s, i) => (fe.steps.get(s)?.defined_fields.get(i))
+            .filter(|f| f.kind.takes_region())
+            .map(|f| &f.region),
         TreeItem::InitialCondition(i) => fe.initial_conditions.get(i).map(|c| &c.region),
         TreeItem::Constraint(i) => fe.constraints.get(i)?.regions().first().copied(),
         TreeItem::NodeTie(i) => fe.node_ties.get(i).map(|t| &t.region),
@@ -2187,6 +2328,9 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
         .filter(|load| step.kind.supports_load(&load.kind))
         .cloned()
         .collect();
+    if step.kind.supports_defined_fields() {
+        step.defined_fields = last.defined_fields.clone();
+    }
 }
 
 /// The step kinds of the dialog: label, the kind with its settings and its default field

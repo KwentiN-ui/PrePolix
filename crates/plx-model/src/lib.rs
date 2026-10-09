@@ -46,6 +46,8 @@ pub use section::{
 pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, Quantity, UnitSystem};
 pub use validity::{Invalid, ModelItem};
 
+use std::path::{Path, PathBuf};
+
 use plx_mesh::{CadEntity, NodeId};
 use serde::{Deserialize, Serialize};
 
@@ -179,6 +181,7 @@ impl FeModel {
             .chain(self.steps.iter_mut().flat_map(|step| {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
+                    .chain(step.defined_fields.iter_mut().map(|f| &mut f.region))
                     .chain((step.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
             }))
     }
@@ -204,7 +207,8 @@ impl FeModel {
                 .chain(
                     (step.loads.iter_mut())
                         .flat_map(|l| [&mut l.amplitude, &mut l.factor_amplitude]),
-                );
+                )
+                .chain(step.defined_fields.iter_mut().map(|f| &mut f.amplitude));
             for reference in references {
                 if reference.as_deref() == Some(old) {
                     *reference = Some(new.to_string());
@@ -243,6 +247,7 @@ impl FeModel {
             .chain(self.steps.iter_mut().flat_map(|step| {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
+                    .chain(step.defined_fields.iter_mut().map(|f| &mut f.region))
                     .chain((step.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
             }));
         for region in regions {
@@ -325,6 +330,10 @@ pub struct Step {
     /// Values printed into the `.dat` file; steps saved before they existed have none.
     #[serde(default)]
     pub history_outputs: Vec<HistoryOutput>,
+    /// Temperatures prescribed for the step, PrePoMax's defined fields; steps saved before
+    /// they existed have none.
+    #[serde(default)]
+    pub defined_fields: Vec<DefinedField>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -354,6 +363,12 @@ impl StepKind {
     /// come from the previous step with [`FrequencyStep::perturbation`].
     pub fn supports_loads(&self) -> bool {
         !matches!(self, StepKind::Frequency(_))
+    }
+
+    /// Whether the step takes defined fields. A thermal step solves for the temperatures
+    /// instead of taking them, as in PrePoMax.
+    pub fn supports_defined_fields(&self) -> bool {
+        !self.is_thermal()
     }
 
     /// Whether the step solves for displacements.
@@ -547,6 +562,7 @@ impl Step {
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
             history_outputs: Vec::new(),
+            defined_fields: Vec::new(),
             field_outputs: FieldOutput::defaults(),
         }
     }
@@ -560,6 +576,7 @@ impl Step {
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
             history_outputs: Vec::new(),
+            defined_fields: Vec::new(),
             field_outputs: FieldOutput::frequency_defaults(),
         }
     }
@@ -573,6 +590,7 @@ impl Step {
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
             history_outputs: Vec::new(),
+            defined_fields: Vec::new(),
             field_outputs: FieldOutput::heat_transfer_defaults(),
         }
     }
@@ -586,6 +604,7 @@ impl Step {
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
             history_outputs: Vec::new(),
+            defined_fields: Vec::new(),
             field_outputs: FieldOutput::coupled_defaults(),
         }
     }
@@ -698,6 +717,65 @@ pub struct InitialCondition {
 pub enum InitialConditionKind {
     /// `*INITIAL CONDITIONS, TYPE=TEMPERATURE`
     Temperature(f64),
+}
+
+/// Temperatures prescribed in a step for the thermal strains of a mechanical analysis,
+/// PrePoMax's defined temperature (`*TEMPERATURE`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DefinedField {
+    pub name: String,
+    /// A deactivated field is left out of the input file.
+    #[serde(default = "active")]
+    pub active: bool,
+    /// The nodes that take the value; a field read from a file covers all nodes of the
+    /// file and ignores the region.
+    pub region: Region,
+    pub kind: DefinedFieldKind,
+    /// Amplitude a value follows over time; `None` is CalculiX's default ramp. A field
+    /// read from a file has none.
+    #[serde(default)]
+    pub amplitude: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum DefinedFieldKind {
+    /// One temperature on the nodes of the region.
+    Temperature(f64),
+    /// The temperatures of a step of a result file, as a heat transfer analysis on the
+    /// same mesh wrote it (`*TEMPERATURE, FILE=`); the step counts from 1. CalculiX reads
+    /// the file from the working directory of the analysis, so the file is copied there
+    /// when the analysis starts.
+    TemperatureFromFile { file: PathBuf, step: u32 },
+}
+
+impl DefinedFieldKind {
+    /// Whether the field takes its nodes from its region.
+    pub fn takes_region(&self) -> bool {
+        matches!(self, DefinedFieldKind::Temperature(_))
+    }
+
+    /// Whether the value can follow an amplitude.
+    pub fn takes_amplitude(&self) -> bool {
+        matches!(self, DefinedFieldKind::Temperature(_))
+    }
+}
+
+impl FeModel {
+    /// The result files the active defined fields of the active steps read, each once;
+    /// CalculiX needs them next to the input file.
+    pub fn result_files(&self) -> Vec<&Path> {
+        let mut files: Vec<&Path> = (self.steps.iter().filter(|s| s.active))
+            .filter(|s| s.kind.supports_defined_fields())
+            .flat_map(|s| s.defined_fields.iter().filter(|f| f.active))
+            .filter_map(|f| match &f.kind {
+                DefinedFieldKind::TemperatureFromFile { file, .. } => Some(file.as_path()),
+                DefinedFieldKind::Temperature(_) => None,
+            })
+            .collect();
+        files.sort_unstable();
+        files.dedup();
+        files
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

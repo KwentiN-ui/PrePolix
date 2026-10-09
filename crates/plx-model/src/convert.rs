@@ -92,6 +92,11 @@ impl FeModel {
                     c.option(&mut f.upper_frequency, Quantity::Frequency);
                 }
             }
+            for field in &mut step.defined_fields {
+                if let crate::DefinedFieldKind::Temperature(t) = &mut field.kind {
+                    c.value(t, Quantity::Temperature);
+                }
+            }
             for bc in &mut step.boundary_conditions {
                 match &mut bc.kind {
                     BoundaryKind::Fixed => {}

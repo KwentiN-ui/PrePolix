@@ -13,7 +13,8 @@ use std::collections::{HashMap, HashSet};
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId};
 
 use crate::{
-    BoundaryKind, Constraint, FeModel, LoadKind, ModelItem, ModelSpace, SectionKind, StepKind,
+    BoundaryKind, Constraint, DefinedFieldKind, FeModel, LoadKind, Material, ModelItem, ModelSpace,
+    SectionKind, StepKind,
 };
 
 /// Whether CalculiX aborts or the results are likely wrong.
@@ -46,6 +47,8 @@ pub enum Problem {
     RotationsIgnored,
     IncrementExceedsStep,
     NoLoad,
+    /// A defined temperature in a step whose materials have no thermal expansion.
+    NoExpansion,
     /// Found in the solver output only.
     NoConvergence,
     /// Found in the solver output only.
@@ -63,7 +66,8 @@ impl Problem {
             | Problem::ConflictingBoundaries
             | Problem::LoadOnFixedNodes
             | Problem::RotationsIgnored
-            | Problem::NoLoad => Severity::Warning,
+            | Problem::NoLoad
+            | Problem::NoExpansion => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -87,6 +91,7 @@ impl Problem {
             Problem::RotationsIgnored => "Rotationen ohne Wirkung",
             Problem::IncrementExceedsStep => "Inkrement größer als der Step",
             Problem::NoLoad => "Keine Last",
+            Problem::NoExpansion => "Temperatur ohne Wärmedehnung",
             Problem::NoConvergence => "Keine Konvergenz",
             Problem::MpcAndSpc => "Freiheitsgrad doppelt gebunden",
             Problem::RotationIn2d => "Rotation in einem 2D-Modell",
@@ -127,9 +132,10 @@ impl Problem {
                  Wärmekapazität. CalculiX bricht mit \"no specific heat was assigned\" ab."
             }
             Problem::NoInitialTemperature => {
-                "Eine instationäre Wärmeübertragung startet von einer Anfangstemperatur. \
-                 Ohne sie bricht CalculiX mit \"please define initial conditions for the \
-                 temperature\" ab."
+                "Eine instationäre Wärmeübertragung startet von einer Anfangstemperatur, \
+                 und eine vorgegebene Temperatur (Defined Field) dehnt das Modell gegenüber \
+                 ihr. Ohne sie bricht CalculiX mit \"please define initial conditions for \
+                 the temperature\" oder \"no thermal *INITIAL CONDITIONS are given\" ab."
             }
             Problem::InvalidElastic => {
                 "Der Elastizitätsmodul muss größer als 0 sein und die Querkontraktionszahl \
@@ -191,6 +197,11 @@ impl Problem {
                 "Der Step hat weder eine aktive Last noch eine vorgegebene Verschiebung. \
                  Die Rechnung läuft, alle Ergebnisse sind aber null."
             }
+            Problem::NoExpansion => {
+                "Die vorgegebene Temperatur (Defined Field) verformt das Modell nur über \
+                 die Wärmedehnung der Materialien. Ohne Wärmeausdehnungskoeffizient \
+                 rechnet CalculiX, die Temperatur bleibt aber ohne Wirkung."
+            }
             Problem::NoConvergence => {
                 "Die Newton-Iteration ist nicht konvergiert; CalculiX hat das Inkrement \
                  immer weiter verkleinert und aufgegeben (\"too many cutbacks\" oder \
@@ -240,8 +251,9 @@ impl Problem {
                  oder den Step stationär rechnen."
             }
             Problem::NoInitialTemperature => {
-                "Unter Initial Conditions eine Anfangstemperatur für das Modell erstellen, \
-                 oder den Step stationär rechnen."
+                "Unter Initial Conditions eine Anfangstemperatur für das Modell erstellen \
+                 (bei Wärmedehnung die Temperatur des spannungsfreien Zustands), oder den \
+                 Step stationär rechnen."
             }
             Problem::InvalidElastic => {
                 "Elastizitätsmodul größer als 0 und Querkontraktionszahl kleiner als 0,5 \
@@ -286,6 +298,10 @@ impl Problem {
                 "Im Step das Anfangsinkrement höchstens so groß wie die Step-Dauer wählen."
             }
             Problem::NoLoad => "Unter Loads eine Last erstellen oder eine deaktivierte aktivieren.",
+            Problem::NoExpansion => {
+                "Das Material bearbeiten und einen Wärmeausdehnungskoeffizienten eintragen \
+                 (Stahl: 1,2e-5 1/K)."
+            }
             Problem::NoConvergence => {
                 "Kontakte prüfen (Steifigkeit der Surface Interaction, Adjust, Lage der \
                  Flächen), Teile ausreichend lagern, die Last auf mehrere Inkremente \
@@ -459,6 +475,16 @@ impl FeModel {
                     format!("{} ist instationär", step.name),
                 ));
             }
+            // CalculiX refuses a *Temperature without an initial temperature.
+            let defined =
+                step.kind.supports_defined_fields() && step.defined_fields.iter().any(|f| f.active);
+            if defined && !initial_temperature {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::NoInitialTemperature,
+                    format!("{} gibt Temperaturen vor (Defined Field)", step.name),
+                ));
+            }
             if let StepKind::Static(settings) = &step.kind
                 && settings.incrementation != crate::Incrementation::Default
                 && settings.initial_increment > settings.time_period
@@ -630,8 +656,31 @@ impl FeModel {
             }
         }
         let user_keywords = self.user_keywords.iter().any(|k| k.active);
+        // A defined temperature strains the model like a load, if the materials expand.
+        let mut temperatures = false;
+        if step.kind.supports_defined_fields() {
+            for (i, field) in step.defined_fields.iter().enumerate() {
+                let missing = match &field.kind {
+                    DefinedFieldKind::Temperature(_) => field.region.missing_reference(mesh),
+                    DefinedFieldKind::TemperatureFromFile { .. } => None,
+                };
+                if !field.active || missing.is_some() {
+                    continue;
+                }
+                temperatures = true;
+                let used = |m: &&Material| self.sections.iter().any(|s| s.material == m.name);
+                let expands = (self.materials.iter().filter(used)).any(|m| m.expansion.is_some());
+                if !expands {
+                    findings.push(Finding::new(
+                        ModelItem::DefinedField(s, i),
+                        Problem::NoExpansion,
+                        format!("{}: kein Material mit Wärmedehnung", field.name),
+                    ));
+                }
+            }
+        }
         if step.kind.supports_loads() {
-            let mut loaded = false;
+            let mut loaded = temperatures;
             for (i, load) in step.loads.iter().enumerate() {
                 if !load.active
                     || !step.kind.supports_load(&load.kind)
@@ -1690,6 +1739,53 @@ mod tests {
         assert_eq!(
             problems(&check(&model, &mesh)),
             [(ModelItem::Step(0), Problem::NoLoad)]
+        );
+    }
+
+    #[test]
+    fn a_defined_temperature_is_a_load_and_needs_thermal_expansion() {
+        let mesh = cubes(1, false);
+        let mut model = model(&mesh);
+        let parts: Vec<String> = mesh.parts.iter().map(|p| p.name.clone()).collect();
+        model.steps[0].loads.clear();
+        model.initial_conditions.push(crate::InitialCondition {
+            name: "Initial_Temperature-1".into(),
+            active: true,
+            region: Region::Parts(parts.clone()),
+            kind: crate::InitialConditionKind::Temperature(20.0),
+        });
+        model.steps[0].defined_fields.push(crate::DefinedField {
+            name: "Defined_Temperature-1".into(),
+            active: true,
+            region: Region::Parts(parts),
+            kind: DefinedFieldKind::Temperature(100.0),
+            amplitude: None,
+        });
+        let findings = check(&model, &mesh);
+        assert_eq!(
+            problems(&findings),
+            [(ModelItem::DefinedField(0, 0), Problem::NoExpansion)]
+        );
+        assert_eq!(
+            findings[0].detail,
+            "Defined_Temperature-1: kein Material mit Wärmedehnung"
+        );
+        model.materials[0].expansion = Some(crate::Expansion::default());
+        assert_eq!(check(&model, &mesh), []);
+        model.initial_conditions[0].active = false;
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Step(0), Problem::NoInitialTemperature)]
+        );
+        model.initial_conditions[0].active = true;
+        // A thermal step solves for the temperatures and takes no defined field.
+        model.steps[0].kind = StepKind::CoupledTempDisp(Default::default());
+        model.materials[0].conductivity = Some(50.0);
+        model.steps[0].defined_fields[0].region = Region::Parts(vec!["Nowhere".into()]);
+        assert!(
+            check(&model, &mesh)
+                .iter()
+                .all(|f| f.problem != Problem::NoExpansion)
         );
     }
 

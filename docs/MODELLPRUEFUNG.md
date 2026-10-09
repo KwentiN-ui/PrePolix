@@ -25,7 +25,9 @@ fehlgeschlagenen Lauf aus der Ausgabe von CalculiX erkennt. Nachgestellt mit Cal
 | Randbedingung auf Tie-Slave-Knoten | `WARNING in gentiedmpc: DOF ... not active` | Tie dort aufgehoben, Lauf geht weiter | keine (meist harmlos) |
 | Keine Konvergenz | `too many cutbacks`, `increment size smaller than minimum` | Abbruch | Ausgabe wird erkannt |
 | Last nur auf festgehaltenen Knoten | keine | Last wirkungslos | Warnung |
-| Statischer Step ohne Last | keine | Ergebnis null | Warnung |
+| Statischer Step ohne Last | keine | Ergebnis null | Warnung; eine vorgegebene Temperatur (Defined Field) zählt als Last |
+| Vorgegebene Temperatur (Defined Field) ohne Anfangstemperatur | `a *TEMPERATURE card is detected but no thermal *INITIAL CONDITIONS are given` | Abbruch beim Einlesen | Initial Conditions in Steps mit Defined Fields |
+| Vorgegebene Temperatur ohne Wärmeausdehnung im Material | keine | Temperatur ohne Wirkung | Warnung |
 | Frequency Step ohne Lagerung | keine | sechs Starrkörpermoden nahe 0 Hz | keine (gewollt) |
 
 Quellen: CalculiX-Handbuch (ccx 2.21), [PrePoMax-Forum: Known CalculiX limitations](https://prepomax.discourse.group/t/known-calculix-limitations/3050),

@@ -19,6 +19,8 @@ pub enum ModelItem {
     Load(usize, usize),
     /// History output by step and index.
     HistoryOutput(usize, usize),
+    /// Defined field by step and index.
+    DefinedField(usize, usize),
     Material(usize),
     /// Part of the mesh by index.
     Part(usize),
@@ -139,6 +141,23 @@ impl FeModel {
                 if let Some(reason) = reason {
                     invalid.push(Invalid {
                         item: ModelItem::HistoryOutput(s, i),
+                        reason,
+                    });
+                }
+            }
+        }
+        for (s, step) in self.steps.iter().enumerate() {
+            for (i, field) in step.defined_fields.iter().enumerate() {
+                let reason = match &field.kind {
+                    crate::DefinedFieldKind::Temperature(_) => (field.region)
+                        .missing_reference(mesh)
+                        .or_else(|| self.missing_amplitude([&field.amplitude])),
+                    crate::DefinedFieldKind::TemperatureFromFile { file, .. } => (!file.is_file())
+                        .then(|| format!("Result file {} does not exist", file.display())),
+                };
+                if let Some(reason) = reason {
+                    invalid.push(Invalid {
+                        item: ModelItem::DefinedField(s, i),
                         reason,
                     });
                 }

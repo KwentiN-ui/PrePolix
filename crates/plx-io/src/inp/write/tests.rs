@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use plx_model::{
-    BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, Elastic, EquationSolver, Load,
-    Material, NodeTie, Section, SectionKind, UserKeyword,
+    BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, DefinedField, DefinedFieldKind,
+    Elastic, EquationSolver, Load, Material, NodeTie, Section, SectionKind, UserKeyword,
 };
 
 use super::*;
@@ -174,27 +174,42 @@ fn empty_regions_and_unknown_materials_are_errors() {
 
 /// Runs CalculiX on the input file, if it is installed; CI does not have it.
 fn run_ccx(name: &str, text: &str) -> Option<FrdImport> {
+    let dir = ccx_dir(name)?;
+    let frd = run_ccx_in(&dir, name, text);
+    remove_ccx_dir(&dir);
+    Some(frd)
+}
+
+/// A fresh directory for a CalculiX run, `None` without CalculiX.
+fn ccx_dir(name: &str) -> Option<PathBuf> {
     if Command::new("ccx").arg("-v").output().is_err() {
         eprintln!("ccx nicht gefunden, Test übersprungen");
         return None;
     }
     let dir = std::env::temp_dir().join(format!("plx-write-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
+    Some(dir)
+}
+
+/// Runs CalculiX on the input file in the directory and reads the results.
+fn run_ccx_in(dir: &std::path::Path, name: &str, text: &str) -> FrdImport {
     std::fs::write(dir.join(format!("{name}.inp")), text).unwrap();
     let output = Command::new("ccx")
         .args(["-i", name])
-        .current_dir(&dir)
+        .current_dir(dir)
         .env("OMP_NUM_THREADS", "1")
         .output()
         .unwrap();
     let log = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && !log.contains("*ERROR"), "{log}");
-    let frd = read_frd(&dir.join(format!("{name}.frd"))).unwrap();
-    // PLX_KEEP_CCX keeps the files for a look at them.
+    read_frd(&dir.join(format!("{name}.frd"))).unwrap()
+}
+
+/// Removes the files of a run; PLX_KEEP_CCX keeps them for a look at them.
+fn remove_ccx_dir(dir: &std::path::Path) {
     if std::env::var_os("PLX_KEEP_CCX").is_none() {
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(dir);
     }
-    Some(frd)
 }
 
 fn node_value(frd: &FrdImport, field: &str, component: &str, node: NodeId) -> f64 {
@@ -2108,6 +2123,154 @@ fn calculix_conducts_heat_along_a_bar() {
     }
     let hfl = node_value(&frd, "FLUX", "F1", 99);
     assert!((hfl.abs() - q).abs() < 1e-3, "{hfl}");
+}
+
+fn defined_temperature(name: &str, region: Region, value: f64) -> DefinedField {
+    DefinedField {
+        name: name.into(),
+        active: true,
+        region,
+        kind: DefinedFieldKind::Temperature(value),
+        amplitude: None,
+    }
+}
+
+fn temperature_from_file(name: &str, file: &str, step: u32) -> DefinedField {
+    DefinedField {
+        name: name.into(),
+        active: true,
+        region: Region::Nodes(Vec::new()),
+        kind: DefinedFieldKind::TemperatureFromFile {
+            file: PathBuf::from(file),
+            step,
+        },
+        amplitude: None,
+    }
+}
+
+#[test]
+fn a_defined_temperature_is_written_like_prepomax_does() {
+    let (mesh, mut model) = thermal_bar(
+        StepKind::Static(StaticStep::default()),
+        Vec::new(),
+        Vec::new(),
+    );
+    model.steps[0].defined_fields = vec![
+        defined_temperature(
+            "Defined_Temperature-1",
+            Region::Parts(vec!["EALL".into()]),
+            120.0,
+        ),
+        temperature_from_file("Defined_Temperature-2", "/results/heat run.frd", 2),
+    ];
+    model.steps[0].defined_fields[1].active = false;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let expected = "** Name: Defined_Temperature-1\n*Temperature\n\
+                    Internal_Selection-1_Defined_Temperature-1, 120\n\
+                    ** Name: Defined_Temperature-2: Deactivated\n";
+    assert!(text.contains(expected), "{text}");
+    model.steps[0].defined_fields[1].active = true;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("** Name: Defined_Temperature-2\n*Temperature, File=heat run.frd, BStep=2\n"),
+        "{text}"
+    );
+    assert_eq!(
+        model.result_files(),
+        [std::path::Path::new("/results/heat run.frd")]
+    );
+    // A thermal step solves for the temperatures and leaves the fields out.
+    model.steps[0].kind = steady();
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("** Name: Defined_Temperature-1: Deactivated\n"),
+        "{text}"
+    );
+    assert!(!text.contains("*Temperature"), "{text}");
+    assert!(model.result_files().is_empty());
+    model.steps[0].kind = StepKind::Static(StaticStep::default());
+    model.steps[0].defined_fields[1].kind = DefinedFieldKind::TemperatureFromFile {
+        file: PathBuf::from("a,b.frd"),
+        step: 1,
+    };
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::InvalidResultFile { .. })
+    ));
+}
+
+/// A heat transfer run gives the bar a gradient from 20 at x = 0 to 120 at the tip; the
+/// static run reads it from the frd file and the bar grows by alpha times the integral of
+/// T - 20 over its length, 1e-5 * 100^2 / 2.
+#[test]
+fn calculix_strains_the_bar_by_the_temperatures_of_a_result_file() {
+    let (mesh, heat) = thermal_bar(
+        steady(),
+        vec![
+            temperature("Temperature-1", Region::NodeSet("FIX".into()), 20.0),
+            temperature("Temperature-2", Region::Surface("TIP".into()), 120.0),
+        ],
+        Vec::new(),
+    );
+    let Some(dir) = ccx_dir("waermedehnung") else {
+        return;
+    };
+    run_ccx_in(&dir, "heat", &write_inp(&mesh, &heat, "").unwrap());
+    let (_, mut model) = thermal_bar(
+        StepKind::Static(StaticStep::default()),
+        Vec::new(),
+        Vec::new(),
+    );
+    // CalculiX refuses a *Temperature without an initial temperature.
+    model.initial_conditions.push(plx_model::InitialCondition {
+        name: "Initial_Temperature-1".into(),
+        active: true,
+        region: Region::Parts(vec!["EALL".into()]),
+        kind: plx_model::InitialConditionKind::Temperature(20.0),
+    });
+    // Held at x = 0 in x only, and against rigid motion at two nodes of that face, so the
+    // bar expands freely: the corner holds y and z, the node along y from it holds z.
+    let fix = nodes_at(&mesh, 0, 0.0);
+    let at = |n: NodeId| mesh.node(n).unwrap();
+    let corner = (fix.iter().copied())
+        .min_by(|&a, &b| (at(a)[1] + at(a)[2]).total_cmp(&(at(b)[1] + at(b)[2])))
+        .unwrap();
+    let along_y = (fix.iter().copied())
+        .filter(|&n| (at(n)[2] - at(corner)[2]).abs() < 1e-9 && n != corner)
+        .max_by(|&a, &b| at(a)[1].total_cmp(&at(b)[1]))
+        .unwrap();
+    let hold = |name: &str, nodes: Vec<NodeId>, held: [bool; 3]| BoundaryCondition {
+        name: name.into(),
+        active: true,
+        region: Region::Nodes(nodes),
+        kind: BoundaryKind::Displacement([
+            held[0].then_some(0.0),
+            held[1].then_some(0.0),
+            held[2].then_some(0.0),
+            None,
+            None,
+            None,
+        ]),
+        amplitude: None,
+    };
+    model.steps[0].boundary_conditions = vec![
+        hold("Axial", fix.clone(), [true, false, false]),
+        hold("Corner", vec![corner], [false, true, true]),
+        hold("Edge", vec![along_y], [false, false, true]),
+    ];
+    model.steps[0].defined_fields = vec![temperature_from_file(
+        "Defined_Temperature-1",
+        dir.join("heat.frd").to_str().unwrap(),
+        1,
+    )];
+    let frd = run_ccx_in(&dir, "static", &write_inp(&mesh, &model, "").unwrap());
+    remove_ccx_dir(&dir);
+    assert_all_close(&temperatures_at(&mesh, &frd, 100.0), 120.0, 1e-6);
+    let tip = nodes_at(&mesh, 0, 100.0);
+    let growth: Vec<f64> = (tip.iter())
+        .map(|&n| node_value(&frd, "DISP", "U1", n))
+        .collect();
+    assert_all_close(&growth, 1e-5 * 100.0 * 100.0 / 2.0, 1e-3);
 }
 
 /// Heat generated in the bar flows out at x = 0: T = Q (L x - x^2 / 2) / k.
