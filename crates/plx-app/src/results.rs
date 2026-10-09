@@ -2,9 +2,11 @@ use plx_render::contour::DEFAULT_LEVELS;
 
 use crate::animation::{Animation, AnimationKind, ColorLimits};
 use crate::sound::ModeSound;
+use glam::{DAffine3, DMat3};
 use plx_mesh::FeMesh;
 use plx_results::field_output::{self, FieldOutput};
 use plx_results::history_output::{self, HistoryOutput, HistorySet};
+use plx_results::transformation::{self, Transformation};
 use plx_results::{AnalysisKind, Component, Field, Increment};
 
 /// How the deformed shape is scaled, as in PrePoMax's results toolbar.
@@ -66,6 +68,9 @@ pub struct ResultsView {
     pub history_outputs: Vec<HistoryOutput>,
     /// Data of the history outputs that could be computed, by name.
     pub history: Vec<HistorySet>,
+    /// Mirrored and patterned copies drawn besides the results, as PrePoMax's
+    /// transformations; the legend and the extremes include them.
+    pub transformations: Vec<Transformation>,
     /// Characteristic model size for the automatic scale (PrePoMax: cube root of the bounding
     /// box volume, square root of the area for flat models).
     model_size: f64,
@@ -112,6 +117,7 @@ impl ResultsView {
             field_outputs: Vec::new(),
             history_outputs: Vec::new(),
             history: Vec::new(),
+            transformations: Vec::new(),
             model_size: bounds.map_or(1.0, model_size),
         };
         view.increment = view.default_increment();
@@ -338,8 +344,9 @@ impl ResultsView {
         lines
     }
 
-    /// Node index and value of the largest value on screen, animation frame included.
-    pub fn maximum(&self) -> Option<(usize, f32)> {
+    /// Node index, value and drawn item ([`ResultsView::instances`]) of the largest value on
+    /// screen, animation frame included.
+    pub fn maximum(&self) -> Option<(usize, f32, usize)> {
         self.extreme(|a, b| b > a)
     }
 
@@ -446,6 +453,53 @@ impl ResultsView {
         ))
     }
 
+    /// Every drawn item: the results themselves first, then the transformed copies.
+    pub fn instances(&self) -> Vec<DAffine3> {
+        transformation::instances(&self.transformations)
+    }
+
+    /// Values of the shown component as drawn on the item transformed by `instance`:
+    /// directional components turn and mirror with it. Overlaid modes keep their values.
+    pub fn shown_values_on(&self, instance: &DAffine3) -> Option<std::borrow::Cow<'_, [f32]>> {
+        if self.superposition.is_none()
+            && let Some((field, _)) = self.current()
+            && let Some(values) =
+                transformation::transformed_values(field, self.component, instance.matrix3)
+        {
+            let amplitude = self.value_amplitude();
+            return Some(std::borrow::Cow::Owned(
+                values.iter().map(|v| v * amplitude).collect(),
+            ));
+        }
+        self.shown_values()
+    }
+
+    /// Range of a component over the results and all transformed copies.
+    fn component_range(&self, field: &Field, component: usize) -> Option<(f32, f32)> {
+        let mut range = field.components.get(component)?.range();
+        let mut rotations: Vec<DMat3> = Vec::new();
+        for instance in self.instances().iter().skip(1) {
+            let q = instance.matrix3;
+            if rotations.iter().any(|r| r.abs_diff_eq(q, 1e-12)) {
+                continue;
+            }
+            rotations.push(q);
+            let Some(values) = transformation::transformed_values(field, component, q) else {
+                continue;
+            };
+            let copy = Component {
+                name: String::new(),
+                values,
+                derived: false,
+            };
+            range = match (range, copy.range()) {
+                (Some((a, b)), Some((c, d))) => Some((a.min(c), b.max(d))),
+                (a, b) => a.or(b),
+            };
+        }
+        range
+    }
+
     /// Ends the animation and shows the increment from before it again.
     pub fn stop_animation(&mut self) {
         if let Some(animation) = self.animation.take() {
@@ -468,7 +522,7 @@ impl ResultsView {
         if let Some(superposition) = &self.superposition {
             return superposition.range;
         }
-        let (min, max) = component.range()?;
+        let (min, max) = self.component_range(field, self.component)?;
         let Some(animation) = &self.animation else {
             return Some((min, max));
         };
@@ -493,28 +547,33 @@ impl ResultsView {
                 .increments
                 .iter()
                 .filter_map(|&i| {
-                    self.increments
-                        .get(i)?
-                        .field(&field.name)?
-                        .component(&component.name)?
-                        .range()
+                    let field = self.increments.get(i)?.field(&field.name)?;
+                    let index = (field.components.iter()).position(|c| c.name == component.name)?;
+                    self.component_range(field, index)
                 })
                 .reduce(|(a, b), (c, d)| (a.min(c), b.max(d))),
         }
     }
 
-    /// Node index and value of the smallest value on screen, animation frame included.
-    pub fn minimum(&self) -> Option<(usize, f32)> {
+    /// Like [`ResultsView::maximum`] for the smallest value.
+    pub fn minimum(&self) -> Option<(usize, f32, usize)> {
         self.extreme(|a, b| b < a)
     }
 
-    fn extreme(&self, better: impl Fn(f32, f32) -> bool) -> Option<(usize, f32)> {
-        self.shown_values()?
-            .iter()
-            .copied()
-            .enumerate()
-            .filter(|(_, v)| v.is_finite())
-            .reduce(|a, b| if better(a.1, b.1) { b } else { a })
+    fn extreme(&self, better: impl Fn(f32, f32) -> bool) -> Option<(usize, f32, usize)> {
+        let mut best: Option<(usize, f32, usize)> = None;
+        for (item, instance) in self.instances().iter().enumerate() {
+            let values = self.shown_values_on(instance)?;
+            let found = (values.iter().copied().enumerate())
+                .filter(|(_, v)| v.is_finite())
+                .reduce(|a, b| if better(a.1, b.1) { b } else { a });
+            if let Some((node, value)) = found
+                && best.is_none_or(|b| better(b.1, value))
+            {
+                best = Some((node, value, item));
+            }
+        }
+        best
     }
 
     pub fn legend(&self) -> Option<Legend> {
@@ -713,8 +772,8 @@ mod tests {
         animation.go_to(0);
         assert_eq!(view.amplitude(), -1.0);
         assert_eq!(view.legend().map(|l| (l.min, l.max)), Some((-3.0, -1.0)));
-        assert_eq!(view.maximum(), Some((0, -1.0)));
-        assert_eq!(view.minimum(), Some((1, -3.0)));
+        assert_eq!(view.maximum(), Some((0, -1.0, 0)));
+        assert_eq!(view.minimum(), Some((1, -3.0, 0)));
         view.animation.as_mut().unwrap().limits = ColorLimits::AllFrames;
         assert_eq!(view.legend().map(|l| (l.min, l.max)), Some((-3.0, 3.0)));
 

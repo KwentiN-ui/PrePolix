@@ -29,6 +29,18 @@ pub struct RenderMesh {
 }
 
 impl RenderMesh {
+    /// Adds another mesh to this one, e.g. a transformed copy of a part.
+    pub fn append(&mut self, other: RenderMesh) {
+        let base = self.vertices.len() as u32;
+        self.vertices.extend(other.vertices);
+        self.triangles
+            .extend(other.triangles.into_iter().map(|index| base + index));
+        self.feature_edges.extend(other.feature_edges);
+        self.mesh_edges.extend(other.mesh_edges);
+        self.wireframe_edges.extend(other.wireframe_edges);
+        self.wide_edges.extend(other.wide_edges);
+    }
+
     pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
         let mut positions = self
             .vertices

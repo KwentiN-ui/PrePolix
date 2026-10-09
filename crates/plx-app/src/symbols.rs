@@ -173,7 +173,7 @@ impl Visible {
 }
 
 fn node_points(model: &Model, region: &Region, visible: &Visible) -> Vec<DVec3> {
-    let coords = model.mesh.coords();
+    let coords = model.exploded_coords();
     region
         .nodes(&model.mesh)
         .into_iter()
@@ -193,7 +193,7 @@ struct FaceGeometry {
 /// Centre, outward normal and area of each element face of the region.
 fn face_geometry(model: &Model, region: &Region, visible: &Visible) -> Vec<FaceGeometry> {
     let mesh = &model.mesh;
-    let coords = mesh.coords();
+    let coords = model.exploded_coords();
     let position = |id: NodeId| mesh.node_index(id).map(|i| DVec3::from(coords[i]));
     let mut faces = Vec::new();
     for (element_id, face) in region.faces(mesh) {

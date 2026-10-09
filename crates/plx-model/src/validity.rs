@@ -10,6 +10,8 @@ use crate::{FeModel, Region};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ModelItem {
     Section(usize),
+    Constraint(usize),
+    ContactPair(usize),
     /// Boundary condition by step and index.
     BoundaryCondition(usize, usize),
     /// Load by step and index.
@@ -40,6 +42,36 @@ impl FeModel {
                 });
             }
         }
+        for (i, constraint) in self.constraints.iter().enumerate() {
+            let reason = match constraint.master_slave() {
+                Some([master, slave]) => master_slave_reference(master, slave, mesh),
+                None => (constraint.regions().into_iter())
+                    .find_map(|region| region.missing_reference(mesh)),
+            };
+            if let Some(reason) = reason {
+                invalid.push(Invalid {
+                    item: ModelItem::Constraint(i),
+                    reason,
+                });
+            }
+        }
+        for (i, pair) in self.contact_pairs.iter().enumerate() {
+            let reason = if !(self.surface_interactions.iter()).any(|s| s.name == pair.interaction)
+            {
+                Some(format!(
+                    "Surface Interaction {} existiert nicht",
+                    pair.interaction
+                ))
+            } else {
+                master_slave_reference(&pair.master, &pair.slave, mesh)
+            };
+            if let Some(reason) = reason {
+                invalid.push(Invalid {
+                    item: ModelItem::ContactPair(i),
+                    reason,
+                });
+            }
+        }
         for (s, step) in self.steps.iter().enumerate() {
             for (i, bc) in step.boundary_conditions.iter().enumerate() {
                 if let Some(reason) = bc.region.missing_reference(mesh) {
@@ -60,6 +92,14 @@ impl FeModel {
         }
         invalid
     }
+}
+
+/// What the master or slave region of a contact or tie refers to that the mesh lacks.
+fn master_slave_reference(master: &Region, slave: &Region, mesh: &FeMesh) -> Option<String> {
+    (master
+        .missing_reference(mesh)
+        .map(|r| format!("Master: {r}")))
+    .or_else(|| slave.missing_reference(mesh).map(|r| format!("Slave: {r}")))
 }
 
 impl Region {
@@ -100,7 +140,9 @@ mod tests {
     use plx_mesh::{Element, ElementShape, Part};
 
     use super::*;
-    use crate::{BoundaryCondition, BoundaryKind, Material, Section, Step};
+    use crate::{
+        BoundaryCondition, BoundaryKind, ContactPair, Material, Section, Step, SurfaceInteraction,
+    };
 
     fn mesh() -> FeMesh {
         let mut mesh = FeMesh::default();
@@ -154,6 +196,7 @@ mod tests {
             steps: vec![step],
             user_keywords: Vec::new(),
             hot_spots: Vec::new(),
+            ..FeModel::default()
         }
     }
 
@@ -208,5 +251,25 @@ mod tests {
                 .missing_reference(&mesh)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn contact_pair_needs_its_interaction_and_surfaces() {
+        let mesh = mesh();
+        let mut model = model();
+        let mut pair = ContactPair::new("Contact_Pair-1", "Surface_Interaction-1");
+        pair.master = Region::Faces(vec![(1, 1)]);
+        pair.slave = Region::Faces(vec![(1, 2)]);
+        model.contact_pairs.push(pair);
+        let invalid = model.invalid_items(&mesh);
+        assert_eq!(invalid[0].item, ModelItem::ContactPair(0));
+        assert!(invalid[0].reason.contains("Surface_Interaction-1"));
+        model.surface_interactions.push(SurfaceInteraction {
+            name: "Surface_Interaction-1".into(),
+            properties: Vec::new(),
+        });
+        assert_eq!(model.invalid_items(&mesh), []);
+        model.contact_pairs[0].slave = Region::Surface("GONE".into());
+        assert!(model.invalid_items(&mesh)[0].reason.starts_with("Slave"));
     }
 }

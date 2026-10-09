@@ -39,12 +39,14 @@ pub struct Overlay {
     /// Selected nodes in render coordinates, drawn as highlighted points.
     pub nodes: Vec<Vec3>,
     /// Selected lines in render coordinates, such as edges of 2D elements.
-    pub lines: Vec<[Vec3; 2]>,
+    pub edges: Vec<[Vec3; 2]>,
     /// The axis of revolution of an axisymmetric model in render coordinates, drawn as a
     /// dash-dotted line between the two points.
     pub axis: Option<[Vec3; 2]>,
     /// Hot spot paths in render coordinates: the toe, then the read-out points.
     pub paths: Vec<Vec<Vec3>>,
+    /// Highlighted polylines in render coordinates, e.g. the axis of a pattern.
+    pub lines: Vec<Vec<Vec3>>,
 }
 
 /// Annotated point of the model, e.g. the node with the largest result value.
@@ -96,7 +98,7 @@ pub fn draw(
     if let Some([a, b]) = overlay.axis {
         dash_dotted(&painter, project(camera, rect, a), project(camera, rect, b));
     }
-    for &[a, b] in &overlay.lines {
+    for &[a, b] in &overlay.edges {
         painter.line_segment(
             [project(camera, rect, a), project(camera, rect, b)],
             Stroke::new(3.0, Color32::RED),
@@ -114,6 +116,13 @@ pub fn draw(
             0.0,
             Color32::RED,
         );
+    }
+    for line in &overlay.lines {
+        let points: Vec<Pos2> = line.iter().map(|&p| project(camera, rect, p)).collect();
+        painter.add(egui::Shape::line(
+            points,
+            egui::Stroke::new(2.0, Color32::RED),
+        ));
     }
     for path in &overlay.paths {
         let points: Vec<Pos2> = path.iter().map(|&p| project(camera, rect, p)).collect();

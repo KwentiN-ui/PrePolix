@@ -66,8 +66,9 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
 #[cfg(test)]
 mod tests {
     use plx_model::{
-        Algorithm2d, Algorithm3d, Extrapolation, HotSpot, Material, MeshSetupItem, MeshSetupKind,
-        MeshingParameters, Region, Step, UserKeyword,
+        Algorithm2d, Algorithm3d, Constraint, ContactPair, Extrapolation, Friction, HotSpot,
+        InteractionProperty, Material, MeshSetupItem, MeshSetupKind, MeshingParameters, Region,
+        Step, SurfaceBehavior, SurfaceInteraction, Tie, UserKeyword,
     };
 
     use super::*;
@@ -97,6 +98,26 @@ mod tests {
                 toe: Region::Nodes(vec![3, 7]),
                 extrapolation: Extrapolation::Custom(vec![2.0, 6.0]),
                 ..HotSpot::new("Hot_Spot-1")
+            }],
+            constraints: vec![Constraint::Tie(Tie {
+                master: Region::Faces(vec![(1, 2)]),
+                slave: Region::Surface("TOP".into()),
+                ..Tie::new("Tie-1")
+            })],
+            surface_interactions: vec![SurfaceInteraction {
+                name: "Surface_Interaction-1".into(),
+                properties: vec![
+                    InteractionProperty::SurfaceBehavior(SurfaceBehavior::Tabular(vec![
+                        [0.0, 0.0],
+                        [1e5, 1.0],
+                    ])),
+                    InteractionProperty::Friction(Friction::default()),
+                ],
+            }],
+            contact_pairs: vec![ContactPair {
+                adjustment_size: Some(0.01),
+                master_color: [255, 0, 0],
+                ..ContactPair::new("Contact_Pair-1", "Surface_Interaction-1")
             }],
         };
         let dir = std::env::temp_dir().join(format!("plx-project-{}", std::process::id()));

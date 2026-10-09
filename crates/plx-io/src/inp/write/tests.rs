@@ -48,6 +48,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
         steps: vec![step],
         user_keywords: Vec::new(),
         hot_spots: Vec::new(),
+        ..FeModel::default()
     };
     (mesh, model)
 }
@@ -667,8 +668,7 @@ fn plane_model(
             thickness,
         }],
         steps: vec![step],
-        user_keywords: Vec::new(),
-        hot_spots: Vec::new(),
+        ..FeModel::default()
     }
 }
 
@@ -827,4 +827,471 @@ fn calculix_pulls_a_tube_by_its_total_force() {
             "{node}: {s} != {stress}"
         );
     }
+}
+
+type Faces = Vec<(ElementId, u8)>;
+
+/// Two blocks of 10 x 10 x 10 mm stacked along z, parts LOWER and UPPER, each 2 x 2 x 1
+/// C3D8 elements with own nodes, the upper one `gap` above the lower one. Returns the mesh
+/// with the top faces of LOWER and the bottom faces of UPPER.
+fn two_blocks(gap: f64) -> (FeMesh, Faces, Faces) {
+    let mut mesh = FeMesh::default();
+    let mut faces = [Vec::new(), Vec::new()];
+    for (block, z0) in [(0u32, 0.0), (1, 10.0 + gap)] {
+        let node = |i: u32, j: u32, k: u32| 100 * block + 1 + i + 3 * j + 9 * k;
+        for k in 0..2 {
+            for j in 0..3 {
+                for i in 0..3 {
+                    let coords = [
+                        5.0 * f64::from(i),
+                        5.0 * f64::from(j),
+                        z0 + 10.0 * f64::from(k),
+                    ];
+                    mesh.set_node(node(i, j, k), coords);
+                }
+            }
+        }
+        let mut elements = Vec::new();
+        for j in 0..2 {
+            for i in 0..2 {
+                let id = 100 * block + 1 + i + 2 * j;
+                let mut nodes = Vec::new();
+                for k in 0..2 {
+                    nodes.extend([node(i, j, k), node(i + 1, j, k), node(i + 1, j + 1, k)]);
+                    nodes.push(node(i, j + 1, k));
+                }
+                mesh.add_element(plx_mesh::Element {
+                    id,
+                    type_name: "C3D8".into(),
+                    shape: plx_mesh::ElementShape::Hex8,
+                    nodes,
+                })
+                .unwrap();
+                elements.push(id);
+                // Top face S2 of the lower block, bottom face S1 of the upper one.
+                faces[block as usize].push((id, if block == 0 { 2 } else { 1 }));
+            }
+        }
+        let name = if block == 0 { "LOWER" } else { "UPPER" };
+        mesh.parts.push(plx_mesh::Part {
+            name: name.into(),
+            elements,
+        });
+    }
+    let [lower, upper] = faces;
+    (mesh, lower, upper)
+}
+
+/// Steel on both blocks, the lower one held at its bottom and 10 MPa pressing on the top of
+/// the upper one.
+fn stacked_blocks(mesh: &FeMesh) -> FeModel {
+    let mut model = FeModel::default();
+    let bottom: Vec<NodeId> = (mesh.node_ids().iter().zip(mesh.coords()))
+        .filter(|(_, c)| c[2] == 0.0)
+        .map(|(&id, _)| id)
+        .collect();
+    let mut step = Step::new_static("Step-1");
+    step.boundary_conditions.push(BoundaryCondition {
+        name: "Fixed-1".into(),
+        active: true,
+        region: Region::Nodes(bottom),
+        kind: BoundaryKind::Fixed,
+    });
+    step.loads.push(Load {
+        name: "Pressure-1".into(),
+        active: true,
+        region: Region::Faces((101..=104).map(|e| (e, 2)).collect()),
+        kind: LoadKind::Pressure(10.0),
+    });
+    model.materials.push(Material {
+        name: "Steel".into(),
+        density: None,
+        elastic: Some(Elastic {
+            young: 210_000.0,
+            poisson: 0.3,
+        }),
+    });
+    model.sections.push(Section {
+        name: "Section-1".into(),
+        material: "Steel".into(),
+        region: Region::Parts(vec!["LOWER".into(), "UPPER".into()]),
+        thickness: 1.0,
+    });
+    model.steps.push(step);
+    model
+}
+
+#[test]
+fn a_tie_writes_its_surfaces_slave_first() {
+    let (mesh, lower, upper) = two_blocks(0.0);
+    let mut model = stacked_blocks(&mesh);
+    let mut tie = plx_model::Tie::new("Tie-1");
+    tie.master = Region::Faces(lower);
+    tie.slave = Region::Faces(upper);
+    tie.position_tolerance = Some(0.5);
+    model.constraints.push(Constraint::Tie(tie));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Surface, Name=Internal_Selection-1_Tie-1_Master, Type=Element\n",
+        "*Elset, Elset=Internal-1_Internal_Selection-1_Tie-1_Slave_S1\n101, 102, 103, 104\n",
+        "*Tie, Name=Tie-1, Position tolerance=0.5\n\
+         Internal_Selection-1_Tie-1_Slave, Internal_Selection-1_Tie-1_Master\n",
+    ] {
+        assert!(text.contains(line), "{line:?} fehlt in\n{text}");
+    }
+    let constraints = top_title(&model_keywords(&mesh, &model, "").unwrap(), "Constraints");
+    assert_eq!(constraints, 11);
+}
+
+#[test]
+fn surface_interactions_and_contact_pairs_are_written_like_prepomax() {
+    let (mesh, lower, upper) = two_blocks(0.0);
+    let mut model = stacked_blocks(&mesh);
+    model.surface_interactions.push(SurfaceInteraction {
+        name: "Surface_Interaction-1".into(),
+        properties: vec![
+            InteractionProperty::SurfaceBehavior(SurfaceBehavior::Linear {
+                k: 1e7,
+                sigma_inf: 2.86,
+                c0: None,
+            }),
+            InteractionProperty::Friction(plx_model::Friction {
+                coefficient: 0.2,
+                stick_slope: Some(5000.0),
+            }),
+            InteractionProperty::GapConductance(GapConductance::Constant(3.0)),
+        ],
+    });
+    let mut pair = ContactPair::new("Contact_Pair-1", "Surface_Interaction-1");
+    pair.master = Region::Faces(lower);
+    pair.slave = Region::Faces(upper);
+    pair.method = ContactMethod::NodeToSurface;
+    pair.small_sliding = true;
+    pair.adjust = true;
+    model.contact_pairs.push(pair.clone());
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Surface interaction, Name=Surface_Interaction-1\n\
+         *Surface behavior, Pressure-overclosure=Linear\n10000000, 2.86\n\
+         *Friction\n0.2, 5000\n*Gap conductance\n3\n",
+        "*Contact pair, Interaction=Surface_Interaction-1, Type=Node to surface, \
+         Small sliding, Adjust=0\n\
+         Internal_Selection-1_Contact_Pair-1_Slave, Internal_Selection-1_Contact_Pair-1_Master\n",
+    ] {
+        assert!(text.contains(line), "{line:?} fehlt in\n{text}");
+    }
+    // Deactivated, the pair keeps its place as a comment and gets no surfaces.
+    model.contact_pairs[0].active = false;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("** Name: Contact_Pair-1: Deactivated\n"));
+    assert!(!text.contains("Contact_Pair-1_Master"));
+    // A pair needs its interaction.
+    model.contact_pairs[0] = ContactPair::new("Contact_Pair-1", "Gone");
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::UnknownInteraction { .. })
+    ));
+}
+
+/// Sum of a component of a nodal field over nodes.
+fn node_sum(frd: &FrdImport, field: &str, component: &str, nodes: &[NodeId]) -> f64 {
+    nodes
+        .iter()
+        .map(|&n| node_value(frd, field, component, n))
+        .sum()
+}
+
+#[test]
+fn calculix_carries_the_load_across_a_tie() {
+    // A small gap within the position tolerance; adjust closes it.
+    let (mesh, lower, upper) = two_blocks(0.01);
+    let mut model = stacked_blocks(&mesh);
+    let mut tie = plx_model::Tie::new("Tie-1");
+    tie.master = Region::Faces(lower);
+    tie.slave = Region::Faces(upper);
+    tie.position_tolerance = Some(0.05);
+    model.constraints.push(Constraint::Tie(tie));
+    let Some(frd) = run_ccx("tie", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let bottom: Vec<NodeId> = (1..=9).collect();
+    let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+    // 10 MPa on 10 x 10 mm.
+    assert!((reaction - 1000.0).abs() < 1.0, "{reaction}");
+    // The tied faces move together: middle node of the lower top and the upper bottom.
+    let below = node_value(&frd, "DISP", "U3", 14);
+    let above = node_value(&frd, "DISP", "U3", 105);
+    assert!(
+        (below - above).abs() < 1e-3 * below.abs(),
+        "{below} != {above}"
+    );
+}
+
+#[test]
+fn calculix_carries_the_load_across_a_contact() {
+    // PrePoMax's default hard contact and a linear spring.
+    let linear = SurfaceBehavior::Linear {
+        k: 1e7,
+        sigma_inf: 2.86,
+        c0: None,
+    };
+    for (name, behavior) in [("hart", SurfaceBehavior::Hard), ("linear", linear)] {
+        let (mesh, lower, upper) = two_blocks(0.0);
+        let mut model = stacked_blocks(&mesh);
+        // Held sideways at its top, the upper block rests on the lower one only by contact.
+        let top: Vec<NodeId> = (119..=127).collect();
+        model.steps[0].boundary_conditions.push(BoundaryCondition {
+            name: "Side-1".into(),
+            active: true,
+            region: Region::Nodes(top),
+            kind: BoundaryKind::Displacement([Some(0.0), Some(0.0), None, None, None, None]),
+        });
+        model.surface_interactions.push(SurfaceInteraction {
+            name: "Surface_Interaction-1".into(),
+            properties: vec![InteractionProperty::SurfaceBehavior(behavior)],
+        });
+        let mut pair = ContactPair::new("Contact_Pair-1", "Surface_Interaction-1");
+        pair.master = Region::Faces(lower);
+        pair.slave = Region::Faces(upper);
+        model.contact_pairs.push(pair);
+        let text = write_inp(&mesh, &model, "").unwrap();
+        let Some(frd) = run_ccx(&format!("kontakt-{name}"), &text) else {
+            return;
+        };
+        let bottom: Vec<NodeId> = (1..=9).collect();
+        let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+        assert!((reaction - 1000.0).abs() < 10.0, "{name}: {reaction}");
+    }
+}
+
+/// Two steel blocks of 1 x 1 x 1 hexahedra, `a` from z = 0 to 1 and `b` from z = 1.1 to 2.1,
+/// with `n` elements per edge each. Returns the mesh and the bottom and top faces of
+/// each block.
+struct Blocks {
+    mesh: FeMesh,
+    a_bottom: Vec<(ElementId, u8)>,
+    a_top: Vec<(ElementId, u8)>,
+    b_bottom: Vec<(ElementId, u8)>,
+    b_top: Vec<(ElementId, u8)>,
+}
+
+fn blocks(na: u32, nb: u32) -> Blocks {
+    use plx_mesh::{Element, ElementShape, Part};
+    let mut mesh = FeMesh::default();
+    let mut next_node = 1;
+    let mut next_element = 1;
+    let mut block = |mesh: &mut FeMesh, n: u32, z0: f64, name: &str| {
+        let mut ids = BTreeMap::new();
+        for k in 0..=n {
+            for j in 0..=n {
+                for i in 0..=n {
+                    let h = 1.0 / f64::from(n);
+                    mesh.set_node(
+                        next_node,
+                        [f64::from(i) * h, f64::from(j) * h, z0 + f64::from(k) * h],
+                    );
+                    ids.insert((i, j, k), next_node);
+                    next_node += 1;
+                }
+            }
+        }
+        let (mut bottom, mut top, mut elements) = (Vec::new(), Vec::new(), Vec::new());
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    let corner = |di, dj, dk| ids[&(i + di, j + dj, k + dk)];
+                    let nodes = vec![
+                        corner(0, 0, 0),
+                        corner(1, 0, 0),
+                        corner(1, 1, 0),
+                        corner(0, 1, 0),
+                        corner(0, 0, 1),
+                        corner(1, 0, 1),
+                        corner(1, 1, 1),
+                        corner(0, 1, 1),
+                    ];
+                    mesh.add_element(Element {
+                        id: next_element,
+                        type_name: "C3D8".into(),
+                        shape: ElementShape::Hex8,
+                        nodes,
+                    })
+                    .unwrap();
+                    if k == 0 {
+                        bottom.push((next_element, 1));
+                    }
+                    if k == n - 1 {
+                        top.push((next_element, 2));
+                    }
+                    elements.push(next_element);
+                    next_element += 1;
+                }
+            }
+        }
+        mesh.parts.push(Part {
+            name: name.into(),
+            elements,
+        });
+        (bottom, top)
+    };
+    let (a_bottom, a_top) = block(&mut mesh, na, 0.0, "A");
+    let (b_bottom, b_top) = block(&mut mesh, nb, 1.1, "B");
+    Blocks {
+        mesh,
+        a_bottom,
+        a_top,
+        b_bottom,
+        b_top,
+    }
+}
+
+/// Steel on both blocks and one static step with a surface traction on top of block `b`,
+/// block `a` held at its bottom.
+fn blocks_model(
+    blocks: &Blocks,
+    constraints: Vec<plx_model::Constraint>,
+    force: [f64; 3],
+) -> FeModel {
+    let mut step = Step::new_static("Step-1");
+    step.boundary_conditions.push(BoundaryCondition {
+        name: "Fixed-1".into(),
+        active: true,
+        region: Region::Faces(blocks.a_bottom.clone()),
+        kind: BoundaryKind::Fixed,
+    });
+    step.loads.push(Load {
+        name: "Surface_Traction-1".into(),
+        active: true,
+        region: Region::Faces(blocks.b_top.clone()),
+        kind: LoadKind::SurfaceTraction(force),
+    });
+    FeModel {
+        materials: vec![Material {
+            name: "Steel".into(),
+            density: None,
+            elastic: Some(Elastic {
+                young: 210_000.0,
+                poisson: 0.3,
+            }),
+        }],
+        sections: vec![Section {
+            name: "Section-1".into(),
+            material: "Steel".into(),
+            region: Region::Parts(vec!["A".into(), "B".into()]),
+            thickness: 1.0,
+        }],
+        constraints,
+        steps: vec![step],
+        ..FeModel::default()
+    }
+}
+
+/// Mean displacement component of the top nodes of block `b`.
+fn mean_top(blocks: &Blocks, frd: &FrdImport, component: &str) -> f64 {
+    let nodes = Region::Faces(blocks.b_top.clone()).nodes(&blocks.mesh);
+    let sum: f64 = nodes
+        .iter()
+        .map(|&n| node_value(frd, "DISP", component, n))
+        .sum();
+    sum / nodes.len() as f64
+}
+
+#[test]
+fn calculix_carries_a_block_on_springs_between_two_surfaces() {
+    use plx_model::SurfaceToSurfaceSpring;
+    // Different meshes on the two sides: the springs end on points between nodes.
+    let blocks = blocks(2, 3);
+    let spring = Constraint::SurfaceToSurfaceSpring(SurfaceToSurfaceSpring {
+        name: "Bearing-1".into(),
+        active: true,
+        master: Region::Faces(blocks.a_top.clone()),
+        slave: Region::Faces(blocks.b_bottom.clone()),
+        stiffness: [1000.0, 1000.0, 2000.0],
+        per_area: false,
+    });
+    let model = blocks_model(&blocks, vec![spring], [0.0, 0.0, 100.0]);
+    let text = write_inp(&blocks.mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Element, Type=SPRING2, Elset=Bearing-1_All\n"),
+        "{text}"
+    );
+    assert!(text.contains("*Equation\n"));
+    let Some(frd) = run_ccx("feder-flaeche", &text) else {
+        return;
+    };
+    // 100 N on 2000 N/mm, the steel itself barely stretches.
+    let lift = mean_top(&blocks, &frd, "U3");
+    assert!((lift - 0.05).abs() < 0.001, "{lift}");
+}
+
+#[test]
+fn calculix_carries_a_block_on_surface_and_point_springs() {
+    use plx_model::{PointSpring, SurfaceSpring};
+    let blocks = blocks(2, 2);
+    let surface = Constraint::SurfaceSpring(SurfaceSpring {
+        name: "Surface_Spring-1".into(),
+        active: true,
+        region: Region::Faces(blocks.b_bottom.clone()),
+        stiffness: [1000.0, 1000.0, 1000.0],
+        per_area: false,
+    });
+    // Nine nodes on the bottom of block b, 100 N/mm each in z.
+    let point = Constraint::PointSpring(PointSpring {
+        name: "Point_Spring-1".into(),
+        active: true,
+        region: Region::Faces(blocks.b_bottom.clone()),
+        stiffness: [0.0, 0.0, 100.0],
+    });
+    let model = blocks_model(&blocks, vec![surface, point], [0.0, 0.0, 95.0]);
+    let text = write_inp(&blocks.mesh, &model, "").unwrap();
+    assert!(text.contains("*Element, Type=SPRING1, Elset=Point_Spring-1_All\n"));
+    assert!(
+        text.contains("*Spring, Elset=Point_Spring-1_DOF_3\n3\n100.\n"),
+        "{text}"
+    );
+    let Some(frd) = run_ccx("federn", &text) else {
+        return;
+    };
+    let lift = mean_top(&blocks, &frd, "U3");
+    assert!((lift - 0.05).abs() < 0.001, "{lift}");
+}
+
+#[test]
+fn calculix_compression_only_support_takes_only_pressure() {
+    use plx_model::{CompressionOnly, SurfaceSpring};
+    let blocks = blocks(2, 2);
+    let support = |force: [f64; 3]| {
+        let springs = Constraint::SurfaceSpring(SurfaceSpring {
+            name: "Surface_Spring-1".into(),
+            active: true,
+            region: Region::Faces(blocks.b_bottom.clone()),
+            stiffness: [1000.0, 1000.0, 1000.0],
+            per_area: false,
+        });
+        let gaps = Constraint::CompressionOnly(CompressionOnly {
+            name: "Compression_Only-1".into(),
+            active: true,
+            region: Region::Faces(blocks.b_bottom.clone()),
+            clearance: 0.0,
+            spring_stiffness: None,
+            tensile_force: None,
+            offset: 0.0,
+            nonlinear: true,
+        });
+        blocks_model(&blocks, vec![springs, gaps], force)
+    };
+    let pulled = write_inp(&blocks.mesh, &support([0.0, 0.0, 100.0]), "").unwrap();
+    assert!(pulled.contains("*Element, Type=GAPUNI\n"));
+    assert!(pulled.contains("*Plastic\n"));
+    let Some(frd) = run_ccx("druck-nur-zug", &pulled) else {
+        return;
+    };
+    // Pulled away, only the springs hold the block.
+    let lift = mean_top(&blocks, &frd, "U3");
+    assert!((lift - 0.1).abs() < 0.002, "{lift}");
+    let pushed = write_inp(&blocks.mesh, &support([0.0, 0.0, -100.0]), "").unwrap();
+    let frd = run_ccx("druck-nur-druck", &pushed).unwrap();
+    // Pushed down, the gaps carry the load.
+    let sink = mean_top(&blocks, &frd, "U3");
+    assert!(sink.abs() < 0.002, "{sink}");
 }

@@ -42,6 +42,12 @@ pub enum Icon {
     Sound,
     /// Half a cube with its cut face, for the section view.
     SectionView,
+    /// Three blocks of a stack pulled apart, for the exploded view.
+    ExplodedView,
+    /// A shape and its mirror image at a dashed plane: PrePoMax's result transformations.
+    Transformation,
+    /// Cross of a remove button.
+    Remove,
 }
 
 /// Flat toolbar button in the Windows style: frame only while hovered or checked.
@@ -282,6 +288,7 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
         Icon::FeatureEdges => cube(shapes, r, None, false),
         Icon::MeshEdges => cube(shapes, r, None, true),
         Icon::SectionView => section_cube(shapes, r),
+        Icon::ExplodedView => exploded_blocks(shapes, r),
         Icon::Animate => {
             let green = Color32::from_rgb(40, 150, 60);
             polygon(
@@ -368,6 +375,29 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
                 line(shapes, &arc, 1.3, ACCENT);
             }
         }
+        Icon::Transformation => {
+            // The original filled, its mirror image as an outline.
+            let shape = |s: f32| {
+                vec![
+                    p(8.0 - s * 1.5, 3.0),
+                    p(8.0 - s * 6.5, 6.0),
+                    p(8.0 - s * 6.5, 13.0),
+                    p(8.0 - s * 1.5, 13.0),
+                ]
+            };
+            polygon(shapes, shape(1.0), ACCENT, OUTLINE);
+            // Reversed, so that the mirror image keeps the winding egui expects.
+            let mirrored = shape(-1.0).into_iter().rev().collect();
+            polygon(shapes, mirrored, FACE, OUTLINE);
+            for y in [1.0f32, 4.5, 8.0, 11.5] {
+                line(shapes, &[p(8.0, y), p(8.0, y + 2.0)], 1.2, OUTLINE);
+            }
+        }
+        Icon::Remove => {
+            let color = Color32::from_rgb(50, 50, 50);
+            line(shapes, &[p(3.5, 3.5), p(12.5, 12.5)], 2.2, color);
+            line(shapes, &[p(12.5, 3.5), p(3.5, 12.5)], 2.2, color);
+        }
         Icon::First | Icon::Previous | Icon::Next | Icon::Last => {
             let forward = matches!(icon, Icon::Next | Icon::Last);
             let s = if forward { 1.0 } else { -1.0 };
@@ -442,6 +472,47 @@ fn section_cube(shapes: &mut Vec<Shape>, r: Rect) {
         closed.push(points[0]);
         line(shapes, &closed, 1.0, OUTLINE);
     }
+}
+
+/// A base plate with two blocks lifted off it along a blue arrow, PrePoMax's exploded view.
+fn exploded_blocks(shapes: &mut Vec<Shape>, r: Rect) {
+    let c = r.center();
+    let s = 5.0;
+    let project = |[x, y, z]: [f32; 3]| c + vec2((x - z) * 0.866 * s, ((x + z) * 0.5 - y) * s);
+    // A box from `min` to `max` in the units of `s`, with its three visible faces.
+    let block = |shapes: &mut Vec<Shape>, min: [f32; 3], max: [f32; 3], fill: Color32| {
+        let [x0, y0, z0] = min;
+        let [x1, y1, z1] = max;
+        let faces = [
+            [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]],
+            [[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]],
+            [[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]],
+        ];
+        for face in faces {
+            let points = face.map(project).to_vec();
+            polygon(shapes, points.clone(), fill, Color32::TRANSPARENT);
+            let mut closed = points.clone();
+            closed.push(points[0]);
+            line(shapes, &closed, 1.0, OUTLINE);
+        }
+    };
+    block(shapes, [-0.9, -1.6, -0.9], [0.9, -1.1, 0.9], FACE);
+    block(shapes, [-0.5, -0.5, -0.5], [0.5, 0.0, 0.5], ACCENT);
+    block(shapes, [-0.7, 0.8, -0.7], [0.7, 1.2, 0.7], FACE);
+    // The arrow along which the blocks come off, beside the stack.
+    let arrow_color = Color32::from_rgb(0, 120, 215);
+    let (bottom, top) = (project([1.6, -0.9, -0.4]), project([1.6, 1.0, -0.4]));
+    line(shapes, &[bottom, top + vec2(0.0, 2.0)], 1.2, arrow_color);
+    polygon(
+        shapes,
+        vec![
+            top + vec2(0.0, -1.0),
+            top + vec2(2.2, 2.5),
+            top + vec2(-2.2, 2.5),
+        ],
+        arrow_color,
+        arrow_color,
+    );
 }
 
 fn cube(shapes: &mut Vec<Shape>, r: Rect, view: Option<ViewIcon>, grid: bool) {

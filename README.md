@@ -37,6 +37,17 @@ cargo run --release -- testdata/platte_mit_loch.step
 
 Unter Linux braucht das Programm zur Laufzeit `libxkbcommon-x11` (X11) bzw. `libxkbcommon` (Wayland) sowie einen Vulkan- oder OpenGL-Treiber. Die meisten Desktop-Installationen bringen das bereits mit.
 
+### Windows-Installer
+
+Der Installer (`prepolix-<version>-setup.exe`, NSIS) wird unter Linux gebaut: `prepolix.exe` entsteht per Cross-Compile mit MinGW, dazu kommen die Gmsh-DLL, das Programmsymbol und die Lizenztexte. Er installiert nach `C:\Program Files\prepolix`, legt einen Startmenü-Eintrag an (Desktop-Symbol optional), verknüpft auf Wunsch `.plx`-Projekte und trägt sich unter *Apps* zum Deinstallieren ein. CalculiX gehört nicht dazu.
+
+```sh
+sudo apt install gcc-mingw-w64-x86-64 nsis
+scripts/build_windows_installer.sh     # -> target/windows-installer/
+```
+
+Ein Tag `v*` baut den Installer über den Workflow *Release* und hängt ihn an das GitHub-Release; per *Run workflow* entsteht er als Artefakt. Unter `C:\Program Files` darf prepolix ohne Administratorrechte nicht schreiben, das Arbeitsverzeichnis für CalculiX liegt dann in `%TEMP%\prepolix`.
+
 ## Bedienung der 3D-Ansicht
 
 Wie in PrePoMax:

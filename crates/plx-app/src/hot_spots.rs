@@ -30,9 +30,11 @@ pub fn preview(model: &Model, hot_spot: &HotSpot) -> Vec<Vec<Vec3>> {
     paths
         .iter()
         .map(|path| {
+            // The path moves with its part in an exploded view.
+            let offset = model.explosion_offset(path.index).as_vec3();
             std::iter::once(path.position)
                 .chain(path.points.iter().map(|p| p.position))
-                .map(|p| model.to_render(p))
+                .map(|p| model.to_render(p) + offset)
                 .collect()
         })
         .collect()
