@@ -88,6 +88,16 @@ impl Analysis {
         })
     }
 
+    /// Adds a line of prepolix's own to the monitor output.
+    pub fn note(&mut self, line: String) {
+        self.output.push(line);
+    }
+
+    /// The solver output collected so far.
+    pub fn output(&self) -> &[String] {
+        &self.output
+    }
+
     pub fn is_running(&self) -> bool {
         self.finished.is_none()
     }

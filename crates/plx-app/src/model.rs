@@ -9,7 +9,7 @@ use plx_mesh::{ElementId, FeMesh, NodeId, PartSkin, extract_part_skin};
 use plx_mesher::{CadEntity, GeometryDisplay};
 #[cfg(test)]
 use plx_model::SectionKind;
-use plx_model::{FeModel, Geometry, UnitSystem};
+use plx_model::{FeModel, Finding, Geometry, MeshCheck, UnitSystem};
 use plx_render::contour::normalize;
 use plx_render::{
     ClipPlane, RenderMesh, SectionCells, SectionValues, Vertex, lighten, part_color,
@@ -90,6 +90,15 @@ pub struct Model {
     /// Lookups to the CAD entities of a mesh generated from geometry, built when first
     /// needed.
     cad_index: std::sync::OnceLock<crate::cad_selection::CadIndex>,
+    /// The model checks of the last FE model checked, see [`Model::findings`].
+    checks: std::sync::Mutex<Option<Checks>>,
+}
+
+/// Findings of the model checks with what they were computed for.
+struct Checks {
+    mesh: MeshCheck,
+    fe: FeModel,
+    findings: Vec<Finding>,
 }
 
 /// Which nodes belong to which part; a node shared by parts belongs to the first of them.
@@ -339,6 +348,7 @@ impl Model {
             section_cells: Default::default(),
             explosion: Explosion::default(),
             part_nodes: Default::default(),
+            checks: Default::default(),
             cad_index: Default::default(),
         };
         let meshes = model.render_meshes();
@@ -388,6 +398,7 @@ impl Model {
         self.highlight = Highlight::default();
         self.section_cells = Default::default();
         self.part_nodes = Default::default();
+        self.checks = Default::default();
         self.cad_index = Default::default();
         // The exploded view stays on and is laid out anew for the new mesh.
         self.explosion.clear_layout();
@@ -397,6 +408,31 @@ impl Model {
         } else {
             self.explosion.show(Vec::new(), false);
         }
+    }
+
+    /// Problems of the FE model that make CalculiX abort or give useless results. The checks
+    /// run again when the FE model changed; the part that depends on the mesh only once per
+    /// mesh.
+    pub fn findings(&self) -> Vec<Finding> {
+        let mut cache = self.checks.lock().unwrap_or_else(|e| e.into_inner());
+        let space = self.fe.properties.space;
+        if let Some(checks) = cache.as_ref()
+            && checks.fe == self.fe
+            && checks.mesh.is_current(&self.mesh, space)
+        {
+            return checks.findings.clone();
+        }
+        let mesh = match cache.take() {
+            Some(checks) if checks.mesh.is_current(&self.mesh, space) => checks.mesh,
+            _ => MeshCheck::new(&self.mesh, space),
+        };
+        let findings = self.fe.check(&self.mesh, &mesh);
+        *cache = Some(Checks {
+            mesh,
+            fe: self.fe.clone(),
+            findings: findings.clone(),
+        });
+        findings
     }
 
     pub fn cad_index(&self) -> &crate::cad_selection::CadIndex {
