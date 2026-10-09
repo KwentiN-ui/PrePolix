@@ -3,6 +3,7 @@
 mod analysis;
 mod animation;
 mod app;
+mod cad_selection;
 mod constraint_dialog;
 mod contact_search;
 mod contacts;

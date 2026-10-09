@@ -212,7 +212,14 @@ impl PrepolixApp {
             loading: None,
         };
         // Every file on the command line is opened in turn, e.g. a model and its results.
-        let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+        let mut paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+        // Without files on the command line, the project open at the last exit is reopened.
+        if paths.is_empty() {
+            let last: Option<PathBuf> = cc
+                .storage
+                .and_then(|s| eframe::get_value(s, LAST_PROJECT_KEY));
+            paths.extend(last.filter(|path| path.is_file()));
+        }
         if !paths.is_empty() {
             let (sender, ctx) = (app.load_events.0.clone(), cc.egui_ctx.clone());
             let units = app.workbench.import_units();
@@ -606,16 +613,12 @@ fn load_in_background(
     ctx.request_repaint();
 }
 
-/// Whether a region of the FE model consists of picked nodes or element faces, which a new
-/// mesh does not keep.
-fn picks_mesh_entities(fe: &plx_model::FeModel) -> bool {
-    use plx_model::Region;
-    let picked = |region: &Region| matches!(region, Region::Nodes(_) | Region::Faces(_));
-    fe.sections.iter().any(|s| picked(&s.region))
-        || fe.steps.iter().any(|step| {
-            step.boundary_conditions.iter().any(|b| picked(&b.region))
-                || step.loads.iter().any(|l| picked(&l.region))
-        })
+/// How many regions of the FE model consist of node or element numbers that a new mesh no
+/// longer has. Regions picked on the geometry are found on the new mesh again.
+fn lost_selections(fe: &plx_model::FeModel, mesh: &plx_mesh::FeMesh) -> usize {
+    fe.regions()
+        .filter(|r| r.by_mesh_ids() && r.missing_reference(mesh).is_some())
+        .count()
 }
 
 /// File dialog filter of the CAD formats Gmsh imports.
@@ -636,9 +639,13 @@ const STANDARD_VIEWS: [(StandardView, &str); 7] = [
     (StandardView::Isometric, "Isometrisch"),
 ];
 
+/// Storage key of the project file open at exit, reopened at the next start.
+const LAST_PROJECT_KEY: &str = "last_project";
+
 impl eframe::App for PrepolixApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, settings::STORAGE_KEY, &self.workbench.settings);
+        eframe::set_value(storage, LAST_PROJECT_KEY, &self.workbench.last_project());
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1713,13 +1720,12 @@ impl Workbench {
                     mesh = plx_mesher::merge_part(&mesh, part.mesh);
                 }
                 model.set_mesh(mesh);
-                if had_mesh && picks_mesh_entities(&model.fe) {
-                    self.output.push(
-                        "Hinweis: Ausgewählte Knoten und Elementflächen eines neu vernetzten \
-                         Parts beziehen sich noch auf das alte Netz und müssen neu ausgewählt \
-                         werden"
-                            .into(),
-                    );
+                let lost = lost_selections(&model.fe, &model.mesh);
+                if had_mesh && lost > 0 {
+                    self.output.push(format!(
+                        "Hinweis: {lost} Auswahlen aus Knoten- oder Elementnummern beziehen \
+                         sich auf das alte Netz und müssen neu ausgewählt werden"
+                    ));
                 }
                 self.output.push(format!(
                     "Netz erzeugt: {} Knoten, {} Elemente, {} Parts ({} ms)",
@@ -1796,6 +1802,11 @@ impl Workbench {
         for (item, label, enabled) in [
             (NewItem::Material, "Material erstellen …", true),
             (NewItem::Section, "Section erstellen …", true),
+            (
+                NewItem::InitialCondition,
+                "Anfangsbedingung erstellen …",
+                true,
+            ),
             (NewItem::Step, "Step erstellen …", true),
             (
                 NewItem::BoundaryCondition(last_step.unwrap_or(0)),
@@ -1999,6 +2010,15 @@ impl Workbench {
         {
             self.open_results = Some(path);
         }
+    }
+
+    /// The project file of the open model, if it was opened from or saved to one that exists.
+    /// Unsaved models and models from input or result files are not reopened at the next start.
+    fn last_project(&self) -> Option<PathBuf> {
+        self.model
+            .as_ref()
+            .filter(|model| model.is_project() && model.path.is_file())
+            .map(|model| model.path.clone())
     }
 
     /// Saves mesh and FE model as a project, to the project file it came from, or to a file
@@ -2592,8 +2612,18 @@ impl Workbench {
         let Some(geometry) = &model.geometry else {
             return;
         };
-        let smaller = match plx_mesher::delete_part(geometry, &name) {
-            Ok(smaller) => smaller,
+        let smaller = match plx_mesher::delete_part_renumbered(geometry, &name) {
+            Ok((smaller, tags)) => {
+                // Gmsh numbers the faces, edges and vertices anew; the mesh and the
+                // selections on the geometry follow.
+                if model.has_cad() {
+                    let mut mesh = model.mesh.clone();
+                    mesh.cad = mesh.cad.renumbered(&tags);
+                    model.fe.renumber_cad(&tags);
+                    model.set_mesh(mesh);
+                }
+                smaller
+            }
             Err(error) => {
                 self.output
                     .push(format!("{name} kann nicht gelöscht werden: {error}"));

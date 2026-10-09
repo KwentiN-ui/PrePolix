@@ -12,9 +12,9 @@ use std::fmt::Write as _;
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
     BoundaryKind, Constraint, ContactMethod, ContactPair, FeModel, FieldOutput, FrequencyStep,
-    GapConductance, Incrementation, InteractionProperty, LoadKind, ModelSpace, OutputKind, Region,
-    Section, SectionKind, StaticStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction,
-    UserKeyword, line_tangent,
+    GapConductance, HeatTransferStep, Incrementation, InitialConditionKind, InteractionProperty,
+    LoadKind, ModelSpace, OutputKind, Region, Section, SectionKind, StaticStep, Step, StepKind,
+    SurfaceBehavior, SurfaceInteraction, UserKeyword, line_tangent,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -243,10 +243,21 @@ pub fn model_keywords(
     materials.extend(generated.material);
     let interactions = model.surface_interactions.iter().map(interaction).collect();
     let contact_pairs = contact_pairs(&mut sets, model)?;
+    let initial_conditions = initial_conditions(&mut sets, model)?;
+    let flux_kinds = FluxKinds::of(model);
     let steps = model
         .steps
         .iter()
-        .map(|step| write_step(&mut sets, step, generated.boundary.as_ref(), space, &lines))
+        .map(|step| {
+            write_step(
+                &mut sets,
+                step,
+                generated.boundary.as_ref(),
+                space,
+                &lines,
+                flux_kinds,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut nodes = String::from("*Node\n");
@@ -299,7 +310,7 @@ pub fn model_keywords(
         Keyword::title("Node sets", node_sets),
         Keyword::title("Element sets", element_sets),
         Keyword::title("Surfaces", surfaces),
-        empty("Physical constants"),
+        Keyword::title("Physical constants", physical_constants(model)),
         empty("Coordinate systems"),
         Keyword::title("Materials", materials),
         Keyword::title("Sections", sections),
@@ -308,7 +319,7 @@ pub fn model_keywords(
         Keyword::title("Surface interactions", interactions),
         Keyword::title("Contact pairs", contact_pairs),
         empty("Amplitudes"),
-        empty("Initial conditions"),
+        Keyword::title("Initial conditions", initial_conditions),
         Keyword::title("Steps", steps),
     ])
 }
@@ -611,10 +622,14 @@ impl<'a> Sets<'a> {
                 item: item.to_owned(),
                 surface: surface.clone(),
             }),
-            Region::Faces(faces) if !faces.is_empty() => {
+            Region::Faces(_) | Region::Geometry(_) => {
+                let faces = region.faces(self.mesh);
+                if faces.is_empty() {
+                    return Err(empty(item, "Elementflächen"));
+                }
                 let postfix = format!("{}_{side}", name(item));
                 let surface = self.free_name("Internal_Selection", &postfix);
-                self.add_face_surface(&surface, faces);
+                self.add_face_surface(&surface, &faces);
                 Ok(surface)
             }
             _ => Err(empty(item, "Elementflächen")),
@@ -629,10 +644,13 @@ impl<'a> Sets<'a> {
                     return Ok(sides.clone());
                 }
             }
-            Region::Faces(faces) if !faces.is_empty() => {
-                let surface = self.free_name("Internal_Selection", &name(item));
-                self.add_face_surface(&surface, faces);
-                return Ok(self.surface_sets[&surface].0.clone());
+            Region::Faces(_) | Region::Geometry(_) => {
+                let faces = region.faces(self.mesh);
+                if !faces.is_empty() {
+                    let surface = self.free_name("Internal_Selection", &name(item));
+                    self.add_face_surface(&surface, &faces);
+                    return Ok(self.surface_sets[&surface].0.clone());
+                }
             }
             _ => {}
         }
@@ -658,10 +676,69 @@ fn materials(model: &FeModel) -> Vec<Keyword> {
                     "*Elastic\n{young}, {poisson}\n"
                 )));
             }
+            // Thermal properties in PrePoMax's order.
+            if let Some(expansion) = material.expansion {
+                let mut out = String::from("*Expansion");
+                if expansion.zero_temperature != 0.0 {
+                    let _ = write!(out, ", Zero={}", number(expansion.zero_temperature));
+                }
+                let _ = writeln!(out, "\n{}", number(expansion.coefficient));
+                properties.push(Keyword::generated(out));
+            }
+            if let Some(conductivity) = material.conductivity {
+                properties.push(Keyword::generated(format!(
+                    "*Conductivity\n{}\n",
+                    number(conductivity)
+                )));
+            }
+            if let Some(specific_heat) = material.specific_heat {
+                properties.push(Keyword::generated(format!(
+                    "*Specific heat\n{}\n",
+                    number(specific_heat)
+                )));
+            }
             let header = format!("*Material, Name={}\n", name(&material.name));
             Keyword::parent(header, properties)
         })
         .collect()
+}
+
+/// `*Physical constants` as PrePoMax's `CalPhysicalConstants` writes it, if any is defined.
+fn physical_constants(model: &FeModel) -> Vec<Keyword> {
+    let properties = &model.properties;
+    let mut out = String::from("*Physical constants");
+    if let Some(zero) = properties.absolute_zero {
+        let _ = write!(out, ", Absolute zero={}", number(zero));
+    }
+    if let Some(sigma) = properties.stefan_boltzmann {
+        let _ = write!(out, ", Stefan Boltzmann={}", number(sigma));
+    }
+    if properties.absolute_zero.is_none() && properties.stefan_boltzmann.is_none() {
+        return Vec::new();
+    }
+    out.push('\n');
+    vec![Keyword::generated(out)]
+}
+
+/// Initial temperatures as PrePoMax's `CalInitialTemperature` writes them.
+fn initial_conditions(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+    let mut keywords = Vec::new();
+    for condition in &model.initial_conditions {
+        if !condition.active {
+            keywords.push(deactivated(&condition.name));
+            continue;
+        }
+        let set = sets.node_set(&condition.name, &condition.region)?;
+        let out = match condition.kind {
+            InitialConditionKind::Temperature(t) => format!(
+                "** Name: {}\n*Initial conditions, Type=Temperature\n{set}, {}\n",
+                condition.name,
+                number(t)
+            ),
+        };
+        keywords.push(Keyword::generated(out));
+    }
+    Ok(keywords)
 }
 
 fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
@@ -923,6 +1000,7 @@ fn write_step(
     extra_boundary: Option<&Keyword>,
     space: ModelSpace,
     lines: &LineElements,
+    flux_kinds: FluxKinds,
 ) -> Result<Keyword, WriteError> {
     // Nodes of 2D models move in the x-y plane only; CalculiX fails on rotations there.
     let dofs = if space.is_2d() { 2 } else { 6 };
@@ -932,10 +1010,16 @@ fn write_step(
     let (header, procedure) = match &step.kind {
         StepKind::Static(settings) => static_step(settings),
         StepKind::Frequency(settings) => frequency_step(settings),
+        StepKind::HeatTransfer(settings) => heat_transfer_step(settings, "*Heat transfer", false),
+        StepKind::CoupledTempDisp(settings) => {
+            heat_transfer_step(settings, "*Coupled temperature-displacement", true)
+        }
     };
     let mut boundaries = vec![Keyword::generated("*Boundary, op=New\n".into())];
     for bc in &step.boundary_conditions {
-        if !bc.active {
+        // A step leaves out what it cannot take, like a deactivated item: displacements in
+        // a heat transfer step, temperatures in a static one.
+        if !bc.active || !step.kind.supports_boundary(&bc.kind) {
             boundaries.push(deactivated(&bc.name));
             continue;
         }
@@ -958,22 +1042,42 @@ fn write_step(
                     }
                 }
             }
+            BoundaryKind::Temperature(t) => {
+                let _ = writeln!(out, "{set}, 11, 11, {}", number(t));
+            }
         }
         boundaries.push(Keyword::generated(out));
     }
     // Boundary conditions that constraints need, PrePoMax's additional boundary conditions.
-    boundaries.extend(extra_boundary.cloned());
+    if step.kind.is_mechanical() {
+        boundaries.extend(extra_boundary.cloned());
+    }
     let mut loads = Vec::new();
-    // Like PrePoMax, a step that takes no loads gets none written, not even the reset.
-    let step_loads: &[_] = if step.kind.supports_loads() {
-        loads.push(Keyword::generated("*Cload, op=New\n".into()));
-        loads.push(Keyword::generated("*Dload, op=New\n".into()));
+    // Like PrePoMax, a step resets the loads it takes; one that takes no loads gets none
+    // written, not even the reset. Distributed fluxes, films and radiation are reset only
+    // when the model has them.
+    let kind = &step.kind;
+    let resets = [
+        ("Cload", kind.supports_load(&LoadKind::Pressure(0.0))),
+        ("Dload", kind.supports_load(&LoadKind::Pressure(0.0))),
+        (
+            "Cflux",
+            kind.supports_load(&LoadKind::ConcentratedFlux(0.0)),
+        ),
+        ("Dflux", kind.is_thermal() && flux_kinds.distributed),
+        ("Film", kind.is_thermal() && flux_kinds.film),
+        ("Radiate", kind.is_thermal() && flux_kinds.radiation),
+    ];
+    for (keyword, _) in resets.into_iter().filter(|(_, reset)| *reset) {
+        loads.push(Keyword::generated(format!("*{keyword}, op=New\n")));
+    }
+    let step_loads: &[_] = if kind.supports_loads() {
         &step.loads
     } else {
         &[]
     };
     for load in step_loads {
-        if !load.active {
+        if !load.active || !kind.supports_load(&load.kind) {
             loads.push(deactivated(&load.name));
             continue;
         }
@@ -1010,6 +1114,34 @@ fn write_step(
                     }
                 }
             }
+            LoadKind::ConcentratedFlux(flux) => {
+                let set = sets.node_set(&load.name, &load.region)?;
+                let _ = writeln!(out, "*Cflux\n{set}, 11, {}", number(flux));
+            }
+            LoadKind::SurfaceFlux(flux) => {
+                out.push_str("*Dflux\n");
+                for (set, face) in sets.face_sets(&load.name, &load.region)? {
+                    let _ = writeln!(out, "{set}, S{face}, {}", number(flux));
+                }
+            }
+            LoadKind::BodyFlux(flux) => {
+                let set = sets.element_set(&load.name, &load.region)?;
+                let _ = writeln!(out, "*Dflux\n{set}, BF, {}", number(flux));
+            }
+            LoadKind::Film { sink, coefficient } => {
+                out.push_str("*Film\n");
+                for (set, face) in sets.face_sets(&load.name, &load.region)? {
+                    let (sink, h) = (number(sink), number(coefficient));
+                    let _ = writeln!(out, "{set}, F{face}, {sink}, {h}");
+                }
+            }
+            LoadKind::Radiation { sink, emissivity } => {
+                out.push_str("*Radiate\n");
+                for (set, face) in sets.face_sets(&load.name, &load.region)? {
+                    let (sink, e) = (number(sink), number(emissivity));
+                    let _ = writeln!(out, "{set}, R{face}, {sink}, {e}");
+                }
+            }
         }
         loads.push(Keyword::generated(out));
     }
@@ -1043,6 +1175,8 @@ fn deactivated_step(step: &Step) -> Keyword {
     let procedure = match step.kind {
         StepKind::Static(_) => "StaticStep",
         StepKind::Frequency(_) => "FrequencyStep",
+        StepKind::HeatTransfer(_) => "HeatTransferStep",
+        StepKind::CoupledTempDisp(_) => "CoupledTempDispStep",
     };
     fn all<'a>(names: impl Iterator<Item = &'a str>) -> Vec<Keyword> {
         names.map(deactivated).collect()
@@ -1150,21 +1284,71 @@ fn polygon_area(corners: &[[f64; 3]]) -> f64 {
     0.5 * (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt()
 }
 
+/// Which kinds of heat loads the model has in any step: PrePoMax resets distributed fluxes,
+/// films and radiation only then.
+#[derive(Clone, Copy, Debug, Default)]
+struct FluxKinds {
+    distributed: bool,
+    film: bool,
+    radiation: bool,
+}
+
+impl FluxKinds {
+    fn of(model: &FeModel) -> Self {
+        let mut kinds = Self::default();
+        for load in model.steps.iter().flat_map(|s| &s.loads) {
+            match load.kind {
+                LoadKind::SurfaceFlux(_) | LoadKind::BodyFlux(_) => kinds.distributed = true,
+                LoadKind::Film { .. } => kinds.film = true,
+                LoadKind::Radiation { .. } => kinds.radiation = true,
+                _ => {}
+            }
+        }
+        kinds
+    }
+}
+
 /// The `*Step` line and the procedure keyword of a static step.
 fn static_step(settings: &StaticStep) -> (String, String) {
+    let mut keyword = String::from("*Static");
+    if let Some(solver) = settings.solver.keyword() {
+        let _ = write!(keyword, ", Solver={solver}");
+    }
+    incremented_step(settings, keyword, settings.nlgeom)
+}
+
+/// The `*Step` line and the procedure keyword of a heat transfer or coupled step, as
+/// PrePoMax's `CalHeatTransferStep` and `CalCoupledTempDispStep` write them.
+fn heat_transfer_step(
+    settings: &HeatTransferStep,
+    keyword: &str,
+    coupled: bool,
+) -> (String, String) {
+    let increments = &settings.increments;
+    let mut keyword = keyword.to_string();
+    if let Some(solver) = increments.solver.keyword() {
+        let _ = write!(keyword, ", Solver={solver}");
+    }
+    if settings.steady_state {
+        keyword.push_str(", Steady state");
+    }
+    if let Some(deltmx) = settings.deltmx.filter(|_| !settings.steady_state) {
+        let _ = write!(keyword, ", Deltmx={}", number(deltmx));
+    }
+    incremented_step(increments, keyword, coupled && increments.nlgeom)
+}
+
+/// The `*Step` line and the procedure with its increments, for steps with a time period.
+fn incremented_step(settings: &StaticStep, keyword: String, nlgeom: bool) -> (String, String) {
     let default = settings.incrementation == Incrementation::Default;
     let mut header = String::from("*Step");
-    if settings.nlgeom {
+    if nlgeom {
         header.push_str(", Nlgeom");
     }
     if !default {
         let _ = write!(header, ", Inc={}", settings.max_increments);
     }
     header.push('\n');
-    let mut keyword = String::from("*Static");
-    if let Some(solver) = settings.solver.keyword() {
-        let _ = write!(keyword, ", Solver={solver}");
-    }
     let procedure = match settings.incrementation {
         Incrementation::Default => format!("{keyword}\n"),
         Incrementation::Automatic => format!(

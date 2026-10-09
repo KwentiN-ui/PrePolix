@@ -87,6 +87,9 @@ pub struct Model {
     pub explosion: Explosion,
     /// Node indices of each part and the part of each node, built when first needed.
     part_nodes: std::sync::OnceLock<PartNodes>,
+    /// Lookups to the CAD entities of a mesh generated from geometry, built when first
+    /// needed.
+    cad_index: std::sync::OnceLock<crate::cad_selection::CadIndex>,
 }
 
 /// Which nodes belong to which part; a node shared by parts belongs to the first of them.
@@ -328,6 +331,7 @@ impl Model {
             section_cells: Default::default(),
             explosion: Explosion::default(),
             part_nodes: Default::default(),
+            cad_index: Default::default(),
         };
         let meshes = model.render_meshes();
         for (part, render) in model.parts.iter_mut().zip(&meshes) {
@@ -376,6 +380,7 @@ impl Model {
         self.highlight = Highlight::default();
         self.section_cells = Default::default();
         self.part_nodes = Default::default();
+        self.cad_index = Default::default();
         // The exploded view stays on and is laid out anew for the new mesh.
         self.explosion.clear_layout();
         if let Some(parameters) = self.explosion.applied.clone() {
@@ -384,6 +389,15 @@ impl Model {
         } else {
             self.explosion.show(Vec::new(), false);
         }
+    }
+
+    pub fn cad_index(&self) -> &crate::cad_selection::CadIndex {
+        (self.cad_index).get_or_init(|| crate::cad_selection::CadIndex::new(&self.mesh))
+    }
+
+    /// Whether the mesh was generated from CAD geometry and knows where its entities lie.
+    pub fn has_cad(&self) -> bool {
+        !self.mesh.cad.is_empty()
     }
 
     fn part_nodes(&self) -> &PartNodes {
@@ -1287,6 +1301,8 @@ mod tests {
         let reopened = load(&path, UnitSystem::MmTonSC).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(reopened.model.geometry, Some(geometry));
+        assert!(!model.mesh.cad.is_empty());
+        assert_eq!(reopened.model.mesh.cad, model.mesh.cad);
         assert_eq!(
             reopened.model.mesh.element_count(),
             model.mesh.element_count()
@@ -1345,6 +1361,7 @@ mod tests {
                     young: 210000.0,
                     poisson: 0.3,
                 }),
+                ..Default::default()
             }],
             sections: vec![Section {
                 name: "Section-1".into(),

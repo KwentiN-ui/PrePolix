@@ -3,13 +3,33 @@ use serde::{Deserialize, Serialize};
 
 use crate::UnitSystem;
 
-/// What the model is about as a whole, PrePoMax's model properties: the model space and the
-/// unit system.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// What the model is about as a whole, PrePoMax's model properties: the model space, the
+/// unit system and the physical constants.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelProperties {
     pub space: ModelSpace,
     pub units: UnitSystem,
+    /// Absolute zero on the model's temperature scale (`*PHYSICAL CONSTANTS`); radiation
+    /// needs it. `None` leaves it undefined, as in PrePoMax.
+    pub absolute_zero: Option<f64>,
+    /// Stefan-Boltzmann constant in the model's units; radiation needs it.
+    pub stefan_boltzmann: Option<f64>,
+}
+
+impl ModelProperties {
+    /// Absolute zero and the Stefan-Boltzmann constant in the units of `units`; `None`
+    /// without units.
+    pub fn standard_constants(units: UnitSystem) -> Option<(f64, f64)> {
+        use crate::Quantity;
+        if !units.has_units() {
+            return None;
+        }
+        let zero = crate::UnitSystem::MKgSC.convert(-273.15, Quantity::Temperature, units);
+        let sigma =
+            crate::UnitSystem::MKgSC.convert(5.670_374_419e-8, Quantity::StefanBoltzmann, units);
+        Some((zero, sigma))
+    }
 }
 
 /// Whether the model is a solid in space or a cross-section in the x-y plane, PrePoMax's

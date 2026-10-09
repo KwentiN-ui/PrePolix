@@ -3,8 +3,9 @@
 
 use crate::units::{Quantity, UnitSystem};
 use crate::{
-    BoundaryKind, Constraint, FeModel, GapConductance, Geometry, InteractionProperty, LoadKind,
-    Material, MeshSetupKind, MeshingParameters, StepKind, SurfaceBehavior,
+    BoundaryKind, Constraint, FeModel, GapConductance, Geometry, InitialConditionKind,
+    InteractionProperty, LoadKind, Material, MeshSetupKind, MeshingParameters, StaticStep,
+    StepKind, SurfaceBehavior,
 };
 
 /// Converts values from one unit system into another.
@@ -69,17 +70,22 @@ impl FeModel {
         for pair in &mut self.contact_pairs {
             c.option(&mut pair.adjustment_size, Quantity::Length);
         }
+        c.option(&mut self.properties.absolute_zero, Quantity::Temperature);
+        c.option(
+            &mut self.properties.stefan_boltzmann,
+            Quantity::StefanBoltzmann,
+        );
+        for condition in &mut self.initial_conditions {
+            match &mut condition.kind {
+                InitialConditionKind::Temperature(t) => c.value(t, Quantity::Temperature),
+            }
+        }
         for step in &mut self.steps {
             match &mut step.kind {
-                StepKind::Static(s) => {
-                    for time in [
-                        &mut s.initial_increment,
-                        &mut s.time_period,
-                        &mut s.min_increment,
-                        &mut s.max_increment,
-                    ] {
-                        c.value(time, Quantity::Time);
-                    }
+                StepKind::Static(s) => s.convert_units(&c),
+                StepKind::HeatTransfer(h) | StepKind::CoupledTempDisp(h) => {
+                    h.increments.convert_units(&c);
+                    c.option(&mut h.deltmx, Quantity::TemperatureDifference);
                 }
                 StepKind::Frequency(f) => {
                     c.option(&mut f.lower_frequency, Quantity::Frequency);
@@ -87,15 +93,19 @@ impl FeModel {
                 }
             }
             for bc in &mut step.boundary_conditions {
-                if let BoundaryKind::Displacement(values) = &mut bc.kind {
-                    for (i, value) in values.iter_mut().enumerate() {
-                        let quantity = if i < 3 {
-                            Quantity::Length
-                        } else {
-                            Quantity::Angle
-                        };
-                        c.option(value, quantity);
+                match &mut bc.kind {
+                    BoundaryKind::Fixed => {}
+                    BoundaryKind::Displacement(values) => {
+                        for (i, value) in values.iter_mut().enumerate() {
+                            let quantity = if i < 3 {
+                                Quantity::Length
+                            } else {
+                                Quantity::Angle
+                            };
+                            c.option(value, quantity);
+                        }
                     }
+                    BoundaryKind::Temperature(t) => c.value(t, Quantity::Temperature),
                 }
             }
             for load in &mut step.loads {
@@ -104,6 +114,14 @@ impl FeModel {
                         c.all(force, Quantity::Force)
                     }
                     LoadKind::Pressure(pressure) => c.value(pressure, Quantity::Pressure),
+                    LoadKind::ConcentratedFlux(flux) => c.value(flux, Quantity::Power),
+                    LoadKind::SurfaceFlux(flux) => c.value(flux, Quantity::HeatFlux),
+                    LoadKind::BodyFlux(flux) => c.value(flux, Quantity::PowerPerVolume),
+                    LoadKind::Film { sink, coefficient } => {
+                        c.value(sink, Quantity::Temperature);
+                        c.value(coefficient, Quantity::HeatTransferCoefficient);
+                    }
+                    LoadKind::Radiation { sink, .. } => c.value(sink, Quantity::Temperature),
                 }
             }
         }
@@ -123,11 +141,30 @@ impl FeModel {
     }
 }
 
+impl StaticStep {
+    fn convert_units(&mut self, c: &Conversion) {
+        for time in [
+            &mut self.initial_increment,
+            &mut self.time_period,
+            &mut self.min_increment,
+            &mut self.max_increment,
+        ] {
+            c.value(time, Quantity::Time);
+        }
+    }
+}
+
 impl Material {
     pub fn convert_units(&mut self, c: &Conversion) {
         c.option(&mut self.density, Quantity::Density);
         if let Some(elastic) = &mut self.elastic {
             c.value(&mut elastic.young, Quantity::Pressure);
+        }
+        c.option(&mut self.conductivity, Quantity::ThermalConductivity);
+        c.option(&mut self.specific_heat, Quantity::SpecificHeat);
+        if let Some(expansion) = &mut self.expansion {
+            c.value(&mut expansion.coefficient, Quantity::ThermalExpansion);
+            c.value(&mut expansion.zero_temperature, Quantity::Temperature);
         }
     }
 }
@@ -234,6 +271,8 @@ mod tests {
                 young: 210_000.0,
                 poisson: 0.3,
             }),
+            conductivity: Some(50.0),
+            ..Material::default()
         });
         model.sections.push(Section {
             name: "Section-1".into(),
@@ -262,6 +301,8 @@ mod tests {
         let material = &model.materials[0];
         assert!(close(material.density.unwrap(), 7.85));
         assert!(close(material.elastic.unwrap().young, 2.1e8));
+        // 50 W/(m·K) is 50 mW/(mm·K) and 0.05 kW/(m·K).
+        assert!(close(material.conductivity.unwrap(), 0.05));
         assert!(close(model.sections[0].thickness, 0.005));
         let loads = &model.steps[0].loads;
         assert!(matches!(loads[0].kind, LoadKind::Pressure(p) if close(p, 2000.0)));

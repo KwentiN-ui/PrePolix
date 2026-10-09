@@ -306,6 +306,7 @@ fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
                 young: YOUNG,
                 poisson: POISSON,
             }),
+            ..Default::default()
         }],
         sections: vec![Section {
             name: "Section-1".into(),

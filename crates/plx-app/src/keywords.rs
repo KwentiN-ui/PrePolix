@@ -657,6 +657,7 @@ mod tests {
             name: "Steel".into(),
             density: Some(7.85e-9),
             elastic: None,
+            ..Default::default()
         });
         model.steps.push(plx_model::Step::new_static("Step-1"));
         KeywordEditor::new(&mesh, &model, "Test").unwrap()
