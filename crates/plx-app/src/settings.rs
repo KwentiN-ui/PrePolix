@@ -296,7 +296,5 @@ mod tests {
             .unwrap()
             .join("Temp");
         assert_eq!(dir, next_to_binary, "the test binary's folder is writable");
-        assert!(!is_writable(std::path::Path::new(
-        )));
     }
 }
