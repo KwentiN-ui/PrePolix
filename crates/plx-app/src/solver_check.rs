@@ -12,7 +12,7 @@ use plx_job::{Job, JobStatus};
 use plx_mesh::{Element, ElementId, ElementShape, FeMesh, NodeId, Part};
 use plx_model::{
     BoundaryCondition, BoundaryKind, Elastic, EquationSolver, FeModel, Load, LoadKind, Material,
-    Region, Section, Step,
+    Region, Section, SectionKind, Step,
 };
 
 const LENGTH: f64 = 100.0;
@@ -312,6 +312,7 @@ fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
             material: "Steel".into(),
             region: Region::Parts(vec!["BEAM".into()]),
             thickness: 1.0,
+            kind: SectionKind::Solid,
         }],
         steps: vec![step],
         user_keywords: Vec::new(),

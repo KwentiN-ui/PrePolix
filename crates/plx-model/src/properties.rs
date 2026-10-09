@@ -134,6 +134,11 @@ impl ModelSpace {
                 self.label()
             ));
         }
+        if family(ElementFamily::Line) {
+            return Err(
+                "Linien (Balken, Stäbe) lassen sich nur in 3D-Modellen vernetzen".into(),
+            );
+        }
         let Some((min, max)) = mesh.bounds() else {
             return Ok(());
         };

@@ -22,6 +22,7 @@ pub const CAD_EXTENSIONS: [&str; 5] = ["step", "stp", "iges", "igs", "brep"];
 
 /// Gmsh's element type numbers.
 const LINE2: i32 = 1;
+const LINE3: i32 = 8;
 const TRI3: i32 = 2;
 const QUAD4: i32 = 3;
 const TET4: i32 = 4;
@@ -162,16 +163,29 @@ pub fn generate_mesh(geometry: &Geometry) -> Result<GeneratedMesh, GmshError> {
     Ok(GeneratedMesh { mesh, warnings })
 }
 
-/// The names of the parts, one per solid and one per face outside the solids, as the
-/// display and the meshes name them.
+/// The names of the parts, one per solid, one per face outside the solids and one per edge
+/// outside the faces, as the display and the meshes name them.
 pub fn part_names(geometry: &Geometry) -> Result<Vec<String>, GmshError> {
     let file = TempFile::with_contents("brep", &geometry.brep)?;
     with_gmsh(|gmsh| {
         gmsh.import_shapes(&file.0)?;
         let mut names = solid_names(gmsh, &gmsh.entities(3)?)?;
         names.extend(shell_names(gmsh, &free_faces(gmsh)?)?);
+        names.extend(line_names(gmsh, &free_edges(gmsh)?)?);
         Ok(names)
     })
+}
+
+/// Edges that bound no face, the line parts of a geometry: wires of a STEP file that become
+/// beams or trusses.
+fn free_edges(gmsh: &Gmsh) -> Result<Vec<i32>, GmshError> {
+    let mut in_face = BTreeSet::new();
+    for face in gmsh.entities(2)? {
+        in_face.extend(gmsh.adjacencies(2, face)?.1);
+    }
+    Ok((gmsh.entities(1)?.into_iter())
+        .filter(|e| !in_face.contains(e))
+        .collect())
 }
 
 /// Faces that bound no solid, the shell parts of a geometry such as a 2D cross-section.
@@ -200,7 +214,11 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
         let volumes = gmsh.entities(3)?;
         let names = solid_names(gmsh, &volumes)?;
         let Some(index) = names.iter().position(|n| n == part) else {
-            return shell_part_mesh(gmsh, geometry, part);
+            let faces = free_faces(gmsh)?;
+            return match shell_names(gmsh, &faces)?.iter().position(|n| n == part) {
+                Some(index) => shell_part_mesh(gmsh, geometry, part, faces[index], &faces),
+                None => line_part_mesh(gmsh, geometry, part),
+            };
         };
         let volume = volumes[index];
         // The other solids go, so that only this one is meshed.
@@ -232,15 +250,13 @@ fn shell_part_mesh(
     gmsh: &Gmsh,
     geometry: &Geometry,
     part: &str,
+    face: i32,
+    free_faces: &[i32],
 ) -> Result<GeneratedMesh, GmshError> {
-    let faces = free_faces(gmsh)?;
-    let names = shell_names(gmsh, &faces)?;
-    let index = (names.iter().position(|n| n == part))
-        .ok_or_else(|| GmshError::Other(format!("Die Geometrie hat kein Part {part}")))?;
-    let face = faces[index];
     // Only the face stays, so that only it is meshed.
     let others: Vec<(i32, i32)> = (gmsh.entities(3)?.into_iter().map(|v| (3, v)))
-        .chain(faces.iter().filter(|&&f| f != face).map(|&f| (2, f)))
+        .chain(free_faces.iter().filter(|&&f| f != face).map(|&f| (2, f)))
+        .chain(free_edges(gmsh)?.into_iter().map(|e| (1, e)))
         .collect();
     if !others.is_empty() {
         gmsh.remove(&others)?;
@@ -290,6 +306,91 @@ fn shell_part_mesh(
             .map_err(|e| GmshError::Other(e.to_string()))?;
             part_elements.elements.push(id);
         }
+    }
+    if part_elements.elements.is_empty() {
+        return Err(GmshError::Other("Gmsh hat keine Elemente erzeugt".into()));
+    }
+    mesh.parts.push(part_elements);
+    Ok(GeneratedMesh {
+        mesh,
+        warnings: gmsh.warnings()?,
+    })
+}
+
+/// Meshes an edge outside the faces with 2- or 3-node lines, typed as beams (`B31`, `B32`);
+/// the section decides what CalculiX makes of them. The mesh holds the one part, numbered
+/// from 1.
+fn line_part_mesh(
+    gmsh: &Gmsh,
+    geometry: &Geometry,
+    part: &str,
+) -> Result<GeneratedMesh, GmshError> {
+    let edges = free_edges(gmsh)?;
+    let names = line_names(gmsh, &edges)?;
+    let index = (names.iter().position(|n| n == part))
+        .ok_or_else(|| GmshError::Other(format!("Die Geometrie hat kein Part {part}")))?;
+    let edge = edges[index];
+    // Only the edge stays, so that only it is meshed.
+    let others: Vec<(i32, i32)> = (gmsh.entities(3)?.into_iter().map(|v| (3, v)))
+        .chain(free_faces(gmsh)?.into_iter().map(|f| (2, f)))
+        .chain(edges.iter().filter(|&&e| e != edge).map(|&e| (1, e)))
+        .collect();
+    if !others.is_empty() {
+        gmsh.remove(&others)?;
+    }
+    let options = MeshOptions::of_part(geometry, part);
+    options.apply(gmsh)?;
+    for (_, local_edges, size) in geometry.local_sizes() {
+        if local_edges.contains(&edge) && size.is_finite() && size > 0.0 {
+            let field = gmsh.add_field("Constant")?;
+            gmsh.set_field_number(field, "VIn", size)?;
+            gmsh.set_field_number(field, "VOut", 1e22)?;
+            gmsh.set_field_number(field, "IncludeBoundary", 1.0)?;
+            gmsh.set_field_numbers(field, "CurvesList", &[f64::from(edge)])?;
+            gmsh.set_background_field(field)?;
+        }
+    }
+    gmsh.generate(1)?;
+    let coords = node_coords(gmsh)?;
+    let (gmsh_type, shape, type_name) = if options.order == 2 {
+        (LINE3, ElementShape::Line3, "B32")
+    } else {
+        (LINE2, ElementShape::Line2, "B31")
+    };
+    let mut mesh = FeMesh::default();
+    let mut part_elements = Part {
+        name: part.to_string(),
+        elements: Vec::new(),
+    };
+    let (_, nodes) = gmsh.elements(gmsh_type, edge)?;
+    for element in nodes.chunks_exact(shape.node_count()) {
+        // Gmsh lists the end nodes first and the midside node last; CalculiX wants the
+        // midside node in the middle.
+        let order: &[usize] = if shape == ElementShape::Line3 {
+            &[0, 2, 1]
+        } else {
+            &[0, 1]
+        };
+        let mut ids = Vec::with_capacity(element.len());
+        for &k in order {
+            let tag = element[k];
+            let position = coords
+                .get(&tag)
+                .ok_or_else(|| GmshError::Other(format!("Knoten {tag} fehlt")))?;
+            let id = node_id(tag)?;
+            mesh.set_node(id, *position);
+            ids.push(id);
+        }
+        let id = ElementId::try_from(mesh.element_count() + 1)
+            .map_err(|_| GmshError::Other("zu viele Elemente".into()))?;
+        mesh.add_element(Element {
+            id,
+            type_name: type_name.into(),
+            shape,
+            nodes: ids,
+        })
+        .map_err(|e| GmshError::Other(e.to_string()))?;
+        part_elements.elements.push(id);
     }
     if part_elements.elements.is_empty() {
         return Err(GmshError::Other("Gmsh hat keine Elemente erzeugt".into()));
@@ -651,6 +752,25 @@ fn shell_names(gmsh: &Gmsh, faces: &[i32]) -> Result<Vec<String>, GmshError> {
     Ok(names)
 }
 
+/// Names of the line parts like [`solid_names`], "LINE-n" where the file names none.
+fn line_names(gmsh: &Gmsh, edges: &[i32]) -> Result<Vec<String>, GmshError> {
+    let mut names = Vec::with_capacity(edges.len());
+    let mut used = BTreeSet::new();
+    for (index, &edge) in edges.iter().enumerate() {
+        let label = gmsh.entity_name(1, edge)?;
+        let base = calculix_name(label.rsplit('/').next().unwrap_or_default())
+            .unwrap_or_else(|| format!("LINE-{}", index + 1));
+        let mut name = base.clone();
+        let mut n = 2;
+        while !used.insert(name.clone()) {
+            name = format!("{base}-{n}");
+            n += 1;
+        }
+        names.push(name);
+    }
+    Ok(names)
+}
+
 /// A name CalculiX accepts: letters, digits, `-` and `_`, upper case, at most 60 characters.
 fn calculix_name(label: &str) -> Option<String> {
     let name: String = label
@@ -673,18 +793,20 @@ fn calculix_name(label: &str) -> Option<String> {
 }
 
 /// Builds the display mesh from Gmsh's surface mesh: per solid its faces as triangles and its
-/// edges as lines. Faces outside any solid form one more part.
+/// edges as lines. Faces outside any solid form one more part each, and so do edges outside
+/// any face.
 fn display_mesh(gmsh: &Gmsh) -> Result<GeometryDisplay, GmshError> {
     let coords = node_coords(gmsh)?;
     let volumes = gmsh.entities(3)?;
     let surfaces = gmsh.entities(2)?;
     let curves = gmsh.entities(1)?;
-    let mut groups: Vec<(String, Vec<i32>)> = Vec::new();
+    // Parts as (name, faces, edges); the edges of the faces are added below.
+    let mut groups: Vec<(String, Vec<i32>, Vec<i32>)> = Vec::new();
     let mut in_solid = BTreeSet::new();
     for (&volume, name) in volumes.iter().zip(solid_names(gmsh, &volumes)?) {
         let (_, faces) = gmsh.adjacencies(3, volume)?;
         in_solid.extend(faces.iter().copied());
-        groups.push((name, faces));
+        groups.push((name, faces, Vec::new()));
     }
     // Every face outside the solids is a shell part of its own, as for 2D models.
     let free: Vec<i32> = surfaces
@@ -693,7 +815,11 @@ fn display_mesh(gmsh: &Gmsh) -> Result<GeometryDisplay, GmshError> {
         .filter(|s| !in_solid.contains(s))
         .collect();
     for (face, name) in free.iter().zip(shell_names(gmsh, &free)?) {
-        groups.push((name, vec![*face]));
+        groups.push((name, vec![*face], Vec::new()));
+    }
+    let free = free_edges(gmsh)?;
+    for (edge, name) in free.iter().zip(line_names(gmsh, &free)?) {
+        groups.push((name, Vec::new(), vec![*edge]));
     }
 
     // Triangles and edge segments of each entity, fetched once.
@@ -737,12 +863,12 @@ fn display_mesh(gmsh: &Gmsh) -> Result<GeometryDisplay, GmshError> {
         })
         .map_err(|e| GmshError::Other(e.to_string()))
     };
-    for (name, faces) in groups {
+    for (name, faces, own_edges) in groups {
         let mut part = Part {
             name,
             elements: Vec::new(),
         };
-        let mut edges = BTreeSet::new();
+        let mut edges: BTreeSet<i32> = own_edges.into_iter().collect();
         for &face in &faces {
             let nodes = triangles.get(&face).map_or(&[][..], Vec::as_slice);
             for triangle in nodes.as_chunks::<3>().0 {

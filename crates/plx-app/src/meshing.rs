@@ -496,6 +496,10 @@ fn algorithm_combo<T: Copy + PartialEq>(
 /// The CAD edge near the hit point, else the CAD face under it.
 pub fn cad_pick(view: &Model, hit: &Hit, precision: f32) -> Option<CadEntity> {
     let mesh = &view.mesh;
+    if hit.line {
+        let element = view.skin(hit.part).line_elements[hit.face];
+        return view.cad_entity(mesh.elements()[element].id);
+    }
     let position = |id: NodeId| mesh.node_index(id).map(|n| view.render_position(n));
     let mut nearest: Option<(f32, CadEntity)> = None;
     for &id in &mesh.parts.get(hit.part)?.elements {
