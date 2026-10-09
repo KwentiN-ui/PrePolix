@@ -1017,12 +1017,7 @@ fn point_rows(
 
 fn pick_button(ui: &mut Ui, slot: Slot, picking: &mut Option<Slot>) {
     let active = *picking == Some(slot);
-    let text = if active {
-        "Im 3D-Fenster wählen …"
-    } else {
-        "Punkt wählen"
-    };
-    if ui.selectable_label(active, text).clicked() {
+    if crate::setup::pick_button(ui, active) {
         *picking = if active { None } else { Some(slot) };
     }
 }

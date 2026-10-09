@@ -11,6 +11,7 @@ use glam::Vec3;
 use plx_render::Camera;
 use plx_render::contour::band_color;
 
+use crate::model::SECONDARY_HIGHLIGHT_COLOR;
 use crate::results::{Legend, format_legend_value, format_value};
 
 const MARGIN: f32 = 20.0;
@@ -42,6 +43,8 @@ pub struct Overlay {
     pub nodes: Vec<Vec3>,
     /// Selected lines in render coordinates, such as edges of 2D elements.
     pub edges: Vec<[Vec3; 2]>,
+    /// Selected lines in the secondary highlight colour, such as slave edges.
+    pub secondary_edges: Vec<[Vec3; 2]>,
     /// The axis of revolution of an axisymmetric model in render coordinates, drawn as a
     /// dash-dotted line between the two points.
     pub axis: Option<[Vec3; 2]>,
@@ -128,11 +131,18 @@ pub fn draw(
     if let Some([a, b]) = overlay.axis {
         dash_dotted(&painter, project(camera, rect, a), project(camera, rect, b));
     }
-    for &[a, b] in &overlay.edges {
-        painter.line_segment(
-            [project(camera, rect, a), project(camera, rect, b)],
-            Stroke::new(3.0, Color32::RED),
-        );
+    let secondary = SECONDARY_HIGHLIGHT_COLOR.map(|c| (c * 255.0).round() as u8);
+    let secondary = Color32::from_rgb(secondary[0], secondary[1], secondary[2]);
+    for (edges, color) in [
+        (&overlay.secondary_edges, secondary),
+        (&overlay.edges, Color32::RED),
+    ] {
+        for &[a, b] in edges {
+            painter.line_segment(
+                [project(camera, rect, a), project(camera, rect, b)],
+                Stroke::new(3.0, color),
+            );
+        }
     }
     let view_proj = camera.view_proj(rect.aspect_ratio());
     for &node in &overlay.nodes {

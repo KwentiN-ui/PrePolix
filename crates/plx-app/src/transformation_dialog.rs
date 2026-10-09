@@ -599,12 +599,7 @@ impl Grid<'_> {
         let picking = *self.picking == Some(slot);
         let mut toggle = false;
         self.labelled(ui, row, "Aus Auswahl", |ui| {
-            let label = if picking {
-                "Im 3D-Fenster wählen …"
-            } else {
-                "Punkt wählen"
-            };
-            toggle = ui.selectable_label(picking, label).clicked();
+            toggle = crate::setup::pick_button(ui, picking);
             (false, toggle)
         });
         if toggle {

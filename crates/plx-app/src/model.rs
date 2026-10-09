@@ -145,6 +145,8 @@ pub struct Highlight {
     pub nodes: Vec<NodeId>,
     /// Lines between two nodes drawn over the scene, such as the edges of 2D elements.
     pub lines: Vec<[NodeId; 2]>,
+    /// Lines in the secondary highlight colour, e.g. the slave edges of a 2D contact.
+    pub secondary_lines: Vec<[NodeId; 2]>,
 }
 
 impl Highlight {
