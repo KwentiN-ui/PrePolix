@@ -95,7 +95,9 @@ fn the_chosen_solver_is_written_with_the_procedure() {
     model.resolve_default_solver(EquationSolver::Pardiso);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Step\n*Static, Solver=Pardiso\n"), "{text}");
-    let StepKind::Static(settings) = &mut model.steps[0].kind;
+    let StepKind::Static(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
     settings.solver = EquationSolver::IterativeCholesky;
     settings.incrementation = Incrementation::Direct;
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -105,7 +107,9 @@ fn the_chosen_solver_is_written_with_the_procedure() {
     );
     // A solver chosen in the step is kept.
     model.resolve_default_solver(EquationSolver::Pardiso);
-    let StepKind::Static(settings) = &model.steps[0].kind;
+    let StepKind::Static(settings) = &model.steps[0].kind else {
+        unreachable!()
+    };
     assert_eq!(settings.solver, EquationSolver::IterativeCholesky);
 }
 
@@ -394,4 +398,83 @@ fn check_model_replaces_the_procedures_by_no_analysis() {
     let text = write_check_inp(&mesh, &model, "").unwrap();
     let step = text.find("*Step\n*No analysis\n").expect(&text);
     assert!(text[step..].contains("*End step\n"), "{text}");
+}
+
+/// The cantilever of `kragbalken_c3d20r.inp` with a frequency step after the static one.
+fn frequency_analysis() -> (FeMesh, FeModel) {
+    let (mesh, mut model) = analysis("kragbalken_c3d20r.inp", tip_force());
+    let mut step = Step::new_frequency("Step-2");
+    step.boundary_conditions = model.steps[0].boundary_conditions.clone();
+    // A load left in a frequency step must not reach CalculiX.
+    step.loads = model.steps[0].loads.clone();
+    model.steps.push(step);
+    (mesh, model)
+}
+
+#[test]
+fn a_frequency_step_is_written_like_prepomax_does() {
+    let (mesh, mut model) = frequency_analysis();
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let frequency = &text[text.find("** Step-2").unwrap()..];
+    for line in [
+        "*Step\n*Frequency\n10\n",
+        "*Boundary\nFIX, 1, 6, 0\n",
+        "*Node file\nU\n",
+        "*El file\nS, E, NOE\n",
+    ] {
+        assert!(frequency.contains(line), "missing {line:?} in\n{frequency}");
+    }
+    assert!(!frequency.contains("*Cload"), "{frequency}");
+    let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
+        unreachable!()
+    };
+    settings.perturbation = true;
+    settings.storage = true;
+    settings.num_frequencies = 4;
+    settings.upper_frequency = Some(5000.0);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Step, Perturbation\n*Frequency, Storage=Yes\n4, 0, 5000\n"),
+        "{text}"
+    );
+    let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
+        unreachable!()
+    };
+    settings.lower_frequency = Some(100.0);
+    settings.upper_frequency = None;
+    model.resolve_default_solver(EquationSolver::Spooles);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Frequency, Solver=Spooles, Storage=Yes\n4, 100\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn calculix_finds_the_bending_frequency_of_the_cantilever() {
+    let (mesh, mut model) = frequency_analysis();
+    // The preload of the static step is small; CalculiX must accept the perturbation step.
+    let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
+        unreachable!()
+    };
+    settings.perturbation = true;
+    let Some(frd) = run_ccx("eigenfrequenz", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let modes: Vec<f64> = (frd.increments.iter())
+        .filter(|i| i.kind == plx_results::AnalysisKind::Frequency)
+        .map(|i| i.value)
+        .collect();
+    assert_eq!(modes.len(), 10, "{modes:?}");
+    // Euler-Bernoulli: f1 = 1.875² / (2π L²) √(EI / ρA) = 835 Hz for the 10 x 10 x 100 steel
+    // beam; shear makes the real beam a little softer. The square section bends alike in
+    // both directions.
+    let euler = 1.875_f64.powi(2) / (2.0 * std::f64::consts::PI * 100.0_f64.powi(2))
+        * (210_000.0 * 10.0_f64.powi(4) / 12.0 / (7.85e-9 * 100.0)).sqrt();
+    for mode in &modes[..2] {
+        assert!(
+            (0.95 * euler..1.001 * euler).contains(mode),
+            "{mode} Hz vs. {euler} Hz"
+        );
+    }
 }

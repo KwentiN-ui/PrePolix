@@ -355,6 +355,9 @@ struct Tree<'a> {
     invalid: HashMap<TreeItem, String>,
     /// Containers holding invalid items, shown red so that they are found when collapsed.
     holds_invalid: HashSet<TreeItem>,
+    /// Containers that cannot take items, with the reason, such as the loads of a frequency
+    /// step.
+    closed: HashMap<TreeItem, &'static str>,
 }
 
 impl Tree<'_> {
@@ -381,7 +384,11 @@ impl Tree<'_> {
         if self.state.reveal && self.is_selected(&item) {
             response.scroll_to_me(None);
         }
-        let creates = creates(&item);
+        let closed = self.closed.get(&item).copied();
+        if let Some(reason) = closed {
+            response = response.on_hover_text(reason);
+        }
+        let creates = creates(&item).filter(|_| closed.is_none());
         let meshing = self.view == TreeView::Geometry
             && matches!(
                 item,
@@ -813,6 +820,7 @@ pub fn show(
         forced_open: None,
         invalid: HashMap::new(),
         holds_invalid: HashSet::new(),
+        closed: HashMap::new(),
     };
     let expanding = tree.state.expand.clone();
     egui::ScrollArea::both()
@@ -896,6 +904,12 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
         let text = counted("Steps", fe.steps.len());
         tree.branch(ui, steps, text, true, |tree, ui| {
             for (s, step) in fe.steps.iter().enumerate() {
+                if !step.kind.supports_loads() {
+                    tree.closed.insert(
+                        TreeItem::StepGroup(s, "Loads"),
+                        "Ein Frequency Step hat keine Lasten.",
+                    );
+                }
                 tree.branch(ui, TreeItem::Step(s), &step.name, true, |tree, ui| {
                     let outputs = (step.field_outputs.iter().enumerate())
                         .map(|(i, f)| (TreeItem::FieldOutput(s, i), f.name.as_str()))

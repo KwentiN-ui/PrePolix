@@ -10,8 +10,8 @@ use egui::Ui;
 use plx_mesh::{ElementId, FeMesh, NodeId};
 use plx_model::{
     BoundaryCondition, BoundaryKind, Elastic, EquationSolver, Extrapolation, FeModel, FieldOutput,
-    HotSpot, HotSpotComponent, Incrementation, Load, LoadKind, Material, OutputKind, Region,
-    Section, Step, StepKind, extrapolation_weights, next_name,
+    FrequencyStep, HotSpot, HotSpotComponent, Incrementation, Load, LoadKind, Material, OutputKind,
+    Region, Section, StaticStep, Step, StepKind, extrapolation_weights, next_name,
 };
 
 use crate::model::{Highlight, Hit, Model};
@@ -465,13 +465,7 @@ impl Editor {
             ),
             NewItem::Step => {
                 let mut step = Step::new_static(next_name("Step", names(&fe.steps, |s| &s.name)));
-                // PrePoMax carries the solution settings of the previous step over.
-                if let (Some(previous), StepKind::Static(settings)) =
-                    (fe.steps.last(), &mut step.kind)
-                {
-                    let StepKind::Static(previous) = &previous.kind;
-                    *settings = previous.clone();
-                }
+                step.kind = StepKind::Static(previous_static(fe));
                 Draft::Step(step)
             }
             NewItem::BoundaryCondition(step) => {
@@ -487,7 +481,9 @@ impl Editor {
                 )
             }
             NewItem::Load(step) => {
-                let existing = names(&fe.steps.get(step)?.loads, |l| &l.name);
+                // A frequency step takes no loads, as in PrePoMax.
+                let target = fe.steps.get(step).filter(|s| s.kind.supports_loads())?;
+                let existing = names(&target.loads, |l| &l.name);
                 let region = RegionDraft::new(NODE_SOURCES, Target::Nodes);
                 Draft::Load(
                     step,
@@ -590,6 +586,22 @@ impl Editor {
             "erstellen"
         };
         format!("{kind} {action}: {name}")
+    }
+
+    /// The boundary condition or load being edited as it would be applied: its step, its
+    /// index (`None` for a new one) and the symbol item, for the 3D view.
+    pub fn step_item(&self) -> Option<(usize, Option<usize>, crate::symbols::Item)> {
+        let (step, kind, region) = match &self.draft {
+            Draft::BoundaryCondition(s, bc, r) => (*s, crate::symbols::Kind::Boundary(bc.kind), r),
+            Draft::Load(s, load, r) => (*s, crate::symbols::Kind::Load(load.kind), r),
+            _ => return None,
+        };
+        let item = crate::symbols::Item {
+            kind,
+            region: region.region(),
+            selected: true,
+        };
+        Some((step, self.index, item))
     }
 
     /// Whether clicks in the 3D view pick for this dialog.
@@ -726,7 +738,7 @@ impl Editor {
                 ui.end_row();
                 region.ui(ui, model);
             }
-            Draft::Step(step) => step_form(ui, step),
+            Draft::Step(step) => step_form(ui, step, self.index.is_none(), &model.fe),
             Draft::BoundaryCondition(_, bc, region) => {
                 name_row(ui, &mut bc.name);
                 ui.label("Art");
@@ -883,6 +895,13 @@ impl Editor {
         if self.region().is_some_and(RegionDraft::is_empty) {
             return Err("Die Region ist leer.".into());
         }
+        if let Draft::Step(Step {
+            kind: StepKind::Frequency(settings),
+            ..
+        }) = &self.draft
+        {
+            validate_frequency_step(settings)?;
+        }
         if let Some(hot_spot) = self.hot_spot() {
             validate_hot_spot(&hot_spot)?;
         }
@@ -919,7 +938,11 @@ impl Editor {
                     existing.name = step.name;
                     existing.kind = step.kind;
                 }
-                None => fe.steps.push(step),
+                None => {
+                    let mut step = step;
+                    copy_items_of_last_step(fe, &mut step);
+                    fe.steps.push(step);
+                }
             },
             Draft::BoundaryCondition(s, mut bc, region) => {
                 bc.region = region.region();
@@ -1026,24 +1049,140 @@ fn material_form(ui: &mut Ui, material: &mut Material) {
     material.elastic = elastic.then_some(values);
 }
 
-fn step_form(ui: &mut Ui, step: &mut Step) {
+/// Solution settings for a new static step: PrePoMax carries those of the last static step
+/// over.
+fn previous_static(fe: &FeModel) -> StaticStep {
+    (fe.steps.iter().rev())
+        .find_map(|s| match &s.kind {
+            StepKind::Static(settings) => Some(settings.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// A new step starts with the boundary conditions and loads of the last step, as in
+/// PrePoMax; loads only where the new step takes them.
+fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
+    let Some(last) = fe.steps.last() else {
+        return;
+    };
+    step.boundary_conditions = last.boundary_conditions.clone();
+    if step.kind.supports_loads() {
+        step.loads = last.loads.clone();
+    }
+}
+
+const STATIC_LABEL: &str = "Statisch (Static)";
+const FREQUENCY_LABEL: &str = "Eigenfrequenzen (Frequency)";
+
+fn step_kind_label(kind: &StepKind) -> &'static str {
+    match kind {
+        StepKind::Static(_) => STATIC_LABEL,
+        StepKind::Frequency(_) => FREQUENCY_LABEL,
+    }
+}
+
+/// The step dialog. The kind is chosen when the step is created, as in PrePoMax's list of
+/// step types; switching it starts with that kind's default field outputs.
+fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
     name_row(ui, &mut step.name);
-    let StepKind::Static(settings) = &mut step.kind;
     ui.label("Art");
-    ui.label("Statisch");
+    if creating {
+        let frequency = matches!(step.kind, StepKind::Frequency(_));
+        egui::ComboBox::from_id_salt("step kind")
+            .selected_text(step_kind_label(&step.kind))
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(!frequency, STATIC_LABEL).clicked() && frequency {
+                    step.kind = StepKind::Static(previous_static(fe));
+                    step.field_outputs = FieldOutput::defaults();
+                }
+                if ui.selectable_label(frequency, FREQUENCY_LABEL).clicked() && !frequency {
+                    step.kind = StepKind::Frequency(FrequencyStep::default());
+                    step.field_outputs = FieldOutput::frequency_defaults();
+                }
+            });
+    } else {
+        ui.label(step_kind_label(&step.kind));
+    }
     ui.end_row();
-    ui.label("");
-    ui.checkbox(&mut settings.nlgeom, "Geometrisch nichtlinear (Nlgeom)");
-    ui.end_row();
+    match &mut step.kind {
+        StepKind::Static(settings) => static_form(ui, settings),
+        StepKind::Frequency(settings) => frequency_form(ui, settings),
+    }
+}
+
+fn solver_row(ui: &mut Ui, solver: &mut EquationSolver, eigenvalues: bool) {
     ui.label("Gleichungslöser");
     egui::ComboBox::from_id_salt("equation solver")
-        .selected_text(solver_label(settings.solver))
+        .selected_text(solver_label(*solver))
         .show_ui(ui, |ui| {
             for choice in EquationSolver::ALL {
-                ui.selectable_value(&mut settings.solver, choice, solver_label(choice));
+                if eigenvalues && !choice.solves_eigenvalues() {
+                    continue;
+                }
+                ui.selectable_value(solver, choice, solver_label(choice));
             }
         });
     ui.end_row();
+}
+
+fn frequency_form(ui: &mut Ui, settings: &mut FrequencyStep) {
+    ui.label("");
+    ui.checkbox(
+        &mut settings.perturbation,
+        "Vorspannung aus vorigem Step (Perturbation)",
+    );
+    ui.end_row();
+    solver_row(ui, &mut settings.solver, true);
+    ui.label("Anzahl Eigenfrequenzen");
+    ui.add(numeric::drag_value(&mut settings.num_frequencies).range(1..=10_000));
+    ui.end_row();
+    for (label, bound) in [
+        ("Untere Frequenzgrenze", &mut settings.lower_frequency),
+        ("Obere Frequenzgrenze", &mut settings.upper_frequency),
+    ] {
+        let mut set = bound.is_some();
+        ui.checkbox(&mut set, label);
+        let mut value = bound.unwrap_or(0.0);
+        ui.add_enabled(
+            set,
+            numeric::drag_value(&mut value)
+                .range(0.0..=f64::MAX)
+                .speed(1.0)
+                .suffix(" Hz"),
+        );
+        *bound = set.then_some(value);
+        ui.end_row();
+    }
+    ui.label("");
+    ui.checkbox(
+        &mut settings.storage,
+        "Matrizen und Eigenformen speichern (Storage, .eig)",
+    );
+    ui.end_row();
+    ui.label("");
+    ui.weak("Lasten wirken in einem Frequency Step nicht; nur die Randbedingungen zählen.");
+    ui.end_row();
+}
+
+fn validate_frequency_step(settings: &FrequencyStep) -> Result<(), String> {
+    if !settings.solver.solves_eigenvalues() {
+        return Err("Die iterativen Löser können keine Eigenfrequenzen berechnen.".into());
+    }
+    if let (Some(lower), Some(upper)) = (settings.lower_frequency, settings.upper_frequency)
+        && lower >= upper
+    {
+        return Err("Die untere Frequenzgrenze muss kleiner als die obere sein.".into());
+    }
+    Ok(())
+}
+
+fn static_form(ui: &mut Ui, settings: &mut StaticStep) {
+    ui.label("");
+    ui.checkbox(&mut settings.nlgeom, "Geometrisch nichtlinear (Nlgeom)");
+    ui.end_row();
+    solver_row(ui, &mut settings.solver, false);
     ui.label("Inkrementierung");
     egui::ComboBox::from_id_salt("incrementation")
         .selected_text(incrementation_label(settings.incrementation))
@@ -1296,6 +1435,64 @@ mod tests {
             ("Fixed-1", &Region::Nodes(vec![1, 4]))
         );
         assert!(Editor::create(NewItem::Load(3), &fe).is_none());
+    }
+
+    #[test]
+    fn a_frequency_step_keeps_the_bcs_but_takes_no_loads() {
+        let mut fe = FeModel::default();
+        Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
+        fe.steps[0].boundary_conditions.push(BoundaryCondition {
+            name: "Fixed-1".into(),
+            region: Region::NodeSet("FIX".into()),
+            kind: BoundaryKind::Fixed,
+        });
+        fe.steps[0].loads.push(Load {
+            name: "Pressure-1".into(),
+            region: Region::Surface("TOP".into()),
+            kind: LoadKind::Pressure(1.0),
+        });
+        let mut editor = Editor::create(NewItem::Step, &fe).unwrap();
+        if let Draft::Step(step) = &mut editor.draft {
+            step.kind = StepKind::Frequency(FrequencyStep {
+                lower_frequency: Some(100.0),
+                upper_frequency: Some(50.0),
+                ..FrequencyStep::default()
+            });
+        }
+        assert!(editor.validate(&fe).is_err(), "bounds the wrong way round");
+        if let Draft::Step(Step {
+            kind: StepKind::Frequency(settings),
+            ..
+        }) = &mut editor.draft
+        {
+            settings.upper_frequency = None;
+            settings.solver = EquationSolver::IterativeCholesky;
+        }
+        assert!(editor.validate(&fe).is_err(), "iterative solver");
+        if let Draft::Step(Step {
+            kind: StepKind::Frequency(settings),
+            ..
+        }) = &mut editor.draft
+        {
+            settings.solver = EquationSolver::Default;
+        }
+        assert_eq!(editor.validate(&fe), Ok(()));
+        editor.apply(&mut fe);
+        let frequency = &fe.steps[1];
+        assert_eq!(frequency.name, "Step-2");
+        assert_eq!(
+            frequency.boundary_conditions,
+            fe.steps[0].boundary_conditions
+        );
+        assert!(frequency.loads.is_empty());
+        assert!(Editor::create(NewItem::Load(1), &fe).is_none());
+        // A static step after it starts from the last static step's settings.
+        let StepKind::Static(settings) = &mut fe.steps[0].kind else {
+            unreachable!()
+        };
+        settings.nlgeom = true;
+        Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
+        assert!(matches!(&fe.steps[2].kind, StepKind::Static(s) if s.nlgeom));
     }
 
     #[test]

@@ -55,9 +55,9 @@ impl FeModel {
     /// installed CalculiX should use by default.
     pub fn resolve_default_solver(&mut self, solver: EquationSolver) {
         for step in &mut self.steps {
-            let StepKind::Static(settings) = &mut step.kind;
-            if settings.solver == EquationSolver::Default {
-                settings.solver = solver;
+            let current = step.kind.solver_mut();
+            if *current == EquationSolver::Default {
+                *current = solver;
             }
         }
     }
@@ -132,6 +132,23 @@ pub struct Step {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum StepKind {
     Static(StaticStep),
+    /// Eigenfrequencies and mode shapes (`*FREQUENCY`).
+    Frequency(FrequencyStep),
+}
+
+impl StepKind {
+    pub fn solver_mut(&mut self) -> &mut EquationSolver {
+        match self {
+            StepKind::Static(settings) => &mut settings.solver,
+            StepKind::Frequency(settings) => &mut settings.solver,
+        }
+    }
+
+    /// Whether the step takes loads. A frequency step has none, as in PrePoMax; preloads
+    /// come from the previous step with [`FrequencyStep::perturbation`].
+    pub fn supports_loads(&self) -> bool {
+        matches!(self, StepKind::Static(_))
+    }
 }
 
 /// How the increments of a step are chosen.
@@ -169,6 +186,15 @@ impl EquationSolver {
         EquationSolver::IterativeScaling,
         EquationSolver::IterativeCholesky,
     ];
+
+    /// Whether CalculiX can use the solver for an eigenvalue problem; the iterative solvers
+    /// only solve static systems.
+    pub fn solves_eigenvalues(self) -> bool {
+        !matches!(
+            self,
+            EquationSolver::IterativeScaling | EquationSolver::IterativeCholesky
+        )
+    }
 
     /// The value of `SOLVER=` in the input file; `None` leaves the choice to CalculiX.
     pub fn keyword(self) -> Option<&'static str> {
@@ -215,6 +241,37 @@ impl Default for StaticStep {
     }
 }
 
+/// Settings of a `*FREQUENCY` step, with PrePoMax's defaults.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FrequencyStep {
+    /// Number of eigenfrequencies to compute.
+    pub num_frequencies: u32,
+    /// Lower bound of the frequency range in cycles per time unit; `None` is CalculiX's 0.
+    pub lower_frequency: Option<f64>,
+    /// Upper bound of the frequency range; `None` leaves it open.
+    pub upper_frequency: Option<f64>,
+    /// Writes eigenvalues, mode shapes and the mass and stiffness matrices to the `.eig`
+    /// file (`STORAGE=YES`).
+    pub storage: bool,
+    /// Takes the stiffness of the deformed state of the previous step into account, e.g. the
+    /// stiffening by a preload (`*STEP, PERTURBATION`).
+    pub perturbation: bool,
+    pub solver: EquationSolver,
+}
+
+impl Default for FrequencyStep {
+    fn default() -> Self {
+        Self {
+            num_frequencies: 10,
+            lower_frequency: None,
+            upper_frequency: None,
+            storage: false,
+            perturbation: false,
+            solver: EquationSolver::Default,
+        }
+    }
+}
+
 impl Step {
     /// A static step with PrePoMax's default field outputs.
     pub fn new_static(name: impl Into<String>) -> Self {
@@ -224,6 +281,17 @@ impl Step {
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
             field_outputs: FieldOutput::defaults(),
+        }
+    }
+
+    /// A frequency step with PrePoMax's default field outputs.
+    pub fn new_frequency(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            kind: StepKind::Frequency(FrequencyStep::default()),
+            boundary_conditions: Vec::new(),
+            loads: Vec::new(),
+            field_outputs: FieldOutput::frequency_defaults(),
         }
     }
 }
@@ -291,6 +359,16 @@ impl FieldOutput {
                 variables: vec!["S".into(), "E".into()],
             },
         ]
+    }
+}
+
+impl FieldOutput {
+    /// Field outputs PrePoMax adds to a new frequency step: no reaction forces, as the
+    /// mode shapes are scaled arbitrarily.
+    pub fn frequency_defaults() -> Vec<Self> {
+        let mut outputs = Self::defaults();
+        outputs[0].variables = vec!["U".into()];
+        outputs
     }
 }
 
