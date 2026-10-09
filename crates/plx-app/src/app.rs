@@ -104,6 +104,8 @@ struct Workbench {
     history_dialog: Option<HistoryOutputDialog>,
     /// Open table of a history output component.
     history_table: Option<HistoryTable>,
+    /// Diagram of a table selection, PrePoMax's diagram view.
+    history_plot: Option<crate::xy_plot::XyData>,
     /// The tree selection whose region is highlighted.
     /// `None` until it is computed, so a dialog's highlight is cleared once it closes.
     highlighted: Option<TreeSelection>,
@@ -211,6 +213,7 @@ impl PrepolixApp {
                 field_output_dialog: None,
                 history_dialog: None,
                 history_table: None,
+                history_plot: None,
                 highlighted: None,
                 analysis: None,
                 solver_findings: Vec::new(),
@@ -989,6 +992,12 @@ impl Workbench {
                         "{} Ergebnis-Inkrement(e) gelesen",
                         view.increments.len()
                     ));
+                    if !view.file_history.is_empty() {
+                        self.output.push(format!(
+                            "{} History-Ausgabe(n) aus der .dat-Datei gelesen",
+                            view.file_history.len()
+                        ));
+                    }
                 }
                 self.dialog = None;
                 self.field_output_dialog = None;
@@ -1224,11 +1233,11 @@ impl Workbench {
         } else if let Some(TreeItem::HotSpot(index)) = response.open {
             self.edit_hot_spot(index);
         } else if let Some(TreeItem::HistoryComponent(set, field, component)) = response.open {
-            self.history_table = Some(HistoryTable {
-                set,
-                field,
-                component,
-            });
+            let same = (self.history_table.as_ref())
+                .is_some_and(|t| (t.set, t.field, t.component) == (set, field, component));
+            if !same {
+                self.history_table = Some(HistoryTable::new(set, field, component));
+            }
         } else if let (Some(TreeItem::Model), TreeView::FeModel) = (&response.open, view) {
             self.edit_model_properties();
         } else if let Some(TreeItem::MeshItem(index)) = response.open {
@@ -2108,6 +2117,11 @@ impl Workbench {
                 "Last erstellen …",
                 takes_loads,
             ),
+            (
+                NewItem::HistoryOutput(last_step.unwrap_or(0)),
+                "History Output erstellen …",
+                last_step.is_some(),
+            ),
         ] {
             if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
                 kind = Some(item);
@@ -2833,18 +2847,29 @@ impl Workbench {
     }
 
     fn history_table_window(&mut self, ctx: &egui::Context) {
-        let (Some(table), Some(view)) = (self.history_table, self.shown_results_view()) else {
+        if let Some(data) = &self.history_plot
+            && !crate::xy_plot::window(ctx, data)
+        {
+            self.history_plot = None;
+        }
+        let Some(mut table) = self.history_table.take() else {
+            return;
+        };
+        let Some(view) = self.shown_results_view() else {
             return;
         };
         let kind = view
             .current_increment()
             .map_or(plx_results::AnalysisKind::Static, |i| i.kind);
-        let unit = (view.history.get(table.set))
-            .and_then(|set| view.history_outputs.iter().find(|o| o.name == set.name))
+        let unit = (view.history_output_index(table.set))
+            .and_then(|i| view.history_outputs.get(i))
             .and_then(|o| o.unit());
-        if !table.show(ctx, &view.history, kind, unit) {
-            self.history_table = None;
+        match table.show(ctx, &view.history, kind, unit) {
+            crate::history_table::TableAction::Close => return,
+            crate::history_table::TableAction::Plot(data) => self.history_plot = Some(data),
+            crate::history_table::TableAction::None => {}
         }
+        self.history_table = Some(table);
     }
 
     /// PrePoMax's Search Contact Pairs; it replaces an open item dialog.
@@ -3344,7 +3369,8 @@ impl Workbench {
             | TreeItem::StepGroup(s, _)
             | TreeItem::BoundaryCondition(s, _)
             | TreeItem::Load(s, _)
-            | TreeItem::FieldOutput(s, _) => Some(s),
+            | TreeItem::FieldOutput(s, _)
+            | TreeItem::HistoryOutput(s, _) => Some(s),
             _ => None,
         };
         let index = (edited.as_ref().map(|(s, ..)| *s))

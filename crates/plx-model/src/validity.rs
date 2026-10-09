@@ -16,6 +16,8 @@ pub enum ModelItem {
     BoundaryCondition(usize, usize),
     /// Load by step and index.
     Load(usize, usize),
+    /// History output by step and index.
+    HistoryOutput(usize, usize),
     Material(usize),
     /// Part of the mesh by index.
     Part(usize),
@@ -111,6 +113,23 @@ impl FeModel {
                 if let Some(reason) = reason {
                     invalid.push(Invalid {
                         item: ModelItem::Load(s, i),
+                        reason,
+                    });
+                }
+            }
+        }
+        for (s, step) in self.steps.iter().enumerate() {
+            for (i, output) in step.history_outputs.iter().enumerate() {
+                let reason = match &output.kind {
+                    crate::HistoryKind::Contact { pair } => {
+                        (!self.contact_pairs.iter().any(|c| c.name == *pair))
+                            .then(|| format!("Contact Pair {pair} existiert nicht"))
+                    }
+                    kind => kind.region().and_then(|r| r.missing_reference(mesh)),
+                };
+                if let Some(reason) = reason {
+                    invalid.push(Invalid {
+                        item: ModelItem::HistoryOutput(s, i),
                         reason,
                     });
                 }
