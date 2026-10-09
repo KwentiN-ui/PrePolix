@@ -75,11 +75,25 @@ pub fn extract_part_skin(mesh: &FeMesh, part: &Part, feature_angle_deg: f64) -> 
                     .push(skin_face(element_index, face_index, shape, &nodes));
                 continue;
             }
+            // Degenerate elements repeat nodes, e.g. pyramids written as C3D6 or C3D8 with a
+            // collapsed corner: their faces are keyed by distinct nodes only, so a collapsed
+            // quad still matches the neighbour's triangle. Faces collapsed to a line are skipped.
             let mut key = [usize::MAX; 4];
             for (k, &corner) in topology.corners.iter().enumerate() {
                 key[k] = nodes[corner];
             }
             key.sort_unstable();
+            let mut distinct = 0;
+            for k in 0..4 {
+                if key[k] != usize::MAX && (distinct == 0 || key[k] != key[distinct - 1]) {
+                    key[distinct] = key[k];
+                    distinct += 1;
+                }
+            }
+            if distinct < 3 {
+                continue;
+            }
+            key[distinct..].fill(usize::MAX);
             solid_faces
                 .entry(key)
                 .and_modify(|seen| seen.2 = true)
@@ -114,17 +128,29 @@ fn node_indices(mesh: &FeMesh, element: &crate::Element, nodes: &mut Vec<usize>)
     true
 }
 
+/// Builds a face, dropping repeated corners of collapsed elements together with the midside
+/// node between them.
 fn skin_face(element: usize, face: usize, shape: ElementShape, nodes: &[usize]) -> SkinFace {
     let topology = &shape.faces()[face];
+    let quadratic = shape.is_quadratic();
+    let n = topology.corners.len();
+    let mut corners = Vec::with_capacity(n);
+    let mut mids = Vec::new();
+    for i in 0..n {
+        let corner = nodes[topology.corners[i]];
+        if corner == nodes[topology.corners[(i + 1) % n]] {
+            continue;
+        }
+        corners.push(corner);
+        if quadratic {
+            mids.push(nodes[topology.mids[i]]);
+        }
+    }
     SkinFace {
         element,
         face,
-        corners: topology.corners.iter().map(|&i| nodes[i]).collect(),
-        mids: if shape.is_quadratic() {
-            topology.mids.iter().map(|&i| nodes[i]).collect()
-        } else {
-            Vec::new()
-        },
+        corners,
+        mids,
         region: 0,
     }
 }
@@ -364,6 +390,57 @@ mod tests {
             elements: (1..=nx).collect(),
         });
         mesh
+    }
+
+    #[test]
+    fn collapsed_wedge_faces_match_tet_neighbours() {
+        // A pyramid written as C3D6 with the apex repeated, like PrePoMax exports, next to a
+        // tet on one of its collapsed quad faces.
+        let mut mesh = FeMesh::default();
+        let coords = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.5, 0.5, 1.0],
+            [-1.0, 0.5, 0.5],
+        ];
+        for (i, c) in coords.iter().enumerate() {
+            mesh.set_node(i as u32 + 1, *c);
+        }
+        mesh.add_element(Element {
+            id: 1,
+            type_name: "C3D6".into(),
+            shape: ElementShape::Wedge6,
+            nodes: vec![1, 5, 2, 4, 5, 3],
+        })
+        .unwrap();
+        mesh.add_element(Element {
+            id: 2,
+            type_name: "C3D4".into(),
+            shape: ElementShape::Tet4,
+            nodes: vec![1, 4, 5, 6],
+        })
+        .unwrap();
+        mesh.parts.push(Part {
+            name: "PYRAMID".into(),
+            elements: vec![1, 2],
+        });
+        let skin = extract_part_skin(&mesh, &mesh.parts[0], 30.0);
+        // 5 pyramid faces and 4 tet faces, minus the shared one on each side.
+        assert_eq!(skin.faces.len(), 7);
+        let collapsed = skin
+            .faces
+            .iter()
+            .find(|f| f.element == 0 && f.face == 3)
+            .unwrap();
+        assert_eq!(collapsed.corners.len(), 3);
+        assert!(skin.faces.iter().all(|f| {
+            let mut c = f.corners.clone();
+            c.sort_unstable();
+            c.dedup();
+            c.len() == f.corners.len()
+        }));
     }
 
     #[test]
