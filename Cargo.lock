@@ -2418,6 +2418,7 @@ dependencies = [
  "plx-model",
  "plx-render",
  "plx-results",
+ "png",
  "rfd",
  "ron",
  "serde",

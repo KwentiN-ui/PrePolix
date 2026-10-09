@@ -32,6 +32,8 @@ pub struct Viewport {
     resting: Option<(Pos2, f64)>,
     /// The resting position last reported as hover.
     hovered: Option<Pos2>,
+    /// Where the view was drawn last, in points.
+    pub rect: Rect,
 }
 
 /// Lines and points in render coordinates drawn as the hover preview.
@@ -164,6 +166,7 @@ impl Viewport {
             box_start: None,
             resting: None,
             hovered: None,
+            rect: Rect::NOTHING,
         }
     }
 
@@ -197,6 +200,7 @@ impl Viewport {
     pub fn ui(&mut self, ui: &mut Ui) -> ViewportResponse {
         let mut result = ViewportResponse::default();
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        self.rect = rect;
         let delta = response.drag_delta();
         let modifiers = ui.input(|i| i.modifiers);
         let ctrl = modifiers.ctrl || modifiers.command;

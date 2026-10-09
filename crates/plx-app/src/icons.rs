@@ -34,6 +34,8 @@ pub enum Icon {
     /// Arrow of the material library's copy and move buttons, pointing in this direction
     /// (unit vector, y down).
     Arrow(Vec2),
+    /// Camera: screenshot of the 3D view.
+    Screenshot,
 }
 
 /// Flat toolbar button in the Windows style: frame only while hovered or checked.
@@ -281,6 +283,28 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
                 color,
                 color,
             );
+        }
+        Icon::Screenshot => {
+            let body = Color32::from_rgb(85, 85, 90);
+            polygon(
+                shapes,
+                vec![p(5.0, 4.5), p(6.5, 2.5), p(10.5, 2.5), p(12.0, 4.5)],
+                body,
+                body,
+            );
+            shapes.push(Shape::rect_filled(
+                Rect::from_min_max(p(1.0, 4.0), p(15.0, 14.0)),
+                1.5,
+                body,
+            ));
+            shapes.push(Shape::rect_filled(
+                Rect::from_min_max(p(2.5, 5.5), p(4.5, 6.5)),
+                0.0,
+                Color32::from_rgb(255, 200, 60),
+            ));
+            shapes.push(Shape::circle_filled(p(8.5, 9.0), 3.8, Color32::WHITE));
+            shapes.push(Shape::circle_filled(p(8.5, 9.0), 2.6, ACCENT));
+            shapes.push(Shape::circle_filled(p(7.6, 8.1), 0.8, Color32::WHITE));
         }
         Icon::First | Icon::Previous | Icon::Next | Icon::Last => {
             let forward = matches!(icon, Icon::Next | Icon::Last);

@@ -11,6 +11,7 @@ mod numeric;
 mod overlay;
 mod properties;
 mod results;
+mod screenshot;
 mod selection;
 mod settings;
 mod setup;
