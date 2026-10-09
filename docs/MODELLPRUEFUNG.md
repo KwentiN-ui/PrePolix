@@ -7,6 +7,8 @@ fehlgeschlagenen Lauf aus der Ausgabe von CalculiX erkennt. Nachgestellt mit Cal
 | Problem | Meldung von CalculiX 2.21 | Verhalten | Prüfung in prepolix |
 |---|---|---|---|
 | Teile nicht oder unvollständig gelagert (Starrkörperbewegung), z. B. Part ohne Tie | Spooles: keine, Lauf "erfolgreich" mit unbrauchbaren Werten; Pardiso/PaStiX: `zero pivot` | stiller Unsinn oder Abbruch | Rang der Lagerung je zusammenhängendem Teil (Ties verbinden, Kontakte nur lose), nur statische Steps |
+| Stabwerk beweglich: Stab (Truss Section) aus mehreren Elementen, ebenes Fachwerk ohne Halt senkrecht zur Ebene | keine, Lauf "erfolgreich" mit beliebigen Verschiebungen an den freien Knoten (Pardiso: riesige Werte) | stiller Unsinn | Stäbe, Lager und Federn je Stabknoten müssen alle drei Richtungen aufspannen (Node Ties zählen als ein Knoten), nur statische Steps |
+| Stabwerk an nur einem Knoten gelagert | keine | stiller Unsinn | Starrkörper-Prüfung; Stabknoten haben keine Rotationen, auch wenn das Netz die Linien als B32 führt |
 | Teil nur über Kontakt gehalten | `zero pivot`, `too many cutbacks` | oft Abbruch | Warnung |
 | Elemente ohne Section | `no material was assigned to element N` | Abbruch | Elemente je Part gegen Sections |
 | Material ohne Elastizität | `no elastic constants were assigned` | Abbruch | Materialien, die eine Section nutzt |
