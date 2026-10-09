@@ -58,7 +58,6 @@ pub enum TreeItem {
     Load(usize, usize),
     FieldOutput(usize, usize),
     Analysis,
-    HotSpot(usize),
     /// Features of the FE model or of the shown results, by index.
     ReferencePoint(usize),
     CoordinateSystem(usize),
@@ -77,6 +76,8 @@ pub enum TreeItem {
     HistoryField(usize, usize),
     HistoryComponent(usize, usize, usize),
     Component(usize, usize),
+    /// A hot spot definition of the current results, by index.
+    HotSpot(usize),
 }
 
 /// Selection shared by the three trees; an item is selected in one view only.
@@ -113,8 +114,8 @@ pub struct TreeResponse {
     pub generate_mesh: bool,
     /// Mesh one part of the geometry, by index.
     pub mesh_part: Option<usize>,
-    /// Evaluate the hot spots with the current results.
-    pub evaluate_hot_spots: bool,
+    /// Show the table of the hot spot values.
+    pub hot_spot_table: bool,
     /// Open PrePoMax's Search Contact Pairs.
     pub search_contacts: bool,
     /// Show the results on a plane, by index, or none.
@@ -266,7 +267,7 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::Group("Initial Conditions") => Some(NewItem::InitialCondition),
         TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
         TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
-        TreeItem::Group(HOT_SPOTS) => Some(NewItem::HotSpot),
+        TreeItem::Group(HOT_SPOTS) => Some(NewItem::ResultHotSpot),
         TreeItem::Group(REFERENCE_POINTS) => Some(NewItem::Feature(FeatureKind::ReferencePoint)),
         TreeItem::Group(COORDINATE_SYSTEMS) => {
             Some(NewItem::Feature(FeatureKind::CoordinateSystem))
@@ -320,7 +321,6 @@ fn is_fe_item(item: &TreeItem) -> bool {
             | TreeItem::BoundaryCondition(..)
             | TreeItem::Load(..)
             | TreeItem::FieldOutput(..)
-            | TreeItem::HotSpot(_)
     )
 }
 
@@ -546,7 +546,10 @@ impl Tree<'_> {
             || feature(&item).is_some()
             || matches!(
                 item,
-                TreeItem::ResultFieldOutput(_) | TreeItem::HistorySet(_) | TreeItem::MeshItem(_)
+                TreeItem::ResultFieldOutput(_)
+                    | TreeItem::HistorySet(_)
+                    | TreeItem::HotSpot(_)
+                    | TreeItem::MeshItem(_)
             );
         if item == TreeItem::Analysis {
             response.context_menu(|ui| self.analysis_menu(ui));
@@ -583,8 +586,8 @@ impl Tree<'_> {
                 }
                 if item == TreeItem::Group(HOT_SPOTS) {
                     ui.separator();
-                    if ui.button("Mit aktuellen Ergebnissen auswerten").clicked() {
-                        self.response.evaluate_hot_spots = true;
+                    if ui.button("Tabelle anzeigen").clicked() {
+                        self.response.hot_spot_table = true;
                     }
                 }
                 if creates.is_some() {
@@ -1114,11 +1117,6 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
             .map(|(i, c)| (TreeItem::InitialCondition(i), c.name.as_str()))
             .collect();
         tree.container(ui, "Initial Conditions", initial);
-        // Not in PrePoMax: hot spot stresses, evaluated on the results of the analysis.
-        let hot_spots = (fe.hot_spots.iter().enumerate())
-            .map(|(i, h)| (TreeItem::HotSpot(i), h.name.as_str()))
-            .collect();
-        tree.container(ui, HOT_SPOTS, hot_spots);
         let steps = TreeItem::Group("Steps");
         if fe.steps.is_empty() {
             tree.leaf(ui, steps, "Steps");
@@ -1213,6 +1211,10 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
     let mut active = None;
     let mut shown_plane = None;
     let mut history: Vec<(String, Vec<NamedList>)> = Vec::new();
+    let hot_spots: Vec<String> = (model.iter())
+        .flat_map(|m| &m.hot_spots.definitions)
+        .map(|h| h.name.clone())
+        .collect();
     if let Some(view) = model.as_ref().and_then(|m| m.results.as_ref()) {
         history = (view.history.iter())
             .map(|set| {
@@ -1297,6 +1299,10 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                     }
                 });
             }
+            // Not in PrePoMax: hot spot stresses, defined on the results.
+            let hot_spots = hot_spots.iter().enumerate();
+            let items = hot_spots.map(|(i, name)| (TreeItem::HotSpot(i), name.as_str()));
+            tree.container(ui, HOT_SPOTS, items.collect());
             // Not in PrePoMax: results along straight lines through the model.
             let paths = (fe.result_paths.iter().enumerate())
                 .map(|(i, p)| (TreeItem::ResultPath(i), p.name.as_str()))

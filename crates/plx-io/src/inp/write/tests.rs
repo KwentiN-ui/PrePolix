@@ -52,7 +52,6 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
         }],
         steps: vec![step],
         user_keywords: Vec::new(),
-        hot_spots: Vec::new(),
         ..FeModel::default()
     };
     (mesh, model)

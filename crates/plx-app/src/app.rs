@@ -3,6 +3,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use plx_model::UnitSystem;
 use plx_render::StandardView;
+use plx_results::hot_spot::{HotSpot, HotSpotPath};
 
 use crate::analysis::{Analysis, MonitorEvent};
 use crate::animation::{AnimationKind, ColorLimits, Playback};
@@ -12,6 +13,7 @@ use crate::features::{FeatureDialog, FeatureKind, FeatureResult};
 use crate::field_output_dialog::{DialogAction, FieldOutputDialog};
 use crate::history_output_dialog::HistoryOutputDialog;
 use crate::history_table::HistoryTable;
+use crate::hot_spot_dialog::HotSpotDialog;
 use crate::icons::{self, Icon};
 use crate::keywords::KeywordEditor;
 use crate::material_library::{LibraryResult, MaterialLibraryEditor};
@@ -105,8 +107,11 @@ struct Workbench {
     /// Results file the user asked to open; read by the app on a worker thread.
     open_results: Option<PathBuf>,
     screenshot: Screenshot,
-    /// Hot spot whose paths are shown in the FE model, edited or selected, with the paths.
-    hot_spot_preview: Option<(plx_model::HotSpot, Vec<Vec<glam::Vec3>>)>,
+    /// Open dialog of a hot spot definition of the current results.
+    hot_spot_dialog: Option<HotSpotDialog>,
+    /// Hot spot whose paths are shown, edited or selected, with the results file and its
+    /// paths there.
+    hot_spot_preview: Option<(HotSpot, usize, Vec<HotSpotPath>)>,
     /// The table of hot spot values is open on the Results tab.
     hot_spot_window: bool,
     /// Audio output of the sound window, opened when it first plays.
@@ -126,8 +131,6 @@ struct Workbench {
     exploded_dialog: Option<(ExplodedDialog, ShownModel)>,
     /// The exploded view last applied, where the next one starts, as in PrePoMax.
     last_exploded: crate::exploded::Parameters,
-    /// Version of the exploded view of the FE model the hot spot paths were drawn for.
-    hot_spot_explosion: u64,
     /// Open dialog of a feature or of results on one.
     feature_dialog: Option<FeatureDialog>,
     /// The shown values on the plane of the shown plane result, in model coordinates: where
@@ -204,6 +207,7 @@ impl PrepolixApp {
                 analysis: None,
                 open_results: None,
                 screenshot: Screenshot::default(),
+                hot_spot_dialog: None,
                 hot_spot_preview: None,
                 hot_spot_window: false,
                 audio: None,
@@ -217,7 +221,6 @@ impl PrepolixApp {
                 symbols_shown: None,
                 exploded_dialog: None,
                 last_exploded: Default::default(),
-                hot_spot_explosion: 0,
             },
             load_events: channel(),
             loading: None,
@@ -813,6 +816,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.poll_meshing();
         self.workbench.field_output_window(&ctx);
         self.workbench.history_output_window(&ctx);
+        self.workbench.hot_spot_dialog_window(&ctx);
         self.workbench.history_table_window(&ctx);
         self.workbench.transformation_window(&ctx);
         self.workbench.feature_window(&ctx);
@@ -982,6 +986,11 @@ impl Workbench {
                     }
                     match previous {
                         Some(index) => {
+                            // Results read again, e.g. after the analysis ran once more,
+                            // keep their hot spots.
+                            let mut model = model;
+                            let old = std::mem::take(&mut self.results[index].hot_spots);
+                            model.hot_spots.definitions = old.definitions;
                             self.results[index] = model;
                             self.current_result = index;
                         }
@@ -990,7 +999,6 @@ impl Workbench {
                             self.current_result = self.results.len() - 1;
                         }
                     }
-                    // Results of the FE model get its hot spots evaluated right away.
                     self.evaluate_hot_spots(true);
                 } else {
                     self.tree.selected = None;
@@ -1157,6 +1165,8 @@ impl Workbench {
             self.edit_field_output(field);
         } else if let Some(TreeItem::HistorySet(set)) = response.open {
             self.edit_history_output(set);
+        } else if let Some(TreeItem::HotSpot(index)) = response.open {
+            self.edit_hot_spot(index);
         } else if let Some(TreeItem::HistoryComponent(set, field, component)) = response.open {
             self.history_table = Some(HistoryTable {
                 set,
@@ -1208,59 +1218,117 @@ impl Workbench {
                 self.generate_mesh(ctx, Some(vec![name]));
             }
         }
-        if response.evaluate_hot_spots {
-            self.evaluate_hot_spots(false);
+        if response.hot_spot_table {
+            self.show_hot_spot_table();
         }
         if response.search_contacts {
             self.open_contact_search();
         }
     }
 
-    /// Evaluates the hot spots of the FE model on the current results file, writes the values
-    /// next to it and opens the table. `automatic` skips the messages when there is nothing
-    /// to evaluate.
-    fn evaluate_hot_spots(&mut self, automatic: bool) {
-        let fe = self.model.as_ref().filter(|m| !m.fe.hot_spots.is_empty());
-        let results = self.results.get_mut(self.current_result);
-        let (Some(fe), Some(results)) = (fe, results) else {
-            if !automatic {
-                self.output.push(
-                    "Hot Spots: erst Hot Spots im FE-Modell definieren und Ergebnisse öffnen."
-                        .into(),
-                );
-            }
+    /// Evaluates the hot spots of the current results file and writes the values next to
+    /// it; `table` opens their table.
+    fn evaluate_hot_spots(&mut self, table: bool) {
+        let Some(results) = self.results.get_mut(self.current_result) else {
             return;
         };
-        match crate::hot_spots::evaluate(fe, results) {
-            Ok(reports) => {
-                let file = match crate::hot_spots::write(&results.path, &reports) {
-                    Ok(file) => {
-                        self.output
-                            .push(format!("Hot Spots ausgewertet: {}", file.display()));
-                        Some(file)
-                    }
-                    Err(error) => {
-                        self.output.push(error);
-                        None
-                    }
-                };
-                self.output.extend(crate::hot_spots::summary(&reports));
-                for report in &reports {
-                    self.output
-                        .extend(report.warnings.iter().map(|w| format!("Warnung: {w}")));
-                }
-                results.hot_spots = Some(crate::hot_spots::Evaluation { reports, file });
-                self.hot_spot_window = true;
-                self.set_tree_view(TreeView::Results);
-                self.update_contour();
-            }
-            Err(error) => {
-                if !automatic || !fe.fe.hot_spots.is_empty() {
-                    self.output
-                        .push(format!("Hot Spots nicht ausgewertet: {error}"));
-                }
-            }
+        let reports = crate::hot_spots::evaluate(results);
+        let hot_spots = &mut results.hot_spots;
+        hot_spots.reports = Vec::new();
+        hot_spots.file = None;
+        if reports.is_empty() {
+            self.hot_spot_window = false;
+            self.update_contour();
+            return;
         }
+        match crate::hot_spots::write(&results.path, &reports) {
+            Ok(file) => {
+                self.output
+                    .push(format!("Hot Spots ausgewertet: {}", file.display()));
+                hot_spots.file = Some(file);
+            }
+            Err(error) => self.output.push(error),
+        }
+        self.output.extend(crate::hot_spots::summary(&reports));
+        for report in &reports {
+            self.output
+                .extend(report.warnings.iter().map(|w| format!("Warnung: {w}")));
+        }
+        hot_spots.reports = reports;
+        if table {
+            self.show_hot_spot_table();
+        } else {
+            self.update_contour();
+        }
+    }
+
+    fn show_hot_spot_table(&mut self) {
+        let evaluated = (self.results.get(self.current_result))
+            .is_some_and(|m| !m.hot_spots.reports.is_empty());
+        if evaluated {
+            self.hot_spot_window = true;
+            self.set_tree_view(TreeView::Results);
+            self.update_contour();
+        }
+    }
+
+    fn edit_hot_spot(&mut self, index: usize) {
+        if let Some(model) = self.results.get(self.current_result) {
+            self.hot_spot_dialog =
+                HotSpotDialog::edit(&model.hot_spots.definitions, index, &model.mesh);
+        }
+    }
+
+    fn delete_hot_spot(&mut self, index: usize) {
+        let Some(model) = self.results.get_mut(self.current_result) else {
+            return;
+        };
+        if index >= model.hot_spots.definitions.len() {
+            return;
+        }
+        let removed = model.hot_spots.definitions.remove(index);
+        self.output
+            .push(format!("Hot Spot {} gelöscht", removed.name));
+        self.hot_spot_dialog = None;
+        self.tree.selected = None;
+        self.evaluate_hot_spots(self.hot_spot_window);
+    }
+
+    fn hot_spot_dialog_window(&mut self, ctx: &egui::Context) {
+        let (Some(dialog), Some(model)) = (
+            &mut self.hot_spot_dialog,
+            self.results.get_mut(self.current_result),
+        ) else {
+            return;
+        };
+        let (hot_spot, next) = match dialog.show(ctx, model) {
+            DialogAction::Open => return,
+            DialogAction::Cancel => {
+                self.hot_spot_dialog = None;
+                return;
+            }
+            DialogAction::Ok { output, next } => (output, next),
+        };
+        let definitions = &mut model.hot_spots.definitions;
+        let verb = match dialog.edit.filter(|&i| i < definitions.len()) {
+            Some(index) => {
+                definitions[index] = hot_spot.clone();
+                "geändert"
+            }
+            None => {
+                definitions.push(hot_spot.clone());
+                "erstellt"
+            }
+        };
+        self.output
+            .push(format!("Hot Spot {} {verb}", hot_spot.name));
+        if next {
+            dialog.next(&hot_spot);
+        } else {
+            self.hot_spot_dialog = None;
+        }
+        // The table would cover the selection window while the next one is picked.
+        self.evaluate_hot_spots(!next);
     }
 
     /// The table of hot spot values of the shown results file.
@@ -1271,59 +1339,61 @@ impl Workbench {
         let Some(model) = self.results.get(self.current_result) else {
             return;
         };
-        let Some(evaluation) = &model.hot_spots else {
+        if model.hot_spots.reports.is_empty() {
             return;
-        };
+        }
         let step = (model.results.as_ref())
             .and_then(ResultsView::current_increment)
             .map(|i| (i.step, i.increment));
-        if !crate::hot_spots::window(ctx, evaluation, step) {
+        if !crate::hot_spots::window(ctx, &model.hot_spots, step) {
             self.hot_spot_window = false;
             self.update_contour();
         }
     }
 
-    /// Shows the paths of the hot spot being edited or selected in the FE model.
+    /// Finds the paths of the hot spot being edited or selected in the Results tree.
     fn update_hot_spot_preview(&mut self) {
-        let wanted = match (&self.editor, &self.tree.selected) {
-            _ if self.tree_view == TreeView::Results => None,
-            (Some(editor), _) => editor.hot_spot(),
-            (None, Some((TreeView::FeModel, TreeItem::HotSpot(i)))) => self
-                .model
-                .as_ref()
-                .and_then(|m| m.fe.hot_spots.get(*i).cloned()),
+        let current = self.current_result;
+        let model = self.results.get(current);
+        let wanted = match (&self.hot_spot_dialog, &self.tree.selected) {
+            _ if self.tree_view != TreeView::Results => None,
+            (Some(dialog), _) => Some(dialog.hot_spot()),
+            (None, Some((TreeView::Results, TreeItem::HotSpot(i)))) => {
+                model.and_then(|m| m.hot_spots.definitions.get(*i).cloned())
+            }
             _ => None,
         };
-        let version = (self.model.as_ref()).map_or(0, |m| m.explosion.version());
-        if wanted.as_ref() == self.hot_spot_preview.as_ref().map(|(h, _)| h)
-            && version == self.hot_spot_explosion
-        {
+        let shown = (self.hot_spot_preview.as_ref()).map(|(h, index, _)| (h, *index));
+        if wanted.as_ref().map(|h| (h, current)) == shown {
             return;
         }
-        self.hot_spot_explosion = version;
-        let paths = match (&wanted, &self.model) {
-            (Some(hot_spot), Some(model)) => crate::hot_spots::preview(model, hot_spot),
-            _ => Vec::new(),
+        self.hot_spot_preview = match (wanted, model) {
+            (Some(hot_spot), Some(model)) => {
+                let paths = crate::hot_spots::paths(model, &hot_spot);
+                Some((hot_spot, current, paths))
+            }
+            _ => None,
         };
-        self.hot_spot_preview = wanted.map(|h| (h, paths));
-        self.viewport.overlay.paths = self.overlay_paths();
+        self.update_contour();
     }
 
-    /// Hot spot paths drawn over the 3D view: of the evaluated results while their table is
-    /// open, otherwise of the hot spot edited or selected in the FE model.
+    /// Hot spot paths drawn over the results, deformed like them: of the hot spot edited or
+    /// selected, else of all evaluated ones while their table is open.
     fn overlay_paths(&self) -> Vec<Vec<glam::Vec3>> {
-        if self.tree_view == TreeView::Results {
-            let model = self.results.get(self.current_result);
-            return match model.and_then(|m| Some((m, m.hot_spots.as_ref()?))) {
-                Some((model, evaluation)) if self.hot_spot_window => {
-                    crate::hot_spots::result_paths(model, evaluation)
-                }
-                _ => Vec::new(),
-            };
+        let model = self.results.get(self.current_result);
+        let Some(model) = model.filter(|_| self.tree_view == TreeView::Results) else {
+            return Vec::new();
+        };
+        match &self.hot_spot_preview {
+            Some((_, index, paths)) if *index == self.current_result => {
+                crate::hot_spots::render_paths(model, paths)
+            }
+            _ if self.hot_spot_window => {
+                let reports = model.hot_spots.reports.iter();
+                crate::hot_spots::render_paths(model, reports.flat_map(|r| &r.paths))
+            }
+            _ => Vec::new(),
         }
-        self.hot_spot_preview
-            .as_ref()
-            .map_or_else(Vec::new, |(_, paths)| paths.clone())
     }
 
     /// The y axis of an axisymmetric model as PrePoMax shows it, from below to above the
@@ -1377,13 +1447,13 @@ impl Workbench {
     }
 
     /// Whether clicks in the 3D view pick for an open dialog: an item dialog of the FE model
-    /// or a history output dialog of the results.
+    /// or a history output or hot spot dialog of the results.
     fn picking(&self) -> bool {
         match self.tree_view {
-            TreeView::Results => self
-                .history_dialog
-                .as_ref()
-                .is_some_and(HistoryOutputDialog::picks),
+            TreeView::Results => {
+                (self.history_dialog.as_ref()).is_some_and(HistoryOutputDialog::picks)
+                    || (self.hot_spot_dialog.as_ref()).is_some_and(HotSpotDialog::picks)
+            }
             TreeView::FeModel => self.editor.as_ref().is_some_and(Editor::picks),
             TreeView::Geometry => {
                 (self.mesh_item_editor.as_ref()).is_some_and(MeshItemEditor::picks)
@@ -1398,6 +1468,7 @@ impl Workbench {
 
     fn close_history_windows(&mut self) {
         self.history_dialog = None;
+        self.hot_spot_dialog = None;
         self.history_table = None;
     }
 
@@ -1482,25 +1553,19 @@ impl Workbench {
     /// PrePoMax's Results menu.
     fn results_menu(&mut self, ui: &mut egui::Ui) {
         let any = !self.results.is_empty();
-        let hot_spots = self
-            .model
-            .as_ref()
-            .is_some_and(|m| !m.fe.hot_spots.is_empty());
         if ui
-            .add_enabled(any && hot_spots, egui::Button::new("Hot Spots auswerten"))
+            .add_enabled(any, egui::Button::new("Hot Spot erstellen …"))
             .clicked()
         {
-            self.evaluate_hot_spots(false);
+            self.create(NewItem::ResultHotSpot);
         }
-        let evaluated =
-            (self.results.get(self.current_result)).is_some_and(|m| m.hot_spots.is_some());
+        let evaluated = (self.results.get(self.current_result))
+            .is_some_and(|m| !m.hot_spots.reports.is_empty());
         if ui
             .add_enabled(evaluated, egui::Button::new("Hot-Spot-Tabelle"))
             .clicked()
         {
-            self.hot_spot_window = true;
-            self.set_tree_view(TreeView::Results);
-            self.update_contour();
+            self.show_hot_spot_table();
         }
         ui.separator();
         if ui
@@ -1626,6 +1691,13 @@ impl Workbench {
     }
 
     fn create(&mut self, kind: NewItem) {
+        if kind == NewItem::ResultHotSpot {
+            if let Some(model) = self.results.get(self.current_result) {
+                self.hot_spot_dialog = Some(HotSpotDialog::create(&model.hot_spots.definitions));
+                self.set_tree_view(TreeView::Results);
+            }
+            return;
+        }
         if let NewItem::Feature(kind) = kind {
             // Paths read results; features belong to the tab they are created on.
             let on_results = matches!(kind, FeatureKind::ResultPath | FeatureKind::ResultPlane);
@@ -1904,7 +1976,6 @@ impl Workbench {
                 "Last erstellen …",
                 takes_loads,
             ),
-            (NewItem::HotSpot, "Hot Spot erstellen …", true),
         ] {
             if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
                 kind = Some(item);
@@ -2241,14 +2312,15 @@ impl Workbench {
             return;
         }
         if self.tree_view == TreeView::Results {
-            if let (Some(dialog), Some(model)) = (
-                &mut self.history_dialog,
-                self.results.get(self.current_result),
-            ) {
+            if let Some(model) = self.results.get(self.current_result) {
                 let hit = model.pick_click(&click);
                 let pick = hit.as_ref().map(|hit| (hit, click.precision_at(hit.point)));
                 let operation = Operation::from_modifiers(click.shift, click.ctrl);
-                dialog.click(model, pick, operation);
+                if let Some(dialog) = &mut self.hot_spot_dialog {
+                    dialog.click(model, pick, operation);
+                } else if let Some(dialog) = &mut self.history_dialog {
+                    dialog.click(model, pick, operation);
+                }
             }
             return;
         }
@@ -2322,11 +2394,12 @@ impl Workbench {
         }
         let operation = Operation::from_modifiers(area.shift, area.ctrl);
         if self.tree_view == TreeView::Results {
-            if let (Some(dialog), Some(model)) = (
-                &mut self.history_dialog,
-                self.results.get(self.current_result),
-            ) {
-                dialog.box_select(model, area, operation);
+            if let Some(model) = self.results.get(self.current_result) {
+                if let Some(dialog) = &mut self.hot_spot_dialog {
+                    dialog.box_select(model, area, operation);
+                } else if let Some(dialog) = &mut self.history_dialog {
+                    dialog.box_select(model, area, operation);
+                }
             }
             return;
         }
@@ -2380,11 +2453,18 @@ impl Workbench {
         }
         let hover = hover.filter(|_| self.picking());
         if self.tree_view == TreeView::Results {
-            let shown = (self.history_dialog.as_ref()).zip(self.results.get(self.current_result));
-            self.viewport.preview = match (hover, shown) {
-                (Some(click), Some((dialog, model))) => model
+            let model = self.results.get(self.current_result);
+            self.viewport.preview = match (hover, model) {
+                (Some(click), Some(model)) => model
                     .pick_click(&click)
-                    .map(|hit| dialog.preview(model, &hit, click.precision_at(hit.point)))
+                    .map(|hit| {
+                        let precision = click.precision_at(hit.point);
+                        match (&self.hot_spot_dialog, &self.history_dialog) {
+                            (Some(dialog), _) => dialog.preview(model, &hit, precision),
+                            (None, Some(dialog)) => dialog.preview(model, &hit, precision),
+                            (None, None) => Default::default(),
+                        }
+                    })
                     .unwrap_or_default(),
                 _ => Default::default(),
             };
@@ -2698,6 +2778,8 @@ impl Workbench {
             self.delete_field_output(field);
         } else if let TreeItem::HistorySet(set) = item {
             self.delete_history_output(set);
+        } else if let TreeItem::HotSpot(index) = item {
+            self.delete_hot_spot(index);
         } else if let TreeItem::MeshItem(index) = item {
             if let Some(geometry) = self.model.as_mut().and_then(|m| m.geometry.as_mut())
                 && index < geometry.mesh_items.len()
@@ -2838,7 +2920,9 @@ impl Workbench {
         // part selected in the Results tree.
         let current = self.current_result;
         for (index, model) in self.results.iter_mut().enumerate() {
-            let dialog = (self.history_dialog.as_ref()).filter(|_| on_results && index == current);
+            let shown = on_results && index == current;
+            let dialog = (self.history_dialog.as_ref()).filter(|_| shown);
+            let hot_spot = (self.hot_spot_dialog.as_ref()).filter(|_| shown);
             let transformation = (self.transformation_dialog.as_ref())
                 .filter(|d| on_results && d.result == index && index == current);
             let feature = (self.feature_dialog.as_ref())
@@ -2848,6 +2932,7 @@ impl Workbench {
                 _ if transformation.is_some() => transformation
                     .map(TransformationDialog::highlight)
                     .unwrap_or_default(),
+                _ if hot_spot.is_some() => hot_spot.map(|d| d.highlight(model)).unwrap_or_default(),
                 (Some(dialog), _) => dialog.highlight(model),
                 (None, Some((TreeView::Results, TreeItem::Part(part)))) if index == current => {
                     Highlight::part(*part)
