@@ -17,7 +17,7 @@ use plx_render::{
 };
 
 use crate::exploded::{Assembly, Explosion, Parameters, PartShape};
-use crate::results::{Deformation, ResultsView};
+use crate::results::ResultsView;
 
 /// Angle between neighbouring faces above which their common edge counts as a feature edge
 /// and the shading across it stays sharp.
@@ -272,11 +272,6 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     model.included_files = included_files;
     model.results = increments.map(|(increments, date, time)| {
         let mut view = ResultsView::new(increments, model.mesh.bounds());
-        // Several parts usually mean contact, where an exaggerated deformation shows parts
-        // penetrating each other; true scale is less confusing there.
-        if model.mesh.parts.len() > 1 {
-            view.deformation = Deformation::TrueScale;
-        }
         view.date = date;
         view.time = time;
         view
@@ -1209,7 +1204,8 @@ mod tests {
         assert_eq!(model.parts[0].name, "STEEL");
         let view = model.results.as_ref().unwrap();
         assert_eq!(view.current().unwrap().1.name, "ALL");
-        assert!(view.scale() > 1.0);
+        assert_eq!(view.deformation, crate::results::Deformation::TrueScale);
+        assert_eq!(view.scale(), 1.0);
         // The beam bends downwards, so the deformed bounds reach below the undeformed ones.
         let undeformed_min_z = -5.0;
         let (min, _) = model.visible_bounds().unwrap();
@@ -1249,30 +1245,6 @@ mod tests {
         );
         let global_z = |p: Vec3| p.z as f64 + model.origin().z;
         assert!((global_z(a) + global_z(b)).abs() < 1e-3, "{a} {b}");
-    }
-
-    #[test]
-    fn multi_part_results_open_in_true_scale() {
-        let single = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::MmTonSC)
-            .unwrap()
-            .model;
-        assert_eq!(
-            single.results.unwrap().deformation,
-            Deformation::Automatic(1.0)
-        );
-        // Give the first element another material, which makes it a second part.
-        let text = std::fs::read_to_string(testdata("kragbalken_c3d8.frd")).unwrap();
-        let text = text.replacen(
-            " -1         1    1    0    1",
-            " -1         1    1    0    2",
-            1,
-        );
-        let path = std::env::temp_dir().join("prepolix_test_zwei_parts.frd");
-        std::fs::write(&path, text).unwrap();
-        let multi = load(&path, UnitSystem::MmTonSC).unwrap().model;
-        std::fs::remove_file(&path).ok();
-        assert_eq!(multi.parts.len(), 2);
-        assert_eq!(multi.results.unwrap().deformation, Deformation::TrueScale);
     }
 
     #[test]
