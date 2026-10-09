@@ -72,6 +72,9 @@ gmsh_api! {
         fn(c_double, c_double, c_double, c_double, c_double, c_double, c_int, Ierr);
     occ_add_rectangle = "gmshModelOccAddRectangle":
         fn(c_double, c_double, c_double, c_double, c_double, c_int, c_double, Ierr) -> c_int;
+    occ_add_point = "gmshModelOccAddPoint":
+        fn(c_double, c_double, c_double, c_double, c_int, Ierr) -> c_int;
+    occ_add_line = "gmshModelOccAddLine": fn(c_int, c_int, c_int, Ierr) -> c_int;
     occ_synchronize = "gmshModelOccSynchronize": fn(Ierr);
     occ_remove = "gmshModelOccRemove": fn(*const c_int, usize, c_int, Ierr);
     field_add = "gmshModelMeshFieldAdd": fn(*const c_char, c_int, Ierr) -> c_int;

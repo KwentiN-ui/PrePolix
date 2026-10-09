@@ -7,6 +7,9 @@ use std::collections::HashSet;
 use plx_mesh::FeMesh;
 
 use crate::equation::Equation;
+use plx_model::CoordinateSystem;
+
+use crate::transformation::{ComponentKind, component_kind};
 use crate::{Component, Field, Increment};
 
 /// Component names PrePoMax gives the computed fields.
@@ -152,6 +155,65 @@ fn component<'a>(increment: &'a Increment, field: &str, component: &str) -> Opti
     Some(&increment.field(field)?.component(component)?.values)
 }
 
+/// The raw components of a vector or tensor field in local directions given per node; `None`
+/// for a field that is neither.
+fn transformed_field(source: &Field, name: &str, rotations: &[[[f64; 3]; 3]]) -> Option<Field> {
+    let raw: Vec<&Component> = source.components.iter().filter(|c| !c.derived).collect();
+    let kinds: Vec<ComponentKind> = (0..source.components.len())
+        .filter(|&i| !source.components[i].derived)
+        .map(|i| component_kind(source, i))
+        .collect();
+    if kinds.iter().all(|k| *k == ComponentKind::Scalar) {
+        return None;
+    }
+    let count = raw
+        .iter()
+        .map(|c| c.values.len())
+        .min()?
+        .min(rotations.len());
+    const SLOT: [[usize; 3]; 3] = [[0, 3, 5], [3, 1, 4], [5, 4, 2]];
+    let components = raw
+        .iter()
+        .zip(&kinds)
+        .map(|(component, kind)| {
+            let values = (0..count)
+                .map(|n| {
+                    let q = &rotations[n];
+                    let value = |k: usize| raw[k].values[n] as f64;
+                    let v = match *kind {
+                        ComponentKind::Scalar => component.values[n] as f64,
+                        ComponentKind::Vector(row) => (0..3).map(|k| q[row][k] * value(k)).sum(),
+                        ComponentKind::Tensor(row, column) => {
+                            let mut sum = 0.0;
+                            for i in 0..3 {
+                                for j in 0..3 {
+                                    sum += q[row][i] * value(SLOT[i][j]) * q[column][j];
+                                }
+                            }
+                            sum
+                        }
+                    };
+                    v as f32
+                })
+                .collect();
+            Component {
+                name: component.name.clone(),
+                values,
+                derived: false,
+            }
+        })
+        .collect();
+    // The invariants and magnitudes follow from the raw components, as for read fields;
+    // which ones depends on the source field's name.
+    let mut field = Field {
+        name: source.name.clone(),
+        components,
+    };
+    crate::add_derived_components(&mut field);
+    field.name = name.to_string();
+    Some(field)
+}
+
 fn new_field(name: &str, components: Vec<(&str, Vec<f32>)>) -> Field {
     Field {
         name: name.to_string(),
@@ -173,6 +235,7 @@ pub fn compute(
     output: &FieldOutput,
     increments: &mut [Increment],
     mesh: &FeMesh,
+    systems: &[CoordinateSystem],
 ) -> Result<(), String> {
     let missing = |field: &str, component: &str| {
         format!("Das Ergebnis {field}.{component} gibt es in keinem Inkrement.")
@@ -292,11 +355,22 @@ pub fn compute(
                 .collect()
         }
         FieldOutputKind::CoordinateSystemTransform {
-            coordinate_system, ..
+            field,
+            coordinate_system,
         } => {
-            return Err(format!(
-                "Das Koordinatensystem {coordinate_system} gibt es nicht."
-            ));
+            let system = (systems.iter())
+                .find(|s| s.name == *coordinate_system)
+                .ok_or_else(|| {
+                    format!("Das Koordinatensystem {coordinate_system} gibt es nicht.")
+                })?;
+            // The local directions at every node, as rows of a rotation.
+            let rotations = (mesh.coords().iter())
+                .map(|&p| system.directions_at(p))
+                .collect::<Result<Vec<_>, _>>()?;
+            increments
+                .iter()
+                .map(|inc| transformed_field(inc.field(field)?, &output.name, &rotations))
+                .collect()
         }
     };
     if fields.iter().all(Option::is_none) {
@@ -387,13 +461,13 @@ mod tests {
                 limits: vec![("A".into(), 200.0), ("B".into(), 400.0)],
             },
         };
-        compute(&output, &mut incs, &mesh()).unwrap();
+        compute(&output, &mut incs, &mesh(), &[]).unwrap();
         assert_eq!(values(&incs[0], "Limit-1", RATIO), [0.5, 1.0, 0.0]);
         let safety = values(&incs[0], "Limit-1", SAFETY_FACTOR);
         assert_eq!(&safety[..2], [2.0, 1.0]);
         assert!(safety[2].is_nan(), "no safety factor without stress");
         // Computing again replaces the field.
-        compute(&output, &mut incs, &mesh()).unwrap();
+        compute(&output, &mut incs, &mesh(), &[]).unwrap();
         assert_eq!(incs[0].fields.len(), 2);
     }
 
@@ -409,7 +483,7 @@ mod tests {
                 limits: vec![(LimitBasis::AllElements.name().into(), 0.0)],
             },
         };
-        assert!(compute(&output, &mut incs, &mesh()).is_err());
+        assert!(compute(&output, &mut incs, &mesh(), &[]).is_err());
         assert_eq!(incs[0].fields.len(), 1);
     }
 
@@ -426,7 +500,7 @@ mod tests {
                 component: "MISES".into(),
             },
         };
-        compute(&output, &mut incs, &mesh()).unwrap();
+        compute(&output, &mut incs, &mesh(), &[]).unwrap();
         for inc in &incs {
             assert_eq!(values(inc, "Envelope-1", MAX), [3.0, 5.0, -2.0]);
             assert_eq!(values(inc, "Envelope-1", MIN), [1.0, 1.0, -4.0]);
@@ -444,7 +518,7 @@ mod tests {
                 unit: "/".into(),
             },
         };
-        compute(&first, &mut incs, &mesh()).unwrap();
+        compute(&first, &mut incs, &mesh(), &[]).unwrap();
         let second = FieldOutput {
             name: "Equation-2".into(),
             kind: FieldOutputKind::Equation {
@@ -452,7 +526,7 @@ mod tests {
                 unit: "/".into(),
             },
         };
-        compute(&second, &mut incs, &mesh()).unwrap();
+        compute(&second, &mut incs, &mesh(), &[]).unwrap();
         assert_eq!(values(&incs[0], "Equation-2", VALUE), [102.0, 204.0, 306.0]);
         assert_eq!(second.parents(), ["Equation-1", "STRESS"]);
     }
@@ -468,7 +542,67 @@ mod tests {
                     unit: "/".into(),
                 },
             };
-            assert!(compute(&output, &mut incs, &mesh()).is_err(), "{equation}");
+            assert!(
+                compute(&output, &mut incs, &mesh(), &[]).is_err(),
+                "{equation}"
+            );
         }
+    }
+
+    fn raw_field(name: &str, components: &[(&str, [f32; 3])]) -> Field {
+        let mut field = Field {
+            name: name.into(),
+            components: (components.iter())
+                .map(|(n, v)| Component {
+                    name: n.to_string(),
+                    values: v.to_vec(),
+                    derived: false,
+                })
+                .collect(),
+        };
+        crate::add_derived_components(&mut field);
+        field
+    }
+
+    #[test]
+    fn fields_turn_into_a_coordinate_system() {
+        let stress = [("S11", [10.0; 3]), ("S22", [0.0; 3]), ("S33", [0.0; 3])]
+            .into_iter()
+            .chain([("S12", [0.0; 3]), ("S23", [0.0; 3]), ("S13", [0.0; 3])]);
+        let stress: Vec<(&str, [f32; 3])> = stress.collect();
+        let disp = [("U1", [1.0; 3]), ("U2", [2.0; 3]), ("U3", [3.0; 3])];
+        let mut incs = vec![Increment {
+            step: 1,
+            increment: 1,
+            kind: AnalysisKind::Static,
+            value: 1.0,
+            fields: vec![raw_field("STRESS", &stress), raw_field("DISP", &disp)],
+        }];
+        // x along global y, y along global -x.
+        let mut system = CoordinateSystem::new("CS-1");
+        system.point_x = [0.0, 1.0, 0.0];
+        system.point_xy = [-1.0, 0.0, 0.0];
+        let output = |field: &str, name: &str| FieldOutput {
+            name: name.into(),
+            kind: FieldOutputKind::CoordinateSystemTransform {
+                field: field.into(),
+                coordinate_system: "CS-1".into(),
+            },
+        };
+        let systems = [system];
+        compute(&output("STRESS", "S_CS"), &mut incs, &mesh(), &systems).unwrap();
+        compute(&output("DISP", "U_CS"), &mut incs, &mesh(), &systems).unwrap();
+        assert_eq!(values(&incs[0], "S_CS", "S11"), [0.0; 3]);
+        assert_eq!(values(&incs[0], "S_CS", "S22"), [10.0; 3]);
+        // The invariants do not change.
+        assert_eq!(
+            values(&incs[0], "S_CS", "MISES"),
+            values(&incs[0], "STRESS", "MISES")
+        );
+        assert_eq!(values(&incs[0], "U_CS", "U1"), [2.0; 3]);
+        assert_eq!(values(&incs[0], "U_CS", "U2"), [-1.0; 3]);
+        assert_eq!(values(&incs[0], "U_CS", "U3"), [3.0; 3]);
+        let missing = output("DISP", "X");
+        assert!(compute(&missing, &mut incs, &mesh(), &[]).is_err());
     }
 }

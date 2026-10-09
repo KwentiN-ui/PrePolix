@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Elastic, Material};
+use crate::{Elastic, Material, UnitSystem};
 
 /// Version of the library file format written by this build.
 pub const LIBRARY_FORMAT: u32 = 1;
@@ -21,6 +21,11 @@ pub type LibraryPath = Vec<usize>;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MaterialLibrary {
     pub format: u32,
+    /// The units the library's values are in; materials are converted when they are copied
+    /// between the library and a model. Libraries saved before this was stored are in
+    /// PrePoMax's default "mm, ton, s, °C".
+    #[serde(default)]
+    pub units: UnitSystem,
     pub root: Category,
 }
 
@@ -82,10 +87,12 @@ impl Default for MaterialLibrary {
                 young: 210_000.0,
                 poisson: 0.3,
             }),
+            ..Material::default()
         };
         let category = |name, items| LibraryNode::Category(Category::new(name, items));
         Self {
             format: LIBRARY_FORMAT,
+            units: UnitSystem::MmTonSC,
             root: Category::new(
                 ROOT_NAME,
                 vec![category(

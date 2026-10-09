@@ -4,7 +4,7 @@
 
 use plx_mesh::FeMesh;
 
-use crate::{FeModel, Region};
+use crate::{FeModel, LoadKind, Region, Section, SectionKind, line_tangent};
 
 /// An item of the model that can refer to something else.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -16,6 +16,7 @@ pub enum ModelItem {
     BoundaryCondition(usize, usize),
     /// Load by step and index.
     Load(usize, usize),
+    InitialCondition(usize),
 }
 
 /// An item with a missing reference and why it is invalid.
@@ -33,7 +34,7 @@ impl FeModel {
             let reason = if !self.materials.iter().any(|m| m.name == section.material) {
                 Some(format!("Material {} existiert nicht", section.material))
             } else {
-                section.region.missing_reference(mesh)
+                (section.region.missing_reference(mesh)).or_else(|| section.kind_problem(mesh))
             };
             if let Some(reason) = reason {
                 invalid.push(Invalid {
@@ -82,7 +83,19 @@ impl FeModel {
                 }
             }
             for (i, load) in step.loads.iter().enumerate() {
-                if let Some(reason) = load.region.missing_reference(mesh) {
+                let radiation = matches!(load.kind, LoadKind::Radiation { .. });
+                let constants = self.properties.absolute_zero.is_some()
+                    && self.properties.stefan_boltzmann.is_some();
+                let reason = if radiation && !constants {
+                    Some(
+                        "Strahlung braucht den absoluten Nullpunkt und die \
+                         Stefan-Boltzmann-Konstante (Modelleigenschaften)"
+                            .into(),
+                    )
+                } else {
+                    load.region.missing_reference(mesh)
+                };
+                if let Some(reason) = reason {
                     invalid.push(Invalid {
                         item: ModelItem::Load(s, i),
                         reason,
@@ -90,7 +103,54 @@ impl FeModel {
                 }
             }
         }
+        for (i, condition) in self.initial_conditions.iter().enumerate() {
+            if let Some(reason) = condition.region.missing_reference(mesh) {
+                invalid.push(Invalid {
+                    item: ModelItem::InitialCondition(i),
+                    reason,
+                });
+            }
+        }
         invalid
+    }
+}
+
+impl Section {
+    /// Why the section's kind does not fit its elements or its own values, if it does not:
+    /// a beam section on solids, a solid section on lines, a pipe on 2-node lines, a normal
+    /// parallel to a beam, or dimensions CalculiX would reject.
+    pub fn kind_problem(&self, mesh: &FeMesh) -> Option<String> {
+        match &self.kind {
+            SectionKind::Solid => {}
+            SectionKind::Truss { area } => {
+                if !(area.is_finite() && *area > 0.0) {
+                    return Some("Die Querschnittsfläche muss größer als 0 sein".into());
+                }
+            }
+            SectionKind::Beam(beam) => {
+                if !beam.profile.is_valid() {
+                    return Some("Die Profilmaße sind ungültig".into());
+                }
+            }
+        }
+        let elements = self.region.elements(mesh);
+        for element in elements.iter().filter_map(|&id| mesh.element(id)) {
+            if let Some(reason) = self.kind.rejects(element) {
+                return Some(reason);
+            }
+            if let SectionKind::Beam(beam) = &self.kind
+                && beam
+                    .orientation
+                    .normal_for(line_tangent(mesh, element))
+                    .is_none()
+            {
+                return Some(format!(
+                    "Die Normale ist parallel zur Achse von Element {}",
+                    element.id
+                ));
+            }
+        }
+        None
     }
 }
 
@@ -130,6 +190,13 @@ impl Region {
                     })
                     .count();
                 (missing > 0).then(|| format!("{missing} Elementflächen existieren nicht"))
+            }
+            Region::Geometry(entities) => {
+                if mesh.cad.is_empty() {
+                    return Some("Das Netz ist nicht aus der Geometrie erzeugt".into());
+                }
+                let missing = entities.iter().filter(|&&e| !mesh.cad.contains(e)).count();
+                (missing > 0).then(|| format!("{missing} Geometrieelemente sind nicht vernetzt"))
             }
         }
     }
@@ -186,12 +253,14 @@ mod tests {
                 name: "Steel".into(),
                 density: None,
                 elastic: None,
+                ..Default::default()
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
                 material: "Steel".into(),
                 region: Region::Parts(vec!["PART-1".into()]),
                 thickness: 1.0,
+                kind: SectionKind::Solid,
             }],
             steps: vec![step],
             user_keywords: Vec::new(),

@@ -2,6 +2,7 @@
 //! shown results, the paths are drawn while it is open.
 
 use egui::Ui;
+use plx_model::Quantity;
 use plx_results::hot_spot::{Extrapolation, HotSpot, HotSpotComponent, extrapolation_weights};
 
 use crate::field_output_dialog::DialogAction;
@@ -209,6 +210,7 @@ fn form(
     ui.label("");
     ui.weak("Knoten am Nahtübergang, z. B. als Kante.");
     ui.end_row();
+    let units = crate::hot_spots::units(model);
     ui.label("Extrapolation");
     let custom = matches!(hot_spot.extrapolation, Extrapolation::Custom(_));
     egui::ComboBox::from_id_salt("hot spot extrapolation")
@@ -220,14 +222,19 @@ fn form(
                 ui.selectable_value(&mut hot_spot.extrapolation, method, label);
             }
             if ui.selectable_label(custom, "Eigene Lesepunkte").clicked() && !custom {
-                let distances = hot_spot.distances();
+                let distances = hot_spot.distances_in(units);
                 *text = format_distances(&distances);
                 hot_spot.extrapolation = Extrapolation::Custom(distances);
             }
         });
     ui.end_row();
     if let Extrapolation::Custom(distances) = &mut hot_spot.extrapolation {
-        ui.label("Abstände");
+        let unit = units.unit(Quantity::Length);
+        ui.label(if unit.is_empty() {
+            "Abstände".to_string()
+        } else {
+            format!("Abstände [{unit}]")
+        });
         let edit = egui::TextEdit::singleline(text)
             .hint_text("z. B. 2, 6, 10")
             .desired_width(200.0);
@@ -239,7 +246,7 @@ fn form(
     ui.label("Blechdicke t");
     ui.add_enabled(
         hot_spot.extrapolation.uses_thickness(),
-        numeric::drag_value(&mut hot_spot.thickness)
+        numeric::quantity(&mut hot_spot.thickness, units, Quantity::Length)
             .range(0.0..=f64::MAX)
             .speed(0.1),
     );
@@ -257,15 +264,7 @@ fn form(
         };
         formula += &format!("{sign} {:.3} S({})", w.abs(), short(*d));
     }
-    ui.vertical(|ui| {
-        ui.label(formula);
-        if matches!(
-            hot_spot.extrapolation,
-            Extrapolation::IiwTypeBFine | Extrapolation::IiwTypeBCoarse
-        ) {
-            ui.weak("Abstände in mm: das Modell muss in mm sein.");
-        }
-    });
+    ui.label(formula);
     ui.end_row();
     ui.label("Spannung");
     egui::ComboBox::from_id_salt("hot spot component")
@@ -338,6 +337,7 @@ mod tests {
         assert_eq!(dialog.hot_spot.name, "Hot_Spot-1");
         assert!(dialog.output().is_err(), "no toe nodes");
         dialog.toe.take(
+            &plx_mesh::FeMesh::default(),
             crate::selection::Items::Nodes(BTreeSet::from([7])),
             Operation::Replace,
         );

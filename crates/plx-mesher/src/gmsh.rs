@@ -316,12 +316,15 @@ impl Gmsh {
     }
 
     /// Reads a STEP, IGES or BREP file into the OpenCASCADE kernel and synchronises the model.
+    /// Shapes of every dimension are kept, so that free faces and edges, the shell and line
+    /// parts, survive next to the solids; the returned (dimension, tag) pairs are the shapes
+    /// of the file.
     pub fn import_shapes(&self, path: &Path) -> Result<Vec<(i32, i32)>, GmshError> {
         let file = c_path(path)?;
         let empty = c_string("")?;
         let (mut tags, mut len) = (std::ptr::null_mut(), 0);
         self.call(|e| unsafe {
-            (self.api.occ_import_shapes)(file.as_ptr(), &mut tags, &mut len, 1, empty.as_ptr(), e);
+            (self.api.occ_import_shapes)(file.as_ptr(), &mut tags, &mut len, 0, empty.as_ptr(), e);
         })?;
         let tags = self.take_vec(tags, len);
         self.synchronize()?;
@@ -346,6 +349,22 @@ impl Gmsh {
             (self.api.occ_add_rectangle)(x, y, z, dx, dy, -1, radius, e);
         })?;
         self.synchronize()
+    }
+
+    /// Adds a point; returns its tag. Points are the ends of lines, see [`Self::add_line`].
+    pub fn add_point(&self, [x, y, z]: [f64; 3]) -> Result<i32, GmshError> {
+        let mut tag = 0;
+        self.call(|e| tag = unsafe { (self.api.occ_add_point)(x, y, z, 0.0, -1, e) })?;
+        self.synchronize()?;
+        Ok(tag)
+    }
+
+    /// Adds a straight line between two points; returns its tag.
+    pub fn add_line(&self, start: i32, end: i32) -> Result<i32, GmshError> {
+        let mut tag = 0;
+        self.call(|e| tag = unsafe { (self.api.occ_add_line)(start, end, -1, e) })?;
+        self.synchronize()?;
+        Ok(tag)
     }
 
     /// Removes entities given as (dimension, tag) with what bounds them and nothing else
@@ -418,10 +437,19 @@ impl Gmsh {
 
     /// Bounding box of the whole model.
     pub fn bounding_box(&self) -> Result<([f64; 3], [f64; 3]), GmshError> {
+        self.entity_bounding_box(-1, -1)
+    }
+
+    /// Bounding box of one entity.
+    pub fn entity_bounding_box(
+        &self,
+        dim: i32,
+        tag: i32,
+    ) -> Result<([f64; 3], [f64; 3]), GmshError> {
         let (mut min, mut max) = ([0.0; 3], [0.0; 3]);
         let [x0, y0, z0] = &mut min;
         let [x1, y1, z1] = &mut max;
-        self.call(|e| unsafe { (self.api.get_bounding_box)(-1, -1, x0, y0, z0, x1, y1, z1, e) })?;
+        self.call(|e| unsafe { (self.api.get_bounding_box)(dim, tag, x0, y0, z0, x1, y1, z1, e) })?;
         Ok((min, max))
     }
 

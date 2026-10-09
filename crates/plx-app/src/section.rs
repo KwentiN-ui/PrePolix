@@ -1,5 +1,5 @@
-//! Section view: what the plane is (a principal plane at a coordinate, or a point with a
-//! normal) and the dialog that edits it. Every way of defining the plane ends in the same
+//! Section view: what the plane is (a principal plane at a coordinate, a plane of the model's
+//! features, or a point with a normal) and the dialog that edits it. Every way of defining the plane ends in the same
 //! point and normal, so the renderer, the cut and the manipulator only know those.
 
 use std::collections::BTreeSet;
@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use egui::Ui;
 use glam::{DMat3, DVec3};
 use plx_mesh::NodeId;
+use plx_model::FeModel;
 
 use crate::gizmo::{GizmoDrag, PlaneGizmo};
 use crate::model::{Highlight, Hit, Model};
@@ -59,6 +60,15 @@ pub enum PlaneDefinition {
     Principal { plane: PrincipalPlane, offset: f64 },
     /// Any plane through a point, as in PrePoMax. The normal need not be a unit vector.
     PointNormal { point: DVec3, normal: DVec3 },
+    /// A plane of the model's features, shifted along its normal; it follows the feature
+    /// when that changes.
+    Feature {
+        plane: String,
+        offset: f64,
+        /// A point on the feature's plane and its unit normal, as last resolved; `None` while
+        /// the feature is missing or degenerate.
+        frame: Option<(DVec3, DVec3)>,
+    },
 }
 
 /// A section view: the plane in model coordinates and how the cut faces look. The side the
@@ -94,17 +104,32 @@ impl SectionView {
         }
     }
 
+    /// Takes the current plane feature the section refers to; returns whether the plane
+    /// moved.
+    pub fn resolve(&mut self, fe: &FeModel) -> bool {
+        let PlaneDefinition::Feature { plane, frame, .. } = &mut self.definition else {
+            return false;
+        };
+        let resolved = (fe.plane(plane))
+            .and_then(|p| p.resolve(fe).ok())
+            .map(|(point, normal)| (DVec3::from(point), DVec3::from(normal)));
+        let moved = *frame != resolved;
+        *frame = resolved;
+        moved
+    }
+
     /// Unit normal pointing into the visible half.
     pub fn normal(&self) -> DVec3 {
         let normal = match &self.definition {
             PlaneDefinition::Principal { plane, .. } => plane.unit_normal(),
             PlaneDefinition::PointNormal { normal, .. } => normal.normalize_or(DVec3::Z),
+            PlaneDefinition::Feature { frame, .. } => frame.map_or(DVec3::Z, |f| f.1),
         };
         if self.flipped { -normal } else { normal }
     }
 
-    /// Where the manipulator sits: the defined point, or for a principal plane the centre of
-    /// the model projected onto it.
+    /// Where the manipulator sits: the defined point, or for a principal plane or a feature
+    /// the centre of the model projected onto it.
     pub fn anchor(&self, center: DVec3) -> DVec3 {
         match &self.definition {
             PlaneDefinition::Principal { plane, offset } => {
@@ -113,6 +138,10 @@ impl SectionView {
                 p
             }
             PlaneDefinition::PointNormal { point, .. } => *point,
+            PlaneDefinition::Feature { offset, frame, .. } => frame
+                .map_or(center, |(point, normal)| {
+                    center - normal * normal.dot(center - point) + normal * *offset
+                }),
         }
     }
 
@@ -122,6 +151,9 @@ impl SectionView {
         match &mut self.definition {
             PlaneDefinition::Principal { plane, offset } => *offset += shift[plane.axis()],
             PlaneDefinition::PointNormal { point, .. } => *point += shift,
+            PlaneDefinition::Feature { offset, frame, .. } => {
+                *offset += shift.dot(frame.map_or(DVec3::Z, |f| f.1));
+            }
         }
     }
 
@@ -140,7 +172,9 @@ impl SectionView {
     /// Shows the other side.
     pub fn flip(&mut self) {
         match &mut self.definition {
-            PlaneDefinition::Principal { .. } => self.flipped = !self.flipped,
+            PlaneDefinition::Principal { .. } | PlaneDefinition::Feature { .. } => {
+                self.flipped = !self.flipped;
+            }
             // Adding zero turns -0 into 0, so the dialog shows no "-0.00".
             PlaneDefinition::PointNormal { normal, .. } => *normal = -*normal + DVec3::ZERO,
         }
@@ -255,7 +289,8 @@ impl SectionDialog {
         let Some((hit, precision)) = pick else {
             return;
         };
-        if let Items::Nodes(nodes) = self.picker.pick(model, hit, Target::Nodes, precision) {
+        let picked = self.picker.pick(model, hit, Target::Nodes, precision);
+        if let Items::Nodes(nodes) = picked.resolved(&model.mesh, Target::Nodes) {
             self.take(model, nodes);
         }
     }
@@ -333,7 +368,7 @@ impl SectionDialog {
             .pivot(egui::Align2::LEFT_TOP)
             .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
             .show(ctx, |ui| {
-                self.form(ui);
+                self.form(ui, &model.fe);
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                     if ui.button("Abbrechen").clicked() {
@@ -364,12 +399,16 @@ impl SectionDialog {
         result
     }
 
-    fn form(&mut self, ui: &mut Ui) {
+    fn form(&mut self, ui: &mut Ui, fe: &FeModel) {
         let speed = self.half_diagonal.length() * 0.005;
-        let principal = matches!(self.draft.definition, PlaneDefinition::Principal { .. });
+        let kind = match self.draft.definition {
+            PlaneDefinition::Principal { .. } => 0,
+            PlaneDefinition::Feature { .. } => 1,
+            PlaneDefinition::PointNormal { .. } => 2,
+        };
         ui.horizontal(|ui| {
             ui.label("Ebene:");
-            if ui.radio(principal, "Grundebene").clicked() && !principal {
+            if ui.radio(kind == 0, "Grundebene").clicked() && kind != 0 {
                 let visible = self.draft.normal();
                 let plane = closest_principal(visible);
                 let offset = self.draft.anchor(self.center)[plane.axis()];
@@ -377,7 +416,23 @@ impl SectionDialog {
                 self.draft.flipped = visible[plane.axis()] < 0.0;
                 self.picking = None;
             }
-            if ui.radio(!principal, "Punkt und Normale").clicked() && principal {
+            let radio = ui
+                .add_enabled(
+                    !fe.planes.is_empty(),
+                    egui::RadioButton::new(kind == 1, "Plane-Feature"),
+                )
+                .on_disabled_hover_text("Zuerst unter Features eine Plane anlegen.");
+            if radio.clicked() && kind != 1 {
+                self.draft.definition = PlaneDefinition::Feature {
+                    plane: fe.planes[0].name.clone(),
+                    offset: 0.0,
+                    frame: None,
+                };
+                self.draft.flipped = false;
+                self.draft.resolve(fe);
+                self.picking = None;
+            }
+            if ui.radio(kind == 2, "Punkt und Normale").clicked() && kind != 2 {
                 let (point, normal) = self.draft.as_point_normal(self.center);
                 self.draft.set_point_normal(point, normal);
             }
@@ -406,6 +461,32 @@ impl SectionDialog {
                     ui.label(format!("Lage {}", plane.axis_label()));
                     ui.add(egui::DragValue::new(offset).speed(speed));
                     ui.end_row();
+                }
+                PlaneDefinition::Feature {
+                    plane,
+                    offset,
+                    frame,
+                } => {
+                    ui.label("Plane");
+                    egui::ComboBox::from_id_salt("section plane")
+                        .selected_text(plane.as_str())
+                        .show_ui(ui, |ui| {
+                            for candidate in &fe.planes {
+                                ui.selectable_value(plane, candidate.name.clone(), &candidate.name);
+                            }
+                        });
+                    ui.end_row();
+                    ui.label("Abstand");
+                    ui.add(egui::DragValue::new(offset).speed(speed));
+                    ui.end_row();
+                    if frame.is_none() {
+                        ui.label("");
+                        ui.colored_label(
+                            egui::Color32::from_rgb(200, 0, 0),
+                            "Die Plane fehlt oder ist ungültig.",
+                        );
+                        ui.end_row();
+                    }
                 }
                 PlaneDefinition::PointNormal { point, normal } => {
                     ui.label("Punkt");
@@ -491,6 +572,8 @@ impl SectionDialog {
             }
             ui.checkbox(&mut self.draft.lighten, "Schnittflächen aufhellen");
         });
+        // A changed plane takes effect at once.
+        self.draft.resolve(fe);
         ui.weak("Pfeil ziehen: verschieben, Bögen ziehen: kippen");
     }
 }
@@ -575,6 +658,49 @@ mod tests {
         assert!((section.anchor(DVec3::ZERO) - center).length() < EPS);
         let expected = DMat3::from_rotation_z(std::f64::consts::FRAC_PI_2) * before;
         assert!((section.normal() - expected).length() < 1e-9);
+    }
+
+    #[test]
+    fn feature_planes_follow_their_feature() {
+        let mut fe = FeModel::default();
+        let mut system = plx_model::CoordinateSystem::new("CS");
+        system.origin = [0.0, 0.0, 5.0];
+        system.point_x = [1.0, 0.0, 5.0];
+        system.point_xy = [0.0, 1.0, 5.0];
+        fe.coordinate_systems.push(system);
+        fe.planes.push(plx_model::Plane {
+            source: plx_model::PlaneSource::CoordinateSystem {
+                system: "CS".into(),
+                plane: plx_model::CoordinatePlane::Xy,
+                offset: 0.0,
+            },
+            ..plx_model::Plane::new("Plane-1")
+        });
+        let mut section = SectionView {
+            definition: PlaneDefinition::Feature {
+                plane: "Plane-1".into(),
+                offset: 1.0,
+                frame: None,
+            },
+            flipped: false,
+            lighten: true,
+        };
+        assert!(section.resolve(&fe));
+        assert!(!section.resolve(&fe));
+        let center = DVec3::new(1.0, 2.0, 0.0);
+        // The model centre projected onto the plane, shifted by the offset.
+        assert!((section.anchor(center) - DVec3::new(1.0, 2.0, 6.0)).length() < EPS);
+        section.translate(2.0);
+        assert!((section.anchor(center).z - 8.0).abs() < EPS);
+        section.flip();
+        section.translate(2.0);
+        assert!((section.anchor(center).z - 6.0).abs() < EPS);
+        // The plane moves with its coordinate system.
+        let system = &mut fe.coordinate_systems[0];
+        (system.origin, system.point_x, system.point_xy) =
+            ([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        assert!(section.resolve(&fe));
+        assert!((section.anchor(center).z - 1.0).abs() < EPS);
     }
 
     #[test]

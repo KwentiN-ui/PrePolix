@@ -35,6 +35,8 @@ pub struct Overlay {
     /// Global origin in render coordinates, where the global axis triad is drawn.
     pub global_origin: Option<Vec3>,
     pub show_scale_bar: bool,
+    /// Length unit written after the scale bar's last label, empty without units.
+    pub length_unit: &'static str,
     pub show_view_triad: bool,
     /// Selected nodes in render coordinates, drawn as highlighted points.
     pub nodes: Vec<Vec3>,
@@ -47,6 +49,34 @@ pub struct Overlay {
     pub paths: Vec<Vec<Vec3>>,
     /// Highlighted polylines in render coordinates, e.g. the axis of a pattern.
     pub lines: Vec<Vec<Vec3>>,
+    /// Reference points, coordinate systems and planes of the model.
+    pub features: Vec<FeatureMark>,
+    /// A result path in render coordinates: start, end and its name.
+    pub result_path: Option<([Vec3; 2], String)>,
+}
+
+/// A feature drawn in the 3D view, in render coordinates.
+pub enum FeatureMark {
+    Point {
+        position: Vec3,
+        name: String,
+        selected: bool,
+    },
+    /// A coordinate system's origin and unit axes x, y, z.
+    System {
+        origin: Vec3,
+        axes: [Vec3; 3],
+        name: String,
+        selected: bool,
+    },
+    /// A plane as a rectangle on it, with its centre and unit normal.
+    Plane {
+        corners: [Vec3; 4],
+        center: Vec3,
+        normal: Vec3,
+        name: String,
+        selected: bool,
+    },
 }
 
 /// Annotated point of the model, e.g. the node with the largest result value.
@@ -128,8 +158,27 @@ pub fn draw(
         let points: Vec<Pos2> = path.iter().map(|&p| project(camera, rect, p)).collect();
         draw_path(&painter, &points);
     }
+    for feature in &overlay.features {
+        draw_feature(&painter, camera, rect, feature);
+    }
+    if let Some(([a, b], name)) = &overlay.result_path {
+        let (a, b) = (project(camera, rect, *a), project(camera, rect, *b));
+        let stroke = Stroke::new(2.5, PATH_COLOR);
+        painter.line_segment([a, b], stroke);
+        for end in [a, b] {
+            painter.circle(end, 4.0, Color32::WHITE, stroke);
+        }
+        painter.text(
+            a + vec2(6.0, -6.0),
+            Align2::LEFT_BOTTOM,
+            name,
+            font(),
+            PATH_COLOR,
+        );
+    }
     if overlay.show_scale_bar {
-        draw_scale_bar(ui, &painter, rect, camera, &mut offsets.scale_bar);
+        let unit = overlay.length_unit;
+        draw_scale_bar(ui, &painter, rect, camera, unit, &mut offsets.scale_bar);
     }
     if overlay.show_view_triad {
         let corner = rect.right_bottom() - vec2(24.0 + 45.0, 24.0 + 45.0);
@@ -338,7 +387,14 @@ fn draw_status(ui: &Ui, painter: &Painter, rect: Rect, lines: &[String], offset:
 
 /// Bar of five alternating fields whose total length is a round number of model units, by
 /// default centred at the bottom; dragging it moves the bar together with its labels.
-fn draw_scale_bar(ui: &Ui, painter: &Painter, rect: Rect, camera: &Camera, offset: &mut Vec2) {
+fn draw_scale_bar(
+    ui: &Ui,
+    painter: &Painter,
+    rect: Rect,
+    camera: &Camera,
+    unit: &str,
+    offset: &mut Vec2,
+) {
     let world_per_point = camera.pixel_size(rect.width(), rect.height());
     let Some((length, width)) = scale_bar_length(world_per_point) else {
         return;
@@ -346,7 +402,12 @@ fn draw_scale_bar(ui: &Ui, painter: &Painter, rect: Rect, camera: &Camera, offse
     let labels: Vec<_> = (0..=SCALE_BAR_FIELDS)
         .map(|i| {
             let value = length * i as f32 / SCALE_BAR_FIELDS as f32;
-            painter.layout_no_wrap(format_value(value), font(), TEXT)
+            // PrePoMax writes the unit after the last label.
+            let text = match i == SCALE_BAR_FIELDS && !unit.is_empty() {
+                true => format!("{} {unit}", format_value(value)),
+                false => format_value(value),
+            };
+            painter.layout_no_wrap(text, font(), TEXT)
         })
         .collect();
     // The outer labels are centred on the bar ends and stick out by half their width.
@@ -456,6 +517,106 @@ fn draw_marker(
     painter.galley(frame.min + MARKER_PADDING, galley, TEXT);
 }
 
+/// Colour of result paths.
+const PATH_COLOR: Color32 = Color32::from_rgb(200, 0, 160);
+/// Colour of reference points and the names of features.
+const FEATURE_COLOR: Color32 = Color32::from_rgb(0, 110, 160);
+const SELECTED_FEATURE: Color32 = Color32::RED;
+
+fn draw_feature(painter: &Painter, camera: &Camera, rect: Rect, feature: &FeatureMark) {
+    match feature {
+        FeatureMark::Point {
+            position,
+            name,
+            selected,
+        } => {
+            let point = project(camera, rect, *position);
+            if !rect.contains(point) {
+                return;
+            }
+            let color = if *selected {
+                SELECTED_FEATURE
+            } else {
+                FEATURE_COLOR
+            };
+            painter.circle(point, 4.5, Color32::WHITE, Stroke::new(2.0, color));
+            painter.circle_filled(point, 1.5, color);
+            painter.text(
+                point + vec2(7.0, -5.0),
+                Align2::LEFT_BOTTOM,
+                name,
+                font(),
+                color,
+            );
+        }
+        FeatureMark::System {
+            origin,
+            axes,
+            name,
+            selected,
+        } => {
+            let center = project(camera, rect, *origin);
+            if !rect.contains(center) {
+                return;
+            }
+            let [x, y, z] = *axes;
+            arrows(
+                painter,
+                camera,
+                center,
+                30.0,
+                &[
+                    (x, "x", Color32::from_rgb(255, 0, 0)),
+                    (y, "y", Color32::from_rgb(0, 200, 0)),
+                    (z, "z", Color32::from_rgb(0, 0, 255)),
+                ],
+            );
+            let color = if *selected {
+                SELECTED_FEATURE
+            } else {
+                FEATURE_COLOR
+            };
+            painter.circle_filled(center, 3.0, color);
+            painter.text(
+                center + vec2(-6.0, 6.0),
+                Align2::RIGHT_TOP,
+                name,
+                font(),
+                color,
+            );
+        }
+        FeatureMark::Plane {
+            corners,
+            center,
+            normal,
+            name,
+            selected,
+        } => {
+            let color = if *selected {
+                SELECTED_FEATURE
+            } else {
+                FEATURE_COLOR
+            };
+            let corners: Vec<Pos2> = corners.iter().map(|&c| project(camera, rect, c)).collect();
+            let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24);
+            painter.add(egui::Shape::convex_polygon(
+                corners.clone(),
+                fill,
+                Stroke::new(if *selected { 2.0 } else { 1.0 }, color),
+            ));
+            let origin = project(camera, rect, *center);
+            arrows(painter, camera, origin, 30.0, &[(*normal, "n", color)]);
+            painter.text(
+                corners[0] + vec2(4.0, -4.0),
+                Align2::LEFT_BOTTOM,
+                name,
+                font(),
+                color,
+            );
+        }
+    }
+}
+
 /// Axes X, Y, Z as arrows in screen space, drawn back to front; `full` adds PrePoMax's centre
 /// sphere and the shorter, faint negative axes.
 fn triad(painter: &Painter, camera: &Camera, center: Pos2, length: f32, full: bool) {
@@ -472,6 +633,22 @@ fn triad(painter: &Painter, camera: &Camera, center: Pos2, length: f32, full: bo
             painter.line_segment([center, end], Stroke::new(2.0, grey));
         }
     }
+    arrows(painter, camera, center, length, &axes);
+    if full {
+        painter.circle_filled(center, 3.5, Color32::from_rgb(200, 200, 200));
+        painter.circle_stroke(center, 3.5, Stroke::new(0.5, Color32::from_gray(120)));
+    }
+}
+
+/// Unit directions as arrows in screen space, drawn back to front.
+fn arrows(
+    painter: &Painter,
+    camera: &Camera,
+    center: Pos2,
+    length: f32,
+    axes: &[(Vec3, &str, Color32)],
+) {
+    let screen = |axis: Vec3| vec2(axis.dot(camera.right()), -axis.dot(camera.up()));
     let mut order: Vec<_> = axes.iter().collect();
     // Farthest first; forward points into the screen.
     order.sort_by(|a, b| {
@@ -479,7 +656,7 @@ fn triad(painter: &Painter, camera: &Camera, center: Pos2, length: f32, full: bo
         depth(b.0).total_cmp(&depth(a.0))
     });
     let cone = length * 14.0 / 45.0;
-    for &(axis, label, color) in order {
+    for &&(axis, label, color) in &order {
         let v = screen(axis);
         let tip = center + v * length;
         let base = center + v * (length - cone);
@@ -494,10 +671,6 @@ fn triad(painter: &Painter, camera: &Camera, center: Pos2, length: f32, full: bo
         }
         let label_pos = center + v * length + v.normalized() * 9.0;
         painter.text(label_pos, Align2::CENTER_CENTER, label, font(), TEXT);
-    }
-    if full {
-        painter.circle_filled(center, 3.5, Color32::from_rgb(200, 200, 200));
-        painter.circle_stroke(center, 3.5, Stroke::new(0.5, Color32::from_gray(120)));
     }
 }
 

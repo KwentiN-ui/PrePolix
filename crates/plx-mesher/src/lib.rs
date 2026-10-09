@@ -11,8 +11,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use plx_mesh::{Element, ElementId, ElementShape, FeMesh, NodeId, Part, SurfaceDefinition};
-use plx_model::{Algorithm2d, Algorithm3d, Geometry, MeshingParameters};
+pub use plx_mesh::CadEntity;
+use plx_mesh::{CadMap, Element, ElementId, ElementShape, FeMesh, NodeId, Part, SurfaceDefinition};
+use plx_model::{Algorithm2d, Algorithm3d, Geometry, MeshingParameters, UnitSystem};
 
 use gmsh::{Gmsh, with_gmsh};
 pub use gmsh::{GmshError, LibraryInfo, loaded_library, set_library_path};
@@ -22,11 +23,13 @@ pub const CAD_EXTENSIONS: [&str; 5] = ["step", "stp", "iges", "igs", "brep"];
 
 /// Gmsh's element type numbers.
 const LINE2: i32 = 1;
+const LINE3: i32 = 8;
 const TRI3: i32 = 2;
 const QUAD4: i32 = 3;
 const TET4: i32 = 4;
 const TRI6: i32 = 9;
 const TET10: i32 = 11;
+const POINT: i32 = 15;
 const QUAD8: i32 = 16;
 
 /// Gmsh numbers the last two midside nodes of a quadratic tetrahedron the other way round
@@ -37,13 +40,6 @@ const TET10_TO_CALCULIX: [usize; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 9, 8];
 pub fn is_cad_file(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| CAD_EXTENSIONS.iter().any(|c| e.eq_ignore_ascii_case(c)))
-}
-
-/// A face or edge of the CAD geometry, by Gmsh's tag.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum CadEntity {
-    Face(i32),
-    Edge(i32),
 }
 
 /// A triangulation of the geometry for display: one part per solid, made of `S3` triangles
@@ -82,12 +78,21 @@ pub struct GeneratedMesh {
     pub warnings: Vec<String>,
 }
 
-/// Reads a STEP, IGES or BREP file. The mesh setup starts with PrePoMax's sizes for the
-/// geometry's extent.
-pub fn import_cad(path: &Path) -> Result<CadImport, GmshError> {
+/// Reads a STEP, IGES or BREP file. STEP and IGES files are converted to the length unit of
+/// the model's unit system, millimetres without one; BREP files have no unit. The mesh setup
+/// starts with PrePoMax's sizes for the geometry's extent.
+pub fn import_cad(path: &Path, units: UnitSystem) -> Result<CadImport, GmshError> {
     let brep_file = TempFile::new("brep");
     let (diagonal, warnings) = with_gmsh(|gmsh| {
-        let shapes = gmsh.import_shapes(path)?;
+        let unit = match units {
+            UnitSystem::MKgSC | UnitSystem::MTonSC => "M",
+            UnitSystem::InLbSF => "INCH",
+            UnitSystem::MmTonSC | UnitSystem::Unitless => "MM",
+        };
+        gmsh.set_string("Geometry.OCCTargetUnit", unit)?;
+        let shapes = gmsh.import_shapes(path);
+        gmsh.set_string("Geometry.OCCTargetUnit", "MM")?;
+        let shapes = shapes?;
         if shapes.is_empty() {
             return Err(GmshError::Other(format!(
                 "{} enthält keine Geometrie",
@@ -112,12 +117,33 @@ pub fn import_cad(path: &Path) -> Result<CadImport, GmshError> {
         brep,
         meshing: MeshingParameters::for_diagonal(diagonal),
         mesh_items: Vec::new(),
+        part_names: Vec::new(),
     };
     let display = tessellate(&geometry)?;
     Ok(CadImport {
         geometry,
         display,
         warnings,
+    })
+}
+
+/// The geometry enlarged by `factor` about the origin, for a model whose length unit
+/// changes. Faces and edges keep their tags.
+pub fn scale_geometry(geometry: &Geometry, factor: f64) -> Result<Geometry, GmshError> {
+    let file = TempFile::with_contents("brep", &geometry.brep)?;
+    let scaled = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        gmsh.set_number("Geometry.OCCScaling", factor)?;
+        let imported = gmsh.import_shapes(&file.0);
+        gmsh.set_number("Geometry.OCCScaling", 1.0)?;
+        imported?;
+        gmsh.write(&scaled.0)
+    })?;
+    let brep = std::fs::read_to_string(&scaled.0)
+        .map_err(|e| GmshError::Other(format!("{}: {e}", scaled.0.display())))?;
+    Ok(Geometry {
+        brep,
+        ..geometry.clone()
     })
 }
 
@@ -146,7 +172,7 @@ pub fn tessellate(geometry: &Geometry) -> Result<GeometryDisplay, GmshError> {
         if let Err(error) = gmsh.generate(2) {
             log::warn!("Darstellung der Geometrie unvollständig: {error}");
         }
-        display_mesh(gmsh)
+        display_mesh(gmsh, geometry)
     })
 }
 
@@ -162,16 +188,142 @@ pub fn generate_mesh(geometry: &Geometry) -> Result<GeneratedMesh, GmshError> {
     Ok(GeneratedMesh { mesh, warnings })
 }
 
-/// The names of the parts, one per solid and one per face outside the solids, as the
-/// display and the meshes name them.
+/// The names of the parts, one per solid, one per face outside the solids and one per edge
+/// outside the faces, as the display and the meshes name them.
 pub fn part_names(geometry: &Geometry) -> Result<Vec<String>, GmshError> {
     let file = TempFile::with_contents("brep", &geometry.brep)?;
     with_gmsh(|gmsh| {
         gmsh.import_shapes(&file.0)?;
-        let mut names = solid_names(gmsh, &gmsh.entities(3)?)?;
-        names.extend(shell_names(gmsh, &free_faces(gmsh)?)?);
-        Ok(names)
+        Ok(parts(gmsh, geometry)?.into_iter().map(|(_, n)| n).collect())
     })
+}
+
+/// The parts of the geometry Gmsh read, as (dimension, tag) with the name: the solids, then
+/// the faces outside them, then the edges outside the faces. Names the geometry keeps since
+/// a part was deleted take precedence over those Gmsh gives.
+fn parts(gmsh: &Gmsh, geometry: &Geometry) -> Result<Vec<(Entity, String)>, GmshError> {
+    let volumes = gmsh.entities(3)?;
+    let faces = free_faces(gmsh)?;
+    let edges = free_edges(gmsh)?;
+    let mut names = solid_names(gmsh, &volumes)?;
+    names.extend(shell_names(gmsh, &faces)?);
+    names.extend(line_names(gmsh, &edges)?);
+    if geometry.part_names.len() == names.len() {
+        names.clone_from(&geometry.part_names);
+    }
+    let entities = (volumes.iter().map(|&v| (3, v)))
+        .chain(faces.iter().map(|&f| (2, f)))
+        .chain(edges.iter().map(|&e| (1, e)));
+    Ok(entities.zip(names).collect())
+}
+
+/// Edges that bound no face, the line parts of a geometry: wires of a STEP file that become
+/// beams or trusses.
+fn free_edges(gmsh: &Gmsh) -> Result<Vec<i32>, GmshError> {
+    let mut in_face = BTreeSet::new();
+    for face in gmsh.entities(2)? {
+        in_face.extend(gmsh.adjacencies(2, face)?.1);
+    }
+    Ok((gmsh.entities(1)?.into_iter())
+        .filter(|e| !in_face.contains(e))
+        .collect())
+}
+
+/// Deletes a part of the geometry, PrePoMax's Delete of a geometry part; `None` once no
+/// part is left. The other parts keep their names. Gmsh numbers the faces and edges anew
+/// when it reads the smaller geometry, so the local mesh sizes are renumbered after where
+/// the faces and edges lie; those of the deleted part are dropped.
+pub fn delete_part(geometry: &Geometry, part: &str) -> Result<Option<Geometry>, GmshError> {
+    delete_part_renumbered(geometry, part).map(|(geometry, _)| geometry)
+}
+
+/// [`delete_part`] with the new tag of every face, edge and vertex that stays, by its old
+/// one, for the mesh and the selections on it.
+pub fn delete_part_renumbered(
+    geometry: &Geometry,
+    part: &str,
+) -> Result<(Option<Geometry>, BTreeMap<CadEntity, CadEntity>), GmshError> {
+    let file = TempFile::with_contents("brep", &geometry.brep)?;
+    let smaller = TempFile::new("brep");
+    let (names, old_boxes) = with_gmsh(|gmsh| {
+        gmsh.import_shapes(&file.0)?;
+        let mut parts = parts(gmsh, geometry)?;
+        let index = (parts.iter().position(|(_, n)| n == part))
+            .ok_or_else(|| GmshError::Other(format!("Die Geometrie hat kein Part {part}")))?;
+        let boxes = entity_boxes(gmsh)?;
+        let (entity, _) = parts.remove(index);
+        gmsh.remove(&[entity])?;
+        gmsh.write(&smaller.0)?;
+        Ok((parts.into_iter().map(|(_, n)| n).collect::<Vec<_>>(), boxes))
+    })?;
+    if names.is_empty() {
+        return Ok((None, BTreeMap::new()));
+    }
+    let brep = std::fs::read_to_string(&smaller.0)
+        .map_err(|e| GmshError::Other(format!("{}: {e}", smaller.0.display())))?;
+    let new_boxes = with_gmsh(|gmsh| {
+        gmsh.import_shapes(&smaller.0)?;
+        entity_boxes(gmsh)
+    })?;
+    let renumber = |dim: i32, tags: &mut Vec<i32>| {
+        *tags = (tags.iter())
+            .filter_map(|tag| {
+                let (_, old) = old_boxes.iter().find(|(e, _)| *e == (dim, *tag))?;
+                (new_boxes.iter())
+                    .find(|((d, _), new)| *d == dim && same_box(old, new))
+                    .map(|((_, t), _)| *t)
+            })
+            .collect();
+    };
+    let mut mesh_items = geometry.mesh_items.clone();
+    for item in &mut mesh_items {
+        if let plx_model::MeshSetupKind::LocalMeshSize { faces, edges, .. } = &mut item.kind {
+            renumber(2, faces);
+            renumber(1, edges);
+        }
+    }
+    let entity = |(dim, tag): Entity| match dim {
+        0 => CadEntity::Vertex(tag),
+        1 => CadEntity::Edge(tag),
+        _ => CadEntity::Face(tag),
+    };
+    let renumbered = (old_boxes.iter())
+        .filter_map(|&((dim, tag), ref old)| {
+            let (new, _) =
+                (new_boxes.iter()).find(|((d, _), new)| *d == dim && same_box(old, new))?;
+            Some((entity((dim, tag)), entity(*new)))
+        })
+        .collect();
+    let smaller = Geometry {
+        brep,
+        mesh_items,
+        part_names: names,
+        ..geometry.clone()
+    };
+    Ok((Some(smaller), renumbered))
+}
+
+/// A Gmsh entity as (dimension, tag).
+type Entity = (i32, i32);
+
+type BoundingBox = ([f64; 3], [f64; 3]);
+
+/// Bounding box of every face, edge and vertex, by (dimension, tag).
+fn entity_boxes(gmsh: &Gmsh) -> Result<Vec<(Entity, BoundingBox)>, GmshError> {
+    let mut boxes = Vec::new();
+    for dim in [0, 1, 2] {
+        for tag in gmsh.entities(dim)? {
+            boxes.push(((dim, tag), gmsh.entity_bounding_box(dim, tag)?));
+        }
+    }
+    Ok(boxes)
+}
+
+/// Whether two bounding boxes are those of the same entity, read twice.
+fn same_box(a: &BoundingBox, b: &BoundingBox) -> bool {
+    let size = (0..3).map(|k| a.1[k] - a.0[k]).fold(0.0, f64::max);
+    let tolerance = 1e-6 * size.max(1.0);
+    (0..3).all(|k| (a.0[k] - b.0[k]).abs() <= tolerance && (a.1[k] - b.1[k]).abs() <= tolerance)
 }
 
 /// Faces that bound no solid, the shell parts of a geometry such as a 2D cross-section.
@@ -198,11 +350,19 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
     with_gmsh(|gmsh| {
         gmsh.import_shapes(&file.0)?;
         let volumes = gmsh.entities(3)?;
-        let names = solid_names(gmsh, &volumes)?;
-        let Some(index) = names.iter().position(|n| n == part) else {
-            return shell_part_mesh(gmsh, geometry, part);
+        let Some((dim, tag)) = (parts(gmsh, geometry)?.into_iter())
+            .find(|(_, n)| n == part)
+            .map(|(entity, _)| entity)
+        else {
+            return Err(GmshError::Other(format!(
+                "Die Geometrie hat kein Part {part}"
+            )));
         };
-        let volume = volumes[index];
+        let volume = match dim {
+            3 => tag,
+            2 => return shell_part_mesh(gmsh, geometry, part, tag),
+            _ => return line_part_mesh(gmsh, geometry, part, tag),
+        };
         // The other solids go, so that only this one is meshed.
         let others: Vec<(i32, i32)> = (volumes.iter())
             .filter(|&&v| v != volume)
@@ -232,15 +392,13 @@ fn shell_part_mesh(
     gmsh: &Gmsh,
     geometry: &Geometry,
     part: &str,
+    face: i32,
 ) -> Result<GeneratedMesh, GmshError> {
     let faces = free_faces(gmsh)?;
-    let names = shell_names(gmsh, &faces)?;
-    let index = (names.iter().position(|n| n == part))
-        .ok_or_else(|| GmshError::Other(format!("Die Geometrie hat kein Part {part}")))?;
-    let face = faces[index];
     // Only the face stays, so that only it is meshed.
     let others: Vec<(i32, i32)> = (gmsh.entities(3)?.into_iter().map(|v| (3, v)))
         .chain(faces.iter().filter(|&&f| f != face).map(|&f| (2, f)))
+        .chain(free_edges(gmsh)?.into_iter().map(|e| (1, e)))
         .collect();
     if !others.is_empty() {
         gmsh.remove(&others)?;
@@ -290,6 +448,89 @@ fn shell_part_mesh(
             .map_err(|e| GmshError::Other(e.to_string()))?;
             part_elements.elements.push(id);
         }
+    }
+    if part_elements.elements.is_empty() {
+        return Err(GmshError::Other("Gmsh hat keine Elemente erzeugt".into()));
+    }
+    mesh.parts.push(part_elements);
+    mesh.cad = cad_map(gmsh, &mesh, &[face], options.order, true)?;
+    Ok(GeneratedMesh {
+        mesh,
+        warnings: gmsh.warnings()?,
+    })
+}
+
+/// Meshes an edge outside the faces with 2- or 3-node lines, typed as beams (`B31`, `B32`);
+/// the section decides what CalculiX makes of them. The mesh holds the one part, numbered
+/// from 1.
+fn line_part_mesh(
+    gmsh: &Gmsh,
+    geometry: &Geometry,
+    part: &str,
+    edge: i32,
+) -> Result<GeneratedMesh, GmshError> {
+    let edges = free_edges(gmsh)?;
+    // Only the edge stays, so that only it is meshed.
+    let others: Vec<(i32, i32)> = (gmsh.entities(3)?.into_iter().map(|v| (3, v)))
+        .chain(free_faces(gmsh)?.into_iter().map(|f| (2, f)))
+        .chain(edges.iter().filter(|&&e| e != edge).map(|&e| (1, e)))
+        .collect();
+    if !others.is_empty() {
+        gmsh.remove(&others)?;
+    }
+    let options = MeshOptions::of_part(geometry, part);
+    options.apply(gmsh)?;
+    for (_, local_edges, size) in geometry.local_sizes() {
+        if local_edges.contains(&edge) && size.is_finite() && size > 0.0 {
+            let field = gmsh.add_field("Constant")?;
+            gmsh.set_field_number(field, "VIn", size)?;
+            gmsh.set_field_number(field, "VOut", 1e22)?;
+            gmsh.set_field_number(field, "IncludeBoundary", 1.0)?;
+            gmsh.set_field_numbers(field, "CurvesList", &[f64::from(edge)])?;
+            gmsh.set_background_field(field)?;
+        }
+    }
+    gmsh.generate(1)?;
+    let coords = node_coords(gmsh)?;
+    let (gmsh_type, shape, type_name) = if options.order == 2 {
+        (LINE3, ElementShape::Line3, "B32")
+    } else {
+        (LINE2, ElementShape::Line2, "B31")
+    };
+    let mut mesh = FeMesh::default();
+    let mut part_elements = Part {
+        name: part.to_string(),
+        elements: Vec::new(),
+    };
+    let (_, nodes) = gmsh.elements(gmsh_type, edge)?;
+    for element in nodes.chunks_exact(shape.node_count()) {
+        // Gmsh lists the end nodes first and the midside node last; CalculiX wants the
+        // midside node in the middle.
+        let order: &[usize] = if shape == ElementShape::Line3 {
+            &[0, 2, 1]
+        } else {
+            &[0, 1]
+        };
+        let mut ids = Vec::with_capacity(element.len());
+        for &k in order {
+            let tag = element[k];
+            let position = coords
+                .get(&tag)
+                .ok_or_else(|| GmshError::Other(format!("Knoten {tag} fehlt")))?;
+            let id = node_id(tag)?;
+            mesh.set_node(id, *position);
+            ids.push(id);
+        }
+        let id = ElementId::try_from(mesh.element_count() + 1)
+            .map_err(|_| GmshError::Other("zu viele Elemente".into()))?;
+        mesh.add_element(Element {
+            id,
+            type_name: type_name.into(),
+            shape,
+            nodes: ids,
+        })
+        .map_err(|e| GmshError::Other(e.to_string()))?;
+        part_elements.elements.push(id);
     }
     if part_elements.elements.is_empty() {
         return Err(GmshError::Other("Gmsh hat keine Elemente erzeugt".into()));
@@ -438,7 +679,25 @@ pub fn merge_part(mesh: &FeMesh, part_mesh: FeMesh) -> FeMesh {
             (name.clone(), surface)
         })
         .collect();
+    merged.cad = mesh.cad.without(&removed, &removed_nodes);
     merged
+        .cad
+        .extend(part_mesh.cad.offset(node_offset, element_offset));
+    merged
+}
+
+/// Deletes a part of a mesh with its elements and the nodes no other part uses, PrePoMax's
+/// Delete of a mesh part. Sets and surfaces lose them too; the other parts keep their
+/// numbers.
+pub fn delete_mesh_part(mesh: &FeMesh, part: &str) -> FeMesh {
+    let mut empty = FeMesh::default();
+    empty.parts.push(Part {
+        name: part.to_string(),
+        elements: Vec::new(),
+    });
+    let mut smaller = merge_part(mesh, empty);
+    smaller.parts.retain(|p| !p.name.eq_ignore_ascii_case(part));
+    smaller
 }
 
 /// Loads Gmsh and meshes a cube, for the self test in the settings.
@@ -609,7 +868,113 @@ fn solid_mesh(gmsh: &Gmsh, order: i32, volumes: &[(i32, String)]) -> Result<FeMe
     if mesh.element_count() == 0 {
         return Err(GmshError::Other("Gmsh hat keine Elemente erzeugt".into()));
     }
+    let mut faces = BTreeSet::new();
+    for (volume, _) in volumes {
+        faces.extend(gmsh.adjacencies(3, *volume)?.1);
+    }
+    let faces: Vec<i32> = faces.into_iter().collect();
+    mesh.cad = cad_map(gmsh, &mesh, &faces, order, false)?;
     Ok(mesh)
+}
+
+/// Where the given CAD faces, their edges and vertices lie in a mesh made from Gmsh's nodes:
+/// the faces of solid elements on the CAD faces, or for shells the elements themselves.
+fn cad_map(
+    gmsh: &Gmsh,
+    mesh: &FeMesh,
+    faces: &[i32],
+    order: i32,
+    shell: bool,
+) -> Result<CadMap, GmshError> {
+    let (surface_types, line_type): (&[i32], i32) = match (order, shell) {
+        (2, false) => (&[TRI6], LINE3),
+        (2, true) => (&[TRI6, QUAD8], LINE3),
+        (_, false) => (&[TRI3], LINE2),
+        (_, true) => (&[TRI3, QUAD4], LINE2),
+    };
+    // The solid elements' faces by their sorted corner nodes.
+    let mut solid_faces: HashMap<Vec<NodeId>, (ElementId, u8)> = HashMap::new();
+    if !shell {
+        for element in mesh.elements() {
+            for (k, face) in element.faces().iter().enumerate() {
+                let mut corners: Vec<NodeId> =
+                    face.corners.iter().map(|&i| element.nodes[i]).collect();
+                corners.sort_unstable();
+                solid_faces.insert(corners, (element.id, (k + 1) as u8));
+            }
+        }
+    }
+    let shell_faces: HashMap<Vec<NodeId>, ElementId> = if shell {
+        (mesh.elements().iter())
+            .map(|e| {
+                let mut nodes = e.nodes.clone();
+                nodes.sort_unstable();
+                (nodes, e.id)
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    let ids = |tags: &[usize]| -> Result<Vec<NodeId>, GmshError> {
+        tags.iter().map(|&t| node_id(t)).collect()
+    };
+    let mut map = CadMap::default();
+    let mut edges = BTreeSet::new();
+    for &face in faces {
+        let mut nodes = BTreeSet::new();
+        let mut on_face = Vec::new();
+        for &gmsh_type in surface_types {
+            let n = match gmsh_type {
+                TRI3 => 3,
+                QUAD4 => 4,
+                TRI6 => 6,
+                _ => 8,
+            };
+            let (_, tags) = gmsh.elements(gmsh_type, face)?;
+            for element in tags.chunks_exact(n) {
+                let element = ids(element)?;
+                nodes.extend(element.iter().copied());
+                let found = if shell {
+                    let mut sorted = element.clone();
+                    sorted.sort_unstable();
+                    shell_faces.get(&sorted).map(|&e| (e, 1))
+                } else {
+                    let mut corners = element[..3].to_vec();
+                    corners.sort_unstable();
+                    solid_faces.get(&corners).copied()
+                };
+                on_face.extend(found);
+            }
+        }
+        map.nodes
+            .insert(CadEntity::Face(face), nodes.into_iter().collect());
+        map.faces.insert(face, on_face);
+        edges.extend(gmsh.adjacencies(2, face)?.1);
+    }
+    let mut vertices = BTreeSet::new();
+    for edge in edges {
+        let (_, tags) = gmsh.elements(line_type, edge)?;
+        let n = if line_type == LINE3 { 3 } else { 2 };
+        let mut nodes = BTreeSet::new();
+        let mut segments = Vec::new();
+        for segment in tags.chunks_exact(n) {
+            let segment = ids(segment)?;
+            nodes.extend(segment.iter().copied());
+            segments.push([segment[0], segment[1]]);
+        }
+        map.nodes
+            .insert(CadEntity::Edge(edge), nodes.into_iter().collect());
+        map.segments.insert(edge, segments);
+        vertices.extend(gmsh.adjacencies(1, edge)?.1);
+    }
+    for vertex in vertices {
+        let (_, tags) = gmsh.elements(POINT, vertex)?;
+        let nodes = ids(&tags)?;
+        if !nodes.is_empty() {
+            map.nodes.insert(CadEntity::Vertex(vertex), nodes);
+        }
+    }
+    Ok(map)
 }
 
 /// Part names from the names in the CAD file, else "SOLID-n"; upper case and unique, as
@@ -651,6 +1016,25 @@ fn shell_names(gmsh: &Gmsh, faces: &[i32]) -> Result<Vec<String>, GmshError> {
     Ok(names)
 }
 
+/// Names of the line parts like [`solid_names`], "LINE-n" where the file names none.
+fn line_names(gmsh: &Gmsh, edges: &[i32]) -> Result<Vec<String>, GmshError> {
+    let mut names = Vec::with_capacity(edges.len());
+    let mut used = BTreeSet::new();
+    for (index, &edge) in edges.iter().enumerate() {
+        let label = gmsh.entity_name(1, edge)?;
+        let base = calculix_name(label.rsplit('/').next().unwrap_or_default())
+            .unwrap_or_else(|| format!("LINE-{}", index + 1));
+        let mut name = base.clone();
+        let mut n = 2;
+        while !used.insert(name.clone()) {
+            name = format!("{base}-{n}");
+            n += 1;
+        }
+        names.push(name);
+    }
+    Ok(names)
+}
+
 /// A name CalculiX accepts: letters, digits, `-` and `_`, upper case, at most 60 characters.
 fn calculix_name(label: &str) -> Option<String> {
     let name: String = label
@@ -673,27 +1057,23 @@ fn calculix_name(label: &str) -> Option<String> {
 }
 
 /// Builds the display mesh from Gmsh's surface mesh: per solid its faces as triangles and its
-/// edges as lines. Faces outside any solid form one more part.
-fn display_mesh(gmsh: &Gmsh) -> Result<GeometryDisplay, GmshError> {
+/// edges as lines. Faces outside any solid form one more part each, and so do edges outside
+/// any face.
+fn display_mesh(gmsh: &Gmsh, geometry: &Geometry) -> Result<GeometryDisplay, GmshError> {
     let coords = node_coords(gmsh)?;
-    let volumes = gmsh.entities(3)?;
     let surfaces = gmsh.entities(2)?;
     let curves = gmsh.entities(1)?;
-    let mut groups: Vec<(String, Vec<i32>)> = Vec::new();
-    let mut in_solid = BTreeSet::new();
-    for (&volume, name) in volumes.iter().zip(solid_names(gmsh, &volumes)?) {
-        let (_, faces) = gmsh.adjacencies(3, volume)?;
-        in_solid.extend(faces.iter().copied());
-        groups.push((name, faces));
-    }
-    // Every face outside the solids is a shell part of its own, as for 2D models.
-    let free: Vec<i32> = surfaces
-        .iter()
-        .copied()
-        .filter(|s| !in_solid.contains(s))
-        .collect();
-    for (face, name) in free.iter().zip(shell_names(gmsh, &free)?) {
-        groups.push((name, vec![*face]));
+    // Parts as (name, faces, edges); the edges of the faces are added below. Every face
+    // outside the solids is a shell part of its own, as for 2D models, every edge outside
+    // the faces a line part.
+    let mut groups: Vec<(String, Vec<i32>, Vec<i32>)> = Vec::new();
+    for ((dim, tag), name) in parts(gmsh, geometry)? {
+        let (faces, edges) = match dim {
+            3 => (gmsh.adjacencies(3, tag)?.1, Vec::new()),
+            2 => (vec![tag], Vec::new()),
+            _ => (Vec::new(), vec![tag]),
+        };
+        groups.push((name, faces, edges));
     }
 
     // Triangles and edge segments of each entity, fetched once.
@@ -715,7 +1095,7 @@ fn display_mesh(gmsh: &Gmsh) -> Result<GeometryDisplay, GmshError> {
      -> Result<(), GmshError> {
         let (shape, type_name) = match entity {
             CadEntity::Face(_) => (ElementShape::Tri3, "S3"),
-            CadEntity::Edge(_) => (ElementShape::Line2, "B31"),
+            CadEntity::Edge(_) | CadEntity::Vertex(_) => (ElementShape::Line2, "B31"),
         };
         let mut ids = Vec::with_capacity(nodes.len());
         for &tag in nodes {
@@ -737,12 +1117,12 @@ fn display_mesh(gmsh: &Gmsh) -> Result<GeometryDisplay, GmshError> {
         })
         .map_err(|e| GmshError::Other(e.to_string()))
     };
-    for (name, faces) in groups {
+    for (name, faces, own_edges) in groups {
         let mut part = Part {
             name,
             elements: Vec::new(),
         };
-        let mut edges = BTreeSet::new();
+        let mut edges: BTreeSet<i32> = own_edges.into_iter().collect();
         for &face in &faces {
             let nodes = triangles.get(&face).map_or(&[][..], Vec::as_slice);
             for triangle in nodes.as_chunks::<3>().0 {
@@ -763,7 +1143,7 @@ fn display_mesh(gmsh: &Gmsh) -> Result<GeometryDisplay, GmshError> {
     Ok(GeometryDisplay {
         mesh,
         entities,
-        solids: volumes.len(),
+        solids: gmsh.entities(3)?.len(),
         faces: surfaces.len(),
         edges: curves.len(),
     })

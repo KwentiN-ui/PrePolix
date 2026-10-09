@@ -7,11 +7,13 @@ use plx_io::frd::{FrdImport, read_frd};
 use plx_io::inp::{InpImport, read_inp};
 use plx_mesh::{ElementId, FeMesh, NodeId, PartSkin, extract_part_skin};
 use plx_mesher::{CadEntity, GeometryDisplay};
-use plx_model::{FeModel, Geometry};
+#[cfg(test)]
+use plx_model::SectionKind;
+use plx_model::{FeModel, Geometry, UnitSystem};
 use plx_render::contour::normalize;
 use plx_render::{
-    ClipPlane, RenderMesh, SectionCells, Vertex, lighten, part_color, part_render_mesh,
-    section_mesh, wireframe_edges,
+    ClipPlane, RenderMesh, SectionCells, SectionValues, Vertex, lighten, part_color,
+    part_render_mesh, section_mesh, section_values, wireframe_edges,
 };
 
 use crate::exploded::{Assembly, Explosion, Parameters, PartShape};
@@ -68,6 +70,8 @@ pub struct Model {
     /// For the display of CAD geometry, the CAD face or edge of each element; element ids
     /// count from 1.
     cad_entities: Vec<CadEntity>,
+    /// Solids of the CAD geometry a geometry display shows.
+    pub geometry_solids: usize,
     /// Hot spots defined on a results file, with their values.
     pub hot_spots: crate::hot_spots::HotSpots,
     /// Faces and parts drawn in the highlight colour.
@@ -83,6 +87,9 @@ pub struct Model {
     pub explosion: Explosion,
     /// Node indices of each part and the part of each node, built when first needed.
     part_nodes: std::sync::OnceLock<PartNodes>,
+    /// Lookups to the CAD entities of a mesh generated from geometry, built when first
+    /// needed.
+    cad_index: std::sync::OnceLock<crate::cad_selection::CadIndex>,
 }
 
 /// Which nodes belong to which part; a node shared by parts belongs to the first of them.
@@ -141,14 +148,16 @@ impl Highlight {
     }
 }
 
-/// A visible face under the mouse.
+/// A visible face or line under the mouse.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hit {
     pub part: usize,
-    /// Index into the part's skin faces.
+    /// Index into the part's skin faces, or into its skin lines when `line` is set.
     pub face: usize,
     /// Hit point relative to the model origin.
     pub point: Vec3,
+    /// A segment of a line element (beam, truss, CAD edge) was hit instead of a face.
+    pub line: bool,
 }
 
 /// Node coordinates as drawn, normalized contour values and whether the shape is deformed.
@@ -163,12 +172,15 @@ pub struct LoadedModel {
     pub geometry_view: Option<Model>,
 }
 
-pub fn load(path: &Path) -> Result<LoadedModel, String> {
+/// Loads a project, input, results or CAD file. CAD geometry is read in the length unit of
+/// `units`, the unit system of the model it goes into.
+pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     let start = Instant::now();
     let extension = |e: &str| path.extension().is_some_and(|x| x.eq_ignore_ascii_case(e));
     if plx_mesher::is_cad_file(path) {
-        let import = plx_mesher::import_cad(path).map_err(|e| e.to_string())?;
+        let import = plx_mesher::import_cad(path, units).map_err(|e| e.to_string())?;
         let mut model = Model::new(path, FeMesh::default());
+        model.fe.properties.units = units;
         model.geometry = Some(import.geometry);
         model.warnings = import.warnings;
         let view = Model::geometry_view(path, import.display);
@@ -310,6 +322,7 @@ impl Model {
             geometry: None,
             is_geometry: false,
             cad_entities: Vec::new(),
+            geometry_solids: 0,
             hot_spots: Default::default(),
             highlight: Highlight::default(),
             clip: None,
@@ -318,6 +331,7 @@ impl Model {
             section_cells: Default::default(),
             explosion: Explosion::default(),
             part_nodes: Default::default(),
+            cad_index: Default::default(),
         };
         let meshes = model.render_meshes();
         for (part, render) in model.parts.iter_mut().zip(&meshes) {
@@ -346,6 +360,7 @@ impl Model {
         let mut model = Self::with_skins(path, mesh, skins);
         model.is_geometry = true;
         model.cad_entities = display.entities;
+        model.geometry_solids = display.solids;
         model
     }
 
@@ -365,6 +380,7 @@ impl Model {
         self.highlight = Highlight::default();
         self.section_cells = Default::default();
         self.part_nodes = Default::default();
+        self.cad_index = Default::default();
         // The exploded view stays on and is laid out anew for the new mesh.
         self.explosion.clear_layout();
         if let Some(parameters) = self.explosion.applied.clone() {
@@ -373,6 +389,15 @@ impl Model {
         } else {
             self.explosion.show(Vec::new(), false);
         }
+    }
+
+    pub fn cad_index(&self) -> &crate::cad_selection::CadIndex {
+        (self.cad_index).get_or_init(|| crate::cad_selection::CadIndex::new(&self.mesh))
+    }
+
+    /// Whether the mesh was generated from CAD geometry and knows where its entities lie.
+    pub fn has_cad(&self) -> bool {
+        !self.mesh.cad.is_empty()
     }
 
     fn part_nodes(&self) -> &PartNodes {
@@ -630,6 +655,36 @@ impl Model {
         meshes
     }
 
+    /// The shown result values where a plane in model coordinates cuts the visible parts:
+    /// of the parts as shown, or of the undeformed mesh, for values at true positions.
+    pub fn section_values(
+        &self,
+        point: DVec3,
+        normal: DVec3,
+        shown: bool,
+    ) -> Option<SectionValues> {
+        let values = self.results.as_ref()?.shown_values()?;
+        let cells = self.section_cells.get_or_init(|| {
+            self.mesh
+                .parts
+                .iter()
+                .map(|part| SectionCells::new(&self.mesh, part))
+                .collect()
+        });
+        let coords = if shown {
+            self.deformed_coords().0
+        } else {
+            std::borrow::Cow::Borrowed(self.mesh.coords())
+        };
+        (cells.iter().zip(&self.parts))
+            .filter(|(_, info)| info.visible)
+            .map(|(cells, _)| section_values(cells, &coords, point, normal, &values))
+            .reduce(|mut all, part| {
+                all.merge(part);
+                all
+            })
+    }
+
     /// The model origin in global coordinates; render positions are relative to it.
     pub fn origin(&self) -> DVec3 {
         self.origin
@@ -827,6 +882,7 @@ impl Model {
                                 part,
                                 face: index,
                                 point,
+                                line: false,
                             },
                         ));
                     }
@@ -836,20 +892,87 @@ impl Model {
         best.map(|(_, hit)| hit)
     }
 
-    /// The node of the hit face nearest to the hit point.
+    /// The nearest visible line segment within the pick tolerance of a ray; `tolerance`
+    /// gives the tolerance at a point of the ray. Returns the distance along the ray too.
+    pub fn pick_line(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        tolerance: impl Fn(Vec3) -> f32,
+    ) -> Option<(f32, Hit)> {
+        let coords = self.shown_coords();
+        let position = |node: usize| (DVec3::from(coords[node]) - self.origin).as_vec3();
+        let u = direction.normalize_or_zero();
+        let mut best: Option<(f32, Hit)> = None;
+        for (part, skin) in self.skins.iter().enumerate() {
+            if !self.parts[part].visible {
+                continue;
+            }
+            for (index, &[a, b]) in skin.lines.iter().enumerate() {
+                let (a, b) = (position(a), position(b));
+                let Some((t, s)) = ray_segment(origin, u, a, b) else {
+                    continue;
+                };
+                let on_ray = origin + u * t;
+                let on_line = a + (b - a) * s;
+                if on_ray.distance(on_line) > tolerance(on_ray)
+                    || self.clip.is_some_and(|clip| clip.distance(on_line) < 0.0)
+                {
+                    continue;
+                }
+                if best.is_none_or(|(nearest, _)| t < nearest) {
+                    best = Some((
+                        t,
+                        Hit {
+                            part,
+                            face: index,
+                            point: on_line,
+                            line: true,
+                        },
+                    ));
+                }
+            }
+        }
+        best
+    }
+
+    /// What a click hits: the nearest face, or a line in front of it or where no face is.
+    pub fn pick_click(&self, click: &crate::viewport::Click) -> Option<Hit> {
+        let face = self.pick(click.origin, click.direction);
+        let line = self.pick_line(click.origin, click.direction, |p| click.precision_at(p));
+        match (face, line) {
+            (Some(face), Some((t, line))) => {
+                let face_t = (face.point - click.origin).dot(click.direction.normalize_or_zero());
+                // A line on a face, such as a CAD edge, wins by the pick tolerance.
+                Some(if t <= face_t + click.precision_at(line.point) {
+                    line
+                } else {
+                    face
+                })
+            }
+            (face, line) => face.or(line.map(|(_, hit)| hit)),
+        }
+    }
+
+    /// The node of the hit face or line segment nearest to the hit point.
     pub fn hit_node(&self, hit: &Hit) -> NodeId {
-        let face = &self.skins[hit.part].faces[hit.face];
         let coords = self.shown_coords();
         let distance = |node: usize| {
             ((DVec3::from(coords[node]) - self.origin).as_vec3() - hit.point).length_squared()
         };
-        let nearest = face
-            .corners
-            .iter()
-            .chain(&face.mids)
-            .copied()
-            .min_by(|&a, &b| distance(a).total_cmp(&distance(b)))
-            .unwrap_or(face.corners[0]);
+        let skin = &self.skins[hit.part];
+        let nearest = if hit.line {
+            let [a, b] = skin.lines[hit.face];
+            if distance(a) <= distance(b) { a } else { b }
+        } else {
+            let face = &skin.faces[hit.face];
+            face.corners
+                .iter()
+                .chain(&face.mids)
+                .copied()
+                .min_by(|&a, &b| distance(a).total_cmp(&distance(b)))
+                .unwrap_or(face.corners[0])
+        };
         self.mesh.node_ids()[nearest]
     }
 
@@ -918,6 +1041,24 @@ fn transform_coords(coords: &[[f64; 3]], instance: &DAffine3) -> Vec<[f64; 3]> {
         .collect()
 }
 
+/// Closest approach of a ray (unit direction `u`, `t >= 0`) and a segment `a`-`b`: the
+/// distance `t` along the ray and the parameter `s` in 0..=1 along the segment. `None` when
+/// the closest point of the segment lies behind the ray's origin.
+fn ray_segment(origin: Vec3, u: Vec3, a: Vec3, b: Vec3) -> Option<(f32, f32)> {
+    let v = b - a;
+    let w = origin - a;
+    let (uv, vv, uw, vw) = (u.dot(v), v.dot(v), u.dot(w), v.dot(w));
+    let denominator = vv - uv * uv;
+    let s = if denominator <= f32::EPSILON * vv.max(f32::MIN_POSITIVE) {
+        // Parallel: the segment's start is as close as any point of it.
+        0.0
+    } else {
+        ((vw - uv * uw) / denominator).clamp(0.0, 1.0)
+    };
+    let t = (a + v * s - origin).dot(u);
+    (t >= 0.0).then_some((t, s))
+}
+
 /// Distance along the ray to a triangle (Möller-Trumbore), seen from either side.
 fn ray_triangle(origin: Vec3, direction: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
     let (ab, ac) = (b - a, c - a);
@@ -946,7 +1087,7 @@ mod tests {
 
     #[test]
     fn loads_testdata_with_part_summaries() {
-        let loaded = load(&testdata("platte_mit_stuetzen.inp")).unwrap();
+        let loaded = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::MmTonSC).unwrap();
         let model = &loaded.model;
         assert_eq!(model.included_files, 1);
         assert_eq!(model.parts.len(), 2);
@@ -960,13 +1101,16 @@ mod tests {
 
     #[test]
     fn renamed_parts_keep_their_references() {
-        let mut model = load(&testdata("platte_mit_stuetzen.inp")).unwrap().model;
+        let mut model = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         let (first, second) = (model.parts[0].name.clone(), model.parts[1].name.clone());
         model.fe.sections.push(plx_model::Section {
             name: "Section-1".into(),
             material: "Steel".into(),
             region: plx_model::Region::Parts(vec![first.clone()]),
             thickness: 1.0,
+            kind: SectionKind::Solid,
         });
         assert!(model.rename_part(0, "").is_err());
         assert!(model.rename_part(0, "zwei wörter").is_err());
@@ -985,14 +1129,16 @@ mod tests {
 
     #[test]
     fn projects_open_with_their_fe_model() {
-        let mut model = load(&testdata("platte_mit_stuetzen.inp")).unwrap().model;
+        let mut model = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         assert!(!model.is_project());
         model.fe.steps.push(plx_model::Step::new_static("Step-1"));
         let dir = std::env::temp_dir().join(format!("prepolix-model-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("platte.plx");
         plx_io::project::save_project(&path, None, &model.mesh, &model.fe).unwrap();
-        let loaded = load(&path).unwrap();
+        let loaded = load(&path, UnitSystem::MmTonSC).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(loaded.model.is_project());
         assert!(!loaded.model.is_results());
@@ -1002,7 +1148,9 @@ mod tests {
 
     #[test]
     fn hidden_parts_do_not_count_for_fitting() {
-        let mut model = load(&testdata("platte_mit_stuetzen.inp")).unwrap().model;
+        let mut model = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         model.parts[1].visible = false;
         let (min, max) = model.visible_bounds().unwrap();
         assert_eq!(max.z - min.z, 0.0);
@@ -1010,7 +1158,7 @@ mod tests {
 
     #[test]
     fn loads_frd_results_with_deformation() {
-        let loaded = load(&testdata("kragbalken_c3d8.frd")).unwrap();
+        let loaded = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::MmTonSC).unwrap();
         let model = &loaded.model;
         assert_eq!(model.parts[0].name, "STEEL");
         let view = model.results.as_ref().unwrap();
@@ -1031,7 +1179,9 @@ mod tests {
     #[test]
     fn transformed_copies_are_drawn_with_mirrored_values() {
         use plx_results::transformation::{SymmetryPlane, Transformation};
-        let mut model = load(&testdata("kragbalken_c3d8.frd")).unwrap().model;
+        let mut model = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         let single = model.render_meshes()[0].vertices.len();
         let view = model.results.as_mut().unwrap();
         let fields = &view.current_increment().unwrap().fields;
@@ -1057,7 +1207,9 @@ mod tests {
 
     #[test]
     fn multi_part_results_open_in_true_scale() {
-        let single = load(&testdata("kragbalken_c3d8.frd")).unwrap().model;
+        let single = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         assert_eq!(
             single.results.unwrap().deformation,
             Deformation::Automatic(1.0)
@@ -1071,7 +1223,7 @@ mod tests {
         );
         let path = std::env::temp_dir().join("prepolix_test_zwei_parts.frd");
         std::fs::write(&path, text).unwrap();
-        let multi = load(&path).unwrap().model;
+        let multi = load(&path, UnitSystem::MmTonSC).unwrap().model;
         std::fs::remove_file(&path).ok();
         assert_eq!(multi.parts.len(), 2);
         assert_eq!(multi.results.unwrap().deformation, Deformation::TrueScale);
@@ -1079,7 +1231,9 @@ mod tests {
 
     #[test]
     fn picking_finds_faces_and_nodes() {
-        let model = load(&testdata("kragbalken_c3d8.inp")).unwrap().model;
+        let model = load(&testdata("kragbalken_c3d8.inp"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         // The beam spans 0..100 x 0..10 x 0..10; look straight down at x = 95, y = 5.
         let origin = Vec3::new(95.0, 5.0, 50.0) - model.origin.as_vec3();
         let hit = model.pick(origin, Vec3::NEG_Z).unwrap();
@@ -1087,6 +1241,47 @@ mod tests {
         let node = model.mesh.node(model.hit_node(&hit)).unwrap();
         assert_eq!(node[2], 10.0);
         assert!(model.pick(origin, Vec3::Z).is_none());
+    }
+
+    #[test]
+    fn picking_finds_lines_within_the_tolerance() {
+        use plx_mesh::{Element, ElementShape, Part};
+        // A beam of two quadratic lines along x from 0 to 100 at y = z = 0.
+        let mut mesh = FeMesh::default();
+        for i in 0..5u32 {
+            mesh.set_node(i + 1, [25.0 * f64::from(i), 0.0, 0.0]);
+        }
+        for (id, nodes) in [(1, vec![1, 2, 3]), (2, vec![3, 4, 5])] {
+            mesh.add_element(Element {
+                id,
+                type_name: "B32".into(),
+                shape: ElementShape::Line3,
+                nodes,
+            })
+            .unwrap();
+        }
+        mesh.parts.push(Part {
+            name: "BEAM".into(),
+            elements: vec![1, 2],
+        });
+        let model = Model::new(Path::new("balken.inp"), mesh);
+        assert!(
+            model.pick(Vec3::ZERO, Vec3::NEG_Z).is_none(),
+            "lines have no faces"
+        );
+        // Looking down 2 units beside the beam at x = 60: within a tolerance of 3, not 1.
+        let origin = Vec3::new(60.0, 2.0, 50.0) - model.origin.as_vec3();
+        let (t, hit) = model
+            .pick_line(origin, Vec3::NEG_Z, |_| 3.0)
+            .expect("line within tolerance");
+        assert!(hit.line && hit.part == 0);
+        assert!((t - 50.0).abs() < 1e-4, "{t}");
+        assert!((hit.point.x + model.origin.x as f32 - 60.0).abs() < 1e-4);
+        // Node 3 at x = 50 is the nearest node of the hit segment (50..75).
+        assert_eq!(model.hit_node(&hit), 3);
+        assert!(model.pick_line(origin, Vec3::NEG_Z, |_| 1.0).is_none());
+        // Behind the origin nothing is hit.
+        assert!(model.pick_line(origin, Vec3::Z, |_| 3.0).is_none());
     }
 
     /// Whether Gmsh can be used; tests that need it pass with a note otherwise, unless
@@ -1107,7 +1302,7 @@ mod tests {
         if !gmsh_available() {
             return;
         }
-        let loaded = load(&testdata("zwei_bloecke.step")).unwrap();
+        let loaded = load(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC).unwrap();
         let view = loaded.geometry_view.unwrap();
         assert!(view.is_geometry());
         assert_eq!(view.parts.len(), 2);
@@ -1133,9 +1328,11 @@ mod tests {
         let path = dir.join("bloecke.plx");
         plx_io::project::save_project(&path, model.geometry.as_ref(), &model.mesh, &model.fe)
             .unwrap();
-        let reopened = load(&path).unwrap();
+        let reopened = load(&path, UnitSystem::MmTonSC).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(reopened.model.geometry, Some(geometry));
+        assert!(!model.mesh.cad.is_empty());
+        assert_eq!(reopened.model.mesh.cad, model.mesh.cad);
         assert_eq!(
             reopened.model.mesh.element_count(),
             model.mesh.element_count()
@@ -1159,7 +1356,9 @@ mod tests {
         use plx_model::{
             BoundaryCondition, BoundaryKind, Elastic, Material, Region, Section, Step,
         };
-        let mut model = load(&testdata("platte_mit_loch.step")).unwrap().model;
+        let mut model = load(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         let mut geometry = model.geometry.clone().unwrap();
         geometry.meshing.max_size = 4.0;
         model.set_mesh(plx_mesher::generate_mesh(&geometry).unwrap().mesh);
@@ -1192,12 +1391,14 @@ mod tests {
                     young: 210000.0,
                     poisson: 0.3,
                 }),
+                ..Default::default()
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
                 material: "Steel".into(),
                 region: Region::Parts(vec!["SOLID-1".into()]),
                 thickness: 1.0,
+                kind: SectionKind::Solid,
             }],
             steps: vec![step],
             user_keywords: Vec::new(),
@@ -1225,6 +1426,6 @@ mod tests {
 
     #[test]
     fn file_without_elements_is_rejected() {
-        assert!(load(&testdata("platte_knoten.inp")).is_err());
+        assert!(load(&testdata("platte_knoten.inp"), UnitSystem::MmTonSC).is_err());
     }
 }

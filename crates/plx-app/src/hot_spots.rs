@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use glam::Vec3;
 use plx_mesh::SkinFace;
+use plx_model::UnitSystem;
 use plx_results::hot_spot::{self, HotSpot, HotSpotPath, HotSpotReport};
 
 use crate::model::Model;
@@ -29,7 +30,13 @@ fn surface_faces(model: &Model) -> Vec<&SkinFace> {
 /// The paths of a definition on the results, for showing them while it is edited or
 /// selected.
 pub fn paths(model: &Model, hot_spot: &HotSpot) -> Vec<HotSpotPath> {
-    hot_spot::hot_spot_paths(&model.mesh, surface_faces(model), hot_spot).0
+    let hot_spot = hot_spot.in_units(units(model));
+    hot_spot::hot_spot_paths(&model.mesh, surface_faces(model), &hot_spot).0
+}
+
+/// The unit system of the results, which IIW's millimetre distances are converted to.
+pub fn units(model: &Model) -> UnitSystem {
+    (model.results.as_ref()).map_or(model.fe.properties.units, |view| view.units)
 }
 
 /// Paths in render coordinates, deformed like the shown mesh, each starting at its toe.
@@ -57,10 +64,13 @@ pub fn evaluate(model: &Model) -> Vec<HotSpotReport> {
     let Some(view) = &model.results else {
         return Vec::new();
     };
+    let definitions: Vec<HotSpot> = (model.hot_spots.definitions.iter())
+        .map(|h| h.in_units(units(model)))
+        .collect();
     hot_spot::evaluate(
         &model.mesh,
         &surface_faces(model),
-        &model.hot_spots.definitions,
+        &definitions,
         &view.increments,
     )
 }
@@ -212,7 +222,9 @@ mod tests {
         // Cantilever 100 x 10 x 10, 100 N across at its end, solved by CalculiX 2.21 with
         // C3D20R. On top the bending stress rises linearly towards the support:
         // S11 = F (100 - x) (h / 2) / I = 0.6 (100 - x), so 30 at x = 50.
-        let mut results = load(&testdata("kragbalken_c3d20r.frd")).unwrap().model;
+        let mut results = load(&testdata("kragbalken_c3d20r.frd"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         let toe = [40.0, 50.0, 60.0].map(|x| node_at(&results, [x, 5.0, 10.0]));
         for (i, extrapolation) in Extrapolation::IIW[..3].iter().enumerate() {
             results.hot_spots.definitions.push(HotSpot {

@@ -8,8 +8,9 @@ use egui::collapsing_header::CollapsingState;
 use egui::epaint::Mesh;
 use egui::{Color32, Pos2, Rect, Response, Shape, Ui, Vec2, WidgetText, pos2, vec2};
 use plx_job::JobStatus;
-use plx_model::ModelItem;
+use plx_model::{FeModel, ModelItem};
 
+use crate::features::{FeatureItem, FeatureKind};
 use crate::model::{Model, PartInfo};
 use crate::setup::NewItem;
 use crate::tree_icons::{self, TreeIcon};
@@ -49,6 +50,7 @@ pub enum TreeItem {
     Constraint(usize),
     SurfaceInteraction(usize),
     ContactPair(usize),
+    InitialCondition(usize),
     Step(usize),
     /// A container inside a step, such as "BCs".
     StepGroup(usize, &'static str),
@@ -56,6 +58,14 @@ pub enum TreeItem {
     Load(usize, usize),
     FieldOutput(usize, usize),
     Analysis,
+    /// Features of the FE model or of the shown results, by index.
+    ReferencePoint(usize),
+    CoordinateSystem(usize),
+    Plane(usize),
+    /// A result path of the shown results, by index.
+    ResultPath(usize),
+    /// Results on a plane of the shown results, by index.
+    ResultPlane(usize),
     FieldOutputs,
     /// Field of the current increment, by index.
     Field(usize),
@@ -90,6 +100,7 @@ pub struct TreeResponse {
     pub open: Option<TreeItem>,
     /// Create a new item from a container's context menu or by double-clicking it.
     pub create: Option<NewItem>,
+    /// Delete an item, by its context menu or the Delete key; the app asks first.
     pub delete: Option<TreeItem>,
     /// Activate a deactivated step, boundary condition or load, or deactivate an active one.
     pub toggle_active: Option<TreeItem>,
@@ -107,6 +118,8 @@ pub struct TreeResponse {
     pub hot_spot_table: bool,
     /// Open PrePoMax's Search Contact Pairs.
     pub search_contacts: bool,
+    /// Show the results on a plane, by index, or none.
+    pub plane_result: Option<Option<usize>>,
 }
 
 /// What the user asked of the analysis, PrePoMax's analysis context menu.
@@ -191,6 +204,7 @@ fn can_deactivate(item: &TreeItem) -> bool {
             | TreeItem::Load(..)
             | TreeItem::Constraint(_)
             | TreeItem::ContactPair(_)
+            | TreeItem::InitialCondition(_)
     )
 }
 
@@ -234,6 +248,10 @@ fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
         ),
         ModelItem::BoundaryCondition(s, i) => (TreeItem::BoundaryCondition(s, i), step(s, "BCs")),
         ModelItem::Load(s, i) => (TreeItem::Load(s, i), step(s, "Loads")),
+        ModelItem::InitialCondition(i) => (
+            TreeItem::InitialCondition(i),
+            vec![TreeItem::Group("Initial Conditions"), TreeItem::Model],
+        ),
     }
 }
 
@@ -246,9 +264,17 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::Group("Constraints") => Some(NewItem::Constraint),
         TreeItem::Group("Surface Interactions") => Some(NewItem::SurfaceInteraction),
         TreeItem::Group("Contact Pairs") => Some(NewItem::ContactPair),
+        TreeItem::Group("Initial Conditions") => Some(NewItem::InitialCondition),
         TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
         TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
         TreeItem::Group(HOT_SPOTS) => Some(NewItem::ResultHotSpot),
+        TreeItem::Group(REFERENCE_POINTS) => Some(NewItem::Feature(FeatureKind::ReferencePoint)),
+        TreeItem::Group(COORDINATE_SYSTEMS) => {
+            Some(NewItem::Feature(FeatureKind::CoordinateSystem))
+        }
+        TreeItem::Group(PLANES) => Some(NewItem::Feature(FeatureKind::Plane)),
+        TreeItem::Group(PATHS) => Some(NewItem::Feature(FeatureKind::ResultPath)),
+        TreeItem::Group(PLANE_RESULTS) => Some(NewItem::Feature(FeatureKind::ResultPlane)),
         TreeItem::Group("Mesh Setup") => Some(NewItem::MeshSetupItem),
         TreeItem::FieldOutputs => Some(NewItem::ResultFieldOutput),
         TreeItem::Group("History Outputs") => Some(NewItem::ResultHistoryOutput),
@@ -270,6 +296,18 @@ fn has_properties(item: &TreeItem) -> bool {
 }
 
 /// Items of the FE model that have an edit dialog.
+/// Items the context menu and the Delete key remove; a step's field outputs are not, nor
+/// the parts of results.
+fn deletable(view: TreeView, item: &TreeItem) -> bool {
+    (is_fe_item(item) && !matches!(item, TreeItem::FieldOutput(..)))
+        || (matches!(item, TreeItem::Part(_)) && view != TreeView::Results)
+        || feature(item).is_some()
+        || matches!(
+            item,
+            TreeItem::ResultFieldOutput(_) | TreeItem::HistorySet(_) | TreeItem::MeshItem(_)
+        )
+}
+
 fn is_fe_item(item: &TreeItem) -> bool {
     matches!(
         item,
@@ -278,6 +316,7 @@ fn is_fe_item(item: &TreeItem) -> bool {
             | TreeItem::Constraint(_)
             | TreeItem::SurfaceInteraction(_)
             | TreeItem::ContactPair(_)
+            | TreeItem::InitialCondition(_)
             | TreeItem::Step(_)
             | TreeItem::BoundaryCondition(..)
             | TreeItem::Load(..)
@@ -325,6 +364,26 @@ fn dotted(mesh: &mut Mesh, ppp: f32, a: Pos2, b: Pos2) {
 }
 
 /// The plus and minus box of the classic Windows tree view, on whole pixels.
+/// Whether `item` lies in the branch `branch`, which opens to reveal it.
+fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
+    use TreeItem::*;
+    match branch {
+        Model => !matches!(item, Model),
+        Mesh | Group("Parts") => matches!(item, Part(_)),
+        Group("Constraints") => matches!(item, Constraint(_)),
+        Group("Contacts") => matches!(
+            item,
+            SurfaceInteraction(_)
+                | ContactPair(_)
+                | Group("Surface Interactions")
+                | Group("Contact Pairs")
+        ),
+        Group("Surface Interactions") => matches!(item, SurfaceInteraction(_)),
+        Group("Contact Pairs") => matches!(item, ContactPair(_)),
+        _ => false,
+    }
+}
+
 fn expander(ui: &mut Ui, openness: f32, response: &Response) {
     let ppp = ui.pixels_per_point();
     let snap = |v: f32| (v * ppp).floor() / ppp;
@@ -374,11 +433,11 @@ pub fn part_menu(
     ui: &mut Ui,
     index: usize,
     visible: bool,
-    geometry: bool,
+    view: TreeView,
     response: &mut TreeResponse,
 ) {
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-    if geometry {
+    if view == TreeView::Geometry {
         if ui.button("Netz erzeugen").clicked() {
             response.mesh_part = Some(index);
         }
@@ -390,6 +449,12 @@ pub fn part_menu(
     let label = if visible { "Ausblenden" } else { "Einblenden" };
     if ui.button(label).clicked() {
         response.visibility.push((index, !visible));
+    }
+    if deletable(view, &TreeItem::Part(index)) {
+        ui.separator();
+        if ui.button("Löschen").clicked() {
+            response.delete = Some(TreeItem::Part(index));
+        }
     }
 }
 
@@ -478,6 +543,7 @@ impl Tree<'_> {
             }
         }
         let editable = is_fe_item(&item)
+            || feature(&item).is_some()
             || matches!(
                 item,
                 TreeItem::ResultFieldOutput(_)
@@ -549,8 +615,7 @@ impl Tree<'_> {
                         }
                         ui.separator();
                     }
-                    let deletable = !matches!(item, TreeItem::FieldOutput(..));
-                    if deletable && ui.button("Löschen").clicked() {
+                    if deletable(self.view, &item) && ui.button("Löschen").clicked() {
                         self.response.delete = Some(item.clone());
                     }
                 }
@@ -719,13 +784,12 @@ impl Tree<'_> {
         {
             self.forced_open = Some(*open);
         }
-        let revealing_part = self.state.reveal
-            && matches!(&self.state.selected, Some((view, TreeItem::Part(_))) if *view == self.view);
-        if revealing_part
-            && matches!(
-                item,
-                TreeItem::Model | TreeItem::Mesh | TreeItem::Group("Parts")
-            )
+        let revealing = (self.state.reveal)
+            .then_some(self.state.selected.as_ref())
+            .flatten()
+            .filter(|(view, _)| *view == self.view);
+        if let Some((_, selected)) = revealing
+            && contains(&item, selected)
         {
             state.set_open(true);
         }
@@ -776,19 +840,6 @@ impl Tree<'_> {
         Shape::mesh(mesh)
     }
 
-    /// Group node that may be empty: a placeholder leaf without children.
-    fn group(&mut self, ui: &mut Ui, name: &'static str, children: &[&'static str]) {
-        if children.is_empty() {
-            self.leaf(ui, TreeItem::Group(name), name);
-        } else {
-            self.branch(ui, TreeItem::Group(name), name, true, |tree, ui| {
-                for &child in children {
-                    tree.leaf(ui, TreeItem::Group(child), child);
-                }
-            });
-        }
-    }
-
     /// Parts with visibility and colour; of the mesh, or of the geometry.
     fn parts(&mut self, ui: &mut Ui, model: &mut Model) {
         let parts = counted("Parts", model.parts.len());
@@ -801,9 +852,9 @@ impl Tree<'_> {
                 if changed {
                     tree.response.visibility.push((index, part.visible));
                 }
-                let geometry = tree.view == TreeView::Geometry;
+                let view = tree.view;
                 response.context_menu(|ui| {
-                    part_menu(ui, index, part.visible, geometry, &mut tree.response);
+                    part_menu(ui, index, part.visible, view, &mut tree.response);
                 });
             }
         });
@@ -900,8 +951,31 @@ impl Tree<'_> {
         });
     }
 
-    fn features(&mut self, ui: &mut Ui) {
-        self.group(ui, "Features", &["Reference Points", "Coordinate Systems"]);
+    /// PrePoMax's features: reference points and coordinate systems, and planes.
+    fn features(&mut self, ui: &mut Ui, fe: &FeModel) {
+        let open = !fe.reference_points.is_empty()
+            || !fe.coordinate_systems.is_empty()
+            || !fe.planes.is_empty();
+        self.branch(
+            ui,
+            TreeItem::Group("Features"),
+            "Features",
+            open,
+            |tree, ui| {
+                let points = (fe.reference_points.iter().enumerate())
+                    .map(|(i, r)| (TreeItem::ReferencePoint(i), r.name.as_str()))
+                    .collect();
+                tree.container(ui, REFERENCE_POINTS, points);
+                let systems = (fe.coordinate_systems.iter().enumerate())
+                    .map(|(i, c)| (TreeItem::CoordinateSystem(i), c.name.as_str()))
+                    .collect();
+                tree.container(ui, COORDINATE_SYSTEMS, systems);
+                let planes = (fe.planes.iter().enumerate())
+                    .map(|(i, p)| (TreeItem::Plane(i), p.name.as_str()))
+                    .collect();
+                tree.container(ui, PLANES, planes);
+            },
+        );
     }
 }
 
@@ -973,6 +1047,16 @@ pub fn show(
     {
         tree.response.toggle_active = Some(item.clone());
     }
+    // Like PrePoMax, the Delete key deletes the selected item, after the same question as the
+    // context menu. The selection may come from the 3D view, so the pointer can be anywhere.
+    if let Some((selected_view, item)) = &tree.state.selected
+        && *selected_view == view
+        && deletable(view, item)
+        && !ui.ctx().text_edit_focused()
+        && ui.input(|i| i.key_pressed(egui::Key::Delete))
+    {
+        tree.response.delete = Some(item.clone());
+    }
     tree.response
 }
 
@@ -990,7 +1074,7 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
     let has_model = model.is_some();
     tree.branch(ui, TreeItem::Model, "Model", true, |tree, ui| {
         tree.mesh(ui, model);
-        tree.features(ui);
+        tree.features(ui, &fe);
         let materials: Vec<(TreeItem, &str)> = (fe.materials.iter().enumerate())
             .map(|(i, m)| (TreeItem::Material(i), m.name.as_str()))
             .collect();
@@ -1023,9 +1107,16 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                 .collect();
             tree.container(ui, "Contact Pairs", pairs);
         });
-        for name in ["Distributions", "Amplitudes", "Initial Conditions"] {
+        for name in ["Distributions", "Amplitudes"] {
             tree.leaf(ui, TreeItem::Group(name), name);
         }
+        for (i, _) in (fe.initial_conditions.iter().enumerate()).filter(|(_, c)| !c.active) {
+            tree.inactive.insert(TreeItem::InitialCondition(i));
+        }
+        let initial = (fe.initial_conditions.iter().enumerate())
+            .map(|(i, c)| (TreeItem::InitialCondition(i), c.name.as_str()))
+            .collect();
+        tree.container(ui, "Initial Conditions", initial);
         let steps = TreeItem::Group("Steps");
         if fe.steps.is_empty() {
             tree.leaf(ui, steps, "Steps");
@@ -1087,6 +1178,26 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
 
 /// Container of the hot spot definitions.
 pub const HOT_SPOTS: &str = "Hot Spot Stresses";
+pub const REFERENCE_POINTS: &str = "Reference Points";
+pub const COORDINATE_SYSTEMS: &str = "Coordinate Systems";
+pub const PLANES: &str = "Planes";
+/// Container of the result paths in the Results tree.
+pub const PATHS: &str = "Paths";
+/// Container of the results on planes in the Results tree.
+pub const PLANE_RESULTS: &str = "Plane Results";
+
+/// The feature a tree item stands for.
+pub fn feature(item: &TreeItem) -> Option<FeatureItem> {
+    let (kind, index) = match *item {
+        TreeItem::ReferencePoint(i) => (FeatureKind::ReferencePoint, i),
+        TreeItem::CoordinateSystem(i) => (FeatureKind::CoordinateSystem, i),
+        TreeItem::Plane(i) => (FeatureKind::Plane, i),
+        TreeItem::ResultPath(i) => (FeatureKind::ResultPath, i),
+        TreeItem::ResultPlane(i) => (FeatureKind::ResultPlane, i),
+        _ => return None,
+    };
+    Some(FeatureItem { kind, index })
+}
 
 /// Name of the analysis job, PrePoMax's first default.
 pub const ANALYSIS_NAME: &str = "Analysis-1";
@@ -1098,6 +1209,7 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
     let model = model.filter(|m| m.results.is_some());
     let mut fields = Vec::new();
     let mut active = None;
+    let mut shown_plane = None;
     let mut history: Vec<(String, Vec<NamedList>)> = Vec::new();
     let hot_spots: Vec<String> = (model.iter())
         .flat_map(|m| &m.hot_spots.definitions)
@@ -1128,10 +1240,12 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                 .collect();
         }
         active = Some((view.field, view.component));
+        shown_plane = view.plane_result;
     }
+    let fe = model.as_ref().map(|m| m.fe.clone()).unwrap_or_default();
     tree.branch(ui, TreeItem::Model, "Model", true, |tree, ui| {
         tree.mesh(ui, model);
-        tree.features(ui);
+        tree.features(ui, &fe);
     });
     tree.branch(
         ui,
@@ -1176,11 +1290,8 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                                 let item = TreeItem::HistoryField(s, f);
                                 tree.branch(ui, item, name, true, |tree, ui| {
                                     for (c, component) in components.into_iter().enumerate() {
-                                        tree.leaf(
-                                            ui,
-                                            TreeItem::HistoryComponent(s, f, c),
-                                            component,
-                                        );
+                                        let item = TreeItem::HistoryComponent(s, f, c);
+                                        tree.leaf(ui, item, component);
                                     }
                                 });
                             }
@@ -1192,6 +1303,35 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
             let hot_spots = hot_spots.iter().enumerate();
             let items = hot_spots.map(|(i, name)| (TreeItem::HotSpot(i), name.as_str()));
             tree.container(ui, HOT_SPOTS, items.collect());
+            // Not in PrePoMax: results along straight lines through the model.
+            let paths = (fe.result_paths.iter().enumerate())
+                .map(|(i, p)| (TreeItem::ResultPath(i), p.name.as_str()))
+                .collect();
+            tree.container(ui, PATHS, paths);
+            // Not in PrePoMax either: the values where a plane cuts the model, shown alone
+            // while checked.
+            let group = TreeItem::Group(PLANE_RESULTS);
+            if fe.result_planes.is_empty() {
+                tree.leaf(ui, group, PLANE_RESULTS);
+            } else {
+                let text = counted(PLANE_RESULTS, fe.result_planes.len());
+                tree.branch(ui, group, text, true, |tree, ui| {
+                    for (i, result) in fe.result_planes.iter().enumerate() {
+                        let item = TreeItem::ResultPlane(i);
+                        let icon = tree.icon(&item, false);
+                        let mut shown = shown_plane == Some(i);
+                        let (_, response, changed) =
+                            tree.row(ui, None, Some(&mut shown), icon, item, &result.name);
+                        let _ = response.on_hover_text(
+                            "Angehakt zeigt das 3D-Fenster nur die Schnittfläche mit der \
+                             Legende der Werte darauf.",
+                        );
+                        if changed {
+                            tree.response.plane_result = Some(shown.then_some(i));
+                        }
+                    }
+                });
+            }
         },
     );
 }
@@ -1199,6 +1339,24 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revealed_items_open_their_branches() {
+        let pair = TreeItem::ContactPair(0);
+        for branch in [
+            TreeItem::Model,
+            TreeItem::Group("Contacts"),
+            TreeItem::Group("Contact Pairs"),
+        ] {
+            assert!(contains(&branch, &pair), "{branch:?}");
+        }
+        assert!(!contains(&TreeItem::Group("Constraints"), &pair));
+        assert!(contains(
+            &TreeItem::Group("Constraints"),
+            &TreeItem::Constraint(1)
+        ));
+        assert!(contains(&TreeItem::Group("Parts"), &TreeItem::Part(2)));
+    }
 
     #[test]
     fn containers_have_no_properties_dialog() {

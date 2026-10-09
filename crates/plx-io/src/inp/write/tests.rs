@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use plx_model::{BoundaryCondition, Elastic, EquationSolver, Load, Material, Section, UserKeyword};
+use plx_model::{
+    BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, Elastic, EquationSolver, Load,
+    Material, Section, SectionKind, UserKeyword,
+};
 
 use super::*;
 use crate::frd::{FrdImport, read_frd};
@@ -38,12 +41,14 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
                 young: 210_000.0,
                 poisson: 0.3,
             }),
+            ..Default::default()
         }],
         sections: vec![Section {
             name: "Section-1".into(),
             material: "Steel".into(),
             region: Region::Parts(vec!["EALL".into()]),
             thickness: 1.0,
+            kind: SectionKind::Solid,
         }],
         steps: vec![step],
         user_keywords: Vec::new(),
@@ -659,12 +664,14 @@ fn plane_model(
                 young: 210_000.0,
                 poisson: 0.3,
             }),
+            ..Default::default()
         }],
         sections: vec![Section {
             name: "Section-1".into(),
             material: "Steel".into(),
             region: Region::Parts(vec!["PLATE".into()]),
             thickness,
+            kind: SectionKind::Solid,
         }],
         steps: vec![step],
         ..FeModel::default()
@@ -909,12 +916,14 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
             young: 210_000.0,
             poisson: 0.3,
         }),
+        ..Default::default()
     });
     model.sections.push(Section {
         name: "Section-1".into(),
         material: "Steel".into(),
         region: Region::Parts(vec!["LOWER".into(), "UPPER".into()]),
         thickness: 1.0,
+        kind: SectionKind::Solid,
     });
     model.steps.push(step);
     model
@@ -1172,12 +1181,14 @@ fn blocks_model(
                 young: 210_000.0,
                 poisson: 0.3,
             }),
+            ..Default::default()
         }],
         sections: vec![Section {
             name: "Section-1".into(),
             material: "Steel".into(),
             region: Region::Parts(vec!["A".into(), "B".into()]),
             thickness: 1.0,
+            kind: SectionKind::Solid,
         }],
         constraints,
         steps: vec![step],
@@ -1293,4 +1304,759 @@ fn calculix_compression_only_support_takes_only_pressure() {
     // Pushed down, the gaps carry the load.
     let sink = mean_top(&blocks, &frd, "U3");
     assert!(sink.abs() < 0.002, "{sink}");
+}
+
+/// A straight chain of `n` line elements along `axis` from 0 to `length`, numbered from 1;
+/// quadratic ones have a midside node.
+fn line_chain(n: u32, axis: usize, length: f64, quadratic: bool) -> FeMesh {
+    use plx_mesh::{Element, ElementShape, Part};
+    let mut mesh = FeMesh::default();
+    let per_element = if quadratic { 2 } else { 1 };
+    let count = n * per_element;
+    for i in 0..=count {
+        let mut coords = [0.0; 3];
+        coords[axis] = length * f64::from(i) / f64::from(count);
+        mesh.set_node(i + 1, coords);
+    }
+    let mut elements = Vec::new();
+    for e in 0..n {
+        let first = e * per_element + 1;
+        let (shape, type_name, nodes) = if quadratic {
+            (
+                ElementShape::Line3,
+                "B32",
+                vec![first, first + 1, first + 2],
+            )
+        } else {
+            (ElementShape::Line2, "B31", vec![first, first + 1])
+        };
+        mesh.add_element(Element {
+            id: e + 1,
+            type_name: type_name.into(),
+            shape,
+            nodes,
+        })
+        .unwrap();
+        elements.push(e + 1);
+    }
+    mesh.parts.push(Part {
+        name: "BEAM".into(),
+        elements,
+    });
+    mesh
+}
+
+/// Steel on part BEAM with the given section, node 1 fixed and `load` at the last node.
+fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
+    let tip = *mesh.node_ids().last().unwrap();
+    let mut step = Step::new_static("Step-1");
+    step.boundary_conditions.push(BoundaryCondition {
+        name: "Fixed-1".into(),
+        active: true,
+        region: Region::Nodes(vec![1]),
+        kind: BoundaryKind::Fixed,
+    });
+    step.loads.push(Load {
+        name: "Force-1".into(),
+        active: true,
+        region: Region::Nodes(vec![tip]),
+        kind: load,
+    });
+    FeModel {
+        materials: vec![Material {
+            name: "Steel".into(),
+            density: None,
+            elastic: Some(Elastic {
+                young: 210_000.0,
+                poisson: 0.3,
+            }),
+            conductivity: None,
+            specific_heat: None,
+            expansion: None,
+        }],
+        sections: vec![Section {
+            name: "Beam-1".into(),
+            material: "Steel".into(),
+            region: Region::Parts(vec!["BEAM".into()]),
+            thickness: 1.0,
+            kind,
+        }],
+        steps: vec![step],
+        ..FeModel::default()
+    }
+}
+
+fn rect_beam(orientation: BeamOrientation) -> SectionKind {
+    SectionKind::Beam(BeamSection {
+        profile: BeamProfile::Rect { a: 10.0, b: 5.0 },
+        orientation,
+        offset: [0.0, 0.0],
+    })
+}
+
+#[test]
+fn beam_sections_type_their_elements_and_write_the_normal() {
+    let mesh = line_chain(2, 0, 100.0, true);
+    let model = line_model(
+        &mesh,
+        rect_beam(BeamOrientation::Direction([0.0, 1.0, 0.0])),
+        LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Element, Type=B32, Elset=BEAM\n1, 1, 2, 3\n2, 3, 4, 5\n",
+        "*Beam section, Elset=Internal_Selection-1_Beam-1, Material=Steel, Section=RECT\n\
+         10, 5\n0, 1, 0\n",
+        "*Boundary\nInternal_Selection-1_Fixed-1, 1, 6, 0\n",
+    ] {
+        assert!(text.contains(line), "{line} fehlt in\n{text}");
+    }
+    // Pipes and boxes need B32R and carry the offsets.
+    let mut model = model;
+    model.sections[0].kind = SectionKind::Beam(BeamSection {
+        profile: BeamProfile::Pipe {
+            radius: 5.0,
+            thickness: 1.0,
+        },
+        orientation: BeamOrientation::Automatic,
+        offset: [0.5, 0.0],
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Element, Type=B32R, Elset=BEAM\n"), "{text}");
+    // CalculiX 2.21 reads the set name of a pipe or box 20 characters wide, so it is short.
+    assert!(text.contains("*Elset, Elset=Beam-1\n1, 2\n"), "{text}");
+    assert!(
+        text.contains(
+            "*Beam section, Elset=Beam-1, Material=Steel, Section=PIPE, Offset1=0.5\n\
+             5, 1\n0, 0, 1\n"
+        ),
+        "{text}"
+    );
+    // A circle is written by its diameter, as CalculiX reads it.
+    model.sections[0].kind = SectionKind::Beam(BeamSection {
+        profile: BeamProfile::Circ { radius: 2.0 },
+        ..BeamSection::DEFAULT
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("Section=CIRC\n4, 4\n0, 0, 1\n"), "{text}");
+}
+
+#[test]
+fn automatic_normals_split_a_frame_into_groups() {
+    use plx_mesh::{Element, ElementShape};
+    // An L: two elements along x, then two up along z.
+    let mut mesh = line_chain(2, 0, 100.0, false);
+    mesh.set_node(4, [100.0, 0.0, 50.0]);
+    mesh.set_node(5, [100.0, 0.0, 100.0]);
+    for (id, nodes) in [(3, vec![3, 4]), (4, vec![4, 5])] {
+        mesh.add_element(Element {
+            id,
+            type_name: "B31".into(),
+            shape: ElementShape::Line2,
+            nodes,
+        })
+        .unwrap();
+        mesh.parts[0].elements.push(id);
+    }
+    let model = line_model(
+        &mesh,
+        rect_beam(BeamOrientation::Automatic),
+        LoadKind::ConcentratedForce([100.0, 0.0, 0.0]),
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Elset, Elset=Internal_Selection-1_Beam-1\n1, 2\n",
+        "*Elset, Elset=Internal_Selection-2_Beam-1\n3, 4\n",
+        "*Beam section, Elset=Internal_Selection-1_Beam-1, Material=Steel, Section=RECT\n\
+         10, 5\n0, 0, 1\n\
+         *Beam section, Elset=Internal_Selection-2_Beam-1, Material=Steel, Section=RECT\n\
+         10, 5\n1, 0, 0\n",
+    ] {
+        assert!(text.contains(line), "{line} fehlt in\n{text}");
+    }
+    // A given normal parallel to the columns is refused.
+    let mut model = model;
+    model.sections[0].kind = rect_beam(BeamOrientation::Direction([0.0, 0.0, 1.0]));
+    let error = write_inp(&mesh, &model, "").unwrap_err();
+    assert_eq!(
+        error,
+        WriteError::InvalidSection {
+            item: "Beam-1".into(),
+            reason: "Die Normale ist parallel zur Achse von Element 3".into()
+        }
+    );
+}
+
+#[test]
+fn sections_must_fit_their_elements() {
+    let mesh = line_chain(2, 0, 100.0, false);
+    let mut model = line_model(
+        &mesh,
+        SectionKind::Solid,
+        LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+    );
+    let error = write_inp(&mesh, &model, "").unwrap_err();
+    assert!(
+        matches!(&error, WriteError::InvalidSection { item, reason }
+            if item == "Beam-1" && reason.contains("Linienelement")),
+        "{error}"
+    );
+    model.sections[0].kind = SectionKind::Beam(BeamSection {
+        profile: BeamProfile::ALL[3],
+        ..BeamSection::DEFAULT
+    });
+    let error = write_inp(&mesh, &model, "").unwrap_err();
+    assert!(
+        matches!(&error, WriteError::InvalidSection { reason, .. } if reason.contains("B32R")),
+        "{error}"
+    );
+    let (solid_mesh, mut solid_model) = cantilever(tip_force());
+    solid_model.sections[0].kind = SectionKind::Truss { area: 1.0 };
+    let error = write_inp(&solid_mesh, &solid_model, "").unwrap_err();
+    assert!(
+        matches!(&error, WriteError::InvalidSection { reason, .. }
+            if reason.contains("kein Linienelement")),
+        "{error}"
+    );
+}
+
+#[test]
+fn trusses_are_written_as_t3d2_with_translations_only() {
+    let mesh = line_chain(2, 0, 100.0, true);
+    let model = line_model(
+        &mesh,
+        SectionKind::Truss { area: 50.0 },
+        LoadKind::ConcentratedForce([1000.0, 0.0, 0.0]),
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        // The midside nodes of the quadratic lines are dropped.
+        "*Element, Type=T3D2, Elset=BEAM\n1, 1, 3\n2, 3, 5\n",
+        "*Solid section, Elset=Internal_Selection-1_Beam-1, Material=Steel\n50\n",
+        "*Boundary\nInternal_Selection-1_Fixed-1, 1, 3, 0\n",
+    ] {
+        assert!(text.contains(line), "{line} fehlt in\n{text}");
+    }
+}
+
+/// Deflection of a cantilever of length `l` under a tip force `f` after beam theory.
+fn cantilever_deflection(f: f64, l: f64, inertia: f64) -> f64 {
+    f * l.powi(3) / (3.0 * 210_000.0 * inertia)
+}
+
+/// The most negative `U2` in the results: the tip of a beam bent down.
+fn min_u2(frd: &FrdImport) -> f64 {
+    let increment = frd.increments.last().unwrap();
+    let u2 = increment.field("DISP").unwrap().component("U2").unwrap();
+    f64::from(u2.values.iter().copied().fold(f32::MAX, f32::min))
+}
+
+#[test]
+fn calculix_bends_a_rectangular_beam_like_beam_theory() {
+    // Rectangle 10 high (1-direction z) and 5 wide, loaded in y: I = 10 * 5^3 / 12.
+    let expected = cantilever_deflection(100.0, 100.0, 10.0 * 125.0 / 12.0);
+    for (quadratic, tolerance) in [(false, 0.005), (true, 0.03)] {
+        let mesh = line_chain(10, 0, 100.0, quadratic);
+        let model = line_model(
+            &mesh,
+            rect_beam(BeamOrientation::Automatic),
+            LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+        );
+        let name = if quadratic {
+            "balken_b32"
+        } else {
+            "balken_b31"
+        };
+        let Some(frd) = run_ccx(name, &write_inp(&mesh, &model, "").unwrap()) else {
+            return;
+        };
+        // CalculiX expands the beam to solids with new node numbers.
+        assert!(frd.mesh.element_count() == 10 && frd.mesh.node(1).is_none());
+        let deflection = -min_u2(&frd);
+        assert!(
+            (deflection - expected).abs() < tolerance * expected,
+            "{name}: {deflection} statt {expected}"
+        );
+    }
+}
+
+#[test]
+fn calculix_bends_a_pipe_like_beam_theory() {
+    let (r, t) = (5.0f64, 1.0f64);
+    let inertia = std::f64::consts::PI * (r.powi(4) - (r - t).powi(4)) / 4.0;
+    let expected = cantilever_deflection(100.0, 100.0, inertia);
+    let mesh = line_chain(10, 0, 100.0, true);
+    let model = line_model(
+        &mesh,
+        SectionKind::Beam(BeamSection {
+            profile: BeamProfile::Pipe {
+                radius: r,
+                thickness: t,
+            },
+            ..BeamSection::DEFAULT
+        }),
+        LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+    );
+    let Some(frd) = run_ccx("rohr_b32r", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let deflection = -min_u2(&frd);
+    assert!(
+        (deflection - expected).abs() < 0.01 * expected,
+        "{deflection} statt {expected}"
+    );
+}
+
+#[test]
+fn calculix_stretches_a_truss_by_f_l_over_e_a() {
+    let mesh = line_chain(5, 0, 100.0, true);
+    let mut model = line_model(
+        &mesh,
+        SectionKind::Truss { area: 50.0 },
+        LoadKind::ConcentratedForce([1000.0, 0.0, 0.0]),
+    );
+    // A straight chain of trusses is a mechanism sideways; hold the nodes in the axis.
+    let nodes: Vec<NodeId> = mesh
+        .node_ids()
+        .iter()
+        .copied()
+        .filter(|&n| n % 2 == 1)
+        .collect();
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Sideways".into(),
+        active: true,
+        region: Region::Nodes(nodes),
+        kind: BoundaryKind::Displacement([None, Some(0.0), Some(0.0), None, None, None]),
+    });
+    let Some(frd) = run_ccx("stab_t3d2", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let expected = 1000.0 * 100.0 / (210_000.0 * 50.0);
+    let stretch = node_value(&frd, "DISP", "U1", 11);
+    assert!(
+        (stretch - expected).abs() < 1e-6 * expected,
+        "{stretch} statt {expected}"
+    );
+}
+
+/// The cantilever bar (x from 0 to 100, 5 x 5 cross-section) as a thermal model of steel in
+/// mm, t, s: conductivity 50 W/(m K), specific heat 460 J/(kg K), expansion 1e-5 from 20, and
+/// a step of the given kind.
+fn thermal_bar(kind: StepKind, bcs: Vec<BoundaryCondition>, loads: Vec<Load>) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = cantilever(tip_force());
+    let material = &mut model.materials[0];
+    material.conductivity = Some(CONDUCTIVITY);
+    material.specific_heat = Some(SPECIFIC_HEAT);
+    material.expansion = Some(plx_model::Expansion {
+        coefficient: 1e-5,
+        zero_temperature: 20.0,
+    });
+    let step = &mut model.steps[0];
+    step.field_outputs = match kind {
+        StepKind::HeatTransfer(_) => FieldOutput::heat_transfer_defaults(),
+        _ => FieldOutput::coupled_defaults(),
+    };
+    step.kind = kind;
+    step.boundary_conditions = bcs;
+    step.loads = loads;
+    (mesh, model)
+}
+
+const CONDUCTIVITY: f64 = 50.0;
+const SPECIFIC_HEAT: f64 = 4.6e8;
+
+fn temperature(name: &str, region: Region, value: f64) -> BoundaryCondition {
+    BoundaryCondition {
+        name: name.into(),
+        active: true,
+        region,
+        kind: BoundaryKind::Temperature(value),
+    }
+}
+
+fn heat_load(name: &str, region: Region, kind: LoadKind) -> Load {
+    Load {
+        name: name.into(),
+        active: true,
+        region,
+        kind,
+    }
+}
+
+fn steady() -> StepKind {
+    StepKind::HeatTransfer(HeatTransferStep::default())
+}
+
+/// Temperatures at the nodes of the cross-section at x.
+fn temperatures_at(mesh: &FeMesh, frd: &FrdImport, x: f64) -> Vec<f64> {
+    let nodes = nodes_at(mesh, 0, x);
+    assert!(!nodes.is_empty());
+    (nodes.iter())
+        .map(|&n| node_value(frd, "NDTEMP", "T", n))
+        .collect()
+}
+
+#[track_caller]
+fn assert_all_close(values: &[f64], expected: f64, tolerance: f64) {
+    for &v in values {
+        assert!(
+            (v - expected).abs() <= tolerance,
+            "{v} != {expected} ({values:?})"
+        );
+    }
+}
+
+#[test]
+fn writes_heat_transfer_keywords() {
+    let (mesh, mut model) = thermal_bar(
+        StepKind::HeatTransfer(HeatTransferStep {
+            steady_state: false,
+            deltmx: Some(5.0),
+            ..HeatTransferStep::default()
+        }),
+        vec![
+            temperature("Temperature-1", Region::NodeSet("FIX".into()), 20.0),
+            BoundaryCondition {
+                name: "Fixed-1".into(),
+                active: true,
+                region: Region::NodeSet("FIX".into()),
+                kind: BoundaryKind::Fixed,
+            },
+        ],
+        vec![
+            heat_load(
+                "Flux-1",
+                Region::Nodes(vec![99]),
+                LoadKind::ConcentratedFlux(3.0),
+            ),
+            heat_load(
+                "Film-1",
+                Region::Surface("TIP".into()),
+                LoadKind::Film {
+                    sink: 25.0,
+                    coefficient: 0.01,
+                },
+            ),
+            heat_load(
+                "Body-1",
+                Region::Parts(vec!["EALL".into()]),
+                LoadKind::BodyFlux(0.5),
+            ),
+            tip_force(),
+        ],
+    );
+    model.properties.absolute_zero = Some(-273.15);
+    model.properties.stefan_boltzmann = Some(5.67e-11);
+    model.initial_conditions.push(plx_model::InitialCondition {
+        name: "Initial_Temperature-1".into(),
+        active: true,
+        region: Region::Parts(vec!["EALL".into()]),
+        kind: plx_model::InitialConditionKind::Temperature(20.0),
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for expected in [
+        "*Physical constants, Absolute zero=-273.15, Stefan Boltzmann=0.0000000000567\n",
+        "*Expansion, Zero=20\n0.00001\n*Conductivity\n50\n*Specific heat\n460000000\n",
+        "** Name: Initial_Temperature-1\n*Initial conditions, Type=Temperature\n",
+        "*Heat transfer, Deltmx=5\n",
+        "** Name: Temperature-1\n*Boundary\nFIX, 11, 11, 20\n",
+        // Displacements and forces do not act in a heat transfer step.
+        "** Name: Fixed-1: Deactivated\n",
+        "** Name: Force-1: Deactivated\n",
+        "*Cflux, op=New\n*Dflux, op=New\n*Film, op=New\n",
+        "*Cflux\nInternal_Selection-1_Flux-1, 11, 3\n",
+        "*Dflux\nInternal_Selection-1_Body-1, BF, 0.5\n",
+        "*Film\nInternal-1_TIP_S4, F4, 25, 0.01\n",
+        "*Node file\nNT, RFL\n",
+        "*El file\nHFL\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    assert!(
+        !text.contains("Cload") && !text.contains("Radiate"),
+        "{text}"
+    );
+}
+
+/// Steady conduction along the bar, held at 0 at x = 0: a heat flux q into the far end
+/// gives T = q x / k.
+#[test]
+fn calculix_conducts_heat_along_a_bar() {
+    let q = 1.0;
+    let (mesh, model) = thermal_bar(
+        steady(),
+        vec![temperature(
+            "Temperature-1",
+            Region::NodeSet("FIX".into()),
+            0.0,
+        )],
+        vec![heat_load(
+            "Surface_Flux-1",
+            Region::Surface("TIP".into()),
+            LoadKind::SurfaceFlux(q),
+        )],
+    );
+    let Some(frd) = run_ccx("waermeleitung", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    for x in [50.0, 100.0] {
+        assert_all_close(&temperatures_at(&mesh, &frd, x), q * x / CONDUCTIVITY, 1e-6);
+    }
+    let hfl = node_value(&frd, "FLUX", "F1", 99);
+    assert!((hfl.abs() - q).abs() < 1e-3, "{hfl}");
+}
+
+/// Heat generated in the bar flows out at x = 0: T = Q (L x - x^2 / 2) / k.
+#[test]
+fn calculix_conducts_body_heat() {
+    let (body, length) = (0.01, 100.0);
+    let (mesh, model) = thermal_bar(
+        steady(),
+        vec![temperature(
+            "Temperature-1",
+            Region::NodeSet("FIX".into()),
+            0.0,
+        )],
+        vec![heat_load(
+            "Body_Flux-1",
+            Region::Parts(vec!["EALL".into()]),
+            LoadKind::BodyFlux(body),
+        )],
+    );
+    let Some(frd) = run_ccx("koerperwaerme", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    for x in [50.0, 100.0] {
+        let expected = body * (length * x - x * x / 2.0) / CONDUCTIVITY;
+        assert_all_close(&temperatures_at(&mesh, &frd, x), expected, 1e-3 * expected);
+    }
+}
+
+/// The far end gives its heat to the surroundings by convection: k T_L / L = h (T_s - T_L).
+#[test]
+fn calculix_cools_the_bar_by_convection() {
+    let (h, sink, length) = (0.5, 100.0, 100.0);
+    let (mesh, model) = thermal_bar(
+        steady(),
+        vec![temperature(
+            "Temperature-1",
+            Region::NodeSet("FIX".into()),
+            0.0,
+        )],
+        vec![heat_load(
+            "Film-1",
+            Region::Surface("TIP".into()),
+            LoadKind::Film {
+                sink,
+                coefficient: h,
+            },
+        )],
+    );
+    let Some(frd) = run_ccx("konvektion", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let expected = h * sink / (h + CONDUCTIVITY / length);
+    assert_all_close(
+        &temperatures_at(&mesh, &frd, length),
+        expected,
+        1e-6 * expected,
+    );
+}
+
+/// The far end radiates to the surroundings: k (T_0 - T_L) / L = e s (T_L^4 - T_s^4) in
+/// kelvin, with the physical constants of the model.
+#[test]
+fn calculix_cools_the_bar_by_radiation() {
+    let (hot, sink, emissivity, length) = (500.0, 20.0, 0.8, 100.0);
+    let (mesh, mut model) = thermal_bar(
+        steady(),
+        vec![temperature(
+            "Temperature-1",
+            Region::NodeSet("FIX".into()),
+            hot,
+        )],
+        vec![heat_load(
+            "Radiation-1",
+            Region::Surface("TIP".into()),
+            LoadKind::Radiation { sink, emissivity },
+        )],
+    );
+    let (zero, sigma) =
+        plx_model::ModelProperties::standard_constants(model.properties.units).unwrap();
+    model.properties.absolute_zero = Some(zero);
+    model.properties.stefan_boltzmann = Some(sigma);
+    // Radiation is nonlinear; CalculiX iterates from the initial temperature.
+    model.initial_conditions.push(plx_model::InitialCondition {
+        name: "Initial_Temperature-1".into(),
+        active: true,
+        region: Region::Parts(vec!["EALL".into()]),
+        kind: plx_model::InitialConditionKind::Temperature(hot),
+    });
+    let Some(frd) = run_ccx("strahlung", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let kelvin = |t: f64| t - zero;
+    let balance = |t: f64| {
+        CONDUCTIVITY * (hot - t) / length
+            - emissivity * sigma * (kelvin(t).powi(4) - kelvin(sink).powi(4))
+    };
+    let (mut low, mut high) = (sink, hot);
+    for _ in 0..100 {
+        let mid = 0.5 * (low + high);
+        if balance(mid) > 0.0 {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    assert_all_close(
+        &temperatures_at(&mesh, &frd, length),
+        low,
+        1e-3 * (hot - low),
+    );
+}
+
+/// A bar heated at x = 0 and insulated elsewhere warms up as the series solution of the
+/// heat equation says: T(L, t) / T_0 = 1 - sum 4 (-1)^n / ((2n+1) pi) exp(-l_n^2 a t).
+#[test]
+fn calculix_warms_the_bar_transiently() {
+    let (hot, length, density) = (100.0, 100.0, 7.85e-9);
+    let mut settings = HeatTransferStep {
+        steady_state: false,
+        ..HeatTransferStep::default()
+    };
+    // Thermal diffusivity.
+    let a = CONDUCTIVITY / (density * SPECIFIC_HEAT);
+    // Half way to the end temperature at the far end.
+    let period = 0.4 * length * length / a;
+    settings.increments.incrementation = Incrementation::Direct;
+    settings.increments.time_period = period;
+    settings.increments.initial_increment = period / 200.0;
+    settings.increments.max_increments = 1000;
+    let (mesh, mut model) = thermal_bar(
+        StepKind::HeatTransfer(settings),
+        vec![temperature(
+            "Temperature-1",
+            Region::NodeSet("FIX".into()),
+            hot,
+        )],
+        Vec::new(),
+    );
+    model.initial_conditions.push(plx_model::InitialCondition {
+        name: "Initial_Temperature-1".into(),
+        active: true,
+        region: Region::Parts(vec!["EALL".into()]),
+        kind: plx_model::InitialConditionKind::Temperature(0.0),
+    });
+    let Some(frd) = run_ccx("instationaer", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let series: f64 = (0..50)
+        .map(|n| {
+            let k = f64::from(2 * n + 1);
+            let lambda = k * std::f64::consts::PI / (2.0 * length);
+            let sign = if n % 2 == 0 { 1.0 } else { -1.0 };
+            4.0 * sign / (k * std::f64::consts::PI) * (-lambda * lambda * a * period).exp()
+        })
+        .sum();
+    let expected = hot * (1.0 - series);
+    assert!(expected > 20.0 && expected < 80.0, "{expected}");
+    assert_all_close(&temperatures_at(&mesh, &frd, length), expected, 0.02 * hot);
+}
+
+/// A bar held only against rigid body motion and heated evenly by 100 from its stress free
+/// temperature grows by alpha dT L and stays free of stress.
+#[test]
+fn calculix_expands_the_bar_in_a_coupled_step() {
+    let length = 100.0;
+    let (mesh, _) = cantilever(tip_force());
+    let at = |p: [f64; 3]| -> NodeId {
+        let index = (mesh.coords().iter())
+            .position(|c| (0..3).all(|k| (c[k] - p[k]).abs() < 1e-9))
+            .unwrap();
+        mesh.node_ids()[index]
+    };
+    let support = |name: &str, nodes: Vec<NodeId>, values: [Option<f64>; 6]| BoundaryCondition {
+        name: name.into(),
+        active: true,
+        region: Region::Nodes(nodes),
+        kind: BoundaryKind::Displacement(values),
+    };
+    let (origin, y, z) = (at([0.0; 3]), at([0.0, 5.0, 0.0]), at([0.0, 0.0, 5.0]));
+    let (mesh, mut model) = thermal_bar(
+        StepKind::CoupledTempDisp(HeatTransferStep::default()),
+        vec![
+            support("Support-1", nodes_at(&mesh, 0, 0.0), FIX_X),
+            support(
+                "Support-2",
+                vec![origin],
+                [None, Some(0.0), Some(0.0), None, None, None],
+            ),
+            support(
+                "Support-3",
+                vec![y],
+                [None, None, Some(0.0), None, None, None],
+            ),
+            support(
+                "Support-4",
+                vec![z],
+                [None, Some(0.0), None, None, None, None],
+            ),
+            temperature("Temperature-1", Region::NodeSet("NALL".into()), 120.0),
+        ],
+        Vec::new(),
+    );
+    model.initial_conditions.push(plx_model::InitialCondition {
+        name: "Initial_Temperature-1".into(),
+        active: true,
+        region: Region::Parts(vec!["EALL".into()]),
+        kind: plx_model::InitialConditionKind::Temperature(20.0),
+    });
+    let Some(frd) = run_ccx("waermedehnung", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let expected = 1e-5 * 100.0 * length;
+    for node in nodes_at(&mesh, 0, length) {
+        let u = node_value(&frd, "DISP", "U1", node);
+        assert!((u - expected).abs() < 1e-6 * expected, "{u} != {expected}");
+        let s = node_value(&frd, "STRESS", "S11", node);
+        assert!(s.abs() < 1e-6, "{s}");
+    }
+}
+
+/// In a plane stress model the faces are edges: a strip held at 0 at x = 0 and cooled by a
+/// film at its far edge reaches k T_L / L = h (T_s - T_L), as the bar does.
+#[test]
+fn calculix_cools_a_plane_strip_by_convection() {
+    let (length, h, sink) = (10.0, 5.0, 100.0);
+    let mesh = rectangle(0.0, length, 2.0, 5, 2);
+    let mut model = plane_model(
+        ModelSpace::PlaneStress,
+        2.0,
+        Vec::new(),
+        LoadKind::Film {
+            sink,
+            coefficient: h,
+        },
+        Region::Faces(edges_at(&mesh, 0, length)),
+    );
+    model.materials[0].conductivity = Some(CONDUCTIVITY);
+    let step = &mut model.steps[0];
+    step.kind = steady();
+    step.field_outputs = FieldOutput::heat_transfer_defaults();
+    step.boundary_conditions = vec![temperature(
+        "Temperature-1",
+        Region::Nodes(nodes_at(&mesh, 0, 0.0)),
+        0.0,
+    )];
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let Some(frd) = run_ccx("film-2d", &text) else {
+        return;
+    };
+    let expected = h * sink / (h + CONDUCTIVITY / length);
+    assert_all_close(
+        &temperatures_at(&mesh, &frd, length),
+        expected,
+        1e-6 * expected,
+    );
 }
