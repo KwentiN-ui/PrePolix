@@ -417,7 +417,7 @@ struct Tree<'a> {
     /// Containers that cannot take items, with the reason, such as the loads of a frequency
     /// step.
     closed: HashMap<TreeItem, &'static str>,
-    /// Deactivated items, shown gray with PrePoMax's switch icon.
+    /// Deactivated items, shown gray with PrePoMax's no-entry sign.
     inactive: HashSet<TreeItem>,
 }
 
@@ -664,7 +664,7 @@ impl Tree<'_> {
                 ui.add_space(2.0);
                 changed
             });
-            // As in PrePoMax, clicking the switch of a deactivated item activates it.
+            // As in PrePoMax, clicking the sign of a deactivated item activates it.
             let inactive = self.inactive.contains(&item);
             let sense = if inactive {
                 egui::Sense::click()
