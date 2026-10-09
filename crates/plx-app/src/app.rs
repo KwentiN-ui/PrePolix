@@ -4165,8 +4165,22 @@ impl Workbench {
         if actions.play || actions.changed {
             sound.mix = None;
         }
+        // A mode clicked in the window swings in the 3D view until another increment is
+        // shown; a playing sound with its overlay takes precedence.
+        if let Some(increment) = actions.show {
+            sound.preview = Some(increment);
+            sound.shape_clock = (0.0, f64::NEG_INFINITY);
+        }
+        if sound
+            .preview
+            .is_some_and(|p| p != view.increment && actions.show.is_none())
+        {
+            sound.preview = None;
+        }
         let audible = self.audio.as_ref().is_some_and(|a| a.synth().sounding());
-        let overlay = sound.show_shape && audible && !actions.close;
+        let playing_overlay = sound.show_shape && audible;
+        let only = (!playing_overlay).then_some(sound.preview).flatten();
+        let overlay = (playing_overlay || only.is_some()) && !actions.close;
         // The overlay takes the place of an animation.
         if overlay && view.animation.is_some() {
             view.stop_animation();
@@ -4179,12 +4193,12 @@ impl Workbench {
             if sound
                 .mix
                 .as_ref()
-                .is_some_and(|m| !m.shows(&field, &component))
+                .is_some_and(|m| !m.shows(&field, &component, only))
             {
                 sound.mix = None;
             }
             if sound.mix.is_none() {
-                let mix = sound::ShapeMix::new(sound, &view.increments, &field, &component);
+                let mix = sound::ShapeMix::new(sound, &view.increments, &field, &component, only);
                 sound.mix = mix;
             }
             // A new frame at the chosen rate; the swings advance with the chosen speed, so
@@ -4207,9 +4221,9 @@ impl Workbench {
             self.results_changed = true;
         }
         if let Some(increment) = actions.show
-            && view.animation.is_none()
             && increment != view.increment
         {
+            view.stop_animation();
             view.select_increment(increment);
             self.results_changed = true;
         }
