@@ -5,6 +5,7 @@
 //! input file; node and element sets that CalculiX needs for them are derived when the input
 //! file is written, so the user never has to define sets by hand.
 
+mod constraint;
 mod contact;
 mod geometry;
 mod hot_spot;
@@ -12,6 +13,7 @@ pub mod library;
 mod region;
 mod validity;
 
+pub use constraint::{CompressionOnly, PointSpring, SurfaceSpring, SurfaceToSurfaceSpring};
 pub use contact::{
     Constraint, ContactMethod, ContactPair, DEFAULT_SURFACE_COLOR, Friction, GapConductance,
     InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
@@ -47,7 +49,7 @@ pub struct Project {
 pub struct FeModel {
     pub materials: Vec<Material>,
     pub sections: Vec<Section>,
-    /// Ties between surfaces, PrePoMax's Constraints.
+    /// Springs, supports and ties, PrePoMax's Constraints.
     #[serde(default)]
     pub constraints: Vec<Constraint>,
     #[serde(default)]

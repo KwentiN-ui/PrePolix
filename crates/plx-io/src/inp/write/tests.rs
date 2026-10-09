@@ -784,3 +784,234 @@ fn calculix_carries_the_load_across_a_contact() {
         assert!((reaction - 1000.0).abs() < 10.0, "{name}: {reaction}");
     }
 }
+
+/// Two steel blocks of 1 x 1 x 1 hexahedra, `a` from z = 0 to 1 and `b` from z = 1.1 to 2.1,
+/// with `n` elements per edge each. Returns the mesh and the bottom and top faces of
+/// each block.
+struct Blocks {
+    mesh: FeMesh,
+    a_bottom: Vec<(ElementId, u8)>,
+    a_top: Vec<(ElementId, u8)>,
+    b_bottom: Vec<(ElementId, u8)>,
+    b_top: Vec<(ElementId, u8)>,
+}
+
+fn blocks(na: u32, nb: u32) -> Blocks {
+    use plx_mesh::{Element, ElementShape, Part};
+    let mut mesh = FeMesh::default();
+    let mut next_node = 1;
+    let mut next_element = 1;
+    let mut block = |mesh: &mut FeMesh, n: u32, z0: f64, name: &str| {
+        let mut ids = BTreeMap::new();
+        for k in 0..=n {
+            for j in 0..=n {
+                for i in 0..=n {
+                    let h = 1.0 / f64::from(n);
+                    mesh.set_node(
+                        next_node,
+                        [f64::from(i) * h, f64::from(j) * h, z0 + f64::from(k) * h],
+                    );
+                    ids.insert((i, j, k), next_node);
+                    next_node += 1;
+                }
+            }
+        }
+        let (mut bottom, mut top, mut elements) = (Vec::new(), Vec::new(), Vec::new());
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    let corner = |di, dj, dk| ids[&(i + di, j + dj, k + dk)];
+                    let nodes = vec![
+                        corner(0, 0, 0),
+                        corner(1, 0, 0),
+                        corner(1, 1, 0),
+                        corner(0, 1, 0),
+                        corner(0, 0, 1),
+                        corner(1, 0, 1),
+                        corner(1, 1, 1),
+                        corner(0, 1, 1),
+                    ];
+                    mesh.add_element(Element {
+                        id: next_element,
+                        type_name: "C3D8".into(),
+                        shape: ElementShape::Hex8,
+                        nodes,
+                    })
+                    .unwrap();
+                    if k == 0 {
+                        bottom.push((next_element, 1));
+                    }
+                    if k == n - 1 {
+                        top.push((next_element, 2));
+                    }
+                    elements.push(next_element);
+                    next_element += 1;
+                }
+            }
+        }
+        mesh.parts.push(Part {
+            name: name.into(),
+            elements,
+        });
+        (bottom, top)
+    };
+    let (a_bottom, a_top) = block(&mut mesh, na, 0.0, "A");
+    let (b_bottom, b_top) = block(&mut mesh, nb, 1.1, "B");
+    Blocks {
+        mesh,
+        a_bottom,
+        a_top,
+        b_bottom,
+        b_top,
+    }
+}
+
+/// Steel on both blocks and one static step with a surface traction on top of block `b`,
+/// block `a` held at its bottom.
+fn blocks_model(
+    blocks: &Blocks,
+    constraints: Vec<plx_model::Constraint>,
+    force: [f64; 3],
+) -> FeModel {
+    let mut step = Step::new_static("Step-1");
+    step.boundary_conditions.push(BoundaryCondition {
+        name: "Fixed-1".into(),
+        active: true,
+        region: Region::Faces(blocks.a_bottom.clone()),
+        kind: BoundaryKind::Fixed,
+    });
+    step.loads.push(Load {
+        name: "Surface_Traction-1".into(),
+        active: true,
+        region: Region::Faces(blocks.b_top.clone()),
+        kind: LoadKind::SurfaceTraction(force),
+    });
+    FeModel {
+        materials: vec![Material {
+            name: "Steel".into(),
+            density: None,
+            elastic: Some(Elastic {
+                young: 210_000.0,
+                poisson: 0.3,
+            }),
+        }],
+        sections: vec![Section {
+            name: "Section-1".into(),
+            material: "Steel".into(),
+            region: Region::Parts(vec!["A".into(), "B".into()]),
+        }],
+        constraints,
+        steps: vec![step],
+        ..FeModel::default()
+    }
+}
+
+/// Mean displacement component of the top nodes of block `b`.
+fn mean_top(blocks: &Blocks, frd: &FrdImport, component: &str) -> f64 {
+    let nodes = Region::Faces(blocks.b_top.clone()).nodes(&blocks.mesh);
+    let sum: f64 = nodes
+        .iter()
+        .map(|&n| node_value(frd, "DISP", component, n))
+        .sum();
+    sum / nodes.len() as f64
+}
+
+#[test]
+fn calculix_carries_a_block_on_springs_between_two_surfaces() {
+    use plx_model::SurfaceToSurfaceSpring;
+    // Different meshes on the two sides: the springs end on points between nodes.
+    let blocks = blocks(2, 3);
+    let spring = Constraint::SurfaceToSurfaceSpring(SurfaceToSurfaceSpring {
+        name: "Bearing-1".into(),
+        active: true,
+        master: Region::Faces(blocks.a_top.clone()),
+        slave: Region::Faces(blocks.b_bottom.clone()),
+        stiffness: [1000.0, 1000.0, 2000.0],
+        per_area: false,
+    });
+    let model = blocks_model(&blocks, vec![spring], [0.0, 0.0, 100.0]);
+    let text = write_inp(&blocks.mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Element, Type=SPRING2, Elset=Bearing-1_All\n"),
+        "{text}"
+    );
+    assert!(text.contains("*Equation\n"));
+    let Some(frd) = run_ccx("feder-flaeche", &text) else {
+        return;
+    };
+    // 100 N on 2000 N/mm, the steel itself barely stretches.
+    let lift = mean_top(&blocks, &frd, "U3");
+    assert!((lift - 0.05).abs() < 0.001, "{lift}");
+}
+
+#[test]
+fn calculix_carries_a_block_on_surface_and_point_springs() {
+    use plx_model::{PointSpring, SurfaceSpring};
+    let blocks = blocks(2, 2);
+    let surface = Constraint::SurfaceSpring(SurfaceSpring {
+        name: "Surface_Spring-1".into(),
+        active: true,
+        region: Region::Faces(blocks.b_bottom.clone()),
+        stiffness: [1000.0, 1000.0, 1000.0],
+        per_area: false,
+    });
+    // Nine nodes on the bottom of block b, 100 N/mm each in z.
+    let point = Constraint::PointSpring(PointSpring {
+        name: "Point_Spring-1".into(),
+        active: true,
+        region: Region::Faces(blocks.b_bottom.clone()),
+        stiffness: [0.0, 0.0, 100.0],
+    });
+    let model = blocks_model(&blocks, vec![surface, point], [0.0, 0.0, 95.0]);
+    let text = write_inp(&blocks.mesh, &model, "").unwrap();
+    assert!(text.contains("*Element, Type=SPRING1, Elset=Point_Spring-1_All\n"));
+    assert!(
+        text.contains("*Spring, Elset=Point_Spring-1_DOF_3\n3\n100.\n"),
+        "{text}"
+    );
+    let Some(frd) = run_ccx("federn", &text) else {
+        return;
+    };
+    let lift = mean_top(&blocks, &frd, "U3");
+    assert!((lift - 0.05).abs() < 0.001, "{lift}");
+}
+
+#[test]
+fn calculix_compression_only_support_takes_only_pressure() {
+    use plx_model::{CompressionOnly, SurfaceSpring};
+    let blocks = blocks(2, 2);
+    let support = |force: [f64; 3]| {
+        let springs = Constraint::SurfaceSpring(SurfaceSpring {
+            name: "Surface_Spring-1".into(),
+            active: true,
+            region: Region::Faces(blocks.b_bottom.clone()),
+            stiffness: [1000.0, 1000.0, 1000.0],
+            per_area: false,
+        });
+        let gaps = Constraint::CompressionOnly(CompressionOnly {
+            name: "Compression_Only-1".into(),
+            active: true,
+            region: Region::Faces(blocks.b_bottom.clone()),
+            clearance: 0.0,
+            spring_stiffness: None,
+            tensile_force: None,
+            offset: 0.0,
+            nonlinear: true,
+        });
+        blocks_model(&blocks, vec![springs, gaps], force)
+    };
+    let pulled = write_inp(&blocks.mesh, &support([0.0, 0.0, 100.0]), "").unwrap();
+    assert!(pulled.contains("*Element, Type=GAPUNI\n"));
+    assert!(pulled.contains("*Plastic\n"));
+    let Some(frd) = run_ccx("druck-nur-zug", &pulled) else {
+        return;
+    };
+    // Pulled away, only the springs hold the block.
+    let lift = mean_top(&blocks, &frd, "U3");
+    assert!((lift - 0.1).abs() < 0.002, "{lift}");
+    let pushed = write_inp(&blocks.mesh, &support([0.0, 0.0, -100.0]), "").unwrap();
+    let frd = run_ccx("druck-nur-druck", &pushed).unwrap();
+    // Pushed down, the gaps carry the load.
+    let sink = mean_top(&blocks, &frd, "U3");
+    assert!(sink.abs() < 0.002, "{sink}");
+}

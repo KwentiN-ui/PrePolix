@@ -118,10 +118,8 @@ fn optional_row(ui: &mut Ui, label: &str, value: &mut Option<f64>, default: f64)
     ui.end_row();
 }
 
+/// The properties of a tie below the constraint dialog's type list.
 pub fn tie_form(ui: &mut Ui, model: &Model, tie: &mut Tie, regions: &mut MasterSlave) {
-    ui.label("Art");
-    ui.label("Tie");
-    ui.end_row();
     optional_row(ui, "Positionstoleranz", &mut tie.position_tolerance, 0.05);
     ui.label("");
     ui.checkbox(

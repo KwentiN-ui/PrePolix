@@ -3,6 +3,7 @@
 mod analysis;
 mod animation;
 mod app;
+mod constraint_dialog;
 mod contact_search;
 mod contacts;
 mod field_output_dialog;

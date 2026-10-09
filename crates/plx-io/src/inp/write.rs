@@ -215,20 +215,30 @@ pub fn model_keywords(
     let mut sets = Sets::new(mesh);
     // Regions are resolved first: their sets must precede the materials and steps.
     let materials = materials(model);
-    let sections = sections(&mut sets, model)?;
-    let constraints = constraints(&mut sets, model)?;
+    let mut sections = sections(&mut sets, model)?;
+    let generated = constraints::springs(&mut sets, model)?;
+    let mut constraints = constraints(&mut sets, model)?;
+    constraints.extend(generated.equations);
+    sections.extend(generated.sections);
+    let mut materials = materials;
+    materials.extend(generated.material);
     let interactions = model.surface_interactions.iter().map(interaction).collect();
     let contact_pairs = contact_pairs(&mut sets, model)?;
     let steps = model
         .steps
         .iter()
-        .map(|step| write_step(&mut sets, step))
+        .map(|step| write_step(&mut sets, step, generated.boundary.as_ref()))
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut nodes = String::from("*Node\n");
     for (id, &[x, y, z]) in mesh.node_ids().iter().zip(mesh.coords()) {
         let _ = writeln!(nodes, "{id}, {:.8E}, {:.8E}, {:.8E}", x, y, z);
     }
+    for (id, [x, y, z]) in &generated.nodes {
+        let _ = writeln!(nodes, "{id}, {:.8E}, {:.8E}, {:.8E}", x, y, z);
+    }
+    let mut element_blocks = elements(mesh);
+    element_blocks.extend(generated.elements);
     let node_sets = sets
         .node_sets
         .iter()
@@ -266,7 +276,7 @@ pub fn model_keywords(
     Ok(vec![
         Keyword::title("Heading", vec![Keyword::generated(heading)]),
         Keyword::title("Nodes", vec![Keyword::generated(nodes)]),
-        Keyword::title("Elements", elements(mesh)),
+        Keyword::title("Elements", element_blocks),
         Keyword::title("Node sets", node_sets),
         Keyword::title("Element sets", element_sets),
         Keyword::title("Surfaces", surfaces),
@@ -411,6 +421,17 @@ impl<'a> Sets<'a> {
             }
         }
         sets
+    }
+
+    /// `name` itself if it is free, otherwise the next free `<name>-<n>`.
+    fn unique(&mut self, name: &str) -> String {
+        if self.used.insert(name.to_ascii_uppercase()) {
+            return name.to_owned();
+        }
+        (2..)
+            .map(|n| format!("{name}-{n}"))
+            .find(|name| self.used.insert(name.to_ascii_uppercase()))
+            .expect("unbounded range")
     }
 
     /// Next free name `<prefix>-<n>_<postfix>`, like PrePoMax's `GetNextNumberedKey`.
@@ -565,7 +586,8 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError
     Ok(keywords)
 }
 
-/// Tie constraints as PrePoMax's `CalTie` writes them: slave surface first.
+/// Tie constraints as PrePoMax's `CalTie` writes them: slave surface first. Springs and
+/// supports are written as elements, see [`constraints::springs`].
 fn constraints(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
     let mut keywords = Vec::new();
     for constraint in &model.constraints {
@@ -574,6 +596,10 @@ fn constraints(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteEr
             continue;
         }
         match constraint {
+            Constraint::PointSpring(_)
+            | Constraint::SurfaceSpring(_)
+            | Constraint::CompressionOnly(_)
+            | Constraint::SurfaceToSurfaceSpring(_) => {}
             Constraint::Tie(tie) => {
                 let master = sets.surface(&tie.name, "Master", &tie.master)?;
                 let slave = sets.surface(&tie.name, "Slave", &tie.slave)?;
@@ -702,7 +728,11 @@ fn contact_pair(pair: &ContactPair, master: &str, slave: &str) -> String {
 ///
 /// Like PrePoMax, a deactivated step or item keeps its place in the file as a comment
 /// (`** Name: Fixed-1: Deactivated`), and nothing of it is written, not even its sets.
-fn write_step(sets: &mut Sets, step: &Step) -> Result<Keyword, WriteError> {
+fn write_step(
+    sets: &mut Sets,
+    step: &Step,
+    extra_boundary: Option<&Keyword>,
+) -> Result<Keyword, WriteError> {
     if !step.active {
         return Ok(deactivated_step(step));
     }
@@ -732,6 +762,8 @@ fn write_step(sets: &mut Sets, step: &Step) -> Result<Keyword, WriteError> {
         }
         boundaries.push(Keyword::generated(out));
     }
+    // Boundary conditions that constraints need, PrePoMax's additional boundary conditions.
+    boundaries.extend(extra_boundary.cloned());
     let mut loads = Vec::new();
     // Like PrePoMax, a step that takes no loads gets none written, not even the reset.
     let step_loads: &[_] = if step.kind.supports_loads() {
@@ -854,52 +886,13 @@ fn traction_forces(
     faces: &[(ElementId, u8)],
     force: [f64; 3],
 ) -> BTreeMap<NodeId, [f64; 3]> {
-    let mut weighted: Vec<(NodeId, f64)> = Vec::new();
-    let mut total_area = 0.0;
-    for &(element, face) in faces {
-        let Some(element) = mesh.element(element) else {
-            continue;
-        };
-        let Some(topology) = (face as usize)
-            .checked_sub(1)
-            .and_then(|f| element.shape.faces().get(f))
-        else {
-            continue;
-        };
-        let node = |local: usize| element.nodes.get(local).copied();
-        let point = |local: usize| node(local).and_then(|id| mesh.node(id));
-        let corners: Vec<[f64; 3]> = topology.corners.iter().filter_map(|&l| point(l)).collect();
-        if corners.len() != topology.corners.len() {
-            continue;
-        }
-        let area = polygon_area(&corners);
-        total_area += area;
-        let quadratic = element.shape.is_quadratic() && !topology.mids.is_empty();
-        let (corner_weight, mid_weight) = match (corners.len(), quadratic) {
-            (3, true) => (0.0, 1.0 / 3.0),
-            (4, true) => (-1.0 / 12.0, 1.0 / 3.0),
-            (n, _) => (1.0 / n as f64, 0.0),
-        };
-        for &local in topology.corners {
-            weighted.extend(node(local).map(|id| (id, area * corner_weight)));
-        }
-        if quadratic {
-            for &local in topology.mids {
-                weighted.extend(node(local).map(|id| (id, area * mid_weight)));
-            }
-        }
-    }
-    let mut nodal: BTreeMap<NodeId, [f64; 3]> = BTreeMap::new();
+    let (weights, total_area) = constraints::node_areas(mesh, faces);
     if total_area <= 0.0 {
-        return nodal;
+        return BTreeMap::new();
     }
-    for (node, weight) in weighted {
-        let share = nodal.entry(node).or_default();
-        for k in 0..3 {
-            share[k] += force[k] * weight / total_area;
-        }
-    }
-    nodal
+    (weights.into_iter())
+        .map(|(node, weight)| (node, force.map(|f| f * weight / total_area)))
+        .collect()
 }
 
 /// Area of a (possibly slightly warped) polygon from its vector area.
@@ -1041,5 +1034,6 @@ fn empty(item: &str, what: &'static str) -> WriteError {
     }
 }
 
+mod constraints;
 #[cfg(test)]
 mod tests;
