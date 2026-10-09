@@ -555,8 +555,16 @@ impl ContactSearchDialog {
             name
         };
         for row in self.rows.iter().filter(|r| !r.item.unresolved) {
-            let master = Region::Faces(surface_faces(&model.mesh, model.skins(), &row.item.master));
-            let slave = Region::Faces(surface_faces(&model.mesh, model.skins(), &row.item.slave));
+            // Surfaces of whole CAD faces are kept by geometry, so that they survive
+            // remeshing.
+            let region = |surface| {
+                let faces = surface_faces(&model.mesh, model.skins(), surface);
+                match model.mesh.whole_cad_faces(&faces) {
+                    Some(entities) => Region::Geometry(entities),
+                    None => Region::Faces(faces),
+                }
+            };
+            let (master, slave) = (region(&row.item.master), region(&row.item.slave));
             match row.kind {
                 PairType::Tie => ties.push(Constraint::Tie(Tie {
                     position_tolerance: Some(row.distance),

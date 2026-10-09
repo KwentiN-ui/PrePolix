@@ -8,7 +8,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use glam::{DVec3, Vec3};
-use plx_mesh::{ElementId, NodeId, SkinFace, face_normal};
+use plx_mesh::{CadEntity, ElementId, NodeId, SkinFace, face_normal};
 
 use crate::model::{Hit, Model};
 use crate::numeric;
@@ -193,6 +193,26 @@ impl SelectBy {
 pub enum Items {
     Nodes(BTreeSet<NodeId>),
     Faces(BTreeSet<(ElementId, u8)>),
+    /// Faces, edges and vertices of the CAD geometry the mesh was generated from.
+    Geometry(BTreeSet<CadEntity>),
+}
+
+impl Items {
+    /// CAD entities as the nodes or element faces of the target they stand for.
+    pub fn resolved(self, mesh: &plx_mesh::FeMesh, target: Target) -> Items {
+        match self {
+            Items::Geometry(entities) => {
+                let entities: Vec<CadEntity> = entities.into_iter().collect();
+                match target {
+                    Target::Nodes => Items::Nodes(mesh.cad_nodes(&entities).into_iter().collect()),
+                    Target::Faces | Target::Edges => {
+                        Items::Faces(mesh.cad_faces(&entities).into_iter().collect())
+                    }
+                }
+            }
+            items => items,
+        }
+    }
 }
 
 /// The dialog's settings, kept while it is open.
@@ -373,6 +393,14 @@ impl Picker {
     /// What a click on `hit` selects. `precision` is the pick tolerance in render units at
     /// the hit, for edges and points.
     pub fn pick(&self, model: &Model, hit: &Hit, target: Target, precision: f32) -> Items {
+        // On a mesh generated from geometry the geometry mode picks CAD entities, which stay
+        // valid when the part is remeshed.
+        if self.select_by == SelectBy::Geometry
+            && model.has_cad()
+            && let Some(entity) = crate::cad_selection::pick(model, hit, target, precision)
+        {
+            return Items::Geometry(BTreeSet::from([entity]));
+        }
         let picker = MeshPicker::new(model, hit.part);
         if target == Target::Edges {
             // Edges of the outline whose nodes the same click would select.
@@ -383,7 +411,7 @@ impl Picker {
                 },
                 _ => match self.pick(model, hit, Target::Nodes, precision) {
                     Items::Nodes(nodes) => nodes,
-                    Items::Faces(_) => BTreeSet::new(),
+                    Items::Faces(_) | Items::Geometry(_) => BTreeSet::new(),
                 },
             };
             return Items::Faces(outline_edges_within(model, Some(hit.part), &nodes));
@@ -547,6 +575,7 @@ impl Picker {
 pub fn preview(model: &Model, items: &Items) -> Preview {
     let mut preview = Preview::default();
     match items {
+        Items::Geometry(entities) => return crate::cad_selection::preview(model, entities),
         Items::Nodes(nodes) => {
             preview.points = nodes
                 .iter()
@@ -923,14 +952,14 @@ mod tests {
     fn faces(items: Items) -> BTreeSet<(ElementId, u8)> {
         match items {
             Items::Faces(faces) => faces,
-            Items::Nodes(_) => panic!("nodes instead of faces"),
+            other => panic!("{other:?} instead of faces"),
         }
     }
 
     fn nodes(items: Items) -> BTreeSet<NodeId> {
         match items {
             Items::Nodes(nodes) => nodes,
-            Items::Faces(_) => panic!("faces instead of nodes"),
+            other => panic!("{other:?} instead of nodes"),
         }
     }
 

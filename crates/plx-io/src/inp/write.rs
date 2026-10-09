@@ -531,10 +531,14 @@ impl<'a> Sets<'a> {
                 item: item.to_owned(),
                 surface: surface.clone(),
             }),
-            Region::Faces(faces) if !faces.is_empty() => {
+            Region::Faces(_) | Region::Geometry(_) => {
+                let faces = region.faces(self.mesh);
+                if faces.is_empty() {
+                    return Err(empty(item, "Elementflächen"));
+                }
                 let postfix = format!("{}_{side}", name(item));
                 let surface = self.free_name("Internal_Selection", &postfix);
-                self.add_face_surface(&surface, faces);
+                self.add_face_surface(&surface, &faces);
                 Ok(surface)
             }
             _ => Err(empty(item, "Elementflächen")),
@@ -549,10 +553,13 @@ impl<'a> Sets<'a> {
                     return Ok(sides.clone());
                 }
             }
-            Region::Faces(faces) if !faces.is_empty() => {
-                let surface = self.free_name("Internal_Selection", &name(item));
-                self.add_face_surface(&surface, faces);
-                return Ok(self.surface_sets[&surface].0.clone());
+            Region::Faces(_) | Region::Geometry(_) => {
+                let faces = region.faces(self.mesh);
+                if !faces.is_empty() {
+                    let surface = self.free_name("Internal_Selection", &name(item));
+                    self.add_face_surface(&surface, &faces);
+                    return Ok(self.surface_sets[&surface].0.clone());
+                }
             }
             _ => {}
         }

@@ -86,7 +86,7 @@ fn step_files_import_with_faces_and_edges() {
     let faces: BTreeSet<i32> = (display.entities.iter())
         .filter_map(|e| match e {
             CadEntity::Face(tag) => Some(*tag),
-            CadEntity::Edge(_) => None,
+            _ => None,
         })
         .collect();
     assert_eq!(faces.len(), display.faces);
@@ -222,6 +222,78 @@ fn a_remeshed_part_replaces_its_old_mesh_and_leaves_the_others() {
         .collect();
     assert_eq!(used.len(), merged.node_count(), "no orphaned nodes");
     assert!(generate_part_mesh(&geometry, "SOLID-9").is_err());
+
+    // The CAD map follows: the second block's entities keep their numbers, the first
+    // block's point into its new mesh.
+    let face_of = |mesh: &FeMesh, part: usize| -> BTreeSet<i32> {
+        let elements: BTreeSet<ElementId> = mesh.parts[part].elements.iter().copied().collect();
+        (mesh.cad.faces.iter())
+            .filter(|(_, faces)| faces.iter().all(|(e, _)| elements.contains(e)))
+            .map(|(&tag, _)| tag)
+            .collect()
+    };
+    assert_eq!(face_of(&merged, 0), face_of(&whole, 0));
+    assert_eq!(face_of(&merged, 1), face_of(&whole, 1));
+    assert_eq!(merged.cad.faces.len(), 12);
+    for tag in face_of(&whole, 1) {
+        assert_eq!(merged.cad.faces[&tag], whole.cad.faces[&tag]);
+    }
+    for tag in face_of(&merged, 0) {
+        let faces = &merged.cad.faces[&tag];
+        assert!(faces.len() > whole.cad.faces[&tag].len());
+        assert!(faces.iter().all(|(e, _)| *e > old_max));
+    }
+    for nodes in merged.cad.nodes.values() {
+        assert!(nodes.iter().all(|&n| merged.node(n).is_some()));
+    }
+}
+
+#[test]
+fn meshes_record_where_the_cad_entities_lie() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = import_cad(&testdata("platte_mit_loch.step"))
+        .unwrap()
+        .geometry;
+    geometry.meshing.max_size = 8.0;
+    let mesh = generate_mesh(&geometry).unwrap().mesh;
+    let cad = &mesh.cad;
+    let display = tessellate(&geometry).unwrap();
+    assert_eq!(cad.faces.len(), display.faces);
+    assert_eq!(cad.segments.len(), display.edges);
+    assert!(cad.nodes.keys().any(|e| matches!(e, CadEntity::Vertex(_))));
+    // Every outer face of the tetrahedra lies on exactly one CAD face.
+    let mut count: HashMap<Vec<NodeId>, usize> = HashMap::new();
+    for element in mesh.elements() {
+        for face in element.faces() {
+            let mut corners: Vec<NodeId> = face.corners.iter().map(|&i| element.nodes[i]).collect();
+            corners.sort_unstable();
+            *count.entry(corners).or_default() += 1;
+        }
+    }
+    let outer = count.values().filter(|&&n| n == 1).count();
+    let on_cad: usize = cad.faces.values().map(Vec::len).sum();
+    assert_eq!(on_cad, outer);
+    // The faces' nodes, midside nodes included, are the CAD face's nodes.
+    for (&tag, faces) in &cad.faces {
+        let nodes: BTreeSet<NodeId> = (faces.iter())
+            .flat_map(|&(e, f)| {
+                let element = mesh.element(e).unwrap();
+                let face = &element.faces()[usize::from(f) - 1];
+                let local = face.corners.iter().chain(face.mids);
+                local.map(|&i| element.nodes[i]).collect::<Vec<_>>()
+            })
+            .collect();
+        let recorded: BTreeSet<NodeId> = cad.nodes[&CadEntity::Face(tag)].iter().copied().collect();
+        assert_eq!(nodes, recorded, "Fläche {tag}");
+    }
+    for (&tag, segments) in &cad.segments {
+        let nodes = &cad.nodes[&CadEntity::Edge(tag)];
+        // Quadratic segments have a midside node each; the hole's edge is closed.
+        let n = 2 * segments.len();
+        assert!(nodes.len() == n + 1 || nodes.len() == n, "Kante {tag}");
+    }
 }
 
 #[test]
@@ -241,7 +313,7 @@ fn local_mesh_sizes_refine_faces_and_edges() {
     let face = (import.display.entities.iter())
         .find_map(|e| match e {
             CadEntity::Face(tag) => Some(*tag),
-            CadEntity::Edge(_) => None,
+            _ => None,
         })
         .unwrap();
     let local = |faces: Vec<i32>, edges: Vec<i32>, size| MeshSetupItem {
@@ -254,7 +326,7 @@ fn local_mesh_sizes_refine_faces_and_edges() {
     let edge = (import.display.entities.iter())
         .find_map(|e| match e {
             CadEntity::Edge(tag) => Some(*tag),
-            CadEntity::Face(_) => None,
+            _ => None,
         })
         .unwrap();
     geometry.mesh_items = vec![local(vec![], vec![edge], 0.5)];
@@ -393,6 +465,16 @@ fn faces_outside_solids_are_meshed_as_shell_parts() {
     let exact = 200.0 - (4.0 - std::f64::consts::PI) * 4.0;
     assert!((area - exact).abs() / exact < 0.01, "Fläche {area}");
     assert!(mesh.coords().iter().all(|c| c[2].abs() < 1e-9));
+    // The face covers every element; the edges run around it.
+    let faces: Vec<(ElementId, u8)> = mesh.cad.faces.values().flatten().copied().collect();
+    assert_eq!(faces.len(), mesh.element_count());
+    assert!(faces.iter().all(|&(_, f)| f == 1));
+    assert_eq!(mesh.cad.segments.len(), 8, "4 Seiten, 4 Rundungen");
+    assert_eq!(
+        mesh.cad_nodes(&[CadEntity::Face(*mesh.cad.faces.keys().next().unwrap())])
+            .len(),
+        mesh.node_count()
+    );
 
     geometry.meshing.second_order = false;
     geometry.meshing.quad_dominated = true;

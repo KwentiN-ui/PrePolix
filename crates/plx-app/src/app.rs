@@ -592,16 +592,12 @@ fn load_in_background(path: PathBuf, sender: Sender<LoadEvent>, ctx: egui::Conte
     ctx.request_repaint();
 }
 
-/// Whether a region of the FE model consists of picked nodes or element faces, which a new
-/// mesh does not keep.
-fn picks_mesh_entities(fe: &plx_model::FeModel) -> bool {
-    use plx_model::Region;
-    let picked = |region: &Region| matches!(region, Region::Nodes(_) | Region::Faces(_));
-    fe.sections.iter().any(|s| picked(&s.region))
-        || fe.steps.iter().any(|step| {
-            step.boundary_conditions.iter().any(|b| picked(&b.region))
-                || step.loads.iter().any(|l| picked(&l.region))
-        })
+/// How many regions of the FE model consist of node or element numbers that a new mesh no
+/// longer has. Regions picked on the geometry are found on the new mesh again.
+fn lost_selections(fe: &plx_model::FeModel, mesh: &plx_mesh::FeMesh) -> usize {
+    fe.regions()
+        .filter(|r| r.by_mesh_ids() && r.missing_reference(mesh).is_some())
+        .count()
 }
 
 /// File dialog filter of the CAD formats Gmsh imports.
@@ -1669,13 +1665,12 @@ impl Workbench {
                     mesh = plx_mesher::merge_part(&mesh, part.mesh);
                 }
                 model.set_mesh(mesh);
-                if had_mesh && picks_mesh_entities(&model.fe) {
-                    self.output.push(
-                        "Hinweis: Ausgewählte Knoten und Elementflächen eines neu vernetzten \
-                         Parts beziehen sich noch auf das alte Netz und müssen neu ausgewählt \
-                         werden"
-                            .into(),
-                    );
+                let lost = lost_selections(&model.fe, &model.mesh);
+                if had_mesh && lost > 0 {
+                    self.output.push(format!(
+                        "Hinweis: {lost} Auswahlen aus Knoten- oder Elementnummern beziehen \
+                         sich auf das alte Netz und müssen neu ausgewählt werden"
+                    ));
                 }
                 self.output.push(format!(
                     "Netz erzeugt: {} Knoten, {} Elemente, {} Parts ({} ms)",

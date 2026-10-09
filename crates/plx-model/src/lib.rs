@@ -27,7 +27,7 @@ pub use library::MaterialLibrary;
 pub use properties::{
     BASE_QUANTITIES, DERIVED_QUANTITIES, ModelProperties, ModelSpace, UnitSystem,
 };
-pub use region::Region;
+pub use region::{Region, describe_entities};
 pub use validity::{Invalid, ModelItem};
 
 use serde::{Deserialize, Serialize};
@@ -83,6 +83,19 @@ impl FeModel {
                 *current = solver;
             }
         }
+    }
+
+    /// Every region of the model: of sections, constraints, contact pairs, boundary
+    /// conditions, loads and hot spots.
+    pub fn regions(&self) -> impl Iterator<Item = &Region> {
+        (self.sections.iter().map(|s| &s.region))
+            .chain(self.constraints.iter().flat_map(Constraint::regions))
+            .chain((self.contact_pairs.iter()).flat_map(|c| [&c.master, &c.slave]))
+            .chain(self.steps.iter().flat_map(|step| {
+                (step.boundary_conditions.iter().map(|b| &b.region))
+                    .chain(step.loads.iter().map(|l| &l.region))
+            }))
+            .chain(self.hot_spots.iter().map(|h| &h.toe))
     }
 
     /// Follows a renamed part: regions on the part, or on the element set an input file

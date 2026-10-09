@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use plx_mesh::{ElementId, FeMesh, NodeId, SurfaceDefinition};
+use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use serde::{Deserialize, Serialize};
 
 /// Where a section, boundary condition or load applies.
@@ -21,6 +21,9 @@ pub enum Region {
     ElementSet(String),
     /// A surface of the input file.
     Surface(String),
+    /// Faces, edges and vertices of the CAD geometry the mesh was generated from, picked
+    /// as in PrePoMax. They are found on the mesh again after remeshing.
+    Geometry(Vec<CadEntity>),
 }
 
 impl Region {
@@ -37,6 +40,9 @@ impl Region {
                 ids.extend(mesh.element_sets.get(name).into_iter().flatten().copied());
             }
             Region::Faces(faces) => ids.extend(faces.iter().map(|(e, _)| *e)),
+            Region::Geometry(entities) => {
+                ids.extend(mesh.cad_faces(entities).iter().map(|(e, _)| *e));
+            }
             Region::Nodes(_) | Region::NodeSet(_) | Region::Surface(_) => {}
         }
         ids.into_iter().collect()
@@ -59,6 +65,7 @@ impl Region {
                 ids.extend(mesh.node_sets.get(name).into_iter().flatten().copied());
             }
             Region::Faces(faces) => ids.extend(face_nodes(mesh, faces)),
+            Region::Geometry(entities) => ids.extend(mesh.cad_nodes(entities)),
             Region::Surface(name) => match mesh.surfaces.get(name) {
                 Some(SurfaceDefinition::Nodes(nodes)) => ids.extend(nodes.iter().copied()),
                 Some(SurfaceDefinition::ElementFaces(faces)) => {
@@ -74,6 +81,7 @@ impl Region {
     pub fn faces(&self, mesh: &FeMesh) -> Vec<(ElementId, u8)> {
         match self {
             Region::Faces(faces) => faces.clone(),
+            Region::Geometry(entities) => mesh.cad_faces(entities),
             Region::Surface(name) => match mesh.surfaces.get(name) {
                 Some(SurfaceDefinition::ElementFaces(faces)) => faces.clone(),
                 _ => Vec::new(),
@@ -91,7 +99,44 @@ impl Region {
             Region::NodeSet(name) | Region::ElementSet(name) | Region::Surface(name) => {
                 name.clone()
             }
+            Region::Geometry(entities) => describe_entities(entities),
         }
+    }
+
+    /// Whether the region refers to node or element numbers, which remeshing invalidates.
+    pub fn by_mesh_ids(&self) -> bool {
+        matches!(self, Region::Nodes(_) | Region::Faces(_))
+    }
+}
+
+/// E.g. "2 Flächen, 1 Kante".
+pub fn describe_entities(entities: &[CadEntity]) -> String {
+    let count = |f: fn(&CadEntity) -> bool| entities.iter().filter(|e| f(e)).count();
+    let parts = [
+        (
+            count(|e| matches!(e, CadEntity::Face(_))),
+            "Fläche",
+            "Flächen",
+        ),
+        (
+            count(|e| matches!(e, CadEntity::Edge(_))),
+            "Kante",
+            "Kanten",
+        ),
+        (
+            count(|e| matches!(e, CadEntity::Vertex(_))),
+            "Punkt",
+            "Punkte",
+        ),
+    ];
+    let text: Vec<String> = (parts.iter())
+        .filter(|(n, ..)| *n > 0)
+        .map(|&(n, one, many)| format!("{n} {}", if n == 1 { one } else { many }))
+        .collect();
+    if text.is_empty() {
+        "keine Geometrie".into()
+    } else {
+        text.join(", ")
     }
 }
 
