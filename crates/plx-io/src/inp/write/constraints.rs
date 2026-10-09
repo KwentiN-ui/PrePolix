@@ -61,7 +61,7 @@ pub(super) fn springs(sets: &mut Sets, model: &FeModel) -> Result<Generated, Wri
             Constraint::SurfaceToSurfaceSpring(spring) => {
                 writer.surface_to_surface(sets, spring)?
             }
-            Constraint::Tie(_) => {}
+            Constraint::Tie(_) | Constraint::NodeTie(_) => {}
         }
     }
     let mut out = writer.out;

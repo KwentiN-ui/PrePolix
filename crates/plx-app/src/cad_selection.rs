@@ -69,6 +69,19 @@ impl CadIndex {
         }
     }
 
+    /// The vertex at an end of a CAD edge within `precision` of `point`, the nearest if both.
+    fn nearest_vertex(&self, model: &Model, edge: i32, point: Vec3, precision: f32) -> Option<i32> {
+        (self.edge_vertices.get(&edge)?.iter())
+            .filter_map(|&v| {
+                let node = *model.mesh.cad.nodes.get(&CadEntity::Vertex(v))?.first()?;
+                let position = model.render_position(model.mesh.node_index(node)?);
+                Some((v, position.distance(point)))
+            })
+            .filter(|&(_, d)| d <= precision)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(v, _)| v)
+    }
+
     /// The CAD face an element face of the skin lies on.
     fn face(&self, mesh: &FeMesh, (element, face): (ElementId, u8)) -> Option<i32> {
         if let Some(&tag) = self.face_of.get(&(element, face)) {
@@ -86,13 +99,20 @@ impl CadIndex {
 /// edge near the click for regions of nodes, else the face under it; for the edges of 2D
 /// models the nearest edge of the face. `None` where the mesh has no CAD entities.
 pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<CadEntity> {
+    let index = model.cad_index();
     if hit.line {
-        // A line part is the mesh of a free CAD edge: the hit names one of its elements.
+        // A line part is the mesh of a free CAD edge: the hit names one of its elements. A
+        // click near an end of the edge picks the vertex there, as on a solid's edge.
         let element = *model.skin(hit.part).line_elements.get(hit.face)?;
         let entity = model.cad_entity(model.mesh.elements()[element].id)?;
+        if target == Target::Nodes
+            && let CadEntity::Edge(edge) = entity
+            && let Some(vertex) = index.nearest_vertex(model, edge, hit.point, precision)
+        {
+            return Some(CadEntity::Vertex(vertex));
+        }
         return (target != Target::Faces).then_some(entity);
     }
-    let index = model.cad_index();
     let skin_face = model.skin(hit.part).faces.get(hit.face)?;
     let element = model.mesh.elements()[skin_face.element].id;
     let face = index.face(&model.mesh, (element, skin_face.face as u8 + 1))?;

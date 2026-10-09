@@ -781,6 +781,11 @@ impl FeModel {
                         join(&mut contacts, &a, &b);
                     }
                 }
+                Constraint::NodeTie(c) => {
+                    let tied = pieces(&c.region);
+                    join(&mut ties, &tied, &[]);
+                    join(&mut contacts, &tied, &[]);
+                }
             }
         }
         for pair in self.contact_pairs.iter().filter(|c| c.active) {

@@ -206,6 +206,7 @@ impl Constraint {
                 c.option(&mut s.tensile_force, Quantity::Force);
             }
             Constraint::Tie(t) => c.option(&mut t.position_tolerance, Quantity::Length),
+            Constraint::NodeTie(_) => {}
         }
     }
 }
