@@ -11,6 +11,19 @@ pub use region::Region;
 
 use serde::{Deserialize, Serialize};
 
+/// Version of the project file format written by this build.
+pub const PROJECT_FORMAT: u32 = 1;
+
+/// A prepolix project as saved in a `.plx` file: the mesh and the analysis set up on it.
+/// Like PrePoMax's `.pmx` it stores what the user defined, not the CalculiX input file.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Project {
+    pub format: u32,
+    pub mesh: plx_mesh::FeMesh,
+    #[serde(default)]
+    pub model: FeModel,
+}
+
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FeModel {
@@ -136,6 +149,9 @@ pub enum LoadKind {
     ConcentratedForce([f64; 3]),
     /// Pressure on a surface region; positive pushes into the material.
     Pressure(f64),
+    /// Total force on a surface region, spread over its nodes by area when the input file is
+    /// written (PrePoMax's surface traction).
+    SurfaceTraction([f64; 3]),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

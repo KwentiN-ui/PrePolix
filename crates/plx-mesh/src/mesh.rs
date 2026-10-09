@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
+use serde::{Deserialize, Serialize};
+
 use crate::element::ElementShape;
 
 pub type NodeId = u32;
@@ -14,7 +16,7 @@ pub struct Element {
     pub nodes: Vec<NodeId>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SurfaceDefinition {
     /// Element faces as (element, 1-based face number S1…S6).
     ElementFaces(Vec<(ElementId, u8)>),
@@ -22,7 +24,7 @@ pub enum SurfaceDefinition {
 }
 
 /// A named group of elements shown and hidden together, like a part in PrePoMax.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Part {
     pub name: String,
     pub elements: Vec<ElementId>,
@@ -44,7 +46,8 @@ pub enum MeshError {
 /// Finite element mesh with nodes, elements, sets and parts.
 ///
 /// Set, surface and part names are stored upper case, because CalculiX treats them case-insensitively.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(try_from = "MeshFile", into = "MeshFile")]
 pub struct FeMesh {
     node_ids: Vec<NodeId>,
     coords: Vec<[f64; 3]>,
@@ -152,9 +155,96 @@ impl FeMesh {
     }
 }
 
+/// How a mesh is stored in project files: nodes and elements without lookup tables; element
+/// shapes follow from the type names.
+#[derive(Serialize, Deserialize)]
+struct MeshFile {
+    node_ids: Vec<NodeId>,
+    coords: Vec<[f64; 3]>,
+    elements: Vec<(ElementId, String, Vec<NodeId>)>,
+    #[serde(default)]
+    node_sets: BTreeMap<String, Vec<NodeId>>,
+    #[serde(default)]
+    element_sets: BTreeMap<String, Vec<ElementId>>,
+    #[serde(default)]
+    surfaces: BTreeMap<String, SurfaceDefinition>,
+    #[serde(default)]
+    parts: Vec<Part>,
+}
+
+impl From<FeMesh> for MeshFile {
+    fn from(mesh: FeMesh) -> Self {
+        Self {
+            node_ids: mesh.node_ids,
+            coords: mesh.coords,
+            elements: (mesh.elements.into_iter())
+                .map(|e| (e.id, e.type_name, e.nodes))
+                .collect(),
+            node_sets: mesh.node_sets,
+            element_sets: mesh.element_sets,
+            surfaces: mesh.surfaces,
+            parts: mesh.parts,
+        }
+    }
+}
+
+impl TryFrom<MeshFile> for FeMesh {
+    type Error = String;
+
+    fn try_from(file: MeshFile) -> Result<Self, String> {
+        if file.node_ids.len() != file.coords.len() {
+            return Err("Knotennummern und Koordinaten passen nicht zusammen".into());
+        }
+        let mut mesh = FeMesh::default();
+        for (id, coords) in file.node_ids.into_iter().zip(file.coords) {
+            mesh.set_node(id, coords);
+        }
+        for (id, type_name, nodes) in file.elements {
+            let shape = ElementShape::from_type_name(&type_name)
+                .ok_or_else(|| format!("Element {id}: unbekannter Typ {type_name}"))?;
+            mesh.add_element(Element {
+                id,
+                type_name,
+                shape,
+                nodes,
+            })
+            .map_err(|e| e.to_string())?;
+        }
+        mesh.node_sets = file.node_sets;
+        mesh.element_sets = file.element_sets;
+        mesh.surfaces = file.surfaces;
+        mesh.parts = file.parts;
+        Ok(mesh)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meshes_survive_serialization() {
+        let mut mesh = FeMesh::default();
+        for (id, x) in [(1, 0.0), (2, 1.0), (3, 0.5), (4, 0.25)] {
+            mesh.set_node(id, [x, x * 2.0, 0.1]);
+        }
+        mesh.add_element(tet(7, vec![1, 2, 3, 4])).unwrap();
+        mesh.parts.push(Part {
+            name: "SOLID".into(),
+            elements: vec![7],
+        });
+        mesh.surfaces
+            .insert("TOP".into(), SurfaceDefinition::ElementFaces(vec![(7, 2)]));
+        let text = ron::to_string(&mesh).unwrap();
+        let read: FeMesh = ron::from_str(&text).unwrap();
+        assert_eq!(read.node_ids(), mesh.node_ids());
+        assert_eq!(read.coords(), mesh.coords());
+        assert_eq!(read.elements(), mesh.elements());
+        assert_eq!(read.element_index(7), Some(0));
+        assert_eq!((read.parts, read.surfaces), (mesh.parts, mesh.surfaces));
+        let broken = text.replace("C3D4", "XYZ");
+        assert!(ron::from_str::<FeMesh>(&broken).is_err());
+    }
 
     fn tet(id: ElementId, nodes: Vec<NodeId>) -> Element {
         Element {

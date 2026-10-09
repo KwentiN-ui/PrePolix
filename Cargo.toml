@@ -26,6 +26,7 @@ env_logger = "0.11"
 glam = { version = "0.34", features = ["bytemuck"] }
 log = "0.4"
 rfd = "0.17"
+ron = "0.12"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 

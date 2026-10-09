@@ -325,6 +325,24 @@ const FIXED: &str = "Fixed";
 const DISPLACEMENT: &str = "Displacement_Rotation";
 const FORCE: &str = "Concentrated_Force";
 const PRESSURE: &str = "Pressure";
+const TRACTION: &str = "Surface_Traction";
+
+/// The load kinds of the dialog: label, default name and the kind with zero values.
+fn load_kinds() -> [(&'static str, &'static str, LoadKind); 3] {
+    [
+        ("Einzelkraft", FORCE, LoadKind::ConcentratedForce([0.0; 3])),
+        ("Druck", PRESSURE, LoadKind::Pressure(0.0)),
+        ("Flächenlast", TRACTION, LoadKind::SurfaceTraction([0.0; 3])),
+    ]
+}
+
+fn load_kind_name(kind: &LoadKind) -> &'static str {
+    match kind {
+        LoadKind::ConcentratedForce(_) => FORCE,
+        LoadKind::Pressure(_) => PRESSURE,
+        LoadKind::SurfaceTraction(_) => TRACTION,
+    }
+}
 
 impl Editor {
     pub fn create(kind: NewItem, fe: &FeModel) -> Option<Self> {
@@ -414,7 +432,7 @@ impl Editor {
                     LoadKind::ConcentratedForce(_) => {
                         RegionDraft::from_region(&load.region, NODE_SOURCES, ALL_MODES)
                     }
-                    LoadKind::Pressure(_) => {
+                    LoadKind::Pressure(_) | LoadKind::SurfaceTraction(_) => {
                         RegionDraft::from_region(&load.region, FACE_SOURCES, FACE_MODES)
                     }
                 };
@@ -570,17 +588,20 @@ impl Editor {
                 name_row(ui, &mut load.name);
                 ui.label("Art");
                 ui.horizontal(|ui| {
-                    let force = matches!(load.kind, LoadKind::ConcentratedForce(_));
-                    if ui.radio(force, "Einzelkraft").clicked() && !force {
-                        load.kind = LoadKind::ConcentratedForce([0.0; 3]);
-                        rename_default(&mut load.name, PRESSURE, FORCE);
-                        *region = RegionDraft::new(NODE_SOURCES, ALL_MODES);
-                        region.mode = PickMode::Node;
-                    }
-                    if ui.radio(!force, "Druck").clicked() && force {
-                        load.kind = LoadKind::Pressure(0.0);
-                        rename_default(&mut load.name, FORCE, PRESSURE);
-                        *region = RegionDraft::new(FACE_SOURCES, FACE_MODES);
+                    let current = load_kind_name(&load.kind);
+                    for (label, name, kind) in load_kinds() {
+                        if ui.radio(current == name, label).clicked() && current != name {
+                            let was_on_nodes = matches!(load.kind, LoadKind::ConcentratedForce(_));
+                            let on_nodes = matches!(kind, LoadKind::ConcentratedForce(_));
+                            load.kind = kind;
+                            rename_default(&mut load.name, current, name);
+                            if on_nodes {
+                                *region = RegionDraft::new(NODE_SOURCES, ALL_MODES);
+                                region.mode = PickMode::Node;
+                            } else if was_on_nodes {
+                                *region = RegionDraft::new(FACE_SOURCES, FACE_MODES);
+                            }
+                        }
                     }
                 });
                 ui.end_row();
@@ -598,6 +619,18 @@ impl Editor {
                     LoadKind::Pressure(pressure) => {
                         ui.label("Druck");
                         ui.add(egui::DragValue::new(pressure).speed(0.1));
+                        ui.end_row();
+                    }
+                    LoadKind::SurfaceTraction(force) => {
+                        for (value, label) in force.iter_mut().zip(["F1", "F2", "F3"]) {
+                            ui.label(label);
+                            ui.add(egui::DragValue::new(value).speed(1.0));
+                            ui.end_row();
+                        }
+                        ui.label("");
+                        ui.weak(
+                            "Gesamtkraft, beim Export flächengewichtet auf die Knoten verteilt.",
+                        );
                         ui.end_row();
                     }
                 }

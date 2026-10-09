@@ -19,6 +19,9 @@ const FEATURE_ANGLE_DEG: f64 = 30.0;
 /// angle between neighbouring faces; shading still blends across such folds.
 const SMOOTH_ANGLE_DEG: f64 = 60.0;
 
+/// Extension of prepolix project files.
+pub const PROJECT_EXTENSION: &str = "plx";
+
 /// Colour of selected faces and nodes, PrePoMax's highlight red.
 pub const HIGHLIGHT_COLOR: [f32; 3] = [1.0, 0.0, 0.0];
 
@@ -86,35 +89,39 @@ pub struct LoadedModel {
 
 pub fn load(path: &Path) -> Result<LoadedModel, String> {
     let start = Instant::now();
-    let is_frd = path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("frd"));
-    let (mesh, warnings, skipped_keywords, included_files, increments) = if is_frd {
-        let FrdImport {
-            mesh,
-            increments,
-            warnings,
-            date,
-            time,
-            ..
-        } = read_frd(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        (
-            mesh,
-            warnings,
-            BTreeMap::new(),
-            0,
-            Some((increments, date, time)),
-        )
-    } else {
-        let InpImport {
-            mesh,
-            warnings,
-            skipped_keywords,
-            files,
-        } = read_inp(path).map_err(|e| e.to_string())?;
-        let included = files.len().saturating_sub(1);
-        (mesh, warnings, skipped_keywords, included, None)
-    };
+    let extension = |e: &str| path.extension().is_some_and(|x| x.eq_ignore_ascii_case(e));
+    let mut fe = FeModel::default();
+    let (mesh, warnings, skipped_keywords, included_files, increments) =
+        if extension(PROJECT_EXTENSION) {
+            let project = plx_io::project::read_project(path).map_err(|e| e.to_string())?;
+            fe = project.model;
+            (project.mesh, Vec::new(), BTreeMap::new(), 0, None)
+        } else if extension("frd") {
+            let FrdImport {
+                mesh,
+                increments,
+                warnings,
+                date,
+                time,
+                ..
+            } = read_frd(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            (
+                mesh,
+                warnings,
+                BTreeMap::new(),
+                0,
+                Some((increments, date, time)),
+            )
+        } else {
+            let InpImport {
+                mesh,
+                warnings,
+                skipped_keywords,
+                files,
+            } = read_inp(path).map_err(|e| e.to_string())?;
+            let included = files.len().saturating_sub(1);
+            (mesh, warnings, skipped_keywords, included, None)
+        };
     if mesh.element_count() == 0 {
         return Err(format!(
             "{} enthält keine darstellbaren Elemente",
@@ -162,7 +169,7 @@ pub fn load(path: &Path) -> Result<LoadedModel, String> {
         results_only: results.is_some(),
         show_results: true,
         results,
-        fe: FeModel::default(),
+        fe,
         highlight: Highlight::default(),
         origin,
         skins,
@@ -390,6 +397,14 @@ impl Model {
         (-self.origin).as_vec3()
     }
 
+    /// Whether the model was opened from or saved to a project file, so saving needs no
+    /// file dialog.
+    pub fn is_project(&self) -> bool {
+        self.path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case(PROJECT_EXTENSION))
+    }
+
     pub fn file_name(&self) -> String {
         self.path.file_name().map_or_else(
             || self.path.display().to_string(),
@@ -445,6 +460,23 @@ mod tests {
         assert_eq!(loaded.render_meshes.len(), 2);
         let (min, max) = model.visible_bounds().unwrap();
         assert_eq!(max - min, Vec3::new(20.0, 20.0, 15.0));
+    }
+
+    #[test]
+    fn projects_open_with_their_fe_model() {
+        let mut model = load(&testdata("platte_mit_stuetzen.inp")).unwrap().model;
+        assert!(!model.is_project());
+        model.fe.steps.push(plx_model::Step::new_static("Step-1"));
+        let dir = std::env::temp_dir().join(format!("prepolix-model-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("platte.plx");
+        plx_io::project::save_project(&path, &model.mesh, &model.fe).unwrap();
+        let loaded = load(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(loaded.model.is_project());
+        assert!(!loaded.model.results_only);
+        assert_eq!(loaded.model.fe, model.fe);
+        assert_eq!(loaded.model.parts.len(), 2);
     }
 
     #[test]

@@ -114,9 +114,10 @@ impl PrepolixApp {
             let picked = rfd::FileDialog::new()
                 .set_title("Modell öffnen")
                 .add_filter(
-                    "CalculiX-Modell oder -Ergebnisse (*.inp, *.frd)",
-                    &["inp", "INP", "frd", "FRD"],
+                    "Projekt, CalculiX-Modell oder -Ergebnisse (*.plx, *.inp, *.frd)",
+                    &["plx", "PLX", "inp", "INP", "frd", "FRD"],
                 )
+                .add_filter("prepolix-Projekt (*.plx)", &["plx", "PLX"])
                 .add_filter("Eingabedatei (*.inp)", &["inp", "INP"])
                 .add_filter("Ergebnisdatei (*.frd)", &["frd", "FRD"])
                 .pick_file();
@@ -180,6 +181,16 @@ impl PrepolixApp {
                     self.open_dialog(ui.ctx());
                 }
                 let setup = self.workbench.setup_model().is_some();
+                let save = egui::Button::new("Speichern").shortcut_text("Strg+S");
+                if ui.add_enabled(setup, save).clicked() {
+                    self.workbench.save_project(false);
+                }
+                let save_as =
+                    egui::Button::new("Speichern unter …").shortcut_text("Strg+Umschalt+S");
+                if ui.add_enabled(setup, save_as).clicked() {
+                    self.workbench.save_project(true);
+                }
+                ui.separator();
                 let export = egui::Button::new("CalculiX-Eingabedatei exportieren …");
                 if ui.add_enabled(setup, export).clicked() {
                     self.workbench.export_inp();
@@ -233,13 +244,10 @@ impl PrepolixApp {
             if icons::button(ui, Icon::Open, "Öffnen (Strg+O)", can_open, false).clicked() {
                 self.open_dialog(ui.ctx());
             }
-            icons::button(
-                ui,
-                Icon::Save,
-                "Speichern (noch nicht implementiert)",
-                false,
-                false,
-            );
+            let can_save = self.workbench.setup_model().is_some();
+            if icons::button(ui, Icon::Save, "Speichern (Strg+S)", can_save, false).clicked() {
+                self.workbench.save_project(false);
+            }
             ui.separator();
             if icons::button(ui, Icon::Fit, "Einpassen", true, false).clicked() {
                 self.workbench.view_command = Some(ViewCommand::Fit);
@@ -315,6 +323,13 @@ impl eframe::App for PrepolixApp {
         let ctx = ui.ctx().clone();
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.open_dialog(&ctx);
+        }
+        let shift_command = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+        if ctx.input_mut(|i| i.consume_key(shift_command, egui::Key::S)) {
+            self.workbench.save_project(true);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
+            self.workbench.save_project(false);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
             self.workbench.close_model();
@@ -533,7 +548,7 @@ impl Workbench {
 
     fn model_tree(&mut self, ui: &mut egui::Ui, view: TreeView) {
         if self.model.is_none() && view != TreeView::Geometry {
-            ui.weak("Kein Modell geladen.\nDatei > Öffnen (Strg+O) oder eine .inp- oder .frd-Datei ins Fenster ziehen.");
+            ui.weak("Kein Modell geladen.\nDatei > Öffnen (Strg+O) oder eine .plx-, .inp- oder .frd-Datei ins Fenster ziehen.");
             ui.separator();
         }
         let response = tree::show(ui, view, self.model.as_mut(), &mut self.tree);
@@ -733,6 +748,43 @@ impl Workbench {
                 model.show_results = show;
                 self.results_changed = true;
             }
+        }
+    }
+
+    /// Saves mesh and FE model as a project, to the project file it came from, or to a file
+    /// the user picks for a model opened from an input file or with `save_as`.
+    fn save_project(&mut self, save_as: bool) {
+        let Some(model) = self.model.as_mut().filter(|m| !m.results_only) else {
+            return;
+        };
+        let path = if model.is_project() && !save_as {
+            model.path.clone()
+        } else {
+            let stem = model
+                .path
+                .file_stem()
+                .map_or_else(|| "Projekt".into(), |s| s.to_string_lossy().into_owned());
+            let mut dialog = rfd::FileDialog::new()
+                .set_title("Projekt speichern")
+                .add_filter("prepolix-Projekt (*.plx)", &[model::PROJECT_EXTENSION])
+                .set_file_name(format!("{stem}.{}", model::PROJECT_EXTENSION));
+            if let Some(dir) = model.path.parent() {
+                dialog = dialog.set_directory(dir);
+            }
+            let Some(mut path) = dialog.save_file() else {
+                return;
+            };
+            if path.extension().is_none() {
+                path.set_extension(model::PROJECT_EXTENSION);
+            }
+            path
+        };
+        match plx_io::project::save_project(&path, &model.mesh, &model.fe) {
+            Ok(()) => {
+                self.output.push(format!("{} gespeichert", path.display()));
+                model.path = path;
+            }
+            Err(error) => self.output.push(format!("Nicht gespeichert: {error}")),
         }
     }
 
