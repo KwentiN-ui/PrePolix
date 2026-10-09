@@ -11,10 +11,11 @@ use std::fmt::Write as _;
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
-    BoundaryKind, Constraint, ContactMethod, ContactPair, FeModel, FieldOutput, FrequencyStep,
-    GapConductance, HeatTransferStep, Incrementation, InitialConditionKind, InteractionProperty,
-    LoadKind, ModelSpace, OutputKind, Region, Section, SectionKind, StaticStep, Step, StepKind,
-    SurfaceBehavior, SurfaceInteraction, UserKeyword, line_tangent,
+    Amplitude, AmplitudeTime, BoundaryKind, Constraint, ContactMethod, ContactPair, FeModel,
+    FieldOutput, FrequencyStep, GapConductance, HeatTransferStep, Incrementation,
+    InitialConditionKind, InteractionProperty, LoadKind, ModelSpace, OutputKind, Region, Section,
+    SectionKind, StaticStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, UserKeyword,
+    line_tangent,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -25,6 +26,10 @@ pub enum WriteError {
     UnknownMaterial { item: String, material: String },
     #[error("{item}: Surface Interaction {interaction} existiert nicht")]
     UnknownInteraction { item: String, interaction: String },
+    #[error("{item}: Amplitude {amplitude} existiert nicht")]
+    UnknownAmplitude { item: String, amplitude: String },
+    #[error("{item}: {reason}")]
+    InvalidAmplitude { item: String, reason: String },
     #[error("{item}: Surface {surface} existiert nicht")]
     UnknownSurface { item: String, surface: String },
     /// A section that does not fit its elements, see [`Section::kind_problem`].
@@ -244,6 +249,7 @@ pub fn model_keywords(
     let interactions = model.surface_interactions.iter().map(interaction).collect();
     let contact_pairs = contact_pairs(&mut sets, model)?;
     let initial_conditions = initial_conditions(&mut sets, model)?;
+    let amplitudes = amplitudes(model)?;
     let flux_kinds = FluxKinds::of(model);
     let steps = model
         .steps
@@ -256,6 +262,7 @@ pub fn model_keywords(
                 space,
                 &lines,
                 flux_kinds,
+                &model.amplitudes,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -318,7 +325,7 @@ pub fn model_keywords(
         Keyword::title("Constraints", constraints),
         Keyword::title("Surface interactions", interactions),
         Keyword::title("Contact pairs", contact_pairs),
-        empty("Amplitudes"),
+        Keyword::title("Amplitudes", amplitudes),
         Keyword::title("Initial conditions", initial_conditions),
         Keyword::title("Steps", steps),
     ])
@@ -720,6 +727,60 @@ fn physical_constants(model: &FeModel) -> Vec<Keyword> {
     vec![Keyword::generated(out)]
 }
 
+/// `*Amplitude` as PrePoMax's `CalAmplitude` writes it: four points per line, the most
+/// CalculiX reads on one.
+fn amplitudes(model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+    let mut keywords = Vec::new();
+    for amplitude in &model.amplitudes {
+        if let Some(reason) = amplitude.points_problem() {
+            return Err(WriteError::InvalidAmplitude {
+                item: amplitude.name.clone(),
+                reason,
+            });
+        }
+        let mut out = format!("*Amplitude, Name={}", name(&amplitude.name));
+        if amplitude.time_span == AmplitudeTime::Total {
+            out.push_str(", Time=Total time");
+        }
+        if amplitude.shift_time != 0.0 {
+            let _ = write!(out, ", Shiftx={}", number(amplitude.shift_time));
+        }
+        if amplitude.shift_amplitude != 0.0 {
+            let _ = write!(out, ", Shifty={}", number(amplitude.shift_amplitude));
+        }
+        out.push('\n');
+        for line in amplitude.points.chunks(4) {
+            let pairs: Vec<String> = line
+                .iter()
+                .map(|[t, a]| format!("{}, {}", number(*t), number(*a)))
+                .collect();
+            let _ = writeln!(out, "{}", pairs.join(", "));
+        }
+        keywords.push(Keyword::generated(out));
+    }
+    Ok(keywords)
+}
+
+/// The amplitude parameter of a boundary condition or load, such as `, Amplitude=Ramp`;
+/// empty without one. `parameter` is the name CalculiX gives it on the keyword.
+fn amplitude_parameter(
+    amplitudes: &[Amplitude],
+    item: &str,
+    parameter: &str,
+    reference: &Option<String>,
+) -> Result<String, WriteError> {
+    let Some(reference) = reference else {
+        return Ok(String::new());
+    };
+    if !amplitudes.iter().any(|a| &a.name == reference) {
+        return Err(WriteError::UnknownAmplitude {
+            item: item.to_owned(),
+            amplitude: reference.clone(),
+        });
+    }
+    Ok(format!(", {parameter}={}", name(reference)))
+}
+
 /// Initial temperatures as PrePoMax's `CalInitialTemperature` writes them.
 fn initial_conditions(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
     let mut keywords = Vec::new();
@@ -1001,6 +1062,7 @@ fn write_step(
     space: ModelSpace,
     lines: &LineElements,
     flux_kinds: FluxKinds,
+    amplitudes: &[Amplitude],
 ) -> Result<Keyword, WriteError> {
     // Nodes of 2D models move in the x-y plane only; CalculiX fails on rotations there.
     let dofs = if space.is_2d() { 2 } else { 6 };
@@ -1030,7 +1092,11 @@ fn write_step(
             dofs
         };
         let set = sets.node_set(&bc.name, &bc.region)?;
-        let mut out = format!("** Name: {}\n*Boundary\n", bc.name);
+        // Fixed supports stay zero; an amplitude would not change them.
+        let reference = bc.amplitude.as_ref().filter(|_| bc.kind.takes_amplitude());
+        let amplitude =
+            amplitude_parameter(amplitudes, &bc.name, "Amplitude", &reference.cloned())?;
+        let mut out = format!("** Name: {}\n*Boundary{amplitude}\n", bc.name);
         match bc.kind {
             BoundaryKind::Fixed => {
                 let _ = writeln!(out, "{set}, 1, {dofs}, 0");
@@ -1082,10 +1148,23 @@ fn write_step(
             continue;
         }
         let mut out = format!("** Name: {}\n", load.name);
+        let amplitude = amplitude_parameter(amplitudes, &load.name, "Amplitude", &load.amplitude)?;
+        // The second amplitude of a film scales its coefficient, of radiation the emissivity.
+        let factor = match load.kind {
+            LoadKind::Film { .. } => Some("Film amplitude"),
+            LoadKind::Radiation { .. } => Some("Radiation amplitude"),
+            _ => None,
+        };
+        let factor_amplitude = match factor {
+            Some(parameter) => {
+                amplitude_parameter(amplitudes, &load.name, parameter, &load.factor_amplitude)?
+            }
+            None => String::new(),
+        };
         match load.kind {
             LoadKind::ConcentratedForce(force) => {
                 let set = sets.node_set(&load.name, &load.region)?;
-                out.push_str("*Cload\n");
+                let _ = writeln!(out, "*Cload{amplitude}");
                 for (dof, value) in (1..).zip(force).take(dofs) {
                     if value != 0.0 {
                         let _ = writeln!(out, "{set}, {dof}, {}", number(value));
@@ -1093,7 +1172,7 @@ fn write_step(
                 }
             }
             LoadKind::Pressure(pressure) => {
-                out.push_str("*Dload\n");
+                let _ = writeln!(out, "*Dload{amplitude}");
                 for (set, face) in sets.face_sets(&load.name, &load.region)? {
                     let _ = writeln!(out, "{set}, P{face}, {}", number(pressure));
                 }
@@ -1105,7 +1184,7 @@ fn write_step(
                 if nodal.is_empty() {
                     return Err(empty(&load.name, "Elementflächen"));
                 }
-                out.push_str("*Cload\n");
+                let _ = writeln!(out, "*Cload{amplitude}");
                 for (node, values) in nodal {
                     for (dof, value) in (1..).zip(values).take(dofs) {
                         if value != 0.0 {
@@ -1116,27 +1195,27 @@ fn write_step(
             }
             LoadKind::ConcentratedFlux(flux) => {
                 let set = sets.node_set(&load.name, &load.region)?;
-                let _ = writeln!(out, "*Cflux\n{set}, 11, {}", number(flux));
+                let _ = writeln!(out, "*Cflux{amplitude}\n{set}, 11, {}", number(flux));
             }
             LoadKind::SurfaceFlux(flux) => {
-                out.push_str("*Dflux\n");
+                let _ = writeln!(out, "*Dflux{amplitude}");
                 for (set, face) in sets.face_sets(&load.name, &load.region)? {
                     let _ = writeln!(out, "{set}, S{face}, {}", number(flux));
                 }
             }
             LoadKind::BodyFlux(flux) => {
                 let set = sets.element_set(&load.name, &load.region)?;
-                let _ = writeln!(out, "*Dflux\n{set}, BF, {}", number(flux));
+                let _ = writeln!(out, "*Dflux{amplitude}\n{set}, BF, {}", number(flux));
             }
             LoadKind::Film { sink, coefficient } => {
-                out.push_str("*Film\n");
+                let _ = writeln!(out, "*Film{amplitude}{factor_amplitude}");
                 for (set, face) in sets.face_sets(&load.name, &load.region)? {
                     let (sink, h) = (number(sink), number(coefficient));
                     let _ = writeln!(out, "{set}, F{face}, {sink}, {h}");
                 }
             }
             LoadKind::Radiation { sink, emissivity } => {
-                out.push_str("*Radiate\n");
+                let _ = writeln!(out, "*Radiate{amplitude}{factor_amplitude}");
                 for (set, face) in sets.face_sets(&load.name, &load.region)? {
                     let (sink, e) = (number(sink), number(emissivity));
                     let _ = writeln!(out, "{set}, R{face}, {sink}, {e}");

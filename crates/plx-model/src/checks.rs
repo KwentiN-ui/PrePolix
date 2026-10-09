@@ -1247,12 +1247,15 @@ mod tests {
             active: true,
             region: Region::Nodes(vec![1, 4, 5, 8]),
             kind: BoundaryKind::Fixed,
+            amplitude: None,
         });
         step.loads.push(Load {
             name: "Force-1".into(),
             active: true,
             region: Region::Nodes(vec![7]),
             kind: LoadKind::ConcentratedForce([0.0, 0.0, -1.0]),
+            amplitude: None,
+            factor_amplitude: None,
         });
         FeModel {
             materials: vec![steel()],
@@ -1306,6 +1309,7 @@ mod tests {
             active: true,
             region: Region::Nodes(vec![1, 2]),
             kind: BoundaryKind::Fixed,
+            amplitude: None,
         });
         let detail = &check(&model, &mesh)[0].detail;
         assert!(detail.ends_with(": Drehung um X frei"), "{detail}");
@@ -1408,6 +1412,7 @@ mod tests {
             active: true,
             region: Region::Nodes(vec![1, 2]),
             kind: BoundaryKind::Displacement([Some(0.1), None, None, None, None, None]),
+            amplitude: None,
         });
         step.loads[0].region = Region::Nodes(vec![4]);
         let findings = check(&model, &mesh);
@@ -1550,12 +1555,15 @@ mod tests {
             active: true,
             region: Region::Nodes(vec![1]),
             kind: BoundaryKind::Temperature(20.0),
+            amplitude: None,
         });
         step.loads.push(Load {
             name: "Flux-1".into(),
             active: true,
             region: Region::Nodes(vec![7]),
             kind: LoadKind::ConcentratedFlux(10.0),
+            amplitude: None,
+            factor_amplitude: None,
         });
         model.steps = vec![step];
         // Displacements are free in a heat transfer, and no elasticity is needed.

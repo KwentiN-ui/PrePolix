@@ -30,6 +30,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
         active: true,
         region: Region::NodeSet("FIX".into()),
         kind: BoundaryKind::Fixed,
+        amplitude: None,
     });
     step.loads.push(load);
     let model = FeModel {
@@ -63,6 +64,8 @@ fn tip_force() -> Load {
         active: true,
         region: Region::Nodes(vec![99]),
         kind: LoadKind::ConcentratedForce([0.0, 0.0, -100.0]),
+        amplitude: None,
+        factor_amplitude: None,
     }
 }
 
@@ -129,6 +132,8 @@ fn picked_faces_become_one_element_set_per_face_number() {
         active: true,
         region: Region::Faces(vec![(10, 4), (20, 4), (1, 6)]),
         kind: LoadKind::Pressure(2.5),
+        amplitude: None,
+        factor_amplitude: None,
     };
     let (mesh, model) = cantilever(load);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -150,6 +155,8 @@ fn empty_regions_and_unknown_materials_are_errors() {
         active: true,
         region: Region::Nodes(Vec::new()),
         kind: LoadKind::ConcentratedForce([1.0, 0.0, 0.0]),
+        amplitude: None,
+        factor_amplitude: None,
     });
     assert_eq!(
         write_inp(&mesh, &model, ""),
@@ -216,6 +223,8 @@ fn calculix_pressure_on_a_surface_balances_the_reactions() {
         active: true,
         region: Region::Surface("TIP".into()),
         kind: LoadKind::Pressure(2.0),
+        amplitude: None,
+        factor_amplitude: None,
     };
     let (mesh, model) = cantilever(load);
     let Some(frd) = run_ccx("druck", &write_inp(&mesh, &model, "").unwrap()) else {
@@ -238,6 +247,8 @@ fn calculix_reads_quadratic_elements_over_two_lines() {
         active: true,
         region: Region::Nodes(vec![NODE]),
         kind: LoadKind::ConcentratedForce(FORCE),
+        amplitude: None,
+        factor_amplitude: None,
     };
     let (mesh, model) = analysis("block_c3d20r.inp", load);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -305,6 +316,8 @@ fn calculix_balances_a_surface_traction() {
         active: true,
         region: Region::Surface("TIP".into()),
         kind: LoadKind::SurfaceTraction([0.0, -80.0, 0.0]),
+        amplitude: None,
+        factor_amplitude: None,
     };
     let (mesh, model) = cantilever(load);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -512,6 +525,8 @@ fn deactivated_items_are_left_out_as_comments() {
         // Not even an empty region stops the export of a deactivated item.
         region: Region::Nodes(Vec::new()),
         kind: LoadKind::ConcentratedForce([1.0, 0.0, 0.0]),
+        amplitude: None,
+        factor_amplitude: None,
     });
     model.steps[0].loads[0].active = false;
     model.steps[0].boundary_conditions[0].active = false;
@@ -644,6 +659,7 @@ fn plane_model(
             active: true,
             region: Region::Nodes(nodes),
             kind: BoundaryKind::Displacement(values),
+            amplitude: None,
         });
     }
     step.loads.push(Load {
@@ -651,6 +667,8 @@ fn plane_model(
         active: true,
         region,
         kind: load,
+        amplitude: None,
+        factor_amplitude: None,
     });
     FeModel {
         properties: plx_model::ModelProperties {
@@ -902,12 +920,15 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
         active: true,
         region: Region::Nodes(bottom),
         kind: BoundaryKind::Fixed,
+        amplitude: None,
     });
     step.loads.push(Load {
         name: "Pressure-1".into(),
         active: true,
         region: Region::Faces((101..=104).map(|e| (e, 2)).collect()),
         kind: LoadKind::Pressure(10.0),
+        amplitude: None,
+        factor_amplitude: None,
     });
     model.materials.push(Material {
         name: "Steel".into(),
@@ -1053,6 +1074,7 @@ fn calculix_carries_the_load_across_a_contact() {
             active: true,
             region: Region::Nodes(top),
             kind: BoundaryKind::Displacement([Some(0.0), Some(0.0), None, None, None, None]),
+            amplitude: None,
         });
         model.surface_interactions.push(SurfaceInteraction {
             name: "Surface_Interaction-1".into(),
@@ -1226,12 +1248,15 @@ fn blocks_model(
         active: true,
         region: Region::Faces(blocks.a_bottom.clone()),
         kind: BoundaryKind::Fixed,
+        amplitude: None,
     });
     step.loads.push(Load {
         name: "Surface_Traction-1".into(),
         active: true,
         region: Region::Faces(blocks.b_top.clone()),
         kind: LoadKind::SurfaceTraction(force),
+        amplitude: None,
+        factor_amplitude: None,
     });
     FeModel {
         materials: vec![Material {
@@ -1415,12 +1440,15 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
         active: true,
         region: Region::Nodes(vec![1]),
         kind: BoundaryKind::Fixed,
+        amplitude: None,
     });
     step.loads.push(Load {
         name: "Force-1".into(),
         active: true,
         region: Region::Nodes(vec![tip]),
         kind: load,
+        amplitude: None,
+        factor_amplitude: None,
     });
     FeModel {
         materials: vec![Material {
@@ -1687,6 +1715,7 @@ fn calculix_stretches_a_truss_by_f_l_over_e_a() {
         active: true,
         region: Region::Nodes(nodes),
         kind: BoundaryKind::Displacement([None, Some(0.0), Some(0.0), None, None, None]),
+        amplitude: None,
     });
     let Some(frd) = run_ccx("stab_t3d2", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
@@ -1731,6 +1760,7 @@ fn temperature(name: &str, region: Region, value: f64) -> BoundaryCondition {
         active: true,
         region,
         kind: BoundaryKind::Temperature(value),
+        amplitude: None,
     }
 }
 
@@ -1740,6 +1770,8 @@ fn heat_load(name: &str, region: Region, kind: LoadKind) -> Load {
         active: true,
         region,
         kind,
+        amplitude: None,
+        factor_amplitude: None,
     }
 }
 
@@ -1781,6 +1813,7 @@ fn writes_heat_transfer_keywords() {
                 active: true,
                 region: Region::NodeSet("FIX".into()),
                 kind: BoundaryKind::Fixed,
+                amplitude: None,
             },
         ],
         vec![
@@ -2041,6 +2074,7 @@ fn calculix_expands_the_bar_in_a_coupled_step() {
         active: true,
         region: Region::Nodes(nodes),
         kind: BoundaryKind::Displacement(values),
+        amplitude: None,
     };
     let (origin, y, z) = (at([0.0; 3]), at([0.0, 5.0, 0.0]), at([0.0, 0.0, 5.0]));
     let (mesh, mut model) = thermal_bar(
@@ -2118,5 +2152,212 @@ fn calculix_cools_a_plane_strip_by_convection() {
         &temperatures_at(&mesh, &frd, length),
         expected,
         1e-6 * expected,
+    );
+}
+
+fn amplitude(name: &str, points: Vec<[f64; 2]>) -> plx_model::Amplitude {
+    plx_model::Amplitude {
+        points,
+        ..plx_model::Amplitude::new(name)
+    }
+}
+
+#[test]
+fn writes_amplitudes_and_their_references() {
+    let mut force = tip_force();
+    force.amplitude = Some("Ramp up".into());
+    let (mesh, mut model) = cantilever(force);
+    let mut ramp = amplitude(
+        "Ramp up",
+        vec![[0.0, 0.0], [0.2, 0.5], [0.4, 1.0], [0.6, 1.0], [1.0, 0.25]],
+    );
+    ramp.time_span = plx_model::AmplitudeTime::Total;
+    ramp.shift_time = 0.1;
+    ramp.shift_amplitude = -0.5;
+    model.amplitudes.push(ramp);
+    model.amplitudes.push(amplitude("Half", vec![[0.0, 0.5]]));
+    let step = &mut model.steps[0];
+    // Fixed supports stay zero; the amplitude is left out.
+    step.boundary_conditions[0].amplitude = Some("Half".into());
+    step.boundary_conditions.push(BoundaryCondition {
+        name: "Displacement-1".into(),
+        active: true,
+        region: Region::Nodes(vec![99]),
+        kind: BoundaryKind::Displacement([None, Some(0.5), None, None, None, None]),
+        amplitude: Some("Half".into()),
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for expected in [
+        "** Amplitudes ",
+        "*Amplitude, Name=Ramp_up, Time=Total time, Shiftx=0.1, Shifty=-0.5\n\
+         0, 0, 0.2, 0.5, 0.4, 1, 0.6, 1\n1, 0.25\n",
+        "*Amplitude, Name=Half\n0, 0.5\n",
+        "** Name: Fixed-1\n*Boundary\nFIX, 1, 6, 0\n",
+        "** Name: Displacement-1\n*Boundary, Amplitude=Half\n",
+        "*Cload, Amplitude=Ramp_up\nInternal_Selection-1_Force-1, 3, -100\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    // The amplitudes precede the steps, as CalculiX reads them before their references.
+    assert!(text.find("*Amplitude,").unwrap() < text.find("*Step").unwrap());
+
+    model.steps[0].loads[0].amplitude = Some("Gone".into());
+    assert_eq!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::UnknownAmplitude {
+            item: "Force-1".into(),
+            amplitude: "Gone".into(),
+        })
+    );
+    model.steps[0].loads[0].amplitude = None;
+    model.amplitudes[1].points.clear();
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::InvalidAmplitude { .. })
+    ));
+}
+
+#[test]
+fn writes_both_amplitudes_of_films_and_radiation() {
+    let mut film = heat_load(
+        "Film-1",
+        Region::Surface("TIP".into()),
+        LoadKind::Film {
+            sink: 25.0,
+            coefficient: 0.01,
+        },
+    );
+    film.amplitude = Some("Sink".into());
+    film.factor_amplitude = Some("Coefficient".into());
+    let mut radiation = heat_load(
+        "Radiation-1",
+        Region::Surface("TIP".into()),
+        LoadKind::Radiation {
+            sink: 25.0,
+            emissivity: 0.8,
+        },
+    );
+    radiation.factor_amplitude = Some("Coefficient".into());
+    let mut flux = heat_load(
+        "Flux-1",
+        Region::Nodes(vec![99]),
+        LoadKind::ConcentratedFlux(3.0),
+    );
+    flux.amplitude = Some("Sink".into());
+    let mut surface_flux = heat_load(
+        "Surface_Flux-1",
+        Region::Surface("TIP".into()),
+        LoadKind::SurfaceFlux(1.0),
+    );
+    surface_flux.amplitude = Some("Sink".into());
+    let mut temperature = temperature("Temperature-1", Region::NodeSet("FIX".into()), 20.0);
+    temperature.amplitude = Some("Sink".into());
+    let (mesh, mut model) = thermal_bar(
+        steady(),
+        vec![temperature],
+        vec![film, radiation, flux, surface_flux],
+    );
+    model.properties.absolute_zero = Some(-273.15);
+    model.properties.stefan_boltzmann = Some(5.67e-11);
+    model.amplitudes = vec![
+        amplitude("Sink", vec![[0.0, 1.0], [1.0, 2.0]]),
+        amplitude("Coefficient", vec![[0.0, 1.0]]),
+    ];
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for expected in [
+        "*Boundary, Amplitude=Sink\nFIX, 11, 11, 20\n",
+        "*Film, Amplitude=Sink, Film amplitude=Coefficient\n",
+        "*Radiate, Radiation amplitude=Coefficient\n",
+        "*Cflux, Amplitude=Sink\n",
+        "*Dflux, Amplitude=Sink\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    // CalculiX takes every one of them.
+    run_ccx("amplitudes_thermal", &text);
+}
+
+/// A force that follows an amplitude up to its full value at half the step and back to half
+/// of it at the end: the cantilever bends as far as with the full force at first, then half.
+/// The deflection is small, so the geometrically nonlinear steps stay within a percent of
+/// the linear solution.
+#[test]
+fn calculix_scales_a_load_by_its_amplitude() {
+    let (mesh, reference) = cantilever(tip_force());
+    let Some(full) = run_ccx(
+        "amplitude_reference",
+        &write_inp(&mesh, &reference, "").unwrap(),
+    ) else {
+        return;
+    };
+    let full = node_value(&full, "DISP", "U3", 99);
+    let mut model = reference.clone();
+    model.amplitudes.push(amplitude(
+        "Up_and_down",
+        vec![[0.0, 0.0], [0.5, 1.0], [1.0, 0.5]],
+    ));
+    model.steps[0].loads[0].amplitude = Some("Up_and_down".into());
+    let StepKind::Static(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    // A linear static step is solved once, at its end; increments need a nonlinear one.
+    settings.nlgeom = true;
+    settings.incrementation = Incrementation::Direct;
+    settings.initial_increment = 0.25;
+    let frd = run_ccx("amplitude_force", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let index = frd.mesh.node_index(99).unwrap();
+    let u3: Vec<f64> = (frd.increments.iter())
+        .filter_map(|i| i.field("DISP"))
+        .map(|f| f64::from(f.component("U3").unwrap().values[index]))
+        .collect();
+    assert_eq!(u3.len(), 4, "{u3:?}");
+    for (value, factor) in u3.iter().zip([0.5, 1.0, 0.75, 0.5]) {
+        assert!(
+            (value - factor * full).abs() < 1e-2 * full.abs(),
+            "{u3:?} statt {factor} * {full}"
+        );
+    }
+}
+
+/// A temperature held by an amplitude that ends at half: the bar settles at half the value.
+#[test]
+fn calculix_scales_a_temperature_by_its_amplitude() {
+    let mut held = temperature("Temperature-1", Region::NodeSet("FIX".into()), 100.0);
+    held.amplitude = Some("Half".into());
+    let (mesh, mut model) = thermal_bar(steady(), vec![held], Vec::new());
+    model
+        .amplitudes
+        .push(amplitude("Half", vec![[0.0, 1.0], [1.0, 0.5]]));
+    let Some(frd) = run_ccx(
+        "amplitude_temperature",
+        &write_inp(&mesh, &model, "").unwrap(),
+    ) else {
+        return;
+    };
+    assert_all_close(&temperatures_at(&mesh, &frd, 100.0), 50.0, 1e-6);
+}
+
+/// Beyond its last point an amplitude keeps the last value, as [`plx_model::Amplitude::value_at`]
+/// assumes for the dialog's curve.
+#[test]
+fn calculix_holds_an_amplitude_after_its_last_point() {
+    let (mesh, reference) = cantilever(tip_force());
+    let Some(full) = run_ccx(
+        "amplitude_hold_ref",
+        &write_inp(&mesh, &reference, "").unwrap(),
+    ) else {
+        return;
+    };
+    let full = node_value(&full, "DISP", "U3", 99);
+    let mut model = reference;
+    model
+        .amplitudes
+        .push(amplitude("Early", vec![[0.0, 0.0], [0.5, 1.0]]));
+    model.steps[0].loads[0].amplitude = Some("Early".into());
+    let frd = run_ccx("amplitude_hold", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let held = node_value(&frd, "DISP", "U3", 99);
+    assert!(
+        (held - full).abs() < 1e-6 * full.abs(),
+        "{held} statt {full}"
     );
 }
