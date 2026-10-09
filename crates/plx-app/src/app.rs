@@ -79,6 +79,10 @@ struct Workbench {
     /// Results file the user asked to open; read by the app on a worker thread.
     open_results: Option<PathBuf>,
     screenshot: Screenshot,
+    /// Hot spot whose paths are shown in the FE model, edited or selected, with the paths.
+    hot_spot_preview: Option<(plx_model::HotSpot, Vec<Vec<glam::Vec3>>)>,
+    /// The table of hot spot values is open on the Results tab.
+    hot_spot_window: bool,
     /// Audio output of the sound window, opened when it first plays.
     audio: Option<sound::Player>,
     /// The section view, while it is on; it cuts whatever the 3D view shows.
@@ -142,6 +146,8 @@ impl PrepolixApp {
                 analysis: None,
                 open_results: None,
                 screenshot: Screenshot::default(),
+                hot_spot_preview: None,
+                hot_spot_window: false,
                 audio: None,
                 section: None,
                 section_dialog: None,
@@ -522,6 +528,8 @@ impl eframe::App for PrepolixApp {
             self.open_path(path, &ctx);
         }
         self.workbench.update_highlight();
+        self.workbench.update_hot_spot_preview();
+        self.workbench.hot_spot_window(&ctx);
         self.workbench.settings_window(&ctx);
         self.workbench.rebuild_if_results_changed();
         self.workbench.update_section();
@@ -606,6 +614,8 @@ impl Workbench {
                             self.current_result = self.results.len() - 1;
                         }
                     }
+                    // Results of the FE model get its hot spots evaluated right away.
+                    self.evaluate_hot_spots(true);
                 } else {
                     self.tree.selected = None;
                     self.editor = None;
@@ -757,6 +767,115 @@ impl Workbench {
         if response.material_library {
             self.open_material_library();
         }
+        if response.evaluate_hot_spots {
+            self.evaluate_hot_spots(false);
+        }
+    }
+
+    /// Evaluates the hot spots of the FE model on the current results file, writes the values
+    /// next to it and opens the table. `automatic` skips the messages when there is nothing
+    /// to evaluate.
+    fn evaluate_hot_spots(&mut self, automatic: bool) {
+        let fe = self.model.as_ref().filter(|m| !m.fe.hot_spots.is_empty());
+        let results = self.results.get_mut(self.current_result);
+        let (Some(fe), Some(results)) = (fe, results) else {
+            if !automatic {
+                self.output.push(
+                    "Hot Spots: erst Hot Spots im FE-Modell definieren und Ergebnisse öffnen."
+                        .into(),
+                );
+            }
+            return;
+        };
+        match crate::hot_spots::evaluate(fe, results) {
+            Ok(reports) => {
+                let file = match crate::hot_spots::write(&results.path, &reports) {
+                    Ok(file) => {
+                        self.output
+                            .push(format!("Hot Spots ausgewertet: {}", file.display()));
+                        Some(file)
+                    }
+                    Err(error) => {
+                        self.output.push(error);
+                        None
+                    }
+                };
+                self.output.extend(crate::hot_spots::summary(&reports));
+                for report in &reports {
+                    self.output
+                        .extend(report.warnings.iter().map(|w| format!("Warnung: {w}")));
+                }
+                results.hot_spots = Some(crate::hot_spots::Evaluation { reports, file });
+                self.hot_spot_window = true;
+                self.set_tree_view(TreeView::Results);
+                self.update_contour();
+            }
+            Err(error) => {
+                if !automatic || !fe.fe.hot_spots.is_empty() {
+                    self.output
+                        .push(format!("Hot Spots nicht ausgewertet: {error}"));
+                }
+            }
+        }
+    }
+
+    /// The table of hot spot values of the shown results file.
+    fn hot_spot_window(&mut self, ctx: &egui::Context) {
+        if !self.hot_spot_window || self.tree_view != TreeView::Results {
+            return;
+        }
+        let Some(model) = self.results.get(self.current_result) else {
+            return;
+        };
+        let Some(evaluation) = &model.hot_spots else {
+            return;
+        };
+        let step = (model.results.as_ref())
+            .and_then(ResultsView::current_increment)
+            .map(|i| (i.step, i.increment));
+        if !crate::hot_spots::window(ctx, evaluation, step) {
+            self.hot_spot_window = false;
+            self.update_contour();
+        }
+    }
+
+    /// Shows the paths of the hot spot being edited or selected in the FE model.
+    fn update_hot_spot_preview(&mut self) {
+        let wanted = match (&self.editor, &self.tree.selected) {
+            _ if self.tree_view == TreeView::Results => None,
+            (Some(editor), _) => editor.hot_spot(),
+            (None, Some((TreeView::FeModel, TreeItem::HotSpot(i)))) => self
+                .model
+                .as_ref()
+                .and_then(|m| m.fe.hot_spots.get(*i).cloned()),
+            _ => None,
+        };
+        if wanted.as_ref() == self.hot_spot_preview.as_ref().map(|(h, _)| h) {
+            return;
+        }
+        let paths = match (&wanted, &self.model) {
+            (Some(hot_spot), Some(model)) => crate::hot_spots::preview(model, hot_spot),
+            _ => Vec::new(),
+        };
+        self.hot_spot_preview = wanted.map(|h| (h, paths));
+        self.viewport.overlay.paths = self.overlay_paths();
+    }
+
+    /// Hot spot paths drawn over the 3D view: of the evaluated results while their table is
+    /// open, otherwise of the hot spot edited or selected in the FE model.
+    fn overlay_paths(&self) -> Vec<Vec<glam::Vec3>> {
+        if self.tree_view == TreeView::Results {
+            let model = self.results.get(self.current_result);
+            return match model.and_then(|m| Some((m, m.hot_spots.as_ref()?))) {
+                Some((model, evaluation)) if self.hot_spot_window => {
+                    crate::hot_spots::result_paths(model, evaluation)
+                }
+                _ => Vec::new(),
+            };
+        }
+        self.hot_spot_preview
+            .as_ref()
+            .map_or_else(Vec::new, |(_, paths)| paths.clone())
     }
 
     /// The FE model, which can be set up.
@@ -886,6 +1005,27 @@ impl Workbench {
     /// PrePoMax's Results menu.
     fn results_menu(&mut self, ui: &mut egui::Ui) {
         let any = !self.results.is_empty();
+        let hot_spots = self
+            .model
+            .as_ref()
+            .is_some_and(|m| !m.fe.hot_spots.is_empty());
+        if ui
+            .add_enabled(any && hot_spots, egui::Button::new("Hot Spots auswerten"))
+            .clicked()
+        {
+            self.evaluate_hot_spots(false);
+        }
+        let evaluated =
+            (self.results.get(self.current_result)).is_some_and(|m| m.hot_spots.is_some());
+        if ui
+            .add_enabled(evaluated, egui::Button::new("Hot-Spot-Tabelle"))
+            .clicked()
+        {
+            self.hot_spot_window = true;
+            self.set_tree_view(TreeView::Results);
+            self.update_contour();
+        }
+        ui.separator();
         if ui
             .add_enabled(any, egui::Button::new("Aktuelle Ergebnisse schließen"))
             .clicked()
@@ -991,6 +1131,7 @@ impl Workbench {
                 "Last erstellen …",
                 last_step.is_some(),
             ),
+            (NewItem::HotSpot, "Hot Spot erstellen …", true),
         ] {
             if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
                 kind = Some(item);
@@ -1975,6 +2116,7 @@ impl Workbench {
             nodes: (model.highlight.nodes.iter())
                 .filter_map(|&id| model.node_position(model.mesh.node_index(id)?))
                 .collect(),
+            paths: self.overlay_paths(),
         };
     }
 }

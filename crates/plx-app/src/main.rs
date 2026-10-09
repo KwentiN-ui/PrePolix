@@ -7,6 +7,7 @@ mod field_output_dialog;
 mod gizmo;
 mod history_output_dialog;
 mod history_table;
+mod hot_spots;
 mod icons;
 mod keywords;
 mod material_library;

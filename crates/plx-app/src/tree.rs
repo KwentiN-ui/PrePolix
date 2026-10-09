@@ -51,6 +51,7 @@ pub enum TreeItem {
     Load(usize, usize),
     FieldOutput(usize, usize),
     Analysis,
+    HotSpot(usize),
     FieldOutputs,
     /// Field of the current increment, by index.
     Field(usize),
@@ -88,6 +89,8 @@ pub struct TreeResponse {
     pub run: bool,
     /// Open the material library.
     pub material_library: bool,
+    /// Evaluate the hot spots with the current results.
+    pub evaluate_hot_spots: bool,
 }
 
 /// Tree label with a fixed size: highlight and hover frame are painted over the same area, so
@@ -178,6 +181,7 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::Group("Steps") => Some(NewItem::Step),
         TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
         TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
+        TreeItem::Group(HOT_SPOTS) => Some(NewItem::HotSpot),
         TreeItem::FieldOutputs => Some(NewItem::ResultFieldOutput),
         TreeItem::Group("History Outputs") => Some(NewItem::ResultHistoryOutput),
         _ => None,
@@ -207,6 +211,7 @@ fn is_fe_item(item: &TreeItem) -> bool {
             | TreeItem::BoundaryCondition(..)
             | TreeItem::Load(..)
             | TreeItem::FieldOutput(..)
+            | TreeItem::HotSpot(_)
     )
 }
 
@@ -381,6 +386,12 @@ impl Tree<'_> {
                         self.response.material_library = true;
                     }
                 }
+                if item == TreeItem::Group(HOT_SPOTS) {
+                    ui.separator();
+                    if ui.button("Mit aktuellen Ergebnissen auswerten").clicked() {
+                        self.response.evaluate_hot_spots = true;
+                    }
+                }
                 if creates.is_some() {
                     ui.separator();
                     if ui.button("Alle aufklappen").clicked() {
@@ -446,6 +457,7 @@ impl Tree<'_> {
             TreeItem::StepGroup(_, "Loads") => TreeIcon::Load,
             TreeItem::StepGroup(_, "Defined Fields") => TreeIcon::DefinedField,
             TreeItem::Group("Analyses") => TreeIcon::Analysis,
+            TreeItem::Group(HOT_SPOTS) => TreeIcon::HotSpot,
             TreeItem::Analysis => match self.job {
                 Some(JobStatus::Running) => TreeIcon::Running,
                 Some(JobStatus::Completed) => TreeIcon::Finished,
@@ -824,7 +836,17 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
     } else {
         tree.leaf(ui, TreeItem::Group("Analyses"), "Analyses");
     }
+    // Not in PrePoMax: hot spot stresses, evaluated on the results of the analysis.
+    if has_model {
+        let hot_spots = (fe.hot_spots.iter().enumerate())
+            .map(|(i, h)| (TreeItem::HotSpot(i), h.name.as_str()))
+            .collect();
+        tree.container(ui, HOT_SPOTS, hot_spots);
+    }
 }
+
+/// Container of the hot spot definitions.
+pub const HOT_SPOTS: &str = "Hot Spot Stresses";
 
 /// Name of the analysis job, PrePoMax's first default.
 pub const ANALYSIS_NAME: &str = "Analysis-1";

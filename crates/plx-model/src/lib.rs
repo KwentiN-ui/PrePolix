@@ -5,10 +5,12 @@
 //! input file; node and element sets that CalculiX needs for them are derived when the input
 //! file is written, so the user never has to define sets by hand.
 
+mod hot_spot;
 pub mod library;
 mod region;
 mod validity;
 
+pub use hot_spot::{Extrapolation, HotSpot, HotSpotComponent, extrapolation_weights};
 pub use library::MaterialLibrary;
 pub use region::Region;
 pub use validity::{Invalid, ModelItem};
@@ -38,6 +40,9 @@ pub struct FeModel {
     /// they appear in it. They cover what the model cannot express yet.
     #[serde(default)]
     pub user_keywords: Vec<UserKeyword>,
+    /// Hot spot stress evaluations, done on the results; not part of the input file.
+    #[serde(default)]
+    pub hot_spots: Vec<HotSpot>,
 }
 
 impl FeModel {
