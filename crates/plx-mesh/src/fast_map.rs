@@ -15,11 +15,11 @@ impl std::hash::Hasher for FastHasher {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        let mut chunks = bytes.chunks_exact(8);
-        for chunk in &mut chunks {
-            self.write_u64(u64::from_le_bytes(chunk.try_into().expect("8 bytes")));
+        let (chunks, rest) = bytes.as_chunks::<8>();
+        for &chunk in chunks {
+            self.write_u64(u64::from_le_bytes(chunk));
         }
-        for &b in chunks.remainder() {
+        for &b in rest {
             self.write_u64(u64::from(b));
         }
     }
