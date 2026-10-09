@@ -11,6 +11,7 @@ use glam::{DVec3, Vec3};
 use plx_mesh::{ElementId, NodeId, SkinFace, face_normal};
 
 use crate::model::{Hit, Model};
+use crate::viewport::{BoxSelect, Preview};
 
 /// How a pick combines with the selection so far.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -314,6 +315,8 @@ impl Picker {
                     }
                 });
                 ui.weak("Umschalt: hinzufügen, Strg: entfernen");
+                ui.weak("Ziehen: Rahmen (nach links: auch angeschnittene)");
+                ui.weak("Mittlere Maustaste: drehen");
             });
         action
     }
@@ -397,6 +400,116 @@ impl Picker {
     }
 }
 
+impl Picker {
+    /// What a selection box selects: nodes in the node modes, otherwise element faces (whole
+    /// elements in the element mode) inside the box, or crossing it when dragged from right
+    /// to left. Only visible parts count.
+    pub fn pick_box(&self, model: &Model, area: &BoxSelect, target: Target) -> Items {
+        let mesh = &model.mesh;
+        let inside: Vec<bool> = (0..mesh.node_count())
+            .map(|n| area.contains(model.render_position(n)))
+            .collect();
+        let taken = |nodes: &mut dyn Iterator<Item = usize>| {
+            let mut nodes = nodes.map(|n| inside[n]);
+            if area.crossing {
+                nodes.any(|inside| inside)
+            } else {
+                nodes.all(|inside| inside)
+            }
+        };
+        let node_modes = matches!(
+            self.select_by,
+            SelectBy::Node
+                | SelectBy::Edge
+                | SelectBy::EdgeAngle
+                | SelectBy::GeometryEdgeAngle
+                | SelectBy::Id
+        );
+        if node_modes && target == Target::Nodes {
+            let visible = model.visible_nodes();
+            return Items::Nodes(
+                visible
+                    .into_iter()
+                    .filter(|&id| mesh.node_index(id).is_some_and(|n| inside[n]))
+                    .collect(),
+            );
+        }
+        let mut faces = Vec::new();
+        for part in (0..model.parts.len()).filter(|&p| model.parts[p].visible) {
+            let picker = MeshPicker::new(model, part);
+            if self.select_by == SelectBy::Element {
+                let mut elements: Vec<usize> = picker.faces().iter().map(|f| f.element).collect();
+                elements.sort_unstable();
+                elements.dedup();
+                for element in elements {
+                    let nodes = &mesh.elements()[element].nodes;
+                    let mut indices = nodes.iter().filter_map(|&id| mesh.node_index(id));
+                    if taken(&mut indices) {
+                        faces.extend(
+                            (0..picker.faces().len())
+                                .filter(|&f| picker.faces()[f].element == element)
+                                .map(|f| (part, f)),
+                        );
+                    }
+                }
+            } else {
+                for f in 0..picker.faces().len() {
+                    if taken(&mut picker.face_nodes(f)) {
+                        faces.push((part, f));
+                    }
+                }
+            }
+        }
+        match target {
+            Target::Faces => Items::Faces(
+                faces
+                    .iter()
+                    .map(|&(part, f)| MeshPicker::new(model, part).face_id(f))
+                    .collect(),
+            ),
+            Target::Nodes => {
+                let ids = mesh.node_ids();
+                Items::Nodes(
+                    faces
+                        .iter()
+                        .flat_map(|&(part, f)| MeshPicker::new(model, part).face_nodes(f))
+                        .map(|n| ids[n])
+                        .collect(),
+                )
+            }
+        }
+    }
+}
+
+/// The hover preview of picked items: outlines of faces and points of nodes.
+pub fn preview(model: &Model, items: &Items) -> Preview {
+    let mut preview = Preview::default();
+    match items {
+        Items::Nodes(nodes) => {
+            preview.points = nodes
+                .iter()
+                .filter_map(|&id| model.mesh.node_index(id))
+                .map(|n| model.render_position(n))
+                .collect();
+        }
+        Items::Faces(faces) => {
+            for (part, skin) in (0..model.parts.len()).map(|p| (p, model.skin(p))) {
+                let picker = MeshPicker::new(model, part);
+                for (index, face) in skin.faces.iter().enumerate() {
+                    if faces.contains(&picker.face_id(index)) {
+                        preview
+                            .lines
+                            .extend(corner_edges(&face.corners).map(|(a, b)| {
+                                [model.render_position(a), model.render_position(b)]
+                            }));
+                    }
+                }
+            }
+        }
+    }
+    preview
+}
+
 /// `1, 5, 10-20` as a list of ids.
 fn parse_ids(text: &str) -> Result<Vec<u32>, String> {
     let mut ids = Vec::new();
@@ -447,7 +560,7 @@ impl<'a> MeshPicker<'a> {
         )
     }
 
-    fn face_nodes(&self, face: usize) -> impl Iterator<Item = usize> + 'a {
+    fn face_nodes(&self, face: usize) -> impl Iterator<Item = usize> + use<'a> {
         let face = &self.faces()[face];
         face.corners.iter().chain(&face.mids).copied()
     }
@@ -727,6 +840,36 @@ mod tests {
             outline.len() > 11,
             "a 95° limit follows the outline around the corners"
         );
+    }
+
+    #[test]
+    fn boxes_take_items_inside_or_crossing() {
+        let (model, _) = beam_hit(55.0, 5.0);
+        // Seen from above, the beam spans -50..50 in x around the model centre; the box
+        // covers the half with x >= 0.
+        let area = |crossing| BoxSelect {
+            // Orthographic view from above: x and y scaled into -1..1, depth around 0.5.
+            view_proj: glam::Mat4::from_translation(Vec3::new(0.0, 0.0, 0.5))
+                * glam::Mat4::from_scale(Vec3::new(1.0 / 60.0, 1.0 / 60.0, -0.005)),
+            min: glam::Vec2::new(-0.0001, -1.0),
+            max: glam::Vec2::new(1.0, 1.0),
+            crossing,
+            shift: false,
+            ctrl: false,
+        };
+        let pick = |mode, crossing, target| picker(mode).pick_box(&model, &area(crossing), target);
+        // 5 elements along x times 2 on each of the 4 long sides, plus the 4 end faces.
+        assert_eq!(
+            faces(pick(SelectBy::Geometry, false, Target::Faces)).len(),
+            44
+        );
+        // Crossing also takes the faces of the elements touching x = 0.
+        assert_eq!(
+            faces(pick(SelectBy::Geometry, true, Target::Faces)).len(),
+            52
+        );
+        // 6 cross sections of 3 x 3 nodes.
+        assert_eq!(nodes(pick(SelectBy::Node, false, Target::Nodes)).len(), 54);
     }
 
     #[test]
