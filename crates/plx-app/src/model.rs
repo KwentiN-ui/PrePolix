@@ -7,7 +7,7 @@ use plx_io::frd::{FrdImport, read_frd};
 use plx_io::inp::{InpImport, read_inp};
 use plx_mesh::{ElementId, FeMesh, NodeId, PartSkin, extract_part_skin};
 use plx_mesher::{CadEntity, GeometryDisplay};
-use plx_model::{FeModel, Geometry};
+use plx_model::{FeModel, Finding, Geometry, MeshCheck};
 use plx_render::contour::normalize;
 use plx_render::{
     ClipPlane, RenderMesh, SectionCells, Vertex, lighten, part_color, part_render_mesh,
@@ -83,6 +83,15 @@ pub struct Model {
     pub explosion: Explosion,
     /// Node indices of each part and the part of each node, built when first needed.
     part_nodes: std::sync::OnceLock<PartNodes>,
+    /// The model checks of the last FE model checked, see [`Model::findings`].
+    checks: std::sync::Mutex<Option<Checks>>,
+}
+
+/// Findings of the model checks with what they were computed for.
+struct Checks {
+    mesh: MeshCheck,
+    fe: FeModel,
+    findings: Vec<Finding>,
 }
 
 /// Which nodes belong to which part; a node shared by parts belongs to the first of them.
@@ -318,6 +327,7 @@ impl Model {
             section_cells: Default::default(),
             explosion: Explosion::default(),
             part_nodes: Default::default(),
+            checks: Default::default(),
         };
         let meshes = model.render_meshes();
         for (part, render) in model.parts.iter_mut().zip(&meshes) {
@@ -365,6 +375,7 @@ impl Model {
         self.highlight = Highlight::default();
         self.section_cells = Default::default();
         self.part_nodes = Default::default();
+        self.checks = Default::default();
         // The exploded view stays on and is laid out anew for the new mesh.
         self.explosion.clear_layout();
         if let Some(parameters) = self.explosion.applied.clone() {
@@ -373,6 +384,31 @@ impl Model {
         } else {
             self.explosion.show(Vec::new(), false);
         }
+    }
+
+    /// Problems of the FE model that make CalculiX abort or give useless results. The checks
+    /// run again when the FE model changed; the part that depends on the mesh only once per
+    /// mesh.
+    pub fn findings(&self) -> Vec<Finding> {
+        let mut cache = self.checks.lock().unwrap_or_else(|e| e.into_inner());
+        let space = self.fe.properties.space;
+        if let Some(checks) = cache.as_ref()
+            && checks.fe == self.fe
+            && checks.mesh.is_current(&self.mesh, space)
+        {
+            return checks.findings.clone();
+        }
+        let mesh = match cache.take() {
+            Some(checks) if checks.mesh.is_current(&self.mesh, space) => checks.mesh,
+            _ => MeshCheck::new(&self.mesh, space),
+        };
+        let findings = self.fe.check(&self.mesh, &mesh);
+        *cache = Some(Checks {
+            mesh,
+            fe: self.fe.clone(),
+            findings: findings.clone(),
+        });
+        findings
     }
 
     fn part_nodes(&self) -> &PartNodes {

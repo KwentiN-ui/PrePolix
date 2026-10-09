@@ -5,6 +5,7 @@
 //! input file; node and element sets that CalculiX needs for them are derived when the input
 //! file is written, so the user never has to define sets by hand.
 
+mod checks;
 mod constraint;
 mod contact;
 mod geometry;
@@ -14,6 +15,7 @@ mod properties;
 mod region;
 mod validity;
 
+pub use checks::{Finding, MeshCheck, Problem, Severity, diagnose_solver_output};
 pub use constraint::{CompressionOnly, PointSpring, SurfaceSpring, SurfaceToSurfaceSpring};
 pub use contact::{
     Constraint, ContactMethod, ContactPair, DEFAULT_SURFACE_COLOR, Friction, GapConductance,

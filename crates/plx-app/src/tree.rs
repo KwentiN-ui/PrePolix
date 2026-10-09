@@ -8,7 +8,7 @@ use egui::collapsing_header::CollapsingState;
 use egui::epaint::Mesh;
 use egui::{Color32, Pos2, Rect, Response, Shape, Ui, Vec2, WidgetText, pos2, vec2};
 use plx_job::JobStatus;
-use plx_model::ModelItem;
+use plx_model::{Finding, ModelItem, Severity};
 
 use crate::model::{Model, PartInfo};
 use crate::setup::NewItem;
@@ -106,6 +106,8 @@ pub struct TreeResponse {
     pub evaluate_hot_spots: bool,
     /// Open PrePoMax's Search Contact Pairs.
     pub search_contacts: bool,
+    /// The warning sign of an item was clicked: explain its findings.
+    pub findings: Option<Vec<Finding>>,
 }
 
 /// What the user asked of the analysis, PrePoMax's analysis context menu.
@@ -193,11 +195,11 @@ fn can_deactivate(item: &TreeItem) -> bool {
     )
 }
 
-/// Warning sign next to an invalid item, PrePoMax's warning icon.
+/// Warning sign next to an item with findings, PrePoMax's warning icon; a click explains them.
 fn warning_sign(ui: &mut Ui) -> Response {
     ui.add_space(3.0);
     let (rect, response) =
-        ui.allocate_exact_size(Vec2::splat(tree_icons::SIZE), egui::Sense::hover());
+        ui.allocate_exact_size(Vec2::splat(tree_icons::SIZE), egui::Sense::click());
     if ui.is_rect_visible(rect) {
         tree_icons::paint(ui.painter(), rect.min, TreeIcon::Warning);
     }
@@ -233,6 +235,24 @@ fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
         ),
         ModelItem::BoundaryCondition(s, i) => (TreeItem::BoundaryCondition(s, i), step(s, "BCs")),
         ModelItem::Load(s, i) => (TreeItem::Load(s, i), step(s, "Loads")),
+        ModelItem::Material(i) => (
+            TreeItem::Material(i),
+            vec![TreeItem::Group("Materials"), TreeItem::Model],
+        ),
+        ModelItem::Part(i) => (
+            TreeItem::Part(i),
+            vec![TreeItem::Group("Parts"), TreeItem::Mesh, TreeItem::Model],
+        ),
+        ModelItem::Step(s) => (
+            TreeItem::Step(s),
+            vec![TreeItem::Group("Steps"), TreeItem::Model],
+        ),
+        ModelItem::BoundaryConditions(s) => {
+            let mut containers = step(s, "BCs");
+            containers.remove(0);
+            (TreeItem::StepGroup(s, "BCs"), containers)
+        }
+        ModelItem::Analysis => (TreeItem::Analysis, vec![TreeItem::Group("Analyses")]),
     }
 }
 
@@ -410,9 +430,10 @@ struct Tree<'a> {
     levels: Vec<Vec<Row>>,
     /// Inside an item being expanded or collapsed: the state all branches take.
     forced_open: Option<bool>,
-    /// Items whose references are gone, with the reason, shown red with a warning sign.
-    invalid: HashMap<TreeItem, String>,
-    /// Containers holding invalid items, shown red so that they are found when collapsed.
+    /// Problems found by the model checks, by item: shown with a warning sign, and red when
+    /// CalculiX would abort.
+    findings: HashMap<TreeItem, Vec<Finding>>,
+    /// Containers holding items with errors, shown red so that they are found when collapsed.
     holds_invalid: HashSet<TreeItem>,
     /// Containers that cannot take items, with the reason, such as the loads of a frequency
     /// step.
@@ -431,8 +452,9 @@ impl Tree<'_> {
 
     /// Selectable label of an item: a click selects it, a double click opens its properties.
     fn label(&mut self, ui: &mut Ui, item: TreeItem, text: impl Into<WidgetText>) -> Response {
-        let reason = self.invalid.get(&item).cloned();
-        let red = reason.is_some() || self.holds_invalid.contains(&item);
+        let findings = self.findings.get(&item).cloned();
+        let error = (findings.iter().flatten()).any(|f| f.severity() == Severity::Error);
+        let red = error || self.holds_invalid.contains(&item);
         let inactive = self.inactive.contains(&item);
         let color = if red {
             Some(INVALID)
@@ -440,9 +462,16 @@ impl Tree<'_> {
             inactive.then_some(INACTIVE)
         };
         let mut response = row_label(ui, self.is_selected(&item), color, text);
-        if let Some(reason) = reason {
-            warning_sign(ui).on_hover_text(&reason);
-            response = response.on_hover_text(reason);
+        if let Some(findings) = findings {
+            let mut hover: Vec<String> = (findings.iter())
+                .map(|f| format!("{}: {}", f.problem.title(), f.detail))
+                .collect();
+            hover.push("Klick auf das Warnsymbol erklärt das Problem.".into());
+            let hover = hover.join("\n");
+            if warning_sign(ui).on_hover_text(&hover).clicked() {
+                self.response.findings = Some(findings);
+            }
+            response = response.on_hover_text(hover);
         }
         // Like PrePoMax, a right click selects the item its context menu belongs to.
         if response.clicked() || response.double_clicked() || response.secondary_clicked() {
@@ -902,13 +931,15 @@ impl Tree<'_> {
     }
 }
 
-/// `mesh_items` names the items of the geometry's mesh setup, for the Geometry tree.
+/// `mesh_items` names the items of the geometry's mesh setup, for the Geometry tree;
+/// `solver_findings` are the problems CalculiX reported in the last run.
 pub fn show(
     ui: &mut Ui,
     view: TreeView,
     model: Option<&mut Model>,
     mesh_items: &[String],
     job: Option<JobState>,
+    solver_findings: &[Finding],
     state: &mut TreeState,
 ) -> TreeResponse {
     let mut tree = Tree {
@@ -918,7 +949,7 @@ pub fn show(
         job,
         levels: vec![Vec::new()],
         forced_open: None,
-        invalid: HashMap::new(),
+        findings: HashMap::new(),
         holds_invalid: HashSet::new(),
         closed: HashMap::new(),
         inactive: HashSet::new(),
@@ -944,7 +975,7 @@ pub fn show(
                         .collect();
                     tree.container(ui, "Mesh Setup", items);
                 }
-                TreeView::FeModel => fe_model(&mut tree, ui, model),
+                TreeView::FeModel => fe_model(&mut tree, ui, model, solver_findings),
                 TreeView::Results => results(&mut tree, ui, model),
             }
             let roots = tree.levels.pop().unwrap_or_default();
@@ -973,14 +1004,16 @@ pub fn show(
     tree.response
 }
 
-fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
+fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[Finding]) {
     // A results file has no FE model, as in PrePoMax; its mesh lives in the Results tree.
     let model = model.filter(|m| !m.is_results());
     if let Some(model) = &model {
-        for invalid in model.fe.invalid_items(&model.mesh) {
-            let (item, containers) = tree_items(invalid.item);
-            tree.invalid.insert(item, invalid.reason);
-            tree.holds_invalid.extend(containers);
+        for finding in model.findings().into_iter().chain(solver.iter().cloned()) {
+            let (item, containers) = tree_items(finding.item);
+            if finding.severity() == Severity::Error {
+                tree.holds_invalid.extend(containers);
+            }
+            tree.findings.entry(item).or_default().push(finding);
         }
     }
     let fe = model.as_ref().map(|m| m.fe.clone()).unwrap_or_default();
