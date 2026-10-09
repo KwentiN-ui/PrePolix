@@ -86,9 +86,10 @@ mod tests {
                 name: "Steel".into(),
                 density: Some(7.85e-9),
                 elastic: None,
+                ..Default::default()
             }],
             sections: Vec::new(),
-            steps: vec![Step::new_static("Step-1")],
+            steps: vec![Step::new_static("Step-1"), Step::new_coupled("Step-2")],
             user_keywords: vec![UserKeyword {
                 position: vec![14, 0],
                 text: "*Amplitude, Name=A\n0, 0, 1, 1".into(),
@@ -144,6 +145,12 @@ mod tests {
                 adjustment_size: Some(0.01),
                 master_color: [255, 0, 0],
                 ..ContactPair::new("Contact_Pair-1", "Surface_Interaction-1")
+            }],
+            initial_conditions: vec![plx_model::InitialCondition {
+                name: "Initial_Temperature-1".into(),
+                active: true,
+                region: Region::Parts(vec!["A".into()]),
+                kind: plx_model::InitialConditionKind::Temperature(20.0),
             }],
         };
         let dir = std::env::temp_dir().join(format!("plx-project-{}", std::process::id()));

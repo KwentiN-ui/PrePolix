@@ -289,7 +289,8 @@ impl SectionDialog {
         let Some((hit, precision)) = pick else {
             return;
         };
-        if let Items::Nodes(nodes) = self.picker.pick(model, hit, Target::Nodes, precision) {
+        let picked = self.picker.pick(model, hit, Target::Nodes, precision);
+        if let Items::Nodes(nodes) = picked.resolved(&model.mesh, Target::Nodes) {
             self.take(model, nodes);
         }
     }

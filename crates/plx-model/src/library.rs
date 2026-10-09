@@ -87,6 +87,7 @@ impl Default for MaterialLibrary {
                 young: 210_000.0,
                 poisson: 0.3,
             }),
+            ..Material::default()
         };
         let category = |name, items| LibraryNode::Category(Category::new(name, items));
         Self {

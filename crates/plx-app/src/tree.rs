@@ -50,6 +50,7 @@ pub enum TreeItem {
     Constraint(usize),
     SurfaceInteraction(usize),
     ContactPair(usize),
+    InitialCondition(usize),
     Step(usize),
     /// A container inside a step, such as "BCs".
     StepGroup(usize, &'static str),
@@ -202,6 +203,7 @@ fn can_deactivate(item: &TreeItem) -> bool {
             | TreeItem::Load(..)
             | TreeItem::Constraint(_)
             | TreeItem::ContactPair(_)
+            | TreeItem::InitialCondition(_)
     )
 }
 
@@ -245,6 +247,10 @@ fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
         ),
         ModelItem::BoundaryCondition(s, i) => (TreeItem::BoundaryCondition(s, i), step(s, "BCs")),
         ModelItem::Load(s, i) => (TreeItem::Load(s, i), step(s, "Loads")),
+        ModelItem::InitialCondition(i) => (
+            TreeItem::InitialCondition(i),
+            vec![TreeItem::Group("Initial Conditions"), TreeItem::Model],
+        ),
     }
 }
 
@@ -257,6 +263,7 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::Group("Constraints") => Some(NewItem::Constraint),
         TreeItem::Group("Surface Interactions") => Some(NewItem::SurfaceInteraction),
         TreeItem::Group("Contact Pairs") => Some(NewItem::ContactPair),
+        TreeItem::Group("Initial Conditions") => Some(NewItem::InitialCondition),
         TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
         TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
         TreeItem::Group(HOT_SPOTS) => Some(NewItem::HotSpot),
@@ -308,6 +315,7 @@ fn is_fe_item(item: &TreeItem) -> bool {
             | TreeItem::Constraint(_)
             | TreeItem::SurfaceInteraction(_)
             | TreeItem::ContactPair(_)
+            | TreeItem::InitialCondition(_)
             | TreeItem::Step(_)
             | TreeItem::BoundaryCondition(..)
             | TreeItem::Load(..)
@@ -1096,9 +1104,16 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                 .collect();
             tree.container(ui, "Contact Pairs", pairs);
         });
-        for name in ["Distributions", "Amplitudes", "Initial Conditions"] {
+        for name in ["Distributions", "Amplitudes"] {
             tree.leaf(ui, TreeItem::Group(name), name);
         }
+        for (i, _) in (fe.initial_conditions.iter().enumerate()).filter(|(_, c)| !c.active) {
+            tree.inactive.insert(TreeItem::InitialCondition(i));
+        }
+        let initial = (fe.initial_conditions.iter().enumerate())
+            .map(|(i, c)| (TreeItem::InitialCondition(i), c.name.as_str()))
+            .collect();
+        tree.container(ui, "Initial Conditions", initial);
         // Not in PrePoMax: hot spot stresses, evaluated on the results of the analysis.
         let hot_spots = (fe.hot_spots.iter().enumerate())
             .map(|(i, h)| (TreeItem::HotSpot(i), h.name.as_str()))

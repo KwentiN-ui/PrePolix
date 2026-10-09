@@ -396,13 +396,13 @@ impl MeshItemEditor {
                 *faces = (picked.iter())
                     .filter_map(|e| match e {
                         CadEntity::Face(tag) => Some(*tag),
-                        CadEntity::Edge(_) => None,
+                        _ => None,
                     })
                     .collect();
                 *edges = (picked.iter())
                     .filter_map(|e| match e {
                         CadEntity::Edge(tag) => Some(*tag),
-                        CadEntity::Face(_) => None,
+                        _ => None,
                     })
                     .collect();
                 if picked.is_empty() {
@@ -582,6 +582,8 @@ fn entity_preview(view: &Model, entity: CadEntity) -> Preview {
                 points: Vec::new(),
             }
         }
+        // The display has no vertices to pick.
+        CadEntity::Vertex(_) => Preview::default(),
     }
 }
 
@@ -591,6 +593,7 @@ fn entities_highlight(view: &Model, entities: &BTreeSet<CadEntity>) -> Highlight
         match *entity {
             CadEntity::Face(tag) => faces.insert(tag),
             CadEntity::Edge(tag) => edges.insert(tag),
+            CadEntity::Vertex(_) => false,
         };
     }
     Highlight {
