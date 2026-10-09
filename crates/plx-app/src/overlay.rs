@@ -35,6 +35,8 @@ pub struct Overlay {
     /// Global origin in render coordinates, where the global axis triad is drawn.
     pub global_origin: Option<Vec3>,
     pub show_scale_bar: bool,
+    /// Length unit written after the scale bar's last label, empty without units.
+    pub length_unit: &'static str,
     pub show_view_triad: bool,
     /// Selected nodes in render coordinates, drawn as highlighted points.
     pub nodes: Vec<Vec3>,
@@ -129,7 +131,8 @@ pub fn draw(
         draw_path(&painter, &points);
     }
     if overlay.show_scale_bar {
-        draw_scale_bar(ui, &painter, rect, camera, &mut offsets.scale_bar);
+        let unit = overlay.length_unit;
+        draw_scale_bar(ui, &painter, rect, camera, unit, &mut offsets.scale_bar);
     }
     if overlay.show_view_triad {
         let corner = rect.right_bottom() - vec2(24.0 + 45.0, 24.0 + 45.0);
@@ -338,7 +341,14 @@ fn draw_status(ui: &Ui, painter: &Painter, rect: Rect, lines: &[String], offset:
 
 /// Bar of five alternating fields whose total length is a round number of model units, by
 /// default centred at the bottom; dragging it moves the bar together with its labels.
-fn draw_scale_bar(ui: &Ui, painter: &Painter, rect: Rect, camera: &Camera, offset: &mut Vec2) {
+fn draw_scale_bar(
+    ui: &Ui,
+    painter: &Painter,
+    rect: Rect,
+    camera: &Camera,
+    unit: &str,
+    offset: &mut Vec2,
+) {
     let world_per_point = camera.pixel_size(rect.width(), rect.height());
     let Some((length, width)) = scale_bar_length(world_per_point) else {
         return;
@@ -346,7 +356,12 @@ fn draw_scale_bar(ui: &Ui, painter: &Painter, rect: Rect, camera: &Camera, offse
     let labels: Vec<_> = (0..=SCALE_BAR_FIELDS)
         .map(|i| {
             let value = length * i as f32 / SCALE_BAR_FIELDS as f32;
-            painter.layout_no_wrap(format_value(value), font(), TEXT)
+            // PrePoMax writes the unit after the last label.
+            let text = match i == SCALE_BAR_FIELDS && !unit.is_empty() {
+                true => format!("{} {unit}", format_value(value)),
+                false => format_value(value),
+            };
+            painter.layout_no_wrap(text, font(), TEXT)
         })
         .collect();
     // The outer labels are centred on the bar ends and stick out by half their width.
