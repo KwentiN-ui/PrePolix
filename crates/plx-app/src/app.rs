@@ -1243,6 +1243,12 @@ impl Workbench {
         if let (Some(item), Some(model)) = (response.toggle_active, self.model.as_mut()) {
             crate::setup::toggle_active(&mut model.fe, &item);
         }
+        if let (Some(item), Some(model)) = (response.swap_master_slave, self.model.as_mut())
+            && crate::setup::swap_master_slave(&mut model.fe, &item)
+        {
+            // The selection stays, but master and slave colours change places.
+            self.highlighted = None;
+        }
         if let Some(action) = response.analysis {
             self.analysis_action(action);
         }

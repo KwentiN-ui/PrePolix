@@ -104,6 +104,8 @@ pub struct TreeResponse {
     pub delete: Option<TreeItem>,
     /// Activate a deactivated step, boundary condition or load, or deactivate an active one.
     pub toggle_active: Option<TreeItem>,
+    /// Swap master and slave of a tie, spring connection or contact pair.
+    pub swap_master_slave: Option<TreeItem>,
     /// An entry of the analysis' context menu, or the monitor by double click.
     pub analysis: Option<AnalysisAction>,
     /// Open the material library.
@@ -505,6 +507,8 @@ struct Tree<'a> {
     closed: HashMap<TreeItem, &'static str>,
     /// Deactivated items, shown gray with PrePoMax's no-entry sign.
     inactive: HashSet<TreeItem>,
+    /// Items with a master and a slave, whose menu offers to swap them.
+    master_slave: HashSet<TreeItem>,
 }
 
 impl Tree<'_> {
@@ -641,6 +645,12 @@ impl Tree<'_> {
                         };
                         if ui.button(label).clicked() {
                             self.response.toggle_active = Some(item.clone());
+                        }
+                        ui.separator();
+                    }
+                    if self.master_slave.contains(&item) {
+                        if ui.button("Master und Slave tauschen").clicked() {
+                            self.response.swap_master_slave = Some(item.clone());
                         }
                         ui.separator();
                     }
@@ -1030,6 +1040,7 @@ pub fn show(
         holds_invalid: HashSet::new(),
         closed: HashMap::new(),
         inactive: HashSet::new(),
+        master_slave: HashSet::new(),
     };
     let expanding = tree.state.expand.clone();
     egui::ScrollArea::both()
@@ -1120,9 +1131,15 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             if !constraint.active() {
                 tree.inactive.insert(TreeItem::Constraint(i));
             }
+            if constraint.master_slave().is_some() {
+                tree.master_slave.insert(TreeItem::Constraint(i));
+            }
         }
-        for (i, _) in (fe.contact_pairs.iter().enumerate()).filter(|(_, c)| !c.active) {
-            tree.inactive.insert(TreeItem::ContactPair(i));
+        for (i, pair) in fe.contact_pairs.iter().enumerate() {
+            if !pair.active {
+                tree.inactive.insert(TreeItem::ContactPair(i));
+            }
+            tree.master_slave.insert(TreeItem::ContactPair(i));
         }
         let constraints = (fe.constraints.iter().enumerate())
             .map(|(i, c)| (TreeItem::Constraint(i), c.name()))
