@@ -585,12 +585,22 @@ impl eframe::App for PrepolixApp {
             .size_range(160.0..=700.0)
             .frame(egui::Frame::new().fill(crate::style::CONTROL))
             .show(ui, |ui| {
-                self.workbench.tree_tabs(ui);
+                let selected_tab = self.workbench.tree_tabs(ui);
+                // Tabs sit flush on the pane: their bottom border is the pane's top border.
+                ui.add_space(-ui.spacing().item_spacing.y - 1.0);
                 pane.inner_margin(4).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
                     let view = self.workbench.tree_view;
                     self.workbench.model_tree(ui, view);
                 });
+                // The selected tab opens into the pane like a Windows tab control.
+                if let Some(tab) = selected_tab {
+                    ui.painter().hline(
+                        tab.x_range().shrink(1.0),
+                        tab.bottom() - 0.5,
+                        egui::Stroke::new(1.0, crate::style::WINDOW),
+                    );
+                }
             });
         egui::Panel::bottom("output")
             .resizable(true)
@@ -806,7 +816,9 @@ impl Workbench {
     }
 
     /// Tab strip above the tree, like PrePoMax's Windows tab control.
-    fn tree_tabs(&mut self, ui: &mut egui::Ui) {
+    /// Returns the rect of the selected tab.
+    fn tree_tabs(&mut self, ui: &mut egui::Ui) -> Option<egui::Rect> {
+        let mut selected_rect = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.add_space(2.0);
@@ -827,6 +839,7 @@ impl Workbench {
                     crate::style::CONTROL
                 };
                 let rect = if selected {
+                    selected_rect = Some(rect);
                     rect
                 } else {
                     rect.shrink2(egui::vec2(0.0, 1.0))
@@ -849,6 +862,7 @@ impl Workbench {
                 }
             }
         });
+        selected_rect
     }
 
     fn output(&self, ui: &mut egui::Ui) {

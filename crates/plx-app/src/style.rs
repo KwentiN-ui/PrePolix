@@ -21,6 +21,10 @@ const TEXT: Color32 = Color32::from_rgb(0, 0, 0);
 pub const HOVER_FILL: Color32 = Color32::from_rgb(229, 241, 251);
 pub const PRESSED_FILL: Color32 = Color32::from_rgb(204, 228, 247);
 
+/// Minimum height of buttons, selectable labels and combo entries: text row plus padding and
+/// frame stroke, rounded up (checked by a test).
+const INTERACT_HEIGHT: f32 = 22.0;
+
 pub fn apply(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
@@ -39,6 +43,11 @@ pub fn apply(ctx: &egui::Context) {
     ctx.style_mut_of(Theme::Light, |style| {
         style.spacing.item_spacing = egui::vec2(6.0, 3.0);
         style.spacing.button_padding = egui::vec2(6.0, 2.0);
+        // egui lays out a selectable label without frame (unselected, not hovered) with its
+        // padding reduced by the frame stroke, so hovering or selecting it grows the row by two
+        // pixels and moves everything below. A minimum height that covers the framed size keeps
+        // all states of buttons, selectables and combo entries equally tall.
+        style.spacing.interact_size.y = INTERACT_HEIGHT;
         style.spacing.indent = 16.0;
         for (text_style, size) in [
             (egui::TextStyle::Body, 13.0),
@@ -101,4 +110,36 @@ fn visuals() -> Visuals {
         state.corner_radius = CornerRadius::ZERO;
     }
     v
+}
+
+#[cfg(test)]
+mod tests {
+    /// Heights of an unselected and a selected label; the selected one is framed like a hovered
+    /// one.
+    fn selectable_heights(ctx: &egui::Context) -> (f32, f32, f32) {
+        let mut heights = (0.0, 0.0, 0.0);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            heights.0 = ui.selectable_label(false, "1, 4").rect.height();
+            heights.1 = ui.selectable_label(true, "1, 4").rect.height();
+            heights.2 = ui.button("1, 4").rect.height();
+        });
+        output.textures_delta.clear();
+        heights
+    }
+
+    #[test]
+    fn hover_frame_keeps_row_height() {
+        let ctx = egui::Context::default();
+        super::apply(&ctx);
+        // Fonts are loaded during the first pass.
+        selectable_heights(&ctx);
+        let (plain, framed, button) = selectable_heights(&ctx);
+        assert_eq!(plain, framed, "selectable label grows when framed");
+        assert_eq!(plain, button);
+        assert_eq!(
+            plain,
+            super::INTERACT_HEIGHT,
+            "INTERACT_HEIGHT no longer covers the text"
+        );
+    }
 }

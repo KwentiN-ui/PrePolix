@@ -152,9 +152,11 @@ impl Camera {
         self.set_view(StandardView::Isometric);
     }
 
-    /// Looks at the target from one of PrePoMax's standard directions.
+    /// Looks at the target from one of PrePoMax's standard directions. The isometric view keeps
+    /// the global axis that is closest to up on the screen pointing up, as PrePoMax does, so a
+    /// model standing on Z is not laid on its side.
     pub fn set_view(&mut self, view: StandardView) {
-        use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+        use std::f32::consts::{FRAC_PI_2, PI};
         self.rotation = match view {
             StandardView::Front => Quat::IDENTITY,
             StandardView::Back => Quat::from_rotation_y(PI),
@@ -163,9 +165,8 @@ impl Camera {
             StandardView::Top => Quat::from_rotation_x(-FRAC_PI_2),
             StandardView::Bottom => Quat::from_rotation_x(FRAC_PI_2),
             StandardView::Isometric => {
-                let yaw = Quat::from_rotation_y(FRAC_PI_4);
-                let pitch = Quat::from_rotation_x(-(1.0_f32 / 2.0_f32.sqrt()).atan());
-                yaw * pitch
+                self.set_isometric_axis(closest_axis(self.up()));
+                return;
             }
         };
     }
@@ -421,5 +422,21 @@ mod tests {
         let third = 1.0 / 3.0_f32.sqrt();
         assert!((f.abs() - Vec3::splat(third)).length() < EPS, "{f:?}");
         assert!(f.z < 0.0, "{f:?}");
+    }
+
+    #[test]
+    fn isometric_view_keeps_the_upright_axis() {
+        let third = 1.0 / 3.0_f32.sqrt();
+        // A fresh camera looks from (1, 1, 1) with Y up, like PrePoMax.
+        let camera = Camera::default();
+        assert!((camera.forward() + Vec3::splat(third)).length() < EPS);
+        assert!(camera.right().dot(Vec3::Y).abs() < EPS && camera.up().y > 0.0);
+        // A slightly tilted view with Z up stays upright on Z.
+        let mut camera = Camera::default();
+        camera.set_isometric_axis(Vec3::Z);
+        camera.orbit(25.0, -15.0);
+        camera.set_view(StandardView::Isometric);
+        assert!(camera.right().dot(Vec3::Z).abs() < EPS && camera.up().z > 0.0);
+        assert!((camera.forward().abs() - Vec3::splat(third)).length() < EPS);
     }
 }
