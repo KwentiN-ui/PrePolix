@@ -239,10 +239,7 @@ impl PrepolixApp {
         let mut paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
         // Without files on the command line, the project open at the last exit is reopened.
         if paths.is_empty() {
-            let last: Option<PathBuf> = cc
-                .storage
-                .and_then(|s| eframe::get_value(s, LAST_PROJECT_KEY));
-            paths.extend(last.filter(|path| path.is_file()));
+            paths.extend(cc.storage.and_then(stored_last_project));
         }
         if !paths.is_empty() {
             let (sender, ctx) = (app.load_events.0.clone(), cc.egui_ctx.clone());
@@ -731,6 +728,14 @@ const STANDARD_VIEWS: [(StandardView, &str); 7] = [
 
 /// Storage key of the project file open at exit, reopened at the next start.
 const LAST_PROJECT_KEY: &str = "last_project";
+
+/// The project file stored at the last exit, if it still exists. It is stored as an
+/// `Option`, so it has to be read back as one.
+fn stored_last_project(storage: &dyn eframe::Storage) -> Option<PathBuf> {
+    eframe::get_value::<Option<PathBuf>>(storage, LAST_PROJECT_KEY)
+        .flatten()
+        .filter(|path| path.is_file())
+}
 
 impl eframe::App for PrepolixApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -4586,4 +4591,43 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView) -> WindowEvent 
         event = WindowEvent::Close;
     }
     event
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct MemoryStorage(HashMap<String, String>);
+
+    impl eframe::Storage for MemoryStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.to_owned(), value);
+        }
+
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
+        }
+
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn the_project_stored_at_exit_is_read_back() {
+        let path = std::env::temp_dir().join("prepolix_test_letztes_projekt.plx");
+        std::fs::write(&path, "").unwrap();
+        let mut storage = MemoryStorage::default();
+        eframe::set_value(&mut storage, LAST_PROJECT_KEY, &Some(path.clone()));
+        assert_eq!(stored_last_project(&storage), Some(path.clone()));
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(stored_last_project(&storage), None);
+        eframe::set_value(&mut storage, LAST_PROJECT_KEY, &None::<PathBuf>);
+        assert_eq!(stored_last_project(&storage), None);
+        assert_eq!(stored_last_project(&MemoryStorage::default()), None);
+    }
 }
