@@ -29,6 +29,10 @@ pub const PROJECT_EXTENSION: &str = "plx";
 /// Colour of selected faces and nodes, PrePoMax's highlight red.
 pub const HIGHLIGHT_COLOR: [f32; 3] = [1.0, 0.0, 0.0];
 
+/// Colour of the second region of an item, such as the slave surface of a contact pair:
+/// PrePoMax's secondary highlight colour, violet.
+pub const SECONDARY_HIGHLIGHT_COLOR: [f32; 3] = [238.0 / 255.0, 130.0 / 255.0, 238.0 / 255.0];
+
 /// Summary of one part, computed once on load so the GUI never iterates large meshes.
 pub struct PartInfo {
     pub name: String,
@@ -84,6 +88,8 @@ pub struct Highlight {
     pub outlines: HashSet<usize>,
     /// Element faces as (element, CalculiX face number).
     pub faces: HashSet<(ElementId, u8)>,
+    /// Element faces in the secondary highlight colour, e.g. slave surfaces.
+    pub secondary_faces: HashSet<(ElementId, u8)>,
     /// Nodes, drawn as points over the scene.
     pub nodes: Vec<NodeId>,
 }
@@ -514,7 +520,10 @@ impl Model {
                 })
                 .collect();
         }
-        if self.highlight.faces.is_empty() && !self.highlight.parts.contains(&part) {
+        if self.highlight.faces.is_empty()
+            && self.highlight.secondary_faces.is_empty()
+            && !self.highlight.parts.contains(&part)
+        {
             return;
         }
         let whole = self.highlight.parts.contains(&part);
@@ -523,9 +532,14 @@ impl Model {
         for face in &skin.faces {
             let count = face.corners.len() + face.mids.len();
             let key = (elements[face.element].id, face.face as u8 + 1);
-            if whole || self.highlight.faces.contains(&key) {
+            let color = if whole || self.highlight.faces.contains(&key) {
+                Some(HIGHLIGHT_COLOR)
+            } else {
+                (self.highlight.secondary_faces.contains(&key)).then_some(SECONDARY_HIGHLIGHT_COLOR)
+            };
+            if let Some(color) = color {
                 for vertex in &mut mesh.vertices[start..start + count] {
-                    vertex.color = HIGHLIGHT_COLOR;
+                    vertex.color = color;
                 }
             }
             start += count;
@@ -557,6 +571,11 @@ impl Model {
 
     pub fn skin(&self, part: usize) -> &PartSkin {
         &self.skins[part]
+    }
+
+    /// Skins of all parts, in the order of the mesh's parts.
+    pub fn skins(&self) -> &[PartSkin] {
+        &self.skins
     }
 
     /// Position of a node relative to the model origin as drawn, where picking happens.

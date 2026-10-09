@@ -5,12 +5,17 @@
 //! input file; node and element sets that CalculiX needs for them are derived when the input
 //! file is written, so the user never has to define sets by hand.
 
+mod contact;
 mod geometry;
 mod hot_spot;
 pub mod library;
 mod region;
 mod validity;
 
+pub use contact::{
+    Constraint, ContactMethod, ContactPair, DEFAULT_SURFACE_COLOR, Friction, GapConductance,
+    InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
+};
 pub use geometry::{
     Algorithm2d, Algorithm3d, Geometry, MeshSetupItem, MeshSetupKind, MeshingParameters,
 };
@@ -42,6 +47,13 @@ pub struct Project {
 pub struct FeModel {
     pub materials: Vec<Material>,
     pub sections: Vec<Section>,
+    /// Ties between surfaces, PrePoMax's Constraints.
+    #[serde(default)]
+    pub constraints: Vec<Constraint>,
+    #[serde(default)]
+    pub surface_interactions: Vec<SurfaceInteraction>,
+    #[serde(default)]
+    pub contact_pairs: Vec<ContactPair>,
     pub steps: Vec<Step>,
     /// CalculiX keywords the user added to the input file in the keyword editor, in the order
     /// they appear in it. They cover what the model cannot express yet.
@@ -67,12 +79,17 @@ impl FeModel {
     /// Follows a renamed part: regions on the part, or on the element set an input file
     /// defines for it, keep pointing at it.
     pub fn rename_part(&mut self, old: &str, new: &str) {
-        let regions = (self.sections.iter_mut().map(|s| &mut s.region)).chain(
-            self.steps.iter_mut().flat_map(|step| {
+        let regions = (self.sections.iter_mut().map(|s| &mut s.region))
+            .chain(
+                self.constraints
+                    .iter_mut()
+                    .flat_map(Constraint::regions_mut),
+            )
+            .chain((self.contact_pairs.iter_mut()).flat_map(|c| [&mut c.master, &mut c.slave]))
+            .chain(self.steps.iter_mut().flat_map(|step| {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
-            }),
-        );
+            }));
         for region in regions {
             match region {
                 Region::Parts(names) => {

@@ -11,8 +11,9 @@ use std::fmt::Write as _;
 
 use plx_mesh::{ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
-    BoundaryKind, FeModel, FieldOutput, FrequencyStep, Incrementation, LoadKind, OutputKind,
-    Region, StaticStep, Step, StepKind, UserKeyword,
+    BoundaryKind, Constraint, ContactMethod, ContactPair, FeModel, FieldOutput, FrequencyStep,
+    GapConductance, Incrementation, InteractionProperty, LoadKind, OutputKind, Region, StaticStep,
+    Step, StepKind, SurfaceBehavior, SurfaceInteraction, UserKeyword,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -21,6 +22,10 @@ pub enum WriteError {
     EmptyRegion { item: String, what: &'static str },
     #[error("{item}: Material {material} existiert nicht")]
     UnknownMaterial { item: String, material: String },
+    #[error("{item}: Surface Interaction {interaction} existiert nicht")]
+    UnknownInteraction { item: String, interaction: String },
+    #[error("{item}: Surface {surface} existiert nicht")]
+    UnknownSurface { item: String, surface: String },
 }
 
 /// One entry of the keyword tree of an input file, the structure PrePoMax's keyword editor
@@ -211,6 +216,9 @@ pub fn model_keywords(
     // Regions are resolved first: their sets must precede the materials and steps.
     let materials = materials(model);
     let sections = sections(&mut sets, model)?;
+    let constraints = constraints(&mut sets, model)?;
+    let interactions = model.surface_interactions.iter().map(interaction).collect();
+    let contact_pairs = contact_pairs(&mut sets, model)?;
     let steps = model
         .steps
         .iter()
@@ -267,9 +275,9 @@ pub fn model_keywords(
         Keyword::title("Materials", materials),
         Keyword::title("Sections", sections),
         empty("Pre-tension sections"),
-        empty("Constraints"),
-        empty("Surface interactions"),
-        empty("Contact pairs"),
+        Keyword::title("Constraints", constraints),
+        Keyword::title("Surface interactions", interactions),
+        Keyword::title("Contact pairs", contact_pairs),
         empty("Amplitudes"),
         empty("Initial conditions"),
         Keyword::title("Steps", steps),
@@ -474,6 +482,27 @@ impl<'a> Sets<'a> {
         Ok(set)
     }
 
+    /// Surface of a contact or tie side: a surface of the input file, or one built from
+    /// picked faces and named like PrePoMax's `Internal_Selection-1_Tie-1_Master`.
+    fn surface(&mut self, item: &str, side: &str, region: &Region) -> Result<String, WriteError> {
+        match region {
+            Region::Surface(surface) if self.mesh.surfaces.contains_key(surface) => {
+                Ok(surface.clone())
+            }
+            Region::Surface(surface) => Err(WriteError::UnknownSurface {
+                item: item.to_owned(),
+                surface: surface.clone(),
+            }),
+            Region::Faces(faces) if !faces.is_empty() => {
+                let postfix = format!("{}_{side}", name(item));
+                let surface = self.free_name("Internal_Selection", &postfix);
+                self.add_face_surface(&surface, faces);
+                Ok(surface)
+            }
+            _ => Err(empty(item, "Elementflächen")),
+        }
+    }
+
     /// Element sets and face numbers of a face region, for pressure loads.
     fn face_sets(&mut self, item: &str, region: &Region) -> Result<Vec<(String, u8)>, WriteError> {
         match region {
@@ -534,6 +563,138 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError
         )));
     }
     Ok(keywords)
+}
+
+/// Tie constraints as PrePoMax's `CalTie` writes them: slave surface first.
+fn constraints(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+    let mut keywords = Vec::new();
+    for constraint in &model.constraints {
+        if !constraint.active() {
+            keywords.push(deactivated(constraint.name()));
+            continue;
+        }
+        match constraint {
+            Constraint::Tie(tie) => {
+                let master = sets.surface(&tie.name, "Master", &tie.master)?;
+                let slave = sets.surface(&tie.name, "Slave", &tie.slave)?;
+                let mut out = format!("*Tie, Name={}", name(&tie.name));
+                if let Some(tolerance) = tie.position_tolerance {
+                    let _ = write!(out, ", Position tolerance={}", number(tolerance));
+                }
+                if !tie.adjust {
+                    out.push_str(", Adjust=No");
+                }
+                let _ = writeln!(out, "\n{slave}, {master}");
+                keywords.push(Keyword::generated(out));
+            }
+        }
+    }
+    Ok(keywords)
+}
+
+/// A surface interaction with its models as children, like PrePoMax's
+/// `CalSurfaceInteraction`.
+fn interaction(interaction: &SurfaceInteraction) -> Keyword {
+    let properties = (interaction.properties.iter())
+        .map(|property| {
+            let mut out = String::new();
+            match property {
+                InteractionProperty::SurfaceBehavior(behavior) => {
+                    let kind = behavior.keyword();
+                    let _ = writeln!(out, "*Surface behavior, Pressure-overclosure={kind}");
+                    match behavior {
+                        SurfaceBehavior::Hard => {}
+                        SurfaceBehavior::Linear { k, sigma_inf, c0 } => {
+                            let _ = write!(out, "{}, {}", number(*k), number(*sigma_inf));
+                            if let Some(c0) = c0 {
+                                let _ = write!(out, ", {}", number(*c0));
+                            }
+                            out.push('\n');
+                        }
+                        SurfaceBehavior::Exponential { c0, p0 } => {
+                            let _ = writeln!(out, "{}, {}", number(*c0), number(*p0));
+                        }
+                        SurfaceBehavior::Tabular(rows) => {
+                            for [pressure, overclosure] in rows {
+                                let _ = writeln!(
+                                    out,
+                                    "{}, {}",
+                                    number(*pressure),
+                                    number(*overclosure)
+                                );
+                            }
+                        }
+                        SurfaceBehavior::Tied { k } => {
+                            let _ = writeln!(out, "{}", number(*k));
+                        }
+                    }
+                }
+                InteractionProperty::Friction(friction) => {
+                    let _ = write!(out, "*Friction\n{}", number(friction.coefficient));
+                    if let Some(slope) = friction.stick_slope {
+                        let _ = write!(out, ", {}", number(slope));
+                    }
+                    out.push('\n');
+                }
+                InteractionProperty::GapConductance(conductance) => {
+                    out.push_str("*Gap conductance\n");
+                    match conductance {
+                        GapConductance::Constant(value) => {
+                            let _ = writeln!(out, "{}", number(*value));
+                        }
+                        GapConductance::Tabular(rows) => {
+                            for row in rows {
+                                let row: Vec<String> = row.iter().map(|&v| number(v)).collect();
+                                let _ = writeln!(out, "{}", row.join(", "));
+                            }
+                        }
+                    }
+                }
+            }
+            Keyword::generated(out)
+        })
+        .collect();
+    let header = format!("*Surface interaction, Name={}\n", name(&interaction.name));
+    Keyword::parent(header, properties)
+}
+
+/// Contact pairs as PrePoMax's `CalContactPair` writes them: slave surface first.
+fn contact_pairs(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+    let mut keywords = Vec::new();
+    for pair in &model.contact_pairs {
+        if !pair.active {
+            keywords.push(deactivated(&pair.name));
+            continue;
+        }
+        if !(model.surface_interactions.iter()).any(|s| s.name == pair.interaction) {
+            return Err(WriteError::UnknownInteraction {
+                item: pair.name.clone(),
+                interaction: pair.interaction.clone(),
+            });
+        }
+        let master = sets.surface(&pair.name, "Master", &pair.master)?;
+        let slave = sets.surface(&pair.name, "Slave", &pair.slave)?;
+        keywords.push(Keyword::generated(contact_pair(pair, &master, &slave)));
+    }
+    Ok(keywords)
+}
+
+fn contact_pair(pair: &ContactPair, master: &str, slave: &str) -> String {
+    let mut out = format!(
+        "** Name: {}\n*Contact pair, Interaction={}, Type={}",
+        pair.name,
+        name(&pair.interaction),
+        pair.method.name()
+    );
+    if pair.method == ContactMethod::NodeToSurface && pair.small_sliding {
+        out.push_str(", Small sliding");
+    }
+    if pair.adjust {
+        let size = pair.adjustment_size.unwrap_or(0.0);
+        let _ = write!(out, ", Adjust={}", number(size));
+    }
+    let _ = writeln!(out, "\n{slave}, {master}");
+    out
 }
 
 /// A step as PrePoMax structures it: the step title holds `*Step`, which holds the procedure

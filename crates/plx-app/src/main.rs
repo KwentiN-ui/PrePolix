@@ -3,6 +3,8 @@
 mod analysis;
 mod animation;
 mod app;
+mod contact_search;
+mod contacts;
 mod field_output_dialog;
 mod gizmo;
 mod history_output_dialog;
@@ -61,6 +63,8 @@ mod tests {
             ("analysis.rs", include_str!("analysis.rs")),
             ("animation.rs", include_str!("animation.rs")),
             ("app.rs", include_str!("app.rs")),
+            ("contact_search.rs", include_str!("contact_search.rs")),
+            ("contacts.rs", include_str!("contacts.rs")),
             (
                 "field_output_dialog.rs",
                 include_str!("field_output_dialog.rs"),

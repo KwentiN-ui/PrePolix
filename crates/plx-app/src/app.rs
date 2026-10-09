@@ -5,6 +5,7 @@ use plx_render::StandardView;
 
 use crate::analysis::{Analysis, MonitorEvent};
 use crate::animation::{AnimationKind, ColorLimits, Playback};
+use crate::contact_search::{ContactSearchDialog, SearchResult};
 use crate::field_output_dialog::{DialogAction, FieldOutputDialog};
 use crate::history_output_dialog::HistoryOutputDialog;
 use crate::history_table::HistoryTable;
@@ -77,6 +78,8 @@ struct Workbench {
     editor: Option<Editor>,
     /// Open CalculiX keyword editor.
     keyword_editor: Option<KeywordEditor>,
+    /// Open search for contact pairs.
+    contact_search: Option<ContactSearchDialog>,
     /// Open material library editor.
     material_library: Option<MaterialLibraryEditor>,
     /// Open dialog creating or editing a field output derived from the shown results.
@@ -86,7 +89,8 @@ struct Workbench {
     /// Open table of a history output component.
     history_table: Option<HistoryTable>,
     /// The tree selection whose region is highlighted.
-    highlighted: Option<(TreeView, TreeItem)>,
+    /// `None` until it is computed, so a dialog's highlight is cleared once it closes.
+    highlighted: Option<Option<(TreeView, TreeItem)>>,
     analysis: Option<Analysis>,
     /// Results file the user asked to open; read by the app on a worker thread.
     open_results: Option<PathBuf>,
@@ -160,6 +164,7 @@ impl PrepolixApp {
                 frame_cache: Default::default(),
                 editor: None,
                 keyword_editor: None,
+                contact_search: None,
                 material_library: None,
                 field_output_dialog: None,
                 history_dialog: None,
@@ -345,6 +350,7 @@ impl PrepolixApp {
             });
             ui.menu_button("Netz", |ui| self.workbench.mesh_menu(ui));
             ui.menu_button("Modell", |ui| self.workbench.model_menu(ui));
+            ui.menu_button("Interaktion", |ui| self.workbench.interaction_menu(ui));
             ui.menu_button("Analyse", |ui| self.workbench.analysis_menu(ui));
             ui.menu_button("Ergebnisse", |ui| self.workbench.results_menu(ui));
             ui.menu_button("Werkzeuge", |ui| {
@@ -613,6 +619,7 @@ impl eframe::App for PrepolixApp {
             .update(&ctx, view, &mut workbench.output);
         self.workbench.properties_window(&ctx);
         self.workbench.editor_window(&ctx);
+        self.workbench.contact_search_window(&ctx);
         self.workbench.section_window(&ctx);
         self.workbench.keyword_editor_window(&ctx);
         self.workbench.material_library_window(&ctx);
@@ -935,6 +942,9 @@ impl Workbench {
         }
         if response.evaluate_hot_spots {
             self.evaluate_hot_spots(false);
+        }
+        if response.search_contacts {
+            self.open_contact_search();
         }
     }
 
@@ -1509,6 +1519,34 @@ impl Workbench {
     }
 
     /// PrePoMax's Model menu: create items of the FE model.
+    /// PrePoMax's Interaction menu: constraints, contacts and the search for contact pairs.
+    fn interaction_menu(&mut self, ui: &mut egui::Ui) {
+        if self.setup_model().is_none() {
+            ui.label("Zuerst eine .inp-Datei öffnen");
+            return;
+        }
+        let mut kind = None;
+        for (item, label) in [
+            (NewItem::Constraint, "Constraint erstellen …"),
+            (
+                NewItem::SurfaceInteraction,
+                "Surface Interaction erstellen …",
+            ),
+            (NewItem::ContactPair, "Kontaktpaar erstellen …"),
+        ] {
+            if ui.button(label).clicked() {
+                kind = Some(item);
+            }
+        }
+        if let Some(kind) = kind {
+            self.create(kind);
+        }
+        ui.separator();
+        if ui.button("Kontaktpaare suchen …").clicked() {
+            self.open_contact_search();
+        }
+    }
+
     fn model_menu(&mut self, ui: &mut egui::Ui) {
         if self.setup_model().is_none() {
             ui.label("Zuerst eine .inp-Datei öffnen");
@@ -2185,6 +2223,40 @@ impl Workbench {
         }
     }
 
+    /// PrePoMax's Search Contact Pairs; it replaces an open item dialog.
+    fn open_contact_search(&mut self) {
+        if let Some(model) = self.setup_model() {
+            self.contact_search = Some(ContactSearchDialog::new(&model.fe));
+            self.editor = None;
+            self.set_tree_view(TreeView::FeModel);
+        }
+    }
+
+    fn contact_search_window(&mut self, ctx: &egui::Context) {
+        let (Some(dialog), Some(model)) = (&mut self.contact_search, &mut self.model) else {
+            return;
+        };
+        match dialog.show(ctx, model) {
+            SearchResult::Open => {}
+            SearchResult::Ok(ties, pairs) => {
+                let created = format!(
+                    "Kontaktsuche: {} Ties und {} Kontaktpaare erstellt",
+                    ties.len(),
+                    pairs.len()
+                );
+                model.fe.constraints.extend(ties);
+                model.fe.contact_pairs.extend(pairs);
+                self.output.push(created);
+                self.contact_search = None;
+                self.highlighted = None;
+            }
+            SearchResult::Cancel => {
+                self.contact_search = None;
+                self.highlighted = None;
+            }
+        }
+    }
+
     fn editor_window(&mut self, ctx: &egui::Context) {
         let (Some(editor), Some(model)) = (&mut self.editor, &mut self.model) else {
             return;
@@ -2237,18 +2309,20 @@ impl Workbench {
         let highlight = if let Some(dialog) = &self.section_dialog {
             self.highlighted = None;
             dialog.highlight()
+        } else if let Some(dialog) = &self.contact_search {
+            self.highlighted = None;
+            dialog.highlight(model)
         } else if let Some(editor) = &self.editor {
+            self.highlighted = None;
             editor.highlight(model)
         } else {
-            if self.highlighted == self.tree.selected {
+            if self.highlighted.as_ref() == Some(&self.tree.selected) {
                 return;
             }
-            self.highlighted = self.tree.selected.clone();
+            self.highlighted = Some(self.tree.selected.clone());
             match &self.tree.selected {
                 Some((TreeView::FeModel, TreeItem::Part(part))) => Highlight::part(*part),
-                Some((TreeView::FeModel, item)) => crate::setup::item_region(&model.fe, item)
-                    .map(|region| crate::setup::region_highlight(model, region))
-                    .unwrap_or_default(),
+                Some((TreeView::FeModel, item)) => crate::setup::item_highlight(model, item),
                 _ => Default::default(),
             }
         };
