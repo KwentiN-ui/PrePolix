@@ -45,6 +45,7 @@ enum Row {
     Basis,
     Equation,
     Unit,
+    CoordinateSystem,
 }
 
 impl Row {
@@ -56,6 +57,7 @@ impl Row {
             Row::Basis => "Grenzwert bezogen auf",
             Row::Equation => "Gleichung",
             Row::Unit => "Einheit",
+            Row::CoordinateSystem => "Koordinatensystem",
         }
     }
 
@@ -76,6 +78,11 @@ impl Row {
                  Max, Min, Pow und If stehen zur Verfügung."
             }
             Row::Unit => "Benutzerdefinierte Einheit der Feldausgabe, in der Legende angezeigt.",
+            Row::CoordinateSystem => {
+                "Koordinatensystem aus den Features der Ergebnisse, in dessen Richtungen die \
+                 Komponenten eines Vektor- oder Tensorfelds umgerechnet werden; bei einem \
+                 zylindrischen in r, theta, z an jedem Knoten."
+            }
         }
     }
 }
@@ -108,6 +115,8 @@ pub struct FieldOutputDialog {
     fields: Vec<(String, Vec<String>)>,
     /// Names a new output may not take.
     taken: Vec<String>,
+    /// Coordinate systems a field can be transformed into.
+    systems: Vec<String>,
 }
 
 impl FieldOutputDialog {
@@ -180,6 +189,15 @@ impl FieldOutputDialog {
             .or_else(|| fields.first().map(|(f, c)| (f.clone(), c[0].clone())))
             .unwrap_or_default();
         let name = |prefix: &str| next_name(prefix, taken.iter().map(String::as_str));
+        let systems: Vec<String> = (view.coordinate_systems.iter())
+            .map(|c| c.name.clone())
+            .collect();
+        // Vectors and tensors can be transformed; STRESS or DISP first.
+        let transformable = ["STRESS", "DISP"]
+            .into_iter()
+            .find(|f| fields.iter().any(|(n, _)| n == f))
+            .map(String::from)
+            .unwrap_or_else(|| field.clone());
         let drafts = [
             FieldOutput {
                 name: name(TYPES[LIMIT].1),
@@ -207,8 +225,8 @@ impl FieldOutputDialog {
             FieldOutput {
                 name: name(TYPES[TRANSFORM].1),
                 kind: FieldOutputKind::CoordinateSystemTransform {
-                    field,
-                    coordinate_system: String::new(),
+                    field: transformable,
+                    coordinate_system: systems.first().cloned().unwrap_or_default(),
                 },
             },
         ];
@@ -224,6 +242,7 @@ impl FieldOutputDialog {
             error: None,
             fields,
             taken,
+            systems,
         }
     }
 
@@ -250,8 +269,7 @@ impl FieldOutputDialog {
     fn unavailable(&self) -> Option<&'static str> {
         if self.fields.is_empty() {
             Some(NO_FIELDS)
-        } else if self.kind == TRANSFORM {
-            // prepolix has no coordinate systems yet.
+        } else if self.kind == TRANSFORM && self.systems.is_empty() {
             Some(NO_COORDINATE_SYSTEM)
         } else {
             None
@@ -427,6 +445,7 @@ impl FieldOutputDialog {
             ui.strong("Daten");
         });
         let fields = &self.fields;
+        let systems = &self.systems;
         let focus = &mut self.focus;
         let draft = &mut self.drafts[self.kind];
         egui::Grid::new("field output properties")
@@ -472,7 +491,33 @@ impl FieldOutputDialog {
                             ui.add(edit).has_focus()
                         });
                     }
-                    FieldOutputKind::CoordinateSystemTransform { .. } => {}
+                    FieldOutputKind::CoordinateSystemTransform {
+                        field,
+                        coordinate_system,
+                    } => {
+                        prop_row(ui, focus, Row::Field, |ui| {
+                            let response = egui::ComboBox::from_id_salt("transform field")
+                                .selected_text(field.as_str())
+                                .width(180.0)
+                                .show_ui(ui, |ui| {
+                                    for (name, _) in fields {
+                                        ui.selectable_value(field, name.clone(), name);
+                                    }
+                                });
+                            response.response.clicked()
+                        });
+                        prop_row(ui, focus, Row::CoordinateSystem, |ui| {
+                            let response = egui::ComboBox::from_id_salt("transform system")
+                                .selected_text(coordinate_system.as_str())
+                                .width(180.0)
+                                .show_ui(ui, |ui| {
+                                    for name in systems {
+                                        ui.selectable_value(coordinate_system, name.clone(), name);
+                                    }
+                                });
+                            response.response.clicked()
+                        });
+                    }
                 }
             });
         if let FieldOutputKind::Equation { equation, .. } = &mut draft.kind {
@@ -700,5 +745,19 @@ mod tests {
         let mut dialog = FieldOutputDialog::create(&view, &mesh);
         dialog.kind = TRANSFORM;
         assert_eq!(dialog.output().unwrap_err(), NO_COORDINATE_SYSTEM);
+    }
+
+    #[test]
+    fn transform_offers_the_coordinate_systems_of_the_results() {
+        let (mut view, mesh) = results();
+        view.coordinate_systems = vec![plx_model::CoordinateSystem::new("CS-1")];
+        let mut dialog = FieldOutputDialog::create(&view, &mesh);
+        dialog.kind = TRANSFORM;
+        let output = dialog.output().unwrap();
+        assert!(matches!(
+            output.kind,
+            FieldOutputKind::CoordinateSystemTransform { ref coordinate_system, .. }
+                if coordinate_system == "CS-1"
+        ));
     }
 }

@@ -246,6 +246,158 @@ pub fn section_mesh(
     render
 }
 
+/// The result values where a plane cuts the elements, interpolated along the cut element
+/// edges like the colours of the section faces. Edges with a node without value are skipped.
+#[derive(Clone, Debug, Default)]
+pub struct SectionValues {
+    /// Points where the plane crosses an element edge with their value, each edge once.
+    pub points: Vec<(DVec3, f32)>,
+    /// Smallest and largest value with the points where they are, `[min, max]`.
+    pub extremes: Option<[(DVec3, f32); 2]>,
+    /// Area of the cut through solid elements and the integral of the values over it.
+    pub area: f64,
+    area_integral: f64,
+    /// Length of the cut through surface elements, e.g. of a 2D model, and the integral of
+    /// the values along it.
+    pub length: f64,
+    length_integral: f64,
+}
+
+impl SectionValues {
+    /// Area-weighted mean on the cut of solid elements, or the length-weighted one on the cut
+    /// of surface elements when no solid is cut.
+    pub fn mean(&self) -> Option<f64> {
+        if self.area > 0.0 {
+            Some(self.area_integral / self.area)
+        } else if self.length > 0.0 {
+            Some(self.length_integral / self.length)
+        } else {
+            None
+        }
+    }
+
+    /// Adds the values of another cut, e.g. of another part.
+    pub fn merge(&mut self, other: SectionValues) {
+        self.points.extend(other.points);
+        if let Some(extremes) = other.extremes {
+            self.add_extremes(extremes);
+        }
+        self.area += other.area;
+        self.area_integral += other.area_integral;
+        self.length += other.length;
+        self.length_integral += other.length_integral;
+    }
+
+    fn add_extremes(&mut self, [low, high]: [(DVec3, f32); 2]) {
+        self.extremes = Some(match self.extremes {
+            None => [low, high],
+            Some([min, max]) => [
+                if low.1 < min.1 { low } else { min },
+                if high.1 > max.1 { high } else { max },
+            ],
+        });
+    }
+}
+
+/// The values on the cut of a plane through the elements of a part; see [`SectionValues`].
+pub fn section_values(
+    cells: &SectionCells,
+    coords: &[[f64; 3]],
+    point: DVec3,
+    normal: DVec3,
+    values: &[f32],
+) -> SectionValues {
+    let mut result = SectionValues::default();
+    let normal = normal.normalize_or_zero();
+    if normal == DVec3::ZERO {
+        return result;
+    }
+    let u = normal.any_orthonormal_vector();
+    let v = normal.cross(u);
+    let value = |node: u32| values.get(node as usize).copied().filter(|v| v.is_finite());
+    let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    let mut distance = [0.0; 8];
+    for cell in &cells.cells {
+        let corners = &cell.corners[..corner_count(cell.shape)];
+        let (mut below, mut above) = (false, false);
+        for (d, &node) in distance.iter_mut().zip(corners) {
+            *d = normal.dot(DVec3::from(coords[node as usize]) - point);
+            if *d < 0.0 {
+                below = true;
+            } else {
+                above = true;
+            }
+        }
+        if !(below && above) {
+            continue;
+        }
+        // The cut corners of the cell, each crossed edge once; `None` without a value.
+        let mut polygon: Vec<((usize, usize), DVec3, Option<f32>)> = Vec::with_capacity(6);
+        for face in cell.shape.faces() {
+            let n = face.corners.len();
+            for k in 0..n {
+                let (a, b) = (face.corners[k], face.corners[(k + 1) % n]);
+                let (da, db) = (distance[a], distance[b]);
+                let edge = (a.min(b), a.max(b));
+                if (da < 0.0) == (db < 0.0) || polygon.iter().any(|p| p.0 == edge) {
+                    continue;
+                }
+                let (na, nb) = (corners[a], corners[b]);
+                let t = da / (da - db);
+                let (pa, pb) = (
+                    DVec3::from(coords[na as usize]),
+                    DVec3::from(coords[nb as usize]),
+                );
+                let at = pa + (pb - pa) * t;
+                let interpolated = match (value(na), value(nb)) {
+                    (Some(va), Some(vb)) => Some(va + (vb - va) * t as f32),
+                    _ => None,
+                };
+                polygon.push((edge, at, interpolated));
+                if let Some(x) = interpolated {
+                    result.add_extremes([(at, x), (at, x)]);
+                    if seen.insert((na.min(nb), na.max(nb))) {
+                        result.points.push((at, x));
+                    }
+                }
+            }
+        }
+        let Some(mut polygon) = (polygon.into_iter())
+            .map(|(_, at, x)| Some((at, x? as f64)))
+            .collect::<Option<Vec<(DVec3, f64)>>>()
+        else {
+            continue;
+        };
+        if cell.shape.family() == ElementFamily::Surface {
+            if let [(a, va), (b, vb)] = polygon[..] {
+                let length = (b - a).length();
+                result.length += length;
+                result.length_integral += length * (va + vb) * 0.5;
+            }
+            continue;
+        }
+        if polygon.len() < 3 {
+            continue;
+        }
+        let centre = polygon.iter().map(|p| p.0).sum::<DVec3>() / polygon.len() as f64;
+        let angle = |p: DVec3| {
+            let d = p - centre;
+            d.dot(v).atan2(d.dot(u))
+        };
+        polygon.sort_by(|a, b| angle(a.0).total_cmp(&angle(b.0)));
+        // Values vary linearly over each triangle of the fan: its integral is the area times
+        // the mean of its corners.
+        let (p0, v0) = polygon[0];
+        for k in 1..polygon.len() - 1 {
+            let ((p1, v1), (p2, v2)) = (polygon[k], polygon[k + 1]);
+            let area = (p1 - p0).cross(p2 - p0).length() * 0.5;
+            result.area += area;
+            result.area_integral += area * (v0 + v1 + v2) / 3.0;
+        }
+    }
+    result
+}
+
 /// A point where the plane crosses an element edge.
 #[derive(Clone, Copy, Debug)]
 struct CutPoint {
@@ -390,6 +542,34 @@ mod tests {
                 .iter()
                 .all(|v| (v.scalar - 0.25).abs() < 1e-6)
         );
+    }
+
+    #[test]
+    fn values_on_the_section_are_interpolated_and_averaged() {
+        let mesh = cubes(2);
+        let cells = SectionCells::new(&mesh, &mesh.parts[0]);
+        // Value y + 10 z on the nodes; the plane z = 0.25 sees 2.5 to 3.5.
+        let values: Vec<f32> = (mesh.coords().iter())
+            .map(|p| (p[1] + 10.0 * p[2]) as f32)
+            .collect();
+        let cut = section_values(
+            &cells,
+            mesh.coords(),
+            DVec3::new(0.0, 0.0, 0.25),
+            DVec3::Z,
+            &values,
+        );
+        let [min, max] = cut.extremes.unwrap();
+        assert!((min.1 - 2.5).abs() < 1e-6 && (max.1 - 3.5).abs() < 1e-6);
+        assert!((min.0.z - 0.25).abs() < 1e-9 && min.0.y.abs() < 1e-9);
+        assert!((max.0.y - 1.0).abs() < 1e-9);
+        // Two unit squares with the value 2.5 + y: the mean is 3.
+        assert!((cut.area - 2.0).abs() < 1e-9);
+        assert!((cut.mean().unwrap() - 3.0).abs() < 1e-6);
+        // The 4 edges along z of each cube, the shared ones once.
+        assert_eq!(cut.points.len(), 6);
+        let beside = section_values(&cells, mesh.coords(), DVec3::Z * 5.0, DVec3::Z, &values);
+        assert!(beside.extremes.is_none() && beside.mean().is_none());
     }
 
     #[test]

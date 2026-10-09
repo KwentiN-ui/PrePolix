@@ -12,8 +12,8 @@ use plx_model::SectionKind;
 use plx_model::{FeModel, Geometry, UnitSystem};
 use plx_render::contour::normalize;
 use plx_render::{
-    ClipPlane, RenderMesh, SectionCells, Vertex, lighten, part_color, part_render_mesh,
-    section_mesh, wireframe_edges,
+    ClipPlane, RenderMesh, SectionCells, SectionValues, Vertex, lighten, part_color,
+    part_render_mesh, section_mesh, section_values, wireframe_edges,
 };
 
 use crate::exploded::{Assembly, Explosion, Parameters, PartShape};
@@ -653,6 +653,36 @@ impl Model {
             }
         }
         meshes
+    }
+
+    /// The shown result values where a plane in model coordinates cuts the visible parts:
+    /// of the parts as shown, or of the undeformed mesh, for values at true positions.
+    pub fn section_values(
+        &self,
+        point: DVec3,
+        normal: DVec3,
+        shown: bool,
+    ) -> Option<SectionValues> {
+        let values = self.results.as_ref()?.shown_values()?;
+        let cells = self.section_cells.get_or_init(|| {
+            self.mesh
+                .parts
+                .iter()
+                .map(|part| SectionCells::new(&self.mesh, part))
+                .collect()
+        });
+        let coords = if shown {
+            self.deformed_coords().0
+        } else {
+            std::borrow::Cow::Borrowed(self.mesh.coords())
+        };
+        (cells.iter().zip(&self.parts))
+            .filter(|(_, info)| info.visible)
+            .map(|(cells, _)| section_values(cells, &coords, point, normal, &values))
+            .reduce(|mut all, part| {
+                all.merge(part);
+                all
+            })
     }
 
     /// The model origin in global coordinates; render positions are relative to it.

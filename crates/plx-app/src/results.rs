@@ -72,6 +72,13 @@ pub struct ResultsView {
     /// Mirrored and patterned copies drawn besides the results, as PrePoMax's
     /// transformations; the legend and the extremes include them.
     pub transformations: Vec<Transformation>,
+    /// Coordinate systems of the results' features, for transformed field outputs.
+    pub coordinate_systems: Vec<plx_model::CoordinateSystem>,
+    /// Range of the shown values on the section plane, which replaces the model's range in
+    /// the legend while only the section is shown.
+    pub section_range: Option<(f32, f32)>,
+    /// The plane result shown alone, by index in the features of the results.
+    pub plane_result: Option<usize>,
     /// Unit system of the values, PrePoMax's results unit system: that of the FE model the
     /// results belong to; the legend shows units after it.
     pub units: UnitSystem,
@@ -122,6 +129,9 @@ impl ResultsView {
             history_outputs: Vec::new(),
             history: Vec::new(),
             transformations: Vec::new(),
+            coordinate_systems: Vec::new(),
+            section_range: None,
+            plane_result: None,
             units: UnitSystem::default(),
             model_size: bounds.map_or(1.0, model_size),
         };
@@ -191,7 +201,12 @@ impl ResultsView {
         mesh: &FeMesh,
     ) -> Result<Vec<String>, String> {
         let shown = self.shown_names();
-        field_output::compute(&output, &mut self.increments, mesh)?;
+        field_output::compute(
+            &output,
+            &mut self.increments,
+            mesh,
+            &self.coordinate_systems,
+        )?;
         let at = match index.filter(|&i| i < self.field_outputs.len()) {
             Some(i) => {
                 let old = std::mem::replace(&mut self.field_outputs[i], output);
@@ -225,11 +240,39 @@ impl ResultsView {
         warnings
     }
 
+    /// Takes the coordinate systems of the results' features and computes the outputs that
+    /// depend on them again; returns their failures.
+    pub fn set_coordinate_systems(
+        &mut self,
+        systems: Vec<plx_model::CoordinateSystem>,
+        mesh: &FeMesh,
+    ) -> Vec<String> {
+        if systems == self.coordinate_systems {
+            return Vec::new();
+        }
+        self.coordinate_systems = systems;
+        let first = (self.field_outputs.iter()).position(|o| {
+            matches!(
+                o.kind,
+                plx_results::FieldOutputKind::CoordinateSystemTransform { .. }
+            )
+        });
+        let Some(first) = first else {
+            return Vec::new();
+        };
+        let shown = self.shown_names();
+        let mut warnings = self.recompute_from(first, mesh);
+        warnings.extend(self.recompute_history(mesh));
+        self.restore_selection(shown);
+        warnings
+    }
+
     /// Computes the outputs from `start` on again; one that fails loses its field.
     fn recompute_from(&mut self, start: usize, mesh: &FeMesh) -> Vec<String> {
         let mut warnings = Vec::new();
         for output in self.field_outputs.iter().skip(start) {
-            if let Err(error) = field_output::compute(output, &mut self.increments, mesh) {
+            let systems = &self.coordinate_systems;
+            if let Err(error) = field_output::compute(output, &mut self.increments, mesh, systems) {
                 field_output::remove(&output.name, &mut self.increments);
                 warnings.push(format!("{}: {error}", output.name));
             }
@@ -583,7 +626,15 @@ impl ResultsView {
 
     pub fn legend(&self) -> Option<Legend> {
         let (field, component) = self.current()?;
-        let (min, max) = self.value_range()?;
+        let (min, max) = match self.section_range {
+            Some(range) => range,
+            None => self.value_range()?,
+        };
+        let scope = if self.section_range.is_some() {
+            "Section plane"
+        } else {
+            "Automatic"
+        };
         // PrePoMax writes names with blanks instead of underscores and dashes.
         let name = |n: &str| n.replace(['_', '-'], " ");
         let derived = self.field_outputs.iter().find(|o| o.name == field.name);
@@ -597,7 +648,7 @@ impl ResultsView {
             .unwrap_or_default();
         Some(Legend {
             title: format!(
-                "{}: {}{unit}\nAutomatic",
+                "{}: {}{unit}\n{scope}",
                 name(&field.name),
                 name(&component.name)
             ),

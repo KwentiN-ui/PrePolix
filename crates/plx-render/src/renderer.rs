@@ -92,6 +92,9 @@ pub struct ViewportRenderer {
     /// Section faces of the parts, drawn while the section view is on.
     sections: Vec<GpuMesh>,
     clip: Option<ClipPlane>,
+    /// Draw only the section faces of the parts and their outlines, e.g. to read results on
+    /// the plane.
+    sections_only: bool,
     targets: Targets,
 }
 
@@ -264,6 +267,7 @@ impl ViewportRenderer {
             parts: Vec::new(),
             sections: Vec::new(),
             clip: None,
+            sections_only: false,
             targets: Targets::new(device, 1, 1),
         }
     }
@@ -277,6 +281,11 @@ impl ViewportRenderer {
     /// Cuts the scene at a plane, or shows it whole again with `None`.
     pub fn set_clip_plane(&mut self, clip: Option<ClipPlane>) {
         self.clip = clip;
+    }
+
+    /// Shows only the section faces and the feature edges of the parts while a section is on.
+    pub fn set_sections_only(&mut self, only: bool) {
+        self.sections_only = only;
     }
 
     /// Section faces of the parts, in the order of the parts.
@@ -380,22 +389,25 @@ impl ViewportRenderer {
             pass.set_pipeline(&self.background_pipeline);
             pass.draw(0..3, 0..1);
             // Section faces belong to their part and share its visibility.
+            let sections_only = self.sections_only && self.clip.is_some();
+            // Meshes with whether they are drawn whole: with only the sections shown, the
+            // parts keep just their outline for orientation.
             let sections = self
                 .sections
                 .iter()
                 .zip(&self.parts)
                 .filter(|_| self.clip.is_some())
-                .map(|(section, part)| (section, part.visible));
+                .map(|(section, part)| (section, part.visible, true));
             let visible = || {
                 self.parts
                     .iter()
-                    .map(|p| (p, p.visible))
+                    .map(|p| (p, p.visible, !sections_only))
                     .chain(sections.clone())
-                    .filter(|(_, visible)| *visible)
-                    .map(|(p, _)| p)
+                    .filter(|(_, visible, _)| *visible)
+                    .map(|(p, _, whole)| (p, whole))
             };
             pass.set_pipeline(&self.surface_pipeline);
-            for part in visible() {
+            for (part, _) in visible().filter(|(_, whole)| *whole) {
                 if let (Some(vertices), Some(triangles)) = (&part.vertices, &part.triangles) {
                     pass.set_vertex_buffer(0, vertices.buffer.slice(..));
                     pass.set_index_buffer(triangles.buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -403,10 +415,13 @@ impl ViewportRenderer {
                 }
             }
             pass.set_pipeline(&self.edge_pipeline);
-            for part in visible() {
-                let mesh_edges = part.mesh_edges.as_ref().filter(|_| options.mesh_edges);
+            for (part, whole) in visible() {
+                let mesh_edges = part
+                    .mesh_edges
+                    .as_ref()
+                    .filter(|_| options.mesh_edges && whole);
                 let lines = [
-                    part.wireframe_edges.as_ref(),
+                    part.wireframe_edges.as_ref().filter(|_| whole),
                     mesh_edges,
                     part.feature_edges.as_ref(),
                 ];
@@ -416,7 +431,8 @@ impl ViewportRenderer {
                 }
             }
             pass.set_pipeline(&self.wide_edge_pipeline);
-            for lines in visible().filter_map(|p| p.wide_edges.as_ref()) {
+            for lines in visible().filter_map(|(p, whole)| p.wide_edges.as_ref().filter(|_| whole))
+            {
                 pass.set_vertex_buffer(0, lines.buffer.slice(..));
                 pass.draw(0..6, 0..lines.count / 2);
             }

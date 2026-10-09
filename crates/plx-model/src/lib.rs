@@ -8,6 +8,7 @@
 mod constraint;
 mod contact;
 pub mod convert;
+mod features;
 mod geometry;
 mod hot_spot;
 pub mod library;
@@ -21,6 +22,10 @@ pub use constraint::{CompressionOnly, PointSpring, SurfaceSpring, SurfaceToSurfa
 pub use contact::{
     Constraint, ContactMethod, ContactPair, DEFAULT_SURFACE_COLOR, Friction, GapConductance,
     InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
+};
+pub use features::{
+    CoordinatePlane, CoordinateSystem, CoordinateSystemKind, GLOBAL, Plane, PlaneSource, PointRef,
+    ReferencePoint, ResultPath, ResultPlane,
 };
 pub use geometry::{
     Algorithm2d, Algorithm3d, Geometry, MeshSetupItem, MeshSetupKind, MeshingParameters,
@@ -80,6 +85,19 @@ pub struct FeModel {
     /// Hot spot stress evaluations, done on the results; not part of the input file.
     #[serde(default)]
     pub hot_spots: Vec<HotSpot>,
+    /// PrePoMax's features: points and coordinate systems other items refer to by name.
+    #[serde(default)]
+    pub reference_points: Vec<ReferencePoint>,
+    #[serde(default)]
+    pub coordinate_systems: Vec<CoordinateSystem>,
+    #[serde(default)]
+    pub planes: Vec<Plane>,
+    /// Results on planes; not part of the input file.
+    #[serde(default)]
+    pub result_planes: Vec<ResultPlane>,
+    /// Straight paths results are read on; not part of the input file.
+    #[serde(default)]
+    pub result_paths: Vec<ResultPath>,
 }
 
 impl FeModel {

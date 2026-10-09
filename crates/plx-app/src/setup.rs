@@ -45,6 +45,8 @@ pub enum NewItem {
     ResultHistoryOutput,
     /// An item of the geometry's mesh setup, created in the Geometry tree.
     MeshSetupItem,
+    /// A reference point, coordinate system or result path, edited in its own dialog.
+    Feature(crate::features::FeatureKind),
 }
 
 /// How a region is given.
@@ -832,7 +834,10 @@ impl Editor {
                     MasterSlave::new(),
                 )
             }
-            NewItem::ResultFieldOutput | NewItem::ResultHistoryOutput | NewItem::MeshSetupItem => {
+            NewItem::ResultFieldOutput
+            | NewItem::ResultHistoryOutput
+            | NewItem::MeshSetupItem
+            | NewItem::Feature(_) => {
                 return None;
             }
         };
