@@ -114,8 +114,10 @@ pub enum ViewCommand {
     View(StandardView),
     /// Turns the closest global axis straight up.
     Vertical,
-    /// Turns the given global axis straight up.
+    /// Turns the given global axis straight up, looking square onto a global plane.
     VerticalAxis(Axis),
+    /// Isometric view with the given global axis up.
+    IsometricAxis(Axis),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,6 +195,7 @@ impl Viewport {
             ViewCommand::View(view) => self.camera.set_view(view),
             ViewCommand::Vertical => self.camera.set_vertical_view(),
             ViewCommand::VerticalAxis(axis) => self.camera.set_vertical_axis(axis.vector()),
+            ViewCommand::IsometricAxis(axis) => self.camera.set_isometric_axis(axis.vector()),
         }
     }
 
@@ -250,6 +253,13 @@ impl Viewport {
                 for axis in Axis::ALL {
                     if ui.button(axis.label()).clicked() {
                         result.command = Some(ViewCommand::VerticalAxis(axis));
+                    }
+                }
+            });
+            ui.menu_button("Isometrisch, Achse oben", |ui| {
+                for axis in Axis::ALL {
+                    if ui.button(axis.label()).clicked() {
+                        result.command = Some(ViewCommand::IsometricAxis(axis));
                     }
                 }
             });
