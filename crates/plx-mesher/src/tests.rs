@@ -368,6 +368,7 @@ fn rectangle(origin: [f64; 3], size: [f64; 2], radius: f64) -> Geometry {
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(size[0].hypot(size[1])),
         mesh_items: Vec::new(),
+        part_names: Vec::new(),
     }
 }
 
@@ -443,4 +444,71 @@ fn faces_outside_solids_are_meshed_as_shell_parts() {
     geometry.meshing.second_order = true;
     let quadratic = generate_mesh(&geometry).unwrap().mesh;
     assert!(quadratic.elements().iter().any(|e| e.type_name == "S8"));
+}
+
+#[test]
+fn a_deleted_part_leaves_the_others_with_their_names_and_local_sizes() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step")).unwrap().geometry;
+    geometry.meshing.second_order = false;
+    geometry.meshing.max_size = 5.0;
+    // A face of each block; the second block's face must follow it into the new numbering.
+    let file = TempFile::with_contents("brep", &geometry.brep).unwrap();
+    let (first, second, second_box) = with_gmsh(|gmsh| {
+        gmsh.import_shapes(&file.0)?;
+        let volumes = gmsh.entities(3)?;
+        let first = gmsh.adjacencies(3, volumes[0])?.1[0];
+        let second = *gmsh.adjacencies(3, volumes[1])?.1.last().unwrap();
+        Ok((first, second, gmsh.entity_bounding_box(2, second)?))
+    })
+    .unwrap();
+    geometry.mesh_items.push(MeshSetupItem {
+        name: "Local_Mesh_Size-1".into(),
+        kind: MeshSetupKind::LocalMeshSize {
+            faces: vec![first, second],
+            edges: Vec::new(),
+            size: 1.0,
+        },
+    });
+
+    let smaller = delete_part(&geometry, "SOLID-1").unwrap().unwrap();
+    // Gmsh alone would call the block that is left SOLID-1.
+    assert_eq!(part_names(&smaller).unwrap(), ["SOLID-2"]);
+    let mesh = generate_mesh(&smaller).unwrap().mesh;
+    let names: Vec<&str> = mesh.parts.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["SOLID-2"]);
+    let display = tessellate(&smaller).unwrap();
+    assert_eq!(display.mesh.parts[0].name, "SOLID-2");
+    let MeshSetupKind::LocalMeshSize { faces, .. } = &smaller.mesh_items[0].kind else {
+        panic!("local mesh size expected");
+    };
+    assert_eq!(faces.len(), 1, "the face of the deleted block is dropped");
+    let file = TempFile::with_contents("brep", &smaller.brep).unwrap();
+    let moved = with_gmsh(|gmsh| {
+        gmsh.import_shapes(&file.0)?;
+        gmsh.entity_bounding_box(2, faces[0])
+    })
+    .unwrap();
+    assert!(same_box(&moved, &second_box));
+
+    assert!(delete_part(&smaller, "SOLID-1").is_err());
+    assert_eq!(delete_part(&smaller, "SOLID-2").unwrap(), None);
+}
+
+#[test]
+fn a_deleted_mesh_part_takes_its_elements_and_nodes() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step")).unwrap().geometry;
+    geometry.meshing.second_order = false;
+    geometry.meshing.max_size = 5.0;
+    let whole = generate_mesh(&geometry).unwrap().mesh;
+    let smaller = delete_mesh_part(&whole, "solid-1");
+    assert_eq!(smaller.parts, whole.parts[1..]);
+    assert_eq!(smaller.element_count(), whole.parts[1].elements.len());
+    assert!(smaller.missing_nodes().is_empty());
+    assert!(smaller.node_count() < whole.node_count());
 }
