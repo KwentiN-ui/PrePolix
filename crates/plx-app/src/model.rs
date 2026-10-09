@@ -8,7 +8,10 @@ use plx_io::inp::{InpImport, read_inp};
 use plx_mesh::{ElementId, FeMesh, NodeId, PartSkin, extract_part_skin};
 use plx_model::FeModel;
 use plx_render::contour::normalize;
-use plx_render::{RenderMesh, part_color, part_render_mesh, wireframe_edges};
+use plx_render::{
+    ClipPlane, RenderMesh, SectionCells, lighten, part_color, part_render_mesh, section_mesh,
+    wireframe_edges,
+};
 
 use crate::results::ResultsView;
 
@@ -56,9 +59,13 @@ pub struct Model {
     pub fe: FeModel,
     /// Faces and parts drawn in the highlight colour.
     pub highlight: Highlight,
+    /// The section view plane in render coordinates; picking ignores what it cuts off.
+    pub clip: Option<ClipPlane>,
     /// Centre of the mesh; render positions are relative to it.
     origin: DVec3,
     skins: Vec<PartSkin>,
+    /// Elements of each part prepared for section cuts, built when first needed.
+    section_cells: std::sync::OnceLock<Vec<SectionCells>>,
 }
 
 /// What is shown selected: whole parts, element faces and nodes.
@@ -80,6 +87,9 @@ pub struct Hit {
     /// Hit point relative to the model origin.
     pub point: Vec3,
 }
+
+/// Node coordinates as drawn, normalized contour values and whether the shape is deformed.
+type ShownState<'a> = (std::borrow::Cow<'a, [[f64; 3]]>, Option<Vec<f32>>, bool);
 
 /// Result of loading on a worker thread: the model plus one GPU-ready mesh per part.
 pub struct LoadedModel {
@@ -171,8 +181,10 @@ pub fn load(path: &Path) -> Result<LoadedModel, String> {
         results,
         fe,
         highlight: Highlight::default(),
+        clip: None,
         origin,
         skins,
+        section_cells: Default::default(),
     };
     let render_meshes = model.render_meshes();
     for (part, render) in model.parts.iter_mut().zip(&render_meshes) {
@@ -229,8 +241,9 @@ impl Model {
         self.show_results = true;
     }
 
-    /// GPU-ready meshes of all parts, deformed and coloured by the selected result if any.
-    pub fn render_meshes(&self) -> Vec<RenderMesh> {
+    /// Node coordinates as drawn and the normalized contour values, if a result is shown;
+    /// the flag tells whether the shape is deformed and the undeformed outline is wanted.
+    fn shown_state(&self) -> ShownState<'_> {
         let mut coords = std::borrow::Cow::Borrowed(self.mesh.coords());
         let mut scalars = None;
         let mut deformed = false;
@@ -253,6 +266,12 @@ impl Model {
                 scalars = Some(normalize(&values, legend.min, legend.max));
             }
         }
+        (coords, scalars, deformed)
+    }
+
+    /// GPU-ready meshes of all parts, deformed and coloured by the selected result if any.
+    pub fn render_meshes(&self) -> Vec<RenderMesh> {
+        let (coords, scalars, deformed) = self.shown_state();
         self.mesh
             .parts
             .iter()
@@ -275,6 +294,49 @@ impl Model {
                 mesh
             })
             .collect()
+    }
+
+    /// Section faces of all parts where a plane in model coordinates cuts them, deformed and
+    /// coloured like the parts.
+    pub fn section_meshes(
+        &self,
+        point: DVec3,
+        normal: DVec3,
+        lighten_colors: bool,
+    ) -> Vec<RenderMesh> {
+        let cells = self.section_cells.get_or_init(|| {
+            self.mesh
+                .parts
+                .iter()
+                .map(|part| SectionCells::new(&self.mesh, part))
+                .collect()
+        });
+        let (coords, scalars, _) = self.shown_state();
+        cells
+            .iter()
+            .zip(&self.parts)
+            .map(|(cells, info)| {
+                let color = if lighten_colors {
+                    lighten(info.color)
+                } else {
+                    info.color
+                };
+                section_mesh(
+                    cells,
+                    &coords,
+                    self.origin,
+                    point,
+                    normal,
+                    color,
+                    scalars.as_deref(),
+                )
+            })
+            .collect()
+    }
+
+    /// The model origin in global coordinates; render positions are relative to it.
+    pub fn origin(&self) -> DVec3 {
+        self.origin
     }
 
     /// Recolours the vertices of highlighted faces; vertices are laid out face by face.
@@ -370,8 +432,11 @@ impl Model {
                     let Some(t) = ray_triangle(origin, direction, a, b, c) else {
                         continue;
                     };
+                    let point = origin + direction * t;
+                    if self.clip.is_some_and(|clip| clip.distance(point) < 0.0) {
+                        continue;
+                    }
                     if best.is_none_or(|(nearest, _)| t < nearest) {
-                        let point = origin + direction * t;
                         best = Some((
                             t,
                             Hit {

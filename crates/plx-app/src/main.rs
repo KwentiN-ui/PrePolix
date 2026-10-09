@@ -3,12 +3,14 @@
 mod analysis;
 mod animation;
 mod app;
+mod gizmo;
 mod icons;
 mod keywords;
 mod model;
 mod overlay;
 mod properties;
 mod results;
+mod section;
 mod selection;
 mod settings;
 mod setup;
