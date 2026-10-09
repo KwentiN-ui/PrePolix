@@ -17,7 +17,7 @@ use crate::meshing::{
     MeshItemEditor, MeshItemResult, MeshSetupResult, MeshSetupWindow, MeshingJob,
 };
 use crate::model::{self, Highlight, LoadedModel, Model};
-use crate::model_properties::{DialogResult, ModelPropertiesDialog};
+use crate::model_properties::{DialogResult, ModelPropertiesDialog, geometry_check};
 use crate::numeric;
 use crate::overlay::{Marker, Overlay};
 use crate::properties;
@@ -782,6 +782,26 @@ impl Workbench {
                     render_meshes,
                     geometry_view,
                 } = *loaded;
+                // Geometry imported into a model that has nothing yet, such as one just
+                // created with File > New, has to fit its model space.
+                let into_empty = (self.model.as_ref()).filter(|old| {
+                    plx_mesher::is_cad_file(&path)
+                        && old.mesh.element_count() == 0
+                        && old.geometry.is_none()
+                });
+                let mut turned_faces = Vec::new();
+                if let (Some(old), Some(view)) = (into_empty, &geometry_view) {
+                    match geometry_check(old.fe.properties.space, view) {
+                        Ok(faces) => turned_faces = faces,
+                        Err(error) => {
+                            self.output.push(format!(
+                                "Fehler beim Import von {}: {error}",
+                                path.display()
+                            ));
+                            return;
+                        }
+                    }
+                }
                 // The scene built on the worker thread is reused unless the settings change it.
                 let mut rebuild = false;
                 if let Some(view) = &mut model.results {
@@ -819,6 +839,14 @@ impl Workbench {
                 }
                 for warning in &model.warnings {
                     self.output.push(format!("Warnung: {warning}"));
+                }
+                if !turned_faces.is_empty() {
+                    let faces: Vec<String> = turned_faces.iter().map(i32::to_string).collect();
+                    self.output.push(format!(
+                        "Hinweis: Normale von Fläche {} zeigt in -z; die Elemente werden beim \
+                         Vernetzen umgedreht.",
+                        faces.join(", ")
+                    ));
                 }
                 if !model.skipped_keywords.is_empty() {
                     let keywords: Vec<String> = model
@@ -2953,7 +2981,8 @@ impl Workbench {
         let mesh = (self.model.as_ref())
             .filter(|_| dialog.editing)
             .map(|m| &m.mesh);
-        let result = dialog.show(ctx, mesh);
+        let geometry = self.geometry.as_ref().filter(|_| dialog.editing);
+        let result = dialog.show(ctx, mesh, geometry);
         let (editing, then_import) = (dialog.editing, dialog.then_import);
         match result {
             DialogResult::Open => return,

@@ -68,6 +68,8 @@ pub struct Model {
     /// For the display of CAD geometry, the CAD face or edge of each element; element ids
     /// count from 1.
     cad_entities: Vec<CadEntity>,
+    /// Solids of the CAD geometry a geometry display shows.
+    pub geometry_solids: usize,
     /// Hot spot values of a results file, evaluated with the hot spots of the FE model.
     pub hot_spots: Option<crate::hot_spots::Evaluation>,
     /// Faces and parts drawn in the highlight colour.
@@ -310,6 +312,7 @@ impl Model {
             geometry: None,
             is_geometry: false,
             cad_entities: Vec::new(),
+            geometry_solids: 0,
             hot_spots: None,
             highlight: Highlight::default(),
             clip: None,
@@ -346,6 +349,7 @@ impl Model {
         let mut model = Self::with_skins(path, mesh, skins);
         model.is_geometry = true;
         model.cad_entities = display.entities;
+        model.geometry_solids = display.solids;
         model
     }
 
