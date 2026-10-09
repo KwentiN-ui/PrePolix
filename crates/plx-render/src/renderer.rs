@@ -4,6 +4,7 @@ use wgpu::util::DeviceExt;
 use crate::camera::Camera;
 use crate::contour::{MAX_LEVELS, band_colors};
 use crate::mesh::{RenderMesh, Vertex};
+use crate::section::ClipPlane;
 
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -11,6 +12,8 @@ const SAMPLE_COUNT: u32 = 4;
 /// How far edges are pulled towards the viewer, in pixels. Tied to the pixel size rather than
 /// the model size, so that edges on the back of thin walls stay hidden when zoomed in.
 const EDGE_OFFSET_PX: f32 = 1.5;
+/// Width of [`RenderMesh::wide_edges`] in pixels, as PrePoMax draws a selected part's outline.
+pub const WIDE_EDGE_PX: f32 = 3.0;
 
 /// PrePoMax's background gradient: Gainsboro at the top, WhiteSmoke at the bottom.
 const BACKGROUND_TOP: [f32; 4] = [220.0 / 255.0, 220.0 / 255.0, 220.0 / 255.0, 1.0];
@@ -24,10 +27,15 @@ struct Globals {
     view_dir: [f32; 4],
     background_top: [f32; 4],
     background_bottom: [f32; 4],
-    /// x: edge depth offset in normalized depth units.
+    /// x: edge depth offset in normalized depth units; y, z: target size in pixels; w: width
+    /// of wide edges in pixels.
     edge: [f32; 4],
     /// x: number of contour bands, 0 when surfaces show their part colour.
     contour: [f32; 4],
+    /// Section view plane: unit normal and `normal · point`.
+    clip: [f32; 4],
+    /// x: 1 when the section view is on, y: how far behind the plane surfaces still show.
+    clip_options: [f32; 4],
     palette: [[f32; 4]; MAX_LEVELS as usize],
 }
 
@@ -43,6 +51,7 @@ struct GpuMesh {
     feature_edges: Option<GpuBuffer>,
     mesh_edges: Option<GpuBuffer>,
     wireframe_edges: Option<GpuBuffer>,
+    wide_edges: Option<GpuBuffer>,
     visible: bool,
 }
 
@@ -78,7 +87,11 @@ pub struct ViewportRenderer {
     background_pipeline: wgpu::RenderPipeline,
     surface_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
+    wide_edge_pipeline: wgpu::RenderPipeline,
     parts: Vec<GpuMesh>,
+    /// Section faces of the parts, drawn while the section view is on.
+    sections: Vec<GpuMesh>,
+    clip: Option<ClipPlane>,
     targets: Targets,
 }
 
@@ -207,6 +220,39 @@ impl ViewportRenderer {
             depth_state(false, wgpu::CompareFunction::LessEqual, Default::default()),
             Some(wgpu::BlendState::ALPHA_BLENDING),
         );
+        // Wide lines are quads: one instance per segment reads both end vertices of the line
+        // list, the vertex shader spreads them across the screen.
+        let vertex_size = std::mem::size_of::<Vertex>() as u64;
+        let segment_layout = wgpu::VertexBufferLayout {
+            array_stride: 2 * vertex_size,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: std::mem::offset_of!(Vertex, color) as u64,
+                    shader_location: 1,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: vertex_size,
+                    shader_location: 2,
+                },
+            ],
+        };
+        let wide_edge_pipeline = pipeline(
+            "viewport wide edges",
+            "vs_wide_edge",
+            "fs_edge",
+            &[Some(segment_layout)],
+            wgpu::PrimitiveTopology::TriangleList,
+            depth_state(false, wgpu::CompareFunction::LessEqual, Default::default()),
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+        );
 
         Self {
             globals,
@@ -214,60 +260,28 @@ impl ViewportRenderer {
             background_pipeline,
             surface_pipeline,
             edge_pipeline,
+            wide_edge_pipeline,
             parts: Vec::new(),
+            sections: Vec::new(),
+            clip: None,
             targets: Targets::new(device, 1, 1),
         }
     }
 
     /// Replaces the scene with one mesh per part; all parts start visible.
     pub fn set_parts(&mut self, device: &wgpu::Device, parts: &[RenderMesh]) {
-        let buffer = |label: &str, contents: &[u8], count: usize, usage: wgpu::BufferUsages| {
-            (count > 0).then(|| GpuBuffer {
-                buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(label),
-                    contents,
-                    usage,
-                }),
-                count: count as u32,
-            })
-        };
-        let vertex = wgpu::BufferUsages::VERTEX;
-        self.parts = parts
-            .iter()
-            .map(|mesh| GpuMesh {
-                vertices: buffer(
-                    "part vertices",
-                    bytemuck::cast_slice(&mesh.vertices),
-                    mesh.vertices.len(),
-                    vertex,
-                ),
-                triangles: buffer(
-                    "part triangles",
-                    bytemuck::cast_slice(&mesh.triangles),
-                    mesh.triangles.len(),
-                    wgpu::BufferUsages::INDEX,
-                ),
-                feature_edges: buffer(
-                    "part feature edges",
-                    bytemuck::cast_slice(&mesh.feature_edges),
-                    mesh.feature_edges.len(),
-                    vertex,
-                ),
-                mesh_edges: buffer(
-                    "part mesh edges",
-                    bytemuck::cast_slice(&mesh.mesh_edges),
-                    mesh.mesh_edges.len(),
-                    vertex,
-                ),
-                wireframe_edges: buffer(
-                    "part wireframe edges",
-                    bytemuck::cast_slice(&mesh.wireframe_edges),
-                    mesh.wireframe_edges.len(),
-                    vertex,
-                ),
-                visible: true,
-            })
-            .collect();
+        self.parts = parts.iter().map(|mesh| upload(device, mesh)).collect();
+        self.sections.clear();
+    }
+
+    /// Cuts the scene at a plane, or shows it whole again with `None`.
+    pub fn set_clip_plane(&mut self, clip: Option<ClipPlane>) {
+        self.clip = clip;
+    }
+
+    /// Section faces of the parts, in the order of the parts.
+    pub fn set_sections(&mut self, device: &wgpu::Device, sections: &[RenderMesh]) {
+        self.sections = sections.iter().map(|mesh| upload(device, mesh)).collect();
     }
 
     pub fn set_part_visible(&mut self, index: usize, visible: bool) {
@@ -309,15 +323,25 @@ impl ViewportRenderer {
                 EDGE_OFFSET_PX
                     * camera.pixel_size(self.targets.width as f32, self.targets.height as f32)
                     / camera.depth_range(),
-                0.0,
-                0.0,
-                0.0,
+                self.targets.width as f32,
+                self.targets.height as f32,
+                WIDE_EDGE_PX,
             ],
             contour: [
                 options
                     .contour_levels
                     .map_or(0.0, |n| n.clamp(2, MAX_LEVELS) as f32),
                 0.0,
+                0.0,
+                0.0,
+            ],
+            clip: self
+                .clip
+                .map_or([0.0; 4], |c| c.normal.extend(c.normal.dot(c.point)).into()),
+            clip_options: [
+                if self.clip.is_some() { 1.0 } else { 0.0 },
+                // Section faces lie on the plane; a fraction of a pixel keeps them visible.
+                0.25 * camera.pixel_size(self.targets.width as f32, self.targets.height as f32),
                 0.0,
                 0.0,
             ],
@@ -355,7 +379,21 @@ impl ViewportRenderer {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_pipeline(&self.background_pipeline);
             pass.draw(0..3, 0..1);
-            let visible = || self.parts.iter().filter(|p| p.visible);
+            // Section faces belong to their part and share its visibility.
+            let sections = self
+                .sections
+                .iter()
+                .zip(&self.parts)
+                .filter(|_| self.clip.is_some())
+                .map(|(section, part)| (section, part.visible));
+            let visible = || {
+                self.parts
+                    .iter()
+                    .map(|p| (p, p.visible))
+                    .chain(sections.clone())
+                    .filter(|(_, visible)| *visible)
+                    .map(|(p, _)| p)
+            };
             pass.set_pipeline(&self.surface_pipeline);
             for part in visible() {
                 if let (Some(vertices), Some(triangles)) = (&part.vertices, &part.triangles) {
@@ -377,8 +415,66 @@ impl ViewportRenderer {
                     pass.draw(0..lines.count, 0..1);
                 }
             }
+            pass.set_pipeline(&self.wide_edge_pipeline);
+            for lines in visible().filter_map(|p| p.wide_edges.as_ref()) {
+                pass.set_vertex_buffer(0, lines.buffer.slice(..));
+                pass.draw(0..6, 0..lines.count / 2);
+            }
         }
         queue.submit([encoder.finish()]);
+    }
+}
+
+fn upload(device: &wgpu::Device, mesh: &RenderMesh) -> GpuMesh {
+    let buffer = |label: &str, contents: &[u8], count: usize, usage: wgpu::BufferUsages| {
+        (count > 0).then(|| GpuBuffer {
+            buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents,
+                usage,
+            }),
+            count: count as u32,
+        })
+    };
+    let vertex = wgpu::BufferUsages::VERTEX;
+    GpuMesh {
+        vertices: buffer(
+            "part vertices",
+            bytemuck::cast_slice(&mesh.vertices),
+            mesh.vertices.len(),
+            vertex,
+        ),
+        triangles: buffer(
+            "part triangles",
+            bytemuck::cast_slice(&mesh.triangles),
+            mesh.triangles.len(),
+            wgpu::BufferUsages::INDEX,
+        ),
+        feature_edges: buffer(
+            "part feature edges",
+            bytemuck::cast_slice(&mesh.feature_edges),
+            mesh.feature_edges.len(),
+            vertex,
+        ),
+        mesh_edges: buffer(
+            "part mesh edges",
+            bytemuck::cast_slice(&mesh.mesh_edges),
+            mesh.mesh_edges.len(),
+            vertex,
+        ),
+        wireframe_edges: buffer(
+            "part wireframe edges",
+            bytemuck::cast_slice(&mesh.wireframe_edges),
+            mesh.wireframe_edges.len(),
+            vertex,
+        ),
+        wide_edges: buffer(
+            "part wide edges",
+            bytemuck::cast_slice(&mesh.wide_edges),
+            mesh.wide_edges.len(),
+            vertex,
+        ),
+        visible: true,
     }
 }
 

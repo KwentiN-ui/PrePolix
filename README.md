@@ -7,7 +7,7 @@ Vorbild für Bedienung und Funktionsumfang ist [PrePoMax](https://prepomax.fs.um
 
 ## Bauen und starten
 
-Voraussetzung ist ein aktuelles stabiles Rust (`rustup`).
+Voraussetzung ist ein aktuelles stabiles Rust (`rustup`). Unter Linux braucht der Build außerdem die ALSA-Entwicklungsdateien für die Audioausgabe (Debian/Ubuntu: `sudo apt install libasound2-dev`, Fedora: `alsa-lib-devel`).
 
 ```sh
 cargo run --release
@@ -35,7 +35,7 @@ Wie in PrePoMax:
 | Kontextmenü | rechte Taste |
 | Einpassen | Doppelklick |
 
-Die Standardansichten folgen PrePoMax: Y zeigt nach oben. "Vertikal" stellt die Achse senkrecht, die der Bildschirm-Hochrichtung am nächsten liegt, "Achse senkrecht" (Menü Ansicht oder Rechtsklick) stellt X, Y oder Z nach oben und schaut senkrecht auf die nächstgelegene Koordinatenebene, und "Isometrisch, Achse oben" zeigt die isometrische Ansicht mit X, Y oder Z nach oben.
+Die Standardansichten folgen PrePoMax: Y zeigt nach oben. "Vertikal" stellt die Achse senkrecht, die der Bildschirm-Hochrichtung am nächsten liegt, "Ansicht senkrecht zu" (Menü Ansicht oder Rechtsklick) schaut entlang X, Y oder Z auf die Ebene, deren Normale die Achse ist, ein Klick auf eine Achse des Koordinatenkreuzes unten rechts (Spitze oder grauer negativer Teil) schaut genauso entlang dieser Richtung, und "Isometrisch, Achse oben" zeigt die isometrische Ansicht mit X, Y oder Z nach oben.
 
 ## Was schon geht
 
@@ -44,6 +44,7 @@ Die Standardansichten folgen PrePoMax: Y zeigt nach oben. "Vertikal" stellt die 
 - Darstellung der Außenhaut mit Feature-Kanten und optionalen Netzkanten, auch für quadratische Elemente.
 - `.frd`-Ergebnisse lesen (ASCII und binär): Netz, Materialien als Parts, alle Steps und Inkremente inklusive Eigenformen. Komponenten heißen wie in PrePoMax (`U1`, `S11`, …); ergänzt werden Verschiebungsbetrag `ALL`, `MISES`, `TRESCA`, Hauptspannungen und Vergleichsdehnung.
 - Ergebnisanzeige wie in PrePoMax: Konturplot in 9 Farbstufen (Regenbogen, einstellbar), Legende, Min/Max mit Knoten, verformte Darstellung mit automatischem, echtem oder eigenem Faktor.
+- Schnittansicht (*Ansicht → Schnittansicht …*): Schnittebene als Grundebene XY/YZ/XZ an einer Koordinate oder als Punkt und Normale, beides auch per Klick ins Modell (Normale aus zwei Punkten). Im 3D-Fenster lässt sich die Ebene am Pfeil verschieben und an den Bögen kippen. Volumenelemente zeigen ihre Schnittfläche mit Netzkanten und Ergebnisfarben.
 
 Beispielmodelle liegen in [testdata/](testdata/), erzeugt von `testdata/erzeugen.py`. Die Modelle mit Step lassen sich direkt mit `ccx` rechnen; zwei Ergebnisdateien (`*.frd`) liegen bei.
 

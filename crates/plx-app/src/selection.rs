@@ -230,12 +230,26 @@ impl Picker {
             self.select_by = SelectBy::Geometry;
         }
         let mut action = None;
+        // egui's own constraint uses a default size before the first layout and pins the
+        // window there; keep it on screen with its real size instead.
+        let id = egui::Id::new("selection window");
+        let width = egui::AreaState::load(ctx, id)
+            .and_then(|s| s.size)
+            .map_or(350.0, |s| s.x);
+        let screen = ctx.content_rect();
+        let pos = egui::pos2(
+            (anchor.right() + 8.0)
+                .min(screen.right() - width)
+                .max(screen.left()),
+            anchor.top(),
+        );
         egui::Window::new("Auswahl")
-            .id(egui::Id::new("selection window"))
+            .id(id)
+            .constrain(false)
             .collapsible(false)
             .resizable(false)
             .title_bar(true)
-            .current_pos(anchor.right_top() + egui::vec2(8.0, 0.0))
+            .current_pos(pos)
             .show(ctx, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.group(|ui| {

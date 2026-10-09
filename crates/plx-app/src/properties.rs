@@ -17,7 +17,7 @@ pub fn title(model: Option<&Model>, item: &TreeItem) -> String {
             .get(*index)
             .map_or_else(String::new, |p| p.name.clone()),
         (TreeItem::NodeSet(n) | TreeItem::ElementSet(n) | TreeItem::Surface(n), _) => n.clone(),
-        (TreeItem::Field(f), Some(model)) => field_name(model, *f),
+        (TreeItem::Field(f) | TreeItem::ResultFieldOutput(f), Some(model)) => field_name(model, *f),
         (TreeItem::Component(f, c), Some(model)) => {
             let field = model
                 .results
@@ -48,8 +48,9 @@ fn field_name(model: &Model, field: usize) -> String {
         .map_or_else(String::new, |f| f.name.clone())
 }
 
-/// Shows the properties of `item` in a grid.
-pub fn show(ui: &mut egui::Ui, model: Option<&Model>, item: &TreeItem) {
+/// Shows the properties of `item` in a grid; with `name`, the name can be edited.
+pub fn show(ui: &mut egui::Ui, model: Option<&Model>, item: &TreeItem, name: Option<&mut String>) {
+    let mut name = name;
     let mut rows: Vec<(&'static str, String)> = Vec::new();
     match model {
         Some(model) => rows_of(model, item, &mut rows),
@@ -65,7 +66,15 @@ pub fn show(ui: &mut egui::Ui, model: Option<&Model>, item: &TreeItem) {
         .show(ui, |ui| {
             for (key, value) in rows {
                 ui.label(key);
-                ui.label(value);
+                match name.as_deref_mut().filter(|_| key == "Name") {
+                    Some(name) => {
+                        let edit = egui::TextEdit::singleline(name).desired_width(200.0);
+                        ui.add(edit);
+                    }
+                    None => {
+                        ui.label(value);
+                    }
+                }
                 ui.end_row();
             }
         });
@@ -85,6 +94,9 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
         | TreeItem::Load(..)
         | TreeItem::FieldOutput(..)
         | TreeItem::HotSpot(_)
+        | TreeItem::HistorySet(_)
+        | TreeItem::HistoryField(..)
+        | TreeItem::HistoryComponent(..)
         | TreeItem::Analysis => {}
         TreeItem::Model => {
             rows.push(("Datei", model.path.display().to_string()));
@@ -147,7 +159,7 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
                 None => {}
             }
         }
-        TreeItem::Field(f) => {
+        TreeItem::Field(f) | TreeItem::ResultFieldOutput(f) => {
             let Some(view) = &model.results else { return };
             let Some(field) = view.current_increment().and_then(|i| i.fields.get(*f)) else {
                 return;
