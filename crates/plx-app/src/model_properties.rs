@@ -1,7 +1,11 @@
 //! PrePoMax's "Model Properties" dialog: the model space and the unit system, asked for a
 //! new model and editable later from the model's context.
 
-use plx_mesh::{ElementFamily, FeMesh};
+use std::collections::BTreeMap;
+
+use crate::model::Model;
+use plx_mesh::{ElementFamily, ElementShape, FeMesh};
+use plx_mesher::CadEntity;
 use plx_model::{BASE_QUANTITIES, DERIVED_QUANTITIES, ModelProperties, ModelSpace, UnitSystem};
 
 const ERROR: egui::Color32 = egui::Color32::from_rgb(200, 0, 0);
@@ -47,11 +51,18 @@ impl ModelPropertiesDialog {
         }
     }
 
-    /// `mesh` is the mesh of the model being edited, which limits the model spaces.
-    pub fn show(&mut self, ctx: &egui::Context, mesh: Option<&FeMesh>) -> DialogResult {
+    /// `mesh` and `geometry`, the display of the CAD geometry, are those of the model being
+    /// edited, which limit the model spaces.
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        mesh: Option<&FeMesh>,
+        geometry: Option<&Model>,
+    ) -> DialogResult {
         let mut open = true;
         let mut result = DialogResult::Open;
-        let error = mesh.and_then(|mesh| space_error(self.draft.space, mesh));
+        let error = (mesh.and_then(|mesh| space_error(self.draft.space, mesh)))
+            .or_else(|| geometry.and_then(|g| geometry_check(self.draft.space, g).err()));
         egui::Window::new("Modelleigenschaften")
             .id(egui::Id::new("model properties"))
             .open(&mut open)
@@ -144,6 +155,64 @@ pub fn space_error(space: ModelSpace, mesh: &FeMesh) -> Option<String> {
     }
 }
 
+/// Checks CAD geometry for a 2D model space: it has to be faces in the x-y plane, for an
+/// axisymmetric model on the side x >= 0 of the axis of revolution. Returns the faces whose
+/// normal points to -z; their elements are turned round when meshed.
+pub fn geometry_check(space: ModelSpace, geometry: &Model) -> Result<Vec<i32>, String> {
+    if !space.is_2d() {
+        return Ok(Vec::new());
+    }
+    if geometry.geometry_solids > 0 {
+        return Err(format!(
+            "Die Geometrie enthält {} Volumenkörper; ein 2D-Modell braucht Flächen in der \
+             x-y-Ebene.",
+            geometry.geometry_solids
+        ));
+    }
+    let Some((min, max)) = geometry.mesh.bounds() else {
+        return Ok(Vec::new());
+    };
+    let diagonal = (0..3)
+        .map(|k| (max[k] - min[k]).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let tolerance = 1e-6 * diagonal.max(f64::MIN_POSITIVE);
+    if min[2].abs() > tolerance || max[2].abs() > tolerance {
+        return Err(format!(
+            "Die Geometrie liegt nicht in der x-y-Ebene (z von {:.4} bis {:.4}); ein \
+             2D-Modell braucht Flächen bei z = 0.",
+            min[2], max[2]
+        ));
+    }
+    if space == ModelSpace::Axisymmetric && min[0] < -tolerance {
+        return Err(format!(
+            "Die Geometrie reicht bis x = {:.4}; ein rotationssymmetrisches Modell liegt ganz \
+             bei x >= 0, die y-Achse ist die Drehachse.",
+            min[0]
+        ));
+    }
+    // The display triangles of a face follow its orientation.
+    let mut turn: BTreeMap<i32, f64> = BTreeMap::new();
+    for element in geometry.mesh.elements() {
+        let (Some(CadEntity::Face(face)), ElementShape::Tri3) =
+            (geometry.cad_entity(element.id), element.shape)
+        else {
+            continue;
+        };
+        let points: Vec<[f64; 3]> = (element.nodes.iter())
+            .filter_map(|&id| geometry.mesh.node(id))
+            .collect();
+        if let [a, b, c] = points[..] {
+            let cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+            *turn.entry(face).or_default() += cross;
+        }
+    }
+    Ok((turn.into_iter())
+        .filter(|&(_, area)| area < 0.0)
+        .map(|(face, _)| face)
+        .collect())
+}
+
 /// A titled frame like a Windows group box.
 fn group(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(4.0);
@@ -223,5 +292,47 @@ mod tests {
             .unwrap();
         assert!(space_error(ModelSpace::Axisymmetric, &plane).is_none());
         assert!(space_error(ModelSpace::ThreeD, &plane).is_some());
+    }
+
+    /// A geometry display of two triangles, face 1 counter-clockwise and face 2 clockwise
+    /// seen from +z, moved by `shift`.
+    fn two_faces(shift: [f64; 3], solids: usize) -> Model {
+        let mut mesh = FeMesh::default();
+        let points = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+        for (id, [x, y]) in (1..).zip(points) {
+            mesh.set_node(id, [x + shift[0], y + shift[1], shift[2]]);
+        }
+        for (id, nodes) in [(1, vec![1, 2, 3]), (2, vec![2, 3, 4])] {
+            mesh.add_element(Element {
+                id,
+                type_name: "S3".into(),
+                shape: ElementShape::Tri3,
+                nodes,
+            })
+            .unwrap();
+        }
+        let display = plx_mesher::GeometryDisplay {
+            mesh,
+            entities: vec![CadEntity::Face(1), CadEntity::Face(2)],
+            solids,
+            faces: 2,
+            edges: 0,
+        };
+        Model::geometry_view(std::path::Path::new("flaechen.brep"), display)
+    }
+
+    #[test]
+    fn two_d_geometry_lies_in_the_x_y_plane_and_reversed_faces_are_found() {
+        let flat = two_faces([0.0; 3], 0);
+        assert_eq!(geometry_check(ModelSpace::PlaneStress, &flat), Ok(vec![2]));
+        assert_eq!(geometry_check(ModelSpace::ThreeD, &flat), Ok(Vec::new()));
+        let raised = two_faces([0.0, 0.0, 0.5], 0);
+        assert!(geometry_check(ModelSpace::PlaneStrain, &raised).is_err());
+        let left = two_faces([-0.5, 0.0, 0.0], 0);
+        assert!(geometry_check(ModelSpace::PlaneStress, &left).is_ok());
+        assert!(geometry_check(ModelSpace::Axisymmetric, &left).is_err());
+        let solid = two_faces([0.0; 3], 1);
+        assert!(geometry_check(ModelSpace::Axisymmetric, &solid).is_err());
+        assert!(geometry_check(ModelSpace::ThreeD, &solid).is_ok());
     }
 }
