@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use plx_model::{BoundaryCondition, Elastic, Load, Material, Section, UserKeyword};
+use plx_model::{BoundaryCondition, Elastic, EquationSolver, Load, Material, Section, UserKeyword};
 
 use super::*;
 use crate::frd::{FrdImport, read_frd};
@@ -86,6 +86,26 @@ fn writes_mesh_and_analysis_that_read_back() {
     assert_eq!(read.surfaces["TIP"], mesh.surfaces["TIP"]);
     // The part set must not be written twice.
     assert_eq!(read.element_sets["EALL"].len(), 40);
+}
+
+#[test]
+fn the_chosen_solver_is_written_with_the_procedure() {
+    let (mesh, mut model) = cantilever(tip_force());
+    model.resolve_default_solver(EquationSolver::Pardiso);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Step\n*Static, Solver=Pardiso\n"), "{text}");
+    let StepKind::Static(settings) = &mut model.steps[0].kind;
+    settings.solver = EquationSolver::IterativeCholesky;
+    settings.incrementation = Incrementation::Direct;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Static, Solver=Iterative Cholesky, Direct\n1, 1\n"),
+        "{text}"
+    );
+    // A solver chosen in the step is kept.
+    model.resolve_default_solver(EquationSolver::Pardiso);
+    let StepKind::Static(settings) = &model.steps[0].kind;
+    assert_eq!(settings.solver, EquationSolver::IterativeCholesky);
 }
 
 #[test]

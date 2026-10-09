@@ -40,6 +40,19 @@ pub struct FeModel {
     pub user_keywords: Vec<UserKeyword>,
 }
 
+impl FeModel {
+    /// Replaces [`EquationSolver::Default`] in all steps by `solver`, the solver the
+    /// installed CalculiX should use by default.
+    pub fn resolve_default_solver(&mut self, solver: EquationSolver) {
+        for step in &mut self.steps {
+            let StepKind::Static(settings) = &mut step.kind;
+            if settings.solver == EquationSolver::Default {
+                settings.solver = solver;
+            }
+        }
+    }
+}
+
 /// Lines of the user's own written into the input file at a fixed place, like PrePoMax's
 /// `CalculixUserKeyword`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -101,6 +114,43 @@ pub enum Incrementation {
     Direct,
 }
 
+/// Equation solver of a step (`SOLVER=`), PrePoMax's choices.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EquationSolver {
+    /// Pardiso where the CalculiX build has it, otherwise CalculiX's own default; resolved
+    /// before the input file is written, see [`FeModel::resolve_default_solver`].
+    #[default]
+    Default,
+    Pardiso,
+    Spooles,
+    PaStiX,
+    IterativeScaling,
+    IterativeCholesky,
+}
+
+impl EquationSolver {
+    pub const ALL: [EquationSolver; 6] = [
+        EquationSolver::Default,
+        EquationSolver::Pardiso,
+        EquationSolver::Spooles,
+        EquationSolver::PaStiX,
+        EquationSolver::IterativeScaling,
+        EquationSolver::IterativeCholesky,
+    ];
+
+    /// The value of `SOLVER=` in the input file; `None` leaves the choice to CalculiX.
+    pub fn keyword(self) -> Option<&'static str> {
+        match self {
+            EquationSolver::Default => None,
+            EquationSolver::Pardiso => Some("Pardiso"),
+            EquationSolver::Spooles => Some("Spooles"),
+            EquationSolver::PaStiX => Some("PaStiX"),
+            EquationSolver::IterativeScaling => Some("Iterative scaling"),
+            EquationSolver::IterativeCholesky => Some("Iterative Cholesky"),
+        }
+    }
+}
+
 /// Settings of a `*STATIC` step, with PrePoMax's defaults.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StaticStep {
@@ -113,6 +163,9 @@ pub struct StaticStep {
     pub time_period: f64,
     pub min_increment: f64,
     pub max_increment: f64,
+    /// Missing in projects saved before the solver could be chosen.
+    #[serde(default)]
+    pub solver: EquationSolver,
 }
 
 impl Default for StaticStep {
@@ -125,6 +178,7 @@ impl Default for StaticStep {
             time_period: 1.0,
             min_increment: 1e-5,
             max_increment: 1e30,
+            solver: EquationSolver::Default,
         }
     }
 }

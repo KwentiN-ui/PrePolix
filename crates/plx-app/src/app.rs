@@ -13,6 +13,7 @@ use crate::numeric;
 use crate::overlay::{Marker, Overlay};
 use crate::properties;
 use crate::results::{Deformation, ResultsView, format_legend_value};
+use crate::screenshot::{self, Screenshot};
 use crate::selection::Operation;
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::setup::{Editor, EditorResult, NewItem};
@@ -62,6 +63,7 @@ struct Workbench {
     analysis: Option<Analysis>,
     /// Results file the user asked to open; read by the app on a worker thread.
     open_results: Option<PathBuf>,
+    screenshot: Screenshot,
 }
 
 pub struct PrepolixApp {
@@ -112,6 +114,7 @@ impl PrepolixApp {
                 highlighted: None,
                 analysis: None,
                 open_results: None,
+                screenshot: Screenshot::default(),
             },
             load_events: channel(),
             loading: None,
@@ -222,6 +225,13 @@ impl PrepolixApp {
                         }
                     }
                 });
+                ui.menu_button("Isometrisch, Achse oben", |ui| {
+                    for axis in Axis::ALL {
+                        if ui.button(axis.label()).clicked() {
+                            self.workbench.view_command = Some(ViewCommand::IsometricAxis(axis));
+                        }
+                    }
+                });
                 ui.separator();
                 ui.checkbox(
                     &mut self.workbench.viewport.options.mesh_edges,
@@ -272,6 +282,17 @@ impl PrepolixApp {
             if icons::button(ui, Icon::Vertical, "Vertikal", true, false).clicked() {
                 self.workbench.view_command = Some(ViewCommand::Vertical);
             }
+            let camera = icons::button(ui, Icon::Screenshot, "Screenshot", true, false);
+            egui::Popup::menu(&camera).show(|ui| {
+                if ui.button("In Zwischenablage kopieren").clicked() {
+                    self.workbench
+                        .screenshot
+                        .request(screenshot::Target::Clipboard);
+                }
+                if ui.button("Speichern unter …").clicked() {
+                    self.workbench.screenshot.request(screenshot::Target::File);
+                }
+            });
             ui.separator();
             let options = &mut self.workbench.viewport.options;
             let mesh = options.mesh_edges;
@@ -367,10 +388,10 @@ impl eframe::App for PrepolixApp {
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
         egui::Panel::top("tools").show(ui, |ui| {
             self.tool_bar(ui);
-            if self.workbench.tree_view == TreeView::Results && !self.workbench.results.is_empty() {
-                ui.separator();
-                self.workbench.results_tool_bar(ui);
-            }
+            // Like PrePoMax, the results row stays in place and is greyed out outside the
+            // Results tab, so the 3D view does not jump when switching tabs.
+            ui.separator();
+            self.workbench.results_tool_bar(ui);
         });
         self.workbench.animate(&ctx);
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
@@ -415,6 +436,11 @@ impl eframe::App for PrepolixApp {
                 ui.ctx().request_repaint();
             }
         });
+        let view = self.workbench.viewport.rect;
+        let workbench = &mut self.workbench;
+        workbench
+            .screenshot
+            .update(&ctx, view, &mut workbench.output);
         self.workbench.properties_window(&ctx);
         self.workbench.editor_window(&ctx);
         self.workbench.keyword_editor_window(&ctx);
@@ -596,7 +622,8 @@ impl Workbench {
             TreeView::Results => self.results.get_mut(self.current_result),
             _ => self.model.as_mut(),
         };
-        let response = tree::show(ui, view, shown, &mut self.tree);
+        let job = self.analysis.as_ref().map(Analysis::status);
+        let response = tree::show(ui, view, shown, job, &mut self.tree);
         for (index, visible) in response.visibility {
             self.viewport.set_part_visible(index, visible);
         }
@@ -754,6 +781,11 @@ impl Workbench {
     /// The results row of the tool bar: PrePoMax's Result box with all opened results
     /// files, then the controls of the shown result.
     fn results_tool_bar(&mut self, ui: &mut egui::Ui) {
+        let enabled = self.tree_view == TreeView::Results && !self.results.is_empty();
+        ui.add_enabled_ui(enabled, |ui| self.results_tool_bar_row(ui, enabled));
+    }
+
+    fn results_tool_bar_row(&mut self, ui: &mut egui::Ui, enabled: bool) {
         ui.horizontal(|ui| {
             ui.label("Ergebnis");
             let mut selected = self.current_result;
@@ -774,9 +806,14 @@ impl Workbench {
                 .on_hover_text(current.unwrap_or_default());
             self.select_result(selected);
             ui.separator();
-            if let Some(view) = self.shown_results_mut()
-                && results_tool_bar(ui, view)
-            {
+            // Greyed out, the row shows the current results file, or empty controls.
+            let mut placeholder = None;
+            let view = match self.results.get_mut(self.current_result) {
+                Some(model) => model.results.as_mut(),
+                None => None,
+            }
+            .unwrap_or_else(|| placeholder.insert(ResultsView::new(Vec::new(), None)));
+            if results_tool_bar(ui, view) && enabled {
                 self.results_changed = true;
             }
         });
@@ -928,10 +965,14 @@ impl Workbench {
         if self.analysis.as_ref().is_some_and(Analysis::is_running) {
             return;
         }
+        if self.setup_model().is_none() {
+            return;
+        }
+        let default_solver = self.settings.solver.default_solver();
         let Some(model) = self.setup_model() else {
             return;
         };
-        match Analysis::start(&self.settings.solver, model) {
+        match Analysis::start(&self.settings.solver, model, default_solver) {
             Ok(analysis) => {
                 self.output.push(format!(
                     "Analyse gestartet: {}",
@@ -1001,11 +1042,17 @@ impl Workbench {
 
     /// Writes the input file of the set-up model to a file the user picks.
     fn export_inp(&mut self) {
+        if self.setup_model().is_none() {
+            return;
+        }
+        let default_solver = self.settings.solver.default_solver();
         let Some(model) = self.setup_model() else {
             return;
         };
         let heading = format!("prepolix: {}", model.file_name());
-        let text = match plx_io::inp::write_inp(&model.mesh, &model.fe, &heading) {
+        let mut fe = model.fe.clone();
+        fe.resolve_default_solver(default_solver);
+        let text = match plx_io::inp::write_inp(&model.mesh, &fe, &heading) {
             Ok(text) => text,
             Err(error) => {
                 self.output.push(format!("Export nicht möglich: {error}"));
@@ -1025,9 +1072,16 @@ impl Workbench {
         }
     }
 
-    /// A click in the 3D view picks for the open dialog.
+    /// A click in the 3D view picks for the open dialog; without one, a click into empty
+    /// space clears the tree selection and with it the highlighted region.
     fn click(&mut self, click: Click) {
         if !self.picking() {
+            let empty = self
+                .shown()
+                .is_none_or(|model| model.pick(click.origin, click.direction).is_none());
+            if empty && self.tree_view != TreeView::Results {
+                self.tree.selected = None;
+            }
             return;
         }
         let (Some(editor), Some(model)) = (&mut self.editor, &self.model) else {
