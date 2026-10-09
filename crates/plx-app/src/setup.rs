@@ -1656,6 +1656,48 @@ pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
     active.map(|a| *a = !*a).is_some()
 }
 
+/// Swaps master and slave of a tie, spring connection or contact pair; a swapped name
+/// `<slave>_to_<master>` that is taken gets the next free number, as in PrePoMax.
+pub fn swap_master_slave(fe: &mut FeModel, item: &TreeItem) -> bool {
+    match *item {
+        TreeItem::Constraint(i) => {
+            let Some(constraint) = fe.constraints.get_mut(i) else {
+                return false;
+            };
+            let old = constraint.name().to_owned();
+            if !constraint.swap_master_slave() {
+                return false;
+            }
+            let name = constraint.name().to_owned();
+            let others = (fe.constraints.iter().enumerate())
+                .filter(|&(j, _)| j != i)
+                .map(|(_, c)| c.name());
+            if name != old && others.clone().any(|n| n.eq_ignore_ascii_case(&name)) {
+                let free = next_name(&name, others);
+                *fe.constraints[i].name_mut() = free;
+            }
+            true
+        }
+        TreeItem::ContactPair(i) => {
+            let Some(pair) = fe.contact_pairs.get_mut(i) else {
+                return false;
+            };
+            let old = pair.name.clone();
+            pair.swap_master_slave();
+            let name = pair.name.clone();
+            let others = (fe.contact_pairs.iter().enumerate())
+                .filter(|&(j, _)| j != i)
+                .map(|(_, c)| c.name.as_str());
+            if name != old && others.clone().any(|n| n.eq_ignore_ascii_case(&name)) {
+                let free = next_name(&name, others);
+                fe.contact_pairs[i].name = free;
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 /// How an item selected in the tree shows in the 3D view: its region, or master and slave.
 pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
     let fe = &model.fe;
@@ -2426,6 +2468,21 @@ mod tests {
         assert!(fe.steps[0].boundary_conditions[0].active);
         assert!(!toggle_active(&mut fe, &TreeItem::Load(0, 0)));
         assert!(!toggle_active(&mut fe, &TreeItem::Material(0)));
+    }
+
+    #[test]
+    fn a_swapped_name_that_is_taken_gets_a_number() {
+        let mut fe = FeModel::default();
+        fe.contact_pairs.push(ContactPair::new("A_to_B", ""));
+        fe.contact_pairs.push(ContactPair::new("B_to_A", ""));
+        fe.contact_pairs[0].master = Region::Surface("A".into());
+        assert!(swap_master_slave(&mut fe, &TreeItem::ContactPair(0)));
+        assert_eq!(fe.contact_pairs[0].name, "B_to_A-1");
+        assert_eq!(fe.contact_pairs[0].slave, Region::Surface("A".into()));
+        fe.constraints
+            .push(Constraint::Tie(plx_model::Tie::new("Tie-1")));
+        assert!(swap_master_slave(&mut fe, &TreeItem::Constraint(0)));
+        assert!(!swap_master_slave(&mut fe, &TreeItem::Material(0)));
     }
 
     #[test]

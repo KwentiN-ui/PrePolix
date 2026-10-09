@@ -179,7 +179,22 @@ pub struct ContactPair {
     pub slave_color: [u8; 3],
 }
 
+/// PrePoMax's name of a swapped pair: `<slave>_to_<master>` for `<master>_to_<slave>`, other
+/// names as they are.
+pub fn swapped_name(name: &str) -> String {
+    match name.split("_to_").collect::<Vec<_>>()[..] {
+        [master, slave] => format!("{slave}_to_{master}"),
+        _ => name.to_owned(),
+    }
+}
+
 impl ContactPair {
+    /// Swaps master and slave, like PrePoMax also in a name `<master>_to_<slave>`.
+    pub fn swap_master_slave(&mut self) {
+        std::mem::swap(&mut self.master, &mut self.slave);
+        self.name = swapped_name(&self.name);
+    }
+
     pub fn new(name: impl Into<String>, interaction: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -236,6 +251,29 @@ impl Constraint {
             Constraint::Tie(tie) => &mut tie.active,
             Constraint::SurfaceToSurfaceSpring(c) => &mut c.active,
         }
+    }
+
+    pub fn name_mut(&mut self) -> &mut String {
+        match self {
+            Constraint::PointSpring(c) => &mut c.name,
+            Constraint::SurfaceSpring(c) => &mut c.name,
+            Constraint::CompressionOnly(c) => &mut c.name,
+            Constraint::Tie(tie) => &mut tie.name,
+            Constraint::SurfaceToSurfaceSpring(c) => &mut c.name,
+        }
+    }
+
+    /// Swaps master and slave of a tie or spring connection, like PrePoMax also in a name
+    /// `<master>_to_<slave>`; returns false for constraints without the two.
+    pub fn swap_master_slave(&mut self) -> bool {
+        let (name, master, slave) = match self {
+            Constraint::Tie(tie) => (&mut tie.name, &mut tie.master, &mut tie.slave),
+            Constraint::SurfaceToSurfaceSpring(c) => (&mut c.name, &mut c.master, &mut c.slave),
+            _ => return false,
+        };
+        std::mem::swap(master, slave);
+        *name = swapped_name(name);
+        true
     }
 
     /// Master and slave region of a tie or spring connection.
@@ -297,5 +335,25 @@ impl Tie {
             master_color: DEFAULT_SURFACE_COLOR,
             slave_color: DEFAULT_SURFACE_COLOR,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swapping_turns_regions_and_a_pair_name_around() {
+        let mut pair = ContactPair::new("BEAM_to_DISC", "Steel");
+        pair.master = Region::Surface("TOP".into());
+        pair.slave = Region::Surface("BOTTOM".into());
+        pair.swap_master_slave();
+        assert_eq!(pair.name, "DISC_to_BEAM");
+        assert_eq!(pair.master, Region::Surface("BOTTOM".into()));
+        assert_eq!(pair.slave, Region::Surface("TOP".into()));
+        let mut tie = Constraint::Tie(Tie::new("Lager"));
+        assert!(tie.swap_master_slave());
+        assert_eq!(tie.name(), "Lager");
+        assert_eq!(swapped_name("A_to_B_to_C"), "A_to_B_to_C");
     }
 }

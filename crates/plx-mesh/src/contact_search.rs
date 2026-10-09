@@ -6,8 +6,10 @@
 //! PrePoMax's geometry surfaces do. In 2D models the surfaces are chains of outline edges of
 //! the plane elements, split at corners, the way CalculiX takes the edges as faces. Two surfaces are in contact where triangles of both face
 //! each other within the search distance and angle. The pairs found are grouped (by parts,
-//! by the contact graph or not at all) and resolved so that a slave surface is a slave only
-//! once, which CalculiX requires of ties.
+//! by the contact graph or not at all). Master is the side with the coarser mesh, then the
+//! stiffer material, then the larger area, the usual rule for CalculiX contact; a surface
+//! touching several better masters is the slave of all of them at once, so that it is a
+//! slave only once, which CalculiX requires of ties.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -38,9 +40,8 @@ pub struct SearchParameters {
     /// Largest deviation of the surfaces from facing each other, in degrees.
     pub angle_deg: f64,
     pub group_by: GroupBy,
-    /// Merge pairs that would make a surface a slave more than once into an unresolved
-    /// item, as PrePoMax does for ties.
-    pub resolve: bool,
+    /// Young's modulus of each part's material, where known, for choosing the master.
+    pub stiffness: Vec<Option<f64>>,
 }
 
 /// A master and a slave side of a contact pair found, each a set of surfaces.
@@ -50,17 +51,11 @@ pub struct MasterSlaveItem {
     pub slave_name: String,
     pub master: BTreeSet<SurfaceId>,
     pub slave: BTreeSet<SurfaceId>,
-    /// Surfaces whose contacts could not be resolved into master and slave; shown to the
-    /// user as one surface in `master`.
-    pub unresolved: bool,
 }
 
 impl MasterSlaveItem {
     /// PrePoMax's name of the pair, `<master>_to_<slave>`, shortened to 35 characters.
     pub fn name(&self) -> String {
-        if self.unresolved {
-            return self.master_name.clone();
-        }
         let join = |a: &str, b: &str| format!("{a}_to_{b}");
         let mut name = join(&self.master_name, &self.slave_name);
         if name.len() > 35 {
@@ -92,6 +87,8 @@ struct Surface {
     face_bounds: Vec<Bounds>,
     bounds: Bounds,
     nodes: BTreeSet<usize>,
+    /// Sum over the faces of their mean edge length, for the mesh size of the surface.
+    edge_lengths: f64,
     /// The other side of a surface shared with another part, which is no contact.
     internal: bool,
 }
@@ -165,9 +162,14 @@ pub fn find_contact_pairs(
     let names: Vec<&str> = mesh.parts.iter().map(|p| p.name.as_str()).collect();
     let nodes: HashMap<SurfaceId, BTreeSet<usize>> =
         (surfaces.iter()).map(|s| (s.id, s.nodes.clone())).collect();
+    let mesh_sizes: HashMap<SurfaceId, f64> = (surfaces.iter())
+        .map(|s| (s.id, s.edge_lengths / s.faces.len().max(1) as f64))
+        .collect();
     let context = Context {
         nodes: &nodes,
         areas: &areas,
+        mesh_sizes: &mesh_sizes,
+        stiffness: &parameters.stiffness,
         names: &names,
     };
     match parameters.group_by {
@@ -175,13 +177,13 @@ pub fn find_contact_pairs(
             let items = (touching.iter())
                 .map(|&(a, b)| item_of(&context, [a].into(), [b].into()))
                 .collect::<Vec<_>>();
-            ContactGraph::new(&context, &items, false).master_slave_items(parameters.resolve)
+            ContactGraph::new(&context, &items, false).master_slave_items()
         }
         GroupBy::Parts => {
             let mut by_parts: BTreeMap<(usize, usize), (BTreeSet<SurfaceId>, BTreeSet<SurfaceId>)> =
                 BTreeMap::new();
             for &(a, b) in &touching {
-                // The part found first is the master.
+                // Sides by part order; the contact graph decides which is master.
                 let (master, slave) = if a.0 < b.0 { (a, b) } else { (b, a) };
                 let entry = by_parts.entry((master.0, slave.0)).or_default();
                 entry.0.insert(master);
@@ -190,7 +192,7 @@ pub fn find_contact_pairs(
             let items = (by_parts.into_values())
                 .map(|(master, slave)| item_of(&context, master, slave))
                 .collect::<Vec<_>>();
-            ContactGraph::new(&context, &items, false).master_slave_items(parameters.resolve)
+            ContactGraph::new(&context, &items, false).master_slave_items()
         }
         GroupBy::Graph => {
             let items = (touching.iter())
@@ -360,9 +362,11 @@ fn contact_surfaces(
             face_bounds: Vec::new(),
             bounds: Bounds::empty(),
             nodes: BTreeSet::new(),
+            edge_lengths: 0.0,
             internal: false,
         });
         let mut points: Vec<[f64; 3]> = face.corners.iter().map(|&n| coords[n]).collect();
+        surface.edge_lengths += mean_edge_length(&points);
         if let [a, b] = points[..] {
             let up = |p: [f64; 3]| [p[0], p[1], p[2] + depth];
             points = vec![a, b, up(b), up(a)];
@@ -392,6 +396,20 @@ fn contact_surfaces(
         }
     }
     surfaces
+}
+
+/// Mean length of the edges of a polygon; of a line, its length.
+fn mean_edge_length(points: &[[f64; 3]]) -> f64 {
+    match points {
+        [] | [_] => 0.0,
+        [a, b] => length(sub(*b, *a)),
+        _ => {
+            let total: f64 = (0..points.len())
+                .map(|i| length(sub(points[(i + 1) % points.len()], points[i])))
+                .sum();
+            total / points.len() as f64
+        }
+    }
 }
 
 /// The diagonal of the bounding box of the nodes.
@@ -670,7 +688,44 @@ struct Context<'a> {
     /// Mesh nodes of each surface patch.
     nodes: &'a HashMap<SurfaceId, BTreeSet<usize>>,
     areas: &'a HashMap<SurfaceId, f64>,
+    /// Mean edge length of the faces of each surface patch.
+    mesh_sizes: &'a HashMap<SurfaceId, f64>,
+    /// Young's modulus of each part, where known.
+    stiffness: &'a [Option<f64>],
     names: &'a [&'a str],
+}
+
+/// How well a side of a contact suits being the master; see [`Priority::master_first`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Priority {
+    /// Mean edge length of the faces, weighted by area.
+    mesh_size: f64,
+    /// The largest Young's modulus of the parts, 0 if unknown.
+    stiffness: f64,
+    area: f64,
+}
+
+impl Priority {
+    /// Mesh sizes within this factor of each other count as the same.
+    const MESH_SIZE_STEP: f64 = 1.25;
+
+    /// The mesh size on a logarithmic scale in steps of [`Self::MESH_SIZE_STEP`].
+    fn mesh_step(&self) -> i64 {
+        if self.mesh_size > 0.0 {
+            (self.mesh_size.ln() / Self::MESH_SIZE_STEP.ln()).round() as i64
+        } else {
+            i64::MIN
+        }
+    }
+
+    /// Orders the better master first: the coarser mesh, so that the finer mesh's nodes
+    /// are the slaves that cannot pass through the master; then the stiffer material; then
+    /// the larger area.
+    fn master_first(&self, other: &Self) -> std::cmp::Ordering {
+        (other.mesh_step().cmp(&self.mesh_step()))
+            .then(other.stiffness.total_cmp(&self.stiffness))
+            .then(other.area.total_cmp(&self.area))
+    }
 }
 
 impl Context<'_> {
@@ -688,10 +743,20 @@ impl Context<'_> {
             .expect("unbounded range")
     }
 
-    fn size(&self, ids: &BTreeSet<SurfaceId>) -> f64 {
-        ids.iter()
-            .map(|id| self.areas.get(id).copied().unwrap_or(0.0))
-            .sum()
+    fn priority(&self, ids: &BTreeSet<SurfaceId>) -> Priority {
+        let area_of = |id: &SurfaceId| self.areas.get(id).copied().unwrap_or(0.0);
+        let area: f64 = ids.iter().map(area_of).sum();
+        let weighted: f64 = (ids.iter())
+            .map(|id| area_of(id) * self.mesh_sizes.get(id).copied().unwrap_or(0.0))
+            .sum();
+        let stiffness = (ids.iter())
+            .filter_map(|id| self.stiffness.get(id.0).copied().flatten())
+            .fold(0.0, f64::max);
+        Priority {
+            mesh_size: if area > 0.0 { weighted / area } else { 0.0 },
+            stiffness,
+            area,
+        }
     }
 
     /// Mesh nodes of a surface patch.
@@ -710,7 +775,6 @@ fn item_of(
         slave_name: context.name(&slave, &[]),
         master,
         slave,
-        unresolved: false,
     }
 }
 
@@ -718,9 +782,15 @@ fn item_of(
 #[derive(Clone, Debug)]
 struct GraphNode {
     id: usize,
-    name: String,
     items: BTreeSet<SurfaceId>,
-    size: f64,
+    priority: Priority,
+}
+
+impl GraphNode {
+    /// The better master first, see [`Priority::master_first`]; ties by id.
+    fn master_first(&self, other: &Self) -> std::cmp::Ordering {
+        (self.priority.master_first(&other.priority)).then(self.id.cmp(&other.id))
+    }
 }
 
 /// An undirected graph as PrePoMax's `Graph<T>`: nodes in order, and per node its neighbours
@@ -746,17 +816,6 @@ impl Graph {
         self.neighbours.get(&node).map_or(&[], Vec::as_slice)
     }
 
-    /// Removes a node and one reference to it from each other node.
-    fn remove(&mut self, node: usize) {
-        self.order.retain(|&n| n != node);
-        self.neighbours.remove(&node);
-        for list in self.neighbours.values_mut() {
-            if let Some(index) = list.iter().position(|&n| n == node) {
-                list.remove(index);
-            }
-        }
-    }
-
     fn subgraph(&self, nodes: &[usize]) -> Graph {
         Graph {
             order: nodes.to_vec(),
@@ -766,10 +825,10 @@ impl Graph {
         }
     }
 
-    /// Connected parts, starting from the largest nodes as PrePoMax sorts them.
-    fn connected(&self, sizes: &HashMap<usize, f64>) -> Vec<Graph> {
+    /// Connected parts, starting from the best masters.
+    fn connected(&self, nodes: &HashMap<usize, GraphNode>) -> Vec<Graph> {
         let mut order = self.order.clone();
-        order.sort_by(|a, b| sizes[b].total_cmp(&sizes[a]));
+        order.sort_by(|a, b| nodes[a].master_first(&nodes[b]));
         let mut visited = HashSet::new();
         let mut graphs = Vec::new();
         for &start in &order {
@@ -787,42 +846,6 @@ impl Graph {
             graphs.push(self.subgraph(&nodes));
         }
         graphs
-    }
-
-    fn is_tree(&self) -> bool {
-        let Some(&first) = self.order.first() else {
-            return true;
-        };
-        let mut visited = HashSet::new();
-        let mut queue = VecDeque::from([(first, first)]);
-        while let Some((node, parent)) = queue.pop_front() {
-            if !visited.insert(node) {
-                return false;
-            }
-            for &neighbour in self.neighbours(node) {
-                if neighbour != parent {
-                    queue.push_back((neighbour, node));
-                }
-            }
-        }
-        true
-    }
-
-    fn has_one_cycle(&self) -> bool {
-        let mut copy = self.clone();
-        loop {
-            let leaves: Vec<usize> = (copy.order.iter())
-                .copied()
-                .filter(|&n| copy.neighbours(n).len() <= 1)
-                .collect();
-            if leaves.is_empty() {
-                break;
-            }
-            for leaf in leaves {
-                copy.remove(leaf);
-            }
-        }
-        copy.order.iter().all(|&n| copy.neighbours(n).len() <= 2)
     }
 }
 
@@ -864,19 +887,15 @@ impl<'a> ContactGraph<'a> {
         }
         let mut nodes = HashMap::new();
         let mut graph = Graph::default();
-        let mut taken = Vec::new();
         for items in sets {
             let id = graph.order.len() + 1;
-            let name = context.name(&items, &taken);
-            taken.push(name.clone());
-            let size = context.size(&items);
+            let priority = context.priority(&items);
             nodes.insert(
                 id,
                 GraphNode {
                     id,
-                    name,
                     items,
-                    size,
+                    priority,
                 },
             );
             graph.add_node(id);
@@ -900,119 +919,55 @@ impl<'a> ContactGraph<'a> {
         }
     }
 
-    fn sizes(&self) -> HashMap<usize, f64> {
-        self.nodes.iter().map(|(&id, n)| (id, n.size)).collect()
-    }
-
-    fn item(&self, master: usize, slave: usize, prefix: &str) -> MasterSlaveItem {
-        let (m, s) = (&self.nodes[&master], &self.nodes[&slave]);
-        MasterSlaveItem {
-            master_name: format!("{prefix}{}", m.name),
-            slave_name: s.name.clone(),
-            master: m.items.clone(),
-            slave: s.items.clone(),
-            unresolved: false,
-        }
-    }
-
-    /// PrePoMax's `GetMasterSlaveItems`.
-    fn master_slave_items(&self, resolve: bool) -> Vec<MasterSlaveItem> {
+    /// Each side is the slave of its neighbours that are better masters, all of them in
+    /// one pair, so that it is a slave only once; the best master of each connected part is
+    /// no slave.
+    fn master_slave_items(&self) -> Vec<MasterSlaveItem> {
         let mut items = Vec::new();
-        for graph in self.graph.connected(&self.sizes()) {
-            if graph.is_tree() {
-                items.extend(self.peel_tree(graph).0);
-            } else if graph.has_one_cycle() {
-                items.extend(self.resolve_one_cycle(graph));
-            } else {
-                items.extend(self.resolve_cycles(graph, resolve));
-            }
-        }
-        items
-    }
-
-    /// Peels off nodes with one neighbour, one at a time: each is the master of its
-    /// neighbour.
-    fn peel_tree(&self, mut graph: Graph) -> (Vec<MasterSlaveItem>, Graph) {
-        let mut items = Vec::new();
-        loop {
-            let leaf = (graph.order.iter())
-                .copied()
-                .find(|&n| graph.neighbours(n).len() == 1);
-            let Some(leaf) = leaf else {
-                break;
-            };
-            let neighbour = graph.neighbours(leaf)[0];
-            items.push(self.item(leaf, neighbour, ""));
-            graph.remove(leaf);
-        }
-        (items, graph)
-    }
-
-    fn resolve_one_cycle(&self, graph: Graph) -> Vec<MasterSlaveItem> {
-        let (mut items, reduced) = self.peel_tree(graph);
-        let Some(&first) = reduced.order.first() else {
-            return items;
-        };
-        let mut visited = HashSet::new();
-        let mut queue = VecDeque::from([(first, first)]);
-        while let Some((node, parent)) = queue.pop_front() {
-            if !visited.insert(node) {
-                continue;
-            }
-            if let Some(&next) = reduced.neighbours(node).iter().find(|&&n| n != parent) {
-                items.push(self.item(node, next, ""));
-                queue.push_back((next, node));
-            }
-        }
-        items
-    }
-
-    fn resolve_cycles(&self, graph: Graph, resolve: bool) -> Vec<MasterSlaveItem> {
-        let mut items = Vec::new();
-        let mut prefix = "";
-        if resolve {
-            let all: BTreeSet<SurfaceId> = (graph.order.iter())
-                .flat_map(|n| self.nodes[n].items.iter().copied())
-                .collect();
-            items.push(MasterSlaveItem {
-                master_name: "Unresolved".into(),
-                slave_name: String::new(),
-                master: all,
-                slave: BTreeSet::new(),
-                unresolved: true,
-            });
-            prefix = "Unresolved_";
-        }
-        let (tree_items, mut reduced) = self.peel_tree(graph);
-        items.extend(tree_items);
-        for node in reduced.order.clone() {
-            for neighbour in reduced.neighbours(node).to_vec() {
-                items.push(self.item(node, neighbour, prefix));
-                if let Some(list) = reduced.neighbours.get_mut(&neighbour)
-                    && let Some(index) = list.iter().position(|&n| n == node)
-                {
-                    list.remove(index);
+        let mut taken = Vec::new();
+        for graph in self.graph.connected(&self.nodes) {
+            let ordered = self.ordered(&graph);
+            let rank: HashMap<usize, usize> =
+                ordered.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+            for &node in &ordered {
+                let masters: BTreeSet<usize> = (graph.neighbours(node).iter())
+                    .copied()
+                    .filter(|n| rank[n] < rank[&node])
+                    .collect();
+                if !masters.is_empty() {
+                    let masters: Vec<usize> = masters.into_iter().collect();
+                    items.push(self.grouped_item(&masters, &[node], &mut taken));
                 }
             }
-            if let Some(list) = reduced.neighbours.get_mut(&node) {
-                list.clear();
-            }
         }
         items
+    }
+
+    /// The nodes of a graph, the best master first.
+    fn ordered(&self, graph: &Graph) -> Vec<usize> {
+        let mut ordered = graph.order.clone();
+        ordered.sort_by(|a, b| self.nodes[a].master_first(&self.nodes[b]));
+        ordered
     }
 
     /// PrePoMax's `GetGroupedMasterSlaveItems`: a two-colourable part becomes one pair with
-    /// the larger side as master; otherwise each node is the slave of its larger neighbours.
+    /// the better master side as master; otherwise each node is the slave of its better
+    /// neighbours, slaves with the same masters in one pair.
     fn grouped_master_slave_items(&self) -> Vec<MasterSlaveItem> {
         let mut items = Vec::new();
         let mut taken = Vec::new();
-        for graph in self.graph.connected(&self.sizes()) {
+        for graph in self.graph.connected(&self.nodes) {
             if let Some((first, second)) = self.bipartite(&graph) {
                 if first.is_empty() || second.is_empty() {
                     continue;
                 }
-                let size = |nodes: &[usize]| nodes.iter().map(|n| self.nodes[n].size).sum::<f64>();
-                if size(&first) >= size(&second) {
+                let priority = |nodes: &[usize]| {
+                    let ids = (nodes.iter())
+                        .flat_map(|n| self.nodes[n].items.iter().copied())
+                        .collect();
+                    self.context.priority(&ids)
+                };
+                if priority(&first).master_first(&priority(&second)).is_le() {
                     items.push(self.grouped_item(&first, &second, &mut taken));
                 } else {
                     items.push(self.grouped_item(&second, &first, &mut taken));
@@ -1061,11 +1016,7 @@ impl<'a> ContactGraph<'a> {
         items: &mut Vec<MasterSlaveItem>,
         taken: &mut Vec<String>,
     ) {
-        let mut ordered = graph.order.clone();
-        ordered.sort_by(|a, b| {
-            let (a, b) = (&self.nodes[a], &self.nodes[b]);
-            b.size.total_cmp(&a.size).then(a.id.cmp(&b.id))
-        });
+        let ordered = self.ordered(graph);
         let rank: HashMap<usize, usize> =
             ordered.iter().enumerate().map(|(i, &n)| (n, i)).collect();
         let mut groups: Vec<(BTreeSet<usize>, Vec<usize>)> = Vec::new();
@@ -1109,7 +1060,6 @@ impl<'a> ContactGraph<'a> {
             slave_name,
             master,
             slave,
-            unresolved: false,
         }
     }
 }
@@ -1184,7 +1134,15 @@ mod tests {
         mesh
     }
 
-    fn search(mesh: &FeMesh, group_by: GroupBy, resolve: bool) -> Vec<MasterSlaveItem> {
+    fn search(mesh: &FeMesh, group_by: GroupBy) -> Vec<MasterSlaveItem> {
+        search_with(mesh, group_by, Vec::new())
+    }
+
+    fn search_with(
+        mesh: &FeMesh,
+        group_by: GroupBy,
+        stiffness: Vec<Option<f64>>,
+    ) -> Vec<MasterSlaveItem> {
         let skins: Vec<PartSkin> = (mesh.parts.iter())
             .map(|p| extract_part_skin(mesh, p, 30.0))
             .collect();
@@ -1192,7 +1150,7 @@ mod tests {
             distance: 0.01,
             angle_deg: 35.0,
             group_by,
-            resolve,
+            stiffness,
         };
         find_contact_pairs(mesh, &skins, &vec![true; mesh.parts.len()], &parameters)
     }
@@ -1250,7 +1208,7 @@ mod tests {
     #[test]
     fn finds_the_edges_where_a_disc_touches_a_beam_in_2d() {
         let mesh = beam_on_disc();
-        let items = search(&mesh, GroupBy::Parts, false);
+        let items = search(&mesh, GroupBy::Parts);
         assert_eq!(items.len(), 1, "{items:?}");
         let item = &items[0];
         assert_eq!(item.name(), "BEAM_to_DISC");
@@ -1277,14 +1235,14 @@ mod tests {
             let p = mesh.coords()[mesh.node_index(id).unwrap()];
             mesh.set_node(id, [p[0], p[1] - 0.1, 0.0]);
         }
-        assert!(search(&mesh, GroupBy::Parts, false).is_empty());
+        assert!(search(&mesh, GroupBy::Parts).is_empty());
     }
 
     #[test]
     fn finds_the_faces_where_two_blocks_touch() {
         // The second block sits on the first with a small gap, shifted sideways by half.
         let mesh = blocks(&[[0.0, 0.0, 0.0], [0.5, 0.0, 1.005]]);
-        let items = search(&mesh, GroupBy::Parts, false);
+        let items = search(&mesh, GroupBy::Parts);
         assert_eq!(items.len(), 1);
         let item = &items[0];
         assert_eq!(item.name(), "PART-1_to_PART-2");
@@ -1300,20 +1258,117 @@ mod tests {
 
     #[test]
     fn blocks_apart_or_side_by_side_at_a_corner_are_no_contact() {
-        assert!(search(&blocks(&[[0.0; 3], [0.0, 0.0, 1.5]]), GroupBy::Parts, false).is_empty());
+        assert!(search(&blocks(&[[0.0; 3], [0.0, 0.0, 1.5]]), GroupBy::Parts).is_empty());
         // Touching along an edge only.
         let edge = blocks(&[[0.0; 3], [1.0, 0.0, 1.0]]);
-        assert!(search(&edge, GroupBy::Parts, false).is_empty());
+        assert!(search(&edge, GroupBy::Parts).is_empty());
     }
 
     #[test]
     fn a_chain_of_blocks_makes_every_block_a_slave_once() {
         let mesh = blocks(&[[0.0; 3], [0.0, 0.0, 1.0], [0.0, 0.0, 2.0]]);
         for group_by in [GroupBy::None, GroupBy::Parts, GroupBy::Graph] {
-            let items = search(&mesh, group_by, true);
+            let items = search(&mesh, group_by);
             assert_eq!(items.len(), 2, "{group_by:?}");
             let slaves: Vec<_> = items.iter().map(|i| i.slave.clone()).collect();
             assert_ne!(slaves[0], slaves[1], "{group_by:?}");
+        }
+    }
+
+    /// A unit cube at `origin` meshed with `n` × `n` × `n` hexes as part `name`.
+    fn add_cube(mesh: &mut FeMesh, name: &str, origin: [f64; 3], n: usize) {
+        add_box(mesh, name, origin, [1.0; 3], [n; 3]);
+    }
+
+    /// A box at `origin` of the size meshed with `n` hexes along each axis as part `name`.
+    fn add_box(mesh: &mut FeMesh, name: &str, origin: [f64; 3], size: [f64; 3], n: [usize; 3]) {
+        let first_node = mesh.coords().len() as u32 + 1;
+        let first_element = mesh.elements().len() as u32 + 1;
+        let id = |i: usize, j: usize, k: usize| {
+            first_node + (i + (n[0] + 1) * (j + (n[1] + 1) * k)) as u32
+        };
+        let h = [0, 1, 2].map(|a| size[a] / n[a] as f64);
+        for k in 0..=n[2] {
+            for j in 0..=n[1] {
+                for i in 0..=n[0] {
+                    let offset = [i as f64 * h[0], j as f64 * h[1], k as f64 * h[2]];
+                    mesh.set_node(id(i, j, k), add(origin, offset));
+                }
+            }
+        }
+        let mut elements = Vec::new();
+        for k in 0..n[2] {
+            for j in 0..n[1] {
+                for i in 0..n[0] {
+                    let element = first_element + elements.len() as u32;
+                    let nodes = vec![
+                        id(i, j, k),
+                        id(i + 1, j, k),
+                        id(i + 1, j + 1, k),
+                        id(i, j + 1, k),
+                        id(i, j, k + 1),
+                        id(i + 1, j, k + 1),
+                        id(i + 1, j + 1, k + 1),
+                        id(i, j + 1, k + 1),
+                    ];
+                    mesh.add_element(Element {
+                        id: element,
+                        type_name: "C3D8".into(),
+                        shape: ElementShape::Hex8,
+                        nodes,
+                    })
+                    .unwrap();
+                    elements.push(element);
+                }
+            }
+        }
+        mesh.parts.push(Part {
+            name: name.into(),
+            elements,
+        });
+    }
+
+    #[test]
+    fn the_coarser_mesh_is_the_master() {
+        // The finely meshed cube comes first, so the part order alone would make it master.
+        let mut mesh = FeMesh::default();
+        add_cube(&mut mesh, "FINE", [0.0, 0.0, 1.0], 3);
+        add_cube(&mut mesh, "COARSE", [0.0; 3], 1);
+        for group_by in [GroupBy::None, GroupBy::Parts, GroupBy::Graph] {
+            let items = search_with(&mesh, group_by, vec![Some(210e3), Some(70e3)]);
+            assert_eq!(items.len(), 1, "{group_by:?}");
+            assert_eq!(items[0].name(), "COARSE_to_FINE", "{group_by:?}");
+        }
+    }
+
+    #[test]
+    fn with_the_same_mesh_the_stiffer_material_is_the_master() {
+        let mesh = blocks(&[[0.0; 3], [0.0, 0.0, 1.0]]);
+        let items = search_with(&mesh, GroupBy::Parts, vec![Some(70e3), Some(210e3)]);
+        assert_eq!(items[0].name(), "PART-2_to_PART-1");
+        let items = search_with(&mesh, GroupBy::Parts, vec![Some(210e3), Some(70e3)]);
+        assert_eq!(items[0].name(), "PART-1_to_PART-2");
+    }
+
+    #[test]
+    fn a_surface_on_two_masters_is_the_slave_of_both_at_once() {
+        // A finely meshed plate lying on two coarse blocks: its bottom face touches both.
+        let mut mesh = FeMesh::default();
+        add_cube(&mut mesh, "LEFT", [0.0; 3], 1);
+        add_cube(&mut mesh, "RIGHT", [2.0, 0.0, 0.0], 1);
+        add_box(
+            &mut mesh,
+            "PLATE",
+            [0.0, 0.0, 1.0],
+            [3.0, 1.0, 0.25],
+            [12, 4, 1],
+        );
+        for group_by in [GroupBy::None, GroupBy::Parts, GroupBy::Graph] {
+            let items = search(&mesh, group_by);
+            assert_eq!(items.len(), 1, "{group_by:?}: {items:?}");
+            assert_eq!(items[0].slave_name, "PLATE", "{group_by:?}");
+            let masters: BTreeSet<usize> = items[0].master.iter().map(|id| id.0).collect();
+            assert_eq!(masters, [0, 1].into(), "{group_by:?}");
         }
     }
 
@@ -1324,7 +1379,6 @@ mod tests {
             slave_name: "B".into(),
             master: BTreeSet::new(),
             slave: BTreeSet::new(),
-            unresolved: false,
         };
         assert_eq!(item.name(), "Item_to_B");
     }
