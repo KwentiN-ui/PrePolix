@@ -451,7 +451,9 @@ fn a_deleted_part_leaves_the_others_with_their_names_and_local_sizes() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("zwei_bloecke.step")).unwrap().geometry;
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
     geometry.meshing.second_order = false;
     geometry.meshing.max_size = 5.0;
     // A face of each block; the second block's face must follow it into the new numbering.
@@ -502,7 +504,9 @@ fn a_deleted_mesh_part_takes_its_elements_and_nodes() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("zwei_bloecke.step")).unwrap().geometry;
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
     geometry.meshing.second_order = false;
     geometry.meshing.max_size = 5.0;
     let whole = generate_mesh(&geometry).unwrap().mesh;
