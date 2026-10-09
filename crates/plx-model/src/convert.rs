@@ -110,6 +110,18 @@ impl FeModel {
             }
             for load in &mut step.loads {
                 match &mut load.kind {
+                    LoadKind::PreTension {
+                        value,
+                        by_displacement,
+                        ..
+                    } => {
+                        let quantity = if *by_displacement {
+                            Quantity::Length
+                        } else {
+                            Quantity::Force
+                        };
+                        c.value(value, quantity);
+                    }
                     LoadKind::ConcentratedForce(force) | LoadKind::SurfaceTraction(force) => {
                         c.all(force, Quantity::Force)
                     }

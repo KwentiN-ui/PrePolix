@@ -645,6 +645,8 @@ impl FeModel {
                         (0..3).filter(|&d| f[d] != 0.0 && d < dofs).collect()
                     }
                     LoadKind::Pressure(_) => (0..dofs.min(3)).collect(),
+                    // Acts on its own node, which nothing holds.
+                    LoadKind::PreTension { .. } => Vec::new(),
                     // Heat flows go into temperatures, which nothing but a temperature holds.
                     _ => Vec::new(),
                 };
