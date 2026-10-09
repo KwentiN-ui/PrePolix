@@ -12,9 +12,10 @@ use plx_model::{
     BoundaryCondition, BoundaryKind, Constraint, ContactPair, Elastic, EquationSolver,
     Extrapolation, FeModel, FieldOutput, FrequencyStep, HotSpot, HotSpotComponent, Incrementation,
     Load, LoadKind, Material, OutputKind, Region, Section, StaticStep, Step, StepKind,
-    SurfaceInteraction, Tie, extrapolation_weights, next_name,
+    SurfaceInteraction, extrapolation_weights, next_name,
 };
 
+use crate::constraint_dialog::ConstraintDraft;
 use crate::contacts::{self, MasterSlave};
 use crate::model::{Highlight, Hit, Model};
 use crate::numeric;
@@ -31,7 +32,7 @@ pub enum NewItem {
     BoundaryCondition(usize),
     Load(usize),
     HotSpot,
-    /// A tie, the only constraint so far.
+    /// A spring, support or tie, chosen in the dialog.
     Constraint,
     SurfaceInteraction,
     ContactPair,
@@ -407,7 +408,7 @@ enum Draft {
     Load(usize, Load, RegionDraft),
     FieldOutput(usize, FieldOutput),
     HotSpot(HotSpot, RegionDraft, HotSpotText),
-    Tie(Tie, MasterSlave),
+    Constraint(ConstraintDraft),
     /// The interaction with the index of the model whose properties are shown.
     SurfaceInteraction(SurfaceInteraction, usize),
     ContactPair(ContactPair, MasterSlave),
@@ -420,7 +421,8 @@ fn draft_region(draft: &Draft) -> Option<&RegionDraft> {
         | Draft::BoundaryCondition(_, _, r)
         | Draft::Load(_, _, r)
         | Draft::HotSpot(_, r, _) => Some(r),
-        Draft::Tie(_, regions) | Draft::ContactPair(_, regions) => Some(regions.current()),
+        Draft::ContactPair(_, regions) => Some(regions.current()),
+        Draft::Constraint(c) => Some(c.region()),
         _ => None,
     }
 }
@@ -431,7 +433,8 @@ fn draft_region_mut(draft: &mut Draft) -> Option<&mut RegionDraft> {
         | Draft::BoundaryCondition(_, _, r)
         | Draft::Load(_, _, r)
         | Draft::HotSpot(_, r, _) => Some(r),
-        Draft::Tie(_, regions) | Draft::ContactPair(_, regions) => Some(regions.current_mut()),
+        Draft::ContactPair(_, regions) => Some(regions.current_mut()),
+        Draft::Constraint(c) => Some(c.region_mut()),
         _ => None,
     }
 }
@@ -552,10 +555,7 @@ impl Editor {
                     },
                 )
             }
-            NewItem::Constraint => {
-                let existing = fe.constraints.iter().map(Constraint::name);
-                Draft::Tie(Tie::new(next_name("Tie", existing)), MasterSlave::new())
-            }
+            NewItem::Constraint => Draft::Constraint(ConstraintDraft::new(fe)),
             NewItem::SurfaceInteraction => {
                 let existing = names(&fe.surface_interactions, |s| &s.name);
                 Draft::SurfaceInteraction(
@@ -620,12 +620,10 @@ impl Editor {
                 let output = fe.steps.get(s)?.field_outputs.get(i)?.clone();
                 (Draft::FieldOutput(s, output), i)
             }
-            TreeItem::Constraint(i) => match fe.constraints.get(i)? {
-                Constraint::Tie(tie) => {
-                    let regions = MasterSlave::from_regions(&tie.master, &tie.slave, mesh);
-                    (Draft::Tie(tie.clone(), regions), i)
-                }
-            },
+            TreeItem::Constraint(i) => (
+                Draft::Constraint(ConstraintDraft::edit(fe.constraints.get(i)?, mesh)),
+                i,
+            ),
             TreeItem::SurfaceInteraction(i) => (
                 Draft::SurfaceInteraction(fe.surface_interactions.get(i)?.clone(), 0),
                 i,
@@ -659,7 +657,7 @@ impl Editor {
     }
 
     pub fn title(&self) -> String {
-        let (kind, name) = match &self.draft {
+        let (kind, name): (&str, &str) = match &self.draft {
             Draft::Material(m) => ("Material", &m.name),
             Draft::Section(s, _) => ("Section", &s.name),
             Draft::Step(s) => ("Step", &s.name),
@@ -667,7 +665,7 @@ impl Editor {
             Draft::Load(_, l, _) => ("Last", &l.name),
             Draft::FieldOutput(_, f) => ("Field Output", &f.name),
             Draft::HotSpot(h, ..) => ("Hot Spot", &h.name),
-            Draft::Tie(t, _) => ("Constraint", &t.name),
+            Draft::Constraint(c) => ("Constraint", c.name()),
             Draft::SurfaceInteraction(s, _) => ("Surface Interaction", &s.name),
             Draft::ContactPair(c, _) => ("Contact Pair", &c.name),
         };
@@ -740,7 +738,8 @@ impl Editor {
     /// The region being edited, for the 3D view.
     pub fn highlight(&self, model: &Model) -> Highlight {
         match &self.draft {
-            Draft::Tie(_, regions) | Draft::ContactPair(_, regions) => regions.highlight(model),
+            Draft::ContactPair(_, regions) => regions.highlight(model),
+            Draft::Constraint(c) => c.highlight(model),
             _ => self
                 .region()
                 .map_or_else(Highlight::default, |r| r.highlight(model)),
@@ -925,10 +924,7 @@ impl Editor {
             Draft::HotSpot(hot_spot, region, text) => {
                 hot_spot_form(ui, model, hot_spot, region, text)
             }
-            Draft::Tie(tie, regions) => {
-                name_row(ui, &mut tie.name);
-                contacts::tie_form(ui, model, tie, regions);
-            }
+            Draft::Constraint(c) => c.form(ui, model, &taken, self.index.is_none()),
             Draft::SurfaceInteraction(interaction, selected) => {
                 name_row(ui, &mut interaction.name);
                 contacts::interaction_form(ui, interaction, selected);
@@ -963,7 +959,7 @@ impl Editor {
             Draft::Load(step, ..) => names(&fe.steps[*step].loads, |l| &l.name),
             Draft::FieldOutput(step, _) => names(&fe.steps[*step].field_outputs, |f| &f.name),
             Draft::HotSpot(..) => names(&fe.hot_spots, |h| &h.name),
-            Draft::Tie(..) => fe.constraints.iter().map(Constraint::name).collect(),
+            Draft::Constraint(_) => fe.constraints.iter().map(Constraint::name).collect(),
             Draft::SurfaceInteraction(..) => names(&fe.surface_interactions, |s| &s.name),
             Draft::ContactPair(..) => names(&fe.contact_pairs, |c| &c.name),
         };
@@ -982,7 +978,7 @@ impl Editor {
             Draft::Load(_, l, _) => &l.name,
             Draft::FieldOutput(_, f) => &f.name,
             Draft::HotSpot(h, ..) => &h.name,
-            Draft::Tie(t, _) => &t.name,
+            Draft::Constraint(c) => c.name(),
             Draft::SurfaceInteraction(s, _) => &s.name,
             Draft::ContactPair(c, _) => &c.name,
         };
@@ -1002,7 +998,7 @@ impl Editor {
             return Err("Bitte ein Material wählen; zuerst unter Materials anlegen.".into());
         }
         match &self.draft {
-            Draft::Tie(_, regions) => regions.validate()?,
+            Draft::Constraint(c) => c.validate()?,
             Draft::ContactPair(pair, regions) => {
                 contacts::validate_contact_pair(pair, fe)?;
                 regions.validate()?;
@@ -1087,12 +1083,12 @@ impl Editor {
                 hot_spot.toe = region.region();
                 put(&mut fe.hot_spots, index, hot_spot);
             }
-            Draft::Tie(mut tie, regions) => {
-                (tie.master, tie.slave) = regions.regions();
+            Draft::Constraint(draft) => {
+                let mut constraint = draft.finish();
                 if let Some(existing) = index.and_then(|i| fe.constraints.get(i)) {
-                    tie.active = existing.active();
+                    *constraint.active_mut() = existing.active();
                 }
-                put(&mut fe.constraints, index, Constraint::Tie(tie));
+                put(&mut fe.constraints, index, constraint);
             }
             Draft::SurfaceInteraction(interaction, _) => {
                 // Contact pairs follow a renamed interaction.
@@ -1166,7 +1162,7 @@ pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
 pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
     let fe = &model.fe;
     let master_slave = match *item {
-        TreeItem::Constraint(i) => fe.constraints.get(i).map(Constraint::regions),
+        TreeItem::Constraint(i) => fe.constraints.get(i).and_then(Constraint::master_slave),
         TreeItem::ContactPair(i) => fe.contact_pairs.get(i).map(|c| [&c.master, &c.slave]),
         _ => None,
     };
@@ -1190,6 +1186,7 @@ pub fn item_region<'a>(fe: &'a FeModel, item: &TreeItem) -> Option<&'a Region> {
             .map(|b| &b.region),
         TreeItem::Load(s, i) => fe.steps.get(s)?.loads.get(i).map(|l| &l.region),
         TreeItem::HotSpot(i) => fe.hot_spots.get(i).map(|h| &h.toe),
+        TreeItem::Constraint(i) => fe.constraints.get(i)?.regions().first().copied(),
         _ => None,
     }
 }

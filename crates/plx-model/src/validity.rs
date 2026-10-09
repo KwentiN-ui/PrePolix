@@ -43,8 +43,12 @@ impl FeModel {
             }
         }
         for (i, constraint) in self.constraints.iter().enumerate() {
-            let [master, slave] = constraint.regions();
-            if let Some(reason) = master_slave_reference(master, slave, mesh) {
+            let reason = match constraint.master_slave() {
+                Some([master, slave]) => master_slave_reference(master, slave, mesh),
+                None => (constraint.regions().into_iter())
+                    .find_map(|region| region.missing_reference(mesh)),
+            };
+            if let Some(reason) = reason {
                 invalid.push(Invalid {
                     item: ModelItem::Constraint(i),
                     reason,

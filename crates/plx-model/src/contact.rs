@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::Region;
+use crate::{CompressionOnly, PointSpring, Region, SurfaceSpring, SurfaceToSurfaceSpring};
 
 /// PrePoMax's default colour of contact and constraint surfaces, yellow.
 pub const DEFAULT_SURFACE_COLOR: [u8; 3] = [255, 255, 0];
@@ -197,41 +197,74 @@ impl ContactPair {
     }
 }
 
-/// A constraint between parts of the model, PrePoMax's Constraints.
+/// A constraint between parts of the model or to ground, PrePoMax's Constraints.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Constraint {
+    PointSpring(PointSpring),
+    SurfaceSpring(SurfaceSpring),
+    CompressionOnly(CompressionOnly),
     Tie(Tie),
+    SurfaceToSurfaceSpring(SurfaceToSurfaceSpring),
 }
 
 impl Constraint {
     pub fn name(&self) -> &str {
         match self {
+            Constraint::PointSpring(c) => &c.name,
+            Constraint::SurfaceSpring(c) => &c.name,
+            Constraint::CompressionOnly(c) => &c.name,
             Constraint::Tie(tie) => &tie.name,
+            Constraint::SurfaceToSurfaceSpring(c) => &c.name,
         }
     }
 
     pub fn active(&self) -> bool {
         match self {
+            Constraint::PointSpring(c) => c.active,
+            Constraint::SurfaceSpring(c) => c.active,
+            Constraint::CompressionOnly(c) => c.active,
             Constraint::Tie(tie) => tie.active,
+            Constraint::SurfaceToSurfaceSpring(c) => c.active,
         }
     }
 
     pub fn active_mut(&mut self) -> &mut bool {
         match self {
+            Constraint::PointSpring(c) => &mut c.active,
+            Constraint::SurfaceSpring(c) => &mut c.active,
+            Constraint::CompressionOnly(c) => &mut c.active,
             Constraint::Tie(tie) => &mut tie.active,
+            Constraint::SurfaceToSurfaceSpring(c) => &mut c.active,
         }
     }
 
-    /// Master and slave region.
-    pub fn regions(&self) -> [&Region; 2] {
+    /// Master and slave region of a tie or spring connection.
+    pub fn master_slave(&self) -> Option<[&Region; 2]> {
         match self {
-            Constraint::Tie(tie) => [&tie.master, &tie.slave],
+            Constraint::Tie(tie) => Some([&tie.master, &tie.slave]),
+            Constraint::SurfaceToSurfaceSpring(c) => Some([&c.master, &c.slave]),
+            _ => None,
         }
     }
 
-    pub fn regions_mut(&mut self) -> [&mut Region; 2] {
+    /// The regions the constraint is defined on, master before slave.
+    pub fn regions(&self) -> Vec<&Region> {
         match self {
-            Constraint::Tie(tie) => [&mut tie.master, &mut tie.slave],
+            Constraint::PointSpring(c) => vec![&c.region],
+            Constraint::SurfaceSpring(c) => vec![&c.region],
+            Constraint::CompressionOnly(c) => vec![&c.region],
+            Constraint::Tie(tie) => vec![&tie.master, &tie.slave],
+            Constraint::SurfaceToSurfaceSpring(c) => vec![&c.master, &c.slave],
+        }
+    }
+
+    pub fn regions_mut(&mut self) -> Vec<&mut Region> {
+        match self {
+            Constraint::PointSpring(c) => vec![&mut c.region],
+            Constraint::SurfaceSpring(c) => vec![&mut c.region],
+            Constraint::CompressionOnly(c) => vec![&mut c.region],
+            Constraint::Tie(tie) => vec![&mut tie.master, &mut tie.slave],
+            Constraint::SurfaceToSurfaceSpring(c) => vec![&mut c.master, &mut c.slave],
         }
     }
 }
