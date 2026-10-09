@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -306,6 +306,54 @@ impl Model {
             .map(|f| (elements[f.element].id, f.face as u8 + 1))
     }
 
+    /// All element faces on the surface with the ids of their corner nodes.
+    pub fn skin_faces_with_corners(
+        &self,
+    ) -> impl Iterator<Item = ((ElementId, u8), Vec<NodeId>)> + '_ {
+        let (elements, ids) = (self.mesh.elements(), self.mesh.node_ids());
+        self.skins
+            .iter()
+            .flat_map(|skin| &skin.faces)
+            .map(move |f| {
+                let corners = f.corners.iter().map(|&n| ids[n]).collect();
+                ((elements[f.element].id, f.face as u8 + 1), corners)
+            })
+    }
+
+    pub fn skin(&self, part: usize) -> &PartSkin {
+        &self.skins[part]
+    }
+
+    /// Undeformed position of a node relative to the model origin, where picking happens.
+    pub fn render_position(&self, index: usize) -> Vec3 {
+        (DVec3::from(self.mesh.coords()[index]) - self.origin).as_vec3()
+    }
+
+    /// All nodes of the visible parts.
+    pub fn visible_nodes(&self) -> BTreeSet<NodeId> {
+        let elements = self.mesh.elements();
+        self.parts
+            .iter()
+            .zip(&self.mesh.parts)
+            .filter(|(info, _)| info.visible)
+            .flat_map(|(_, part)| &part.elements)
+            .filter_map(|&id| self.mesh.element_index(id))
+            .flat_map(|index| elements[index].nodes.iter().copied())
+            .collect()
+    }
+
+    /// All surface faces of the visible parts.
+    pub fn visible_faces(&self) -> BTreeSet<(ElementId, u8)> {
+        let elements = self.mesh.elements();
+        self.skins
+            .iter()
+            .zip(&self.parts)
+            .filter(|(_, info)| info.visible)
+            .flat_map(|(skin, _)| &skin.faces)
+            .map(|f| (elements[f.element].id, f.face as u8 + 1))
+            .collect()
+    }
+
     /// The nearest visible face hit by a ray, both relative to the model origin.
     pub fn pick(&self, origin: Vec3, direction: Vec3) -> Option<Hit> {
         let coords = self.mesh.coords();
@@ -337,24 +385,6 @@ impl Model {
             }
         }
         best.map(|(_, hit)| hit)
-    }
-
-    /// Element and CalculiX face number of a hit.
-    pub fn hit_face(&self, hit: &Hit) -> (ElementId, u8) {
-        let face = &self.skins[hit.part].faces[hit.face];
-        (self.mesh.elements()[face.element].id, face.face as u8 + 1)
-    }
-
-    /// All faces of the smooth surface patch around a hit, bounded by feature edges.
-    pub fn hit_patch(&self, hit: &Hit) -> Vec<(ElementId, u8)> {
-        let skin = &self.skins[hit.part];
-        let region = skin.faces[hit.face].region;
-        let elements = self.mesh.elements();
-        skin.faces
-            .iter()
-            .filter(|f| f.region == region)
-            .map(|f| (elements[f.element].id, f.face as u8 + 1))
-            .collect()
     }
 
     /// The node of the hit face nearest to the hit point.
@@ -508,17 +538,12 @@ mod tests {
     }
 
     #[test]
-    fn picking_finds_faces_patches_and_nodes() {
+    fn picking_finds_faces_and_nodes() {
         let model = load(&testdata("kragbalken_c3d8.inp")).unwrap().model;
         // The beam spans 0..100 x 0..10 x 0..10; look straight down at x = 95, y = 5.
         let origin = Vec3::new(95.0, 5.0, 50.0) - model.origin.as_vec3();
         let hit = model.pick(origin, Vec3::NEG_Z).unwrap();
         assert!((hit.point.z + model.origin.z as f32 - 10.0).abs() < 1e-4);
-        let (element, face) = model.hit_face(&hit);
-        assert_eq!(face, 2, "top face of a hex is S2");
-        assert!(model.mesh.element(element).is_some());
-        // The top of the beam is one patch of 10 x 2 element faces.
-        assert_eq!(model.hit_patch(&hit).len(), 20);
         let node = model.mesh.node(model.hit_node(&hit)).unwrap();
         assert_eq!(node[2], 10.0);
         assert!(model.pick(origin, Vec3::Z).is_none());

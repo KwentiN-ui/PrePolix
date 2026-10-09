@@ -28,8 +28,23 @@ pub struct Viewport {
 pub struct Click {
     pub origin: Vec3,
     pub direction: Vec3,
-    /// Ctrl was held: remove from the selection instead of adding.
-    pub remove: bool,
+    /// The ray through a pixel [`PICK_PRECISION_PIXELS`] to the side, to turn the pick
+    /// tolerance into a distance in the scene.
+    pub side_origin: Vec3,
+    pub side_direction: Vec3,
+    pub shift: bool,
+    pub ctrl: bool,
+}
+
+/// How close to an edge or point a click has to be to pick it, as in PrePoMax.
+pub const PICK_PRECISION_PIXELS: f32 = 7.0;
+
+impl Click {
+    /// The pick tolerance at a point on the click ray.
+    pub fn precision_at(&self, point: Vec3) -> f32 {
+        let offset = point - self.side_origin;
+        (offset - self.side_direction * offset.dot(self.side_direction)).length()
+    }
 }
 
 /// What happened in the 3D view this frame.
@@ -110,14 +125,24 @@ impl Viewport {
         {
             // Ray through the pixel from the near to the far plane.
             let inverse = self.camera.view_proj(rect.aspect_ratio()).inverse();
-            let x = (pointer.x - rect.center().x) / (rect.width() * 0.5);
-            let y = (rect.center().y - pointer.y) / (rect.height() * 0.5);
-            let near = inverse.project_point3(Vec3::new(x, y, 0.0));
-            let far = inverse.project_point3(Vec3::new(x, y, 1.0));
+            let ray = |pointer: egui::Pos2| {
+                let x = (pointer.x - rect.center().x) / (rect.width() * 0.5);
+                let y = (rect.center().y - pointer.y) / (rect.height() * 0.5);
+                let near = inverse.project_point3(Vec3::new(x, y, 0.0));
+                let far = inverse.project_point3(Vec3::new(x, y, 1.0));
+                (near, (far - near).normalize_or_zero())
+            };
+            let (origin, direction) = ray(pointer);
+            let (side_origin, side_direction) =
+                ray(pointer + egui::vec2(PICK_PRECISION_PIXELS, 0.0));
+            let modifiers = ui.input(|i| i.modifiers);
             result.click = Some(Click {
-                origin: near,
-                direction: (far - near).normalize_or_zero(),
-                remove: ui.input(|i| i.modifiers.command),
+                origin,
+                direction,
+                side_origin,
+                side_direction,
+                shift: modifiers.shift,
+                ctrl: modifiers.command,
             });
         }
 
