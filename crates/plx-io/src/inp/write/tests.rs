@@ -2805,3 +2805,115 @@ fn calculix_reactions_balance_the_weight_and_the_centrifugal_force() {
         "{reaction} vs {expected}"
     );
 }
+
+/// The cantilever spinning about its own axis like a shaft: a static step with the
+/// centrifugal load, a frequency step storing its modes and a complex frequency step with
+/// the Coriolis forces, as CalculiX wants them.
+fn rotor_analysis(speed: f64) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = analysis(
+        "kragbalken_c3d8.inp",
+        body_load(LoadKind::Centrifugal {
+            point: [0.0, 5.0, 5.0],
+            axis: [1.0, 0.0, 0.0],
+            speed,
+        }),
+    );
+    let mut frequency = Step::new_frequency("Step-2");
+    frequency.boundary_conditions = model.steps[0].boundary_conditions.clone();
+    let StepKind::Frequency(settings) = &mut frequency.kind else {
+        unreachable!()
+    };
+    settings.perturbation = true;
+    settings.storage = true;
+    settings.num_frequencies = 4;
+    model.steps.push(frequency);
+    let mut complex = Step::new_complex_frequency("Step-3");
+    complex.boundary_conditions = model.steps[0].boundary_conditions.clone();
+    let StepKind::ComplexFrequency(settings) = &mut complex.kind else {
+        unreachable!()
+    };
+    settings.num_frequencies = 4;
+    model.steps.push(complex);
+    (mesh, model)
+}
+
+#[test]
+fn a_complex_frequency_step_is_written_like_prepomax_does() {
+    let (mesh, mut model) = rotor_analysis(100.0);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let complex = &text[text.find("** Step-3").unwrap()..];
+    for line in [
+        "*Step, Perturbation\n*Complex frequency, Coriolis\n4\n",
+        "*Boundary\nFIX, 1, 6, 0\n",
+        "*Node file\nU, PU\n",
+    ] {
+        assert!(complex.contains(line), "missing {line:?} in\n{complex}");
+    }
+    assert!(!complex.contains("*Dload"), "{complex}");
+    let StepKind::ComplexFrequency(settings) = &mut model.steps[2].kind else {
+        unreachable!()
+    };
+    settings.coriolis = false;
+    settings.perturbation = false;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Step\n*Complex frequency\n4\n"), "{text}");
+}
+
+#[test]
+fn calculix_splits_the_bending_modes_of_the_rotating_cantilever() {
+    // At 100 rad/s about its axis the two bending modes of the square beam split into a
+    // backward and a forward whirl around the frequency of the standing beam.
+    let (mesh, model) = rotor_analysis(100.0);
+    let Some(frd) = run_ccx("rotor", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let standing: Vec<f64> = (frd.increments.iter())
+        .filter(|i| i.kind == plx_results::AnalysisKind::Frequency)
+        .map(|i| i.value)
+        .collect();
+    let whirling: Vec<&plx_results::Increment> = (frd.increments.iter())
+        .filter(|i| i.kind == plx_results::AnalysisKind::ComplexFrequency)
+        .collect();
+    assert_eq!(standing.len(), 4, "{standing:?}");
+    assert_eq!(
+        whirling.iter().map(|i| i.increment).collect::<Vec<_>>(),
+        [1, 2, 3, 4]
+    );
+    let f1 = standing[0];
+    let (backward, forward) = (whirling[0].value, whirling[1].value);
+    assert!(
+        backward < f1 && f1 < forward,
+        "{backward} < {f1} < {forward}"
+    );
+    // The real part of the mode shape and its magnitudes and phases for the whirl animation.
+    let mode = whirling[0];
+    assert!(mode.field("DISP").is_some());
+    let pdisp = mode.field("PDISP").unwrap();
+    for name in ["MAG1", "MAG2", "MAG3", "PHA1", "PHA2", "PHA3"] {
+        assert!(pdisp.component(name).is_some(), "{name} missing");
+    }
+    let tip = frd.mesh.node_index(99).unwrap();
+    let magnitude = |k: &str| f64::from(pdisp.component(k).unwrap().values[tip]);
+    assert!(magnitude("MAG2").hypot(magnitude("MAG3")) > 0.0);
+}
+
+#[test]
+fn calculix_prints_the_complex_frequencies_and_the_whirl_direction() {
+    let (mesh, model) = rotor_analysis(100.0);
+    let Some(dat) = run_ccx_dat("rotor_dat", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let import = crate::dat::parse_dat(&dat);
+    let set = import.sets.iter().find(|s| s.name == "STEP_3").unwrap();
+    let output = set.field("EIGENVALUE_OUTPUT").unwrap();
+    let whirl = &output.component("TURNING_DIRECTION").unwrap().entries[0].values;
+    assert_eq!(whirl.len(), 4, "{whirl:?}");
+    assert!(whirl.iter().all(|w| w.abs() == 1.0), "{whirl:?}");
+    assert!(whirl.contains(&1.0) && whirl.contains(&-1.0), "{whirl:?}");
+    assert_eq!(
+        output.component("FREQUENCY").unwrap().entries[0]
+            .values
+            .len(),
+        4
+    );
+}

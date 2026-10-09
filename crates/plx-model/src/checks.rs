@@ -46,6 +46,10 @@ pub enum Problem {
     RotationsIgnored,
     IncrementExceedsStep,
     NoLoad,
+    /// A complex frequency step without a frequency step before it that stores its modes.
+    NoStoredModes,
+    /// A Coriolis complex frequency step without a centrifugal load before it.
+    NoRotation,
     /// Found in the solver output only.
     NoConvergence,
     /// Found in the solver output only.
@@ -63,7 +67,8 @@ impl Problem {
             | Problem::ConflictingBoundaries
             | Problem::LoadOnFixedNodes
             | Problem::RotationsIgnored
-            | Problem::NoLoad => Severity::Warning,
+            | Problem::NoLoad
+            | Problem::NoRotation => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -87,6 +92,8 @@ impl Problem {
             Problem::RotationsIgnored => "Rotationen ohne Wirkung",
             Problem::IncrementExceedsStep => "Inkrement größer als der Step",
             Problem::NoLoad => "Keine Last",
+            Problem::NoStoredModes => "Keine gespeicherten Eigenformen",
+            Problem::NoRotation => "Keine Rotation",
             Problem::NoConvergence => "Keine Konvergenz",
             Problem::MpcAndSpc => "Freiheitsgrad doppelt gebunden",
             Problem::RotationIn2d => "Rotation in einem 2D-Modell",
@@ -191,6 +198,16 @@ impl Problem {
                 "Der Step hat weder eine aktive Last noch eine vorgegebene Verschiebung. \
                  Die Rechnung läuft, alle Ergebnisse sind aber null."
             }
+            Problem::NoStoredModes => {
+                "Ein Complex Frequency Step rechnet auf den Eigenformen des letzten Frequency \
+                 Steps davor, der sie mit Storage in die .eig-Datei schreibt. Ohne ihn bricht \
+                 CalculiX mit \"the eigenvalue file does not exist\" ab."
+            }
+            Problem::NoRotation => {
+                "Die Coriolis-Kräfte eines Complex Frequency Steps kommen aus der \
+                 Fliehkraftlast eines statischen Steps vor dem Frequency Step. Ohne Rotation \
+                 sind die komplexen Eigenfrequenzen die des Frequency Steps."
+            }
             Problem::NoConvergence => {
                 "Die Newton-Iteration ist nicht konvergiert; CalculiX hat das Inkrement \
                  immer weiter verkleinert und aufgegeben (\"too many cutbacks\" oder \
@@ -286,6 +303,13 @@ impl Problem {
                 "Im Step das Anfangsinkrement höchstens so groß wie die Step-Dauer wählen."
             }
             Problem::NoLoad => "Unter Loads eine Last erstellen oder eine deaktivierte aktivieren.",
+            Problem::NoStoredModes => {
+                "Vor dem Complex Frequency Step einen Frequency Step mit der Option Storage \
+                 anlegen (als Perturbation Step nach einem statischen Step mit der Fliehkraft)."
+            }
+            Problem::NoRotation => {
+                "Im statischen Step vor dem Frequency Step eine Centrifugal Load erstellen."
+            }
             Problem::NoConvergence => {
                 "Kontakte prüfen (Steifigkeit der Surface Interaction, Adjust, Lage der \
                  Flächen), Teile ausreichend lagern, die Last auf mehrere Inkremente \
@@ -694,6 +718,32 @@ impl FeModel {
                 .iter()
                 .any(|w| text.contains(w))
         });
+        if let StepKind::ComplexFrequency(settings) = &step.kind {
+            let before = || self.steps[..s].iter().filter(|s| s.active);
+            let stored = before().rev().find_map(|s| match &s.kind {
+                StepKind::Frequency(f) => Some(f.storage),
+                _ => None,
+            });
+            if stored != Some(true) {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::NoStoredModes,
+                    format!("{}: kein Frequency Step mit Storage davor", step.name),
+                ));
+            }
+            let rotating = before().any(|s| {
+                s.kind.supports_loads()
+                    && (s.loads.iter())
+                        .any(|l| l.active && matches!(l.kind, LoadKind::Centrifugal { .. }))
+            });
+            if settings.coriolis && !rotating {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::NoRotation,
+                    format!("{}: keine Fliehkraftlast in einem Step davor", step.name),
+                ));
+            }
+        }
         let static_mechanical = matches!(
             step.kind,
             StepKind::Static(_) | StepKind::CoupledTempDisp(_)
