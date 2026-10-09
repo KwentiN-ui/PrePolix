@@ -221,8 +221,8 @@ fn node_coords(gmsh: &Gmsh) -> Result<HashMap<usize, [f64; 3]>, GmshError> {
     let (tags, coords) = gmsh.nodes()?;
     Ok(tags
         .into_iter()
-        .zip(coords.chunks_exact(3))
-        .map(|(tag, c)| (tag, [c[0], c[1], c[2]]))
+        .zip(coords.as_chunks::<3>().0)
+        .map(|(tag, &c)| (tag, c))
         .collect())
 }
 
@@ -401,14 +401,14 @@ fn display_mesh(gmsh: &Gmsh) -> Result<GeometryDisplay, GmshError> {
         let mut edges = BTreeSet::new();
         for &face in &faces {
             let nodes = triangles.get(&face).map_or(&[][..], Vec::as_slice);
-            for triangle in nodes.chunks_exact(3) {
+            for triangle in nodes.as_chunks::<3>().0 {
                 add(&mut mesh, &mut part, CadEntity::Face(face), triangle)?;
             }
             edges.extend(gmsh.adjacencies(2, face)?.1);
         }
         for edge in edges {
             let nodes = segments.get(&edge).map_or(&[][..], Vec::as_slice);
-            for segment in nodes.chunks_exact(2) {
+            for segment in nodes.as_chunks::<2>().0 {
                 add(&mut mesh, &mut part, CadEntity::Edge(edge), segment)?;
             }
         }

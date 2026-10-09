@@ -462,7 +462,11 @@ impl Gmsh {
 
 /// Gmsh's flat (dim, tag) lists as pairs.
 fn pairs(flat: &[c_int]) -> Vec<(i32, i32)> {
-    flat.chunks_exact(2).map(|p| (p[0], p[1])).collect()
+    flat.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[a, b]| (a, b))
+        .collect()
 }
 
 fn c_string(text: &str) -> Result<CString, GmshError> {
