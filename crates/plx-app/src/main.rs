@@ -3,6 +3,7 @@
 mod analysis;
 mod animation;
 mod app;
+mod exploded;
 mod field_output_dialog;
 mod gizmo;
 mod history_output_dialog;

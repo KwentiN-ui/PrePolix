@@ -14,6 +14,7 @@ use plx_render::{
     section_mesh, wireframe_edges,
 };
 
+use crate::exploded::{Assembly, Explosion, Parameters, PartShape};
 use crate::results::{Deformation, ResultsView};
 
 /// Angle between neighbouring faces above which their common edge counts as a feature edge
@@ -74,6 +75,40 @@ pub struct Model {
     skins: Vec<PartSkin>,
     /// Elements of each part prepared for section cuts, built when first needed.
     section_cells: std::sync::OnceLock<Vec<SectionCells>>,
+    /// The exploded view: parts drawn and picked moved apart.
+    pub explosion: Explosion,
+    /// Node indices of each part and the part of each node, built when first needed.
+    part_nodes: std::sync::OnceLock<PartNodes>,
+}
+
+/// Which nodes belong to which part; a node shared by parts belongs to the first of them.
+struct PartNodes {
+    nodes: Vec<Vec<usize>>,
+    part_of: Vec<u32>,
+}
+
+impl PartNodes {
+    fn new(mesh: &FeMesh) -> Self {
+        let mut part_of = vec![u32::MAX; mesh.node_count()];
+        let nodes = (mesh.parts.iter().enumerate())
+            .map(|(index, part)| {
+                let mut nodes: Vec<usize> = (part.elements.iter())
+                    .filter_map(|&id| mesh.element(id))
+                    .flat_map(|e| e.nodes.iter())
+                    .filter_map(|&id| mesh.node_index(id))
+                    .collect();
+                nodes.sort_unstable();
+                nodes.dedup();
+                for &node in &nodes {
+                    if part_of[node] == u32::MAX {
+                        part_of[node] = index as u32;
+                    }
+                }
+                nodes
+            })
+            .collect();
+        Self { nodes, part_of }
+    }
 }
 
 /// What is shown selected: whole parts, element faces and nodes.
@@ -271,6 +306,8 @@ impl Model {
             origin,
             skins,
             section_cells: Default::default(),
+            explosion: Explosion::default(),
+            part_nodes: Default::default(),
         };
         let meshes = model.render_meshes();
         for (part, render) in model.parts.iter_mut().zip(&meshes) {
@@ -316,6 +353,76 @@ impl Model {
         self.skins = fresh.skins;
         self.origin = fresh.origin;
         self.highlight = Highlight::default();
+        self.section_cells = Default::default();
+        self.part_nodes = Default::default();
+        // The exploded view stays on and is laid out anew for the new mesh.
+        self.explosion.clear_layout();
+        if let Some(parameters) = self.explosion.applied.clone() {
+            let offsets = self.explosion_offsets(&parameters);
+            self.explosion.show(offsets, false);
+        } else {
+            self.explosion.show(Vec::new(), false);
+        }
+    }
+
+    fn part_nodes(&self) -> &PartNodes {
+        self.part_nodes.get_or_init(|| PartNodes::new(&self.mesh))
+    }
+
+    /// The offsets of all parts for an exploded view; the layout is kept until parameters
+    /// it depends on change.
+    pub fn explosion_offsets(&mut self, parameters: &Parameters) -> Vec<glam::DVec3> {
+        self.explosion_layout(parameters)
+            .offsets(parameters.scale(), parameters.sequential)
+    }
+
+    /// The layout of an exploded view, computed when first needed.
+    pub fn explosion_layout(&mut self, parameters: &Parameters) -> &crate::exploded::Layout {
+        let part_nodes = self.part_nodes.get_or_init(|| PartNodes::new(&self.mesh));
+        let assembly = Assembly {
+            mesh: &self.mesh,
+            parts: (self.mesh.parts.iter().enumerate())
+                .map(|(i, part)| PartShape {
+                    name: &part.name,
+                    nodes: &part_nodes.nodes[i],
+                    skin: &self.skins[i],
+                })
+                .collect(),
+        };
+        self.explosion.layout(&assembly, parameters)
+    }
+
+    /// How far a node is moved by the exploded view.
+    pub fn explosion_offset(&self, index: usize) -> DVec3 {
+        let offsets = self.explosion.offsets();
+        if offsets.is_empty() {
+            return DVec3::ZERO;
+        }
+        let part = self
+            .part_nodes()
+            .part_of
+            .get(index)
+            .copied()
+            .unwrap_or(u32::MAX);
+        offsets.get(part as usize).copied().unwrap_or(DVec3::ZERO)
+    }
+
+    /// Node coordinates moved by the exploded view, without any deformation.
+    pub fn exploded_coords(&self) -> std::borrow::Cow<'_, [[f64; 3]]> {
+        let coords = self.mesh.coords();
+        if !self.explosion.is_shown() {
+            return std::borrow::Cow::Borrowed(coords);
+        }
+        let offsets = self.explosion.offsets();
+        let part_of = &self.part_nodes().part_of;
+        std::borrow::Cow::Owned(
+            (coords.iter().zip(part_of))
+                .map(|(p, &part)| {
+                    let o = offsets.get(part as usize).copied().unwrap_or(DVec3::ZERO);
+                    [p[0] + o.x, p[1] + o.y, p[2] + o.z]
+                })
+                .collect(),
+        )
     }
 
     /// Whether this shows CAD geometry rather than a mesh.
@@ -328,33 +435,42 @@ impl Model {
         self.results.is_some()
     }
 
-    /// Node coordinates as drawn: with the shown deformation of results.
+    /// Node coordinates as drawn: moved by the exploded view and with the shown deformation
+    /// of results.
     pub fn shown_coords(&self) -> std::borrow::Cow<'_, [[f64; 3]]> {
-        let coords = self.mesh.coords();
+        self.deformed_coords().0
+    }
+
+    /// Node coordinates as drawn and whether a deformation is shown.
+    fn deformed_coords(&self) -> (std::borrow::Cow<'_, [[f64; 3]]>, bool) {
+        let coords = self.exploded_coords();
         let Some(view) = &self.results else {
-            return std::borrow::Cow::Borrowed(coords);
+            return (coords, false);
         };
         let scale = (view.scale() * view.amplitude()) as f64;
         match view.shown_displacements() {
-            Some(displacements) if scale != 0.0 => std::borrow::Cow::Owned(
-                coords
-                    .iter()
-                    .zip(displacements.iter())
-                    .map(|(p, d)| [0, 1, 2].map(|k| p[k] + scale * d[k] as f64))
-                    .collect(),
+            Some(displacements) if scale != 0.0 => (
+                std::borrow::Cow::Owned(
+                    coords
+                        .iter()
+                        .zip(displacements.iter())
+                        .map(|(p, d)| [0, 1, 2].map(|k| p[k] + scale * d[k] as f64))
+                        .collect(),
+                ),
+                true,
             ),
-            _ => std::borrow::Cow::Borrowed(coords),
+            _ => (coords, false),
         }
     }
 
     /// Node coordinates as drawn and the normalized contour values, if a result is shown;
     /// the flag tells whether the shape is deformed and the undeformed outline is wanted.
     fn shown_state(&self) -> ShownState<'_> {
-        let coords = self.shown_coords();
+        let (coords, is_deformed) = self.deformed_coords();
         let mut scalars = None;
         let mut deformed = false;
         if let Some(view) = &self.results {
-            if matches!(coords, std::borrow::Cow::Owned(_)) {
+            if is_deformed {
                 deformed = view.show_undeformed;
             }
             if let (Some(values), Some(legend)) = (view.shown_values(), view.legend()) {
@@ -367,6 +483,11 @@ impl Model {
     /// GPU-ready meshes of all parts, deformed and coloured by the selected result if any.
     pub fn render_meshes(&self) -> Vec<RenderMesh> {
         let (coords, scalars, deformed) = self.shown_state();
+        let undeformed = if deformed {
+            self.exploded_coords()
+        } else {
+            std::borrow::Cow::Borrowed(&[][..])
+        };
         self.mesh
             .parts
             .iter()
@@ -384,7 +505,7 @@ impl Model {
                 );
                 self.highlight_faces(index, skin, &mut mesh);
                 if deformed {
-                    mesh.wireframe_edges = wireframe_edges(self.mesh.coords(), skin, self.origin);
+                    mesh.wireframe_edges = wireframe_edges(&undeformed, skin, self.origin);
                 }
                 if self.is_geometry {
                     mesh.mesh_edges.clear();
@@ -607,7 +728,7 @@ impl Model {
 
     /// Where a node is drawn, relative to the model origin, including the shown deformation.
     pub fn node_position(&self, index: usize) -> Option<Vec3> {
-        let mut p = DVec3::from(*self.mesh.coords().get(index)?);
+        let mut p = DVec3::from(*self.mesh.coords().get(index)?) + self.explosion_offset(index);
         if let Some(view) = &self.results {
             let scale = (view.scale() * view.amplitude()) as f64;
             let displacement = view.shown_displacement(index);

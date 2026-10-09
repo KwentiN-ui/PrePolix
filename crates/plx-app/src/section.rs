@@ -268,10 +268,12 @@ impl SectionDialog {
     /// Takes picked nodes: one node is itself the point, an edge or a face is replaced by
     /// its centre, e.g. the centre of a hole.
     fn take(&mut self, model: &Model, nodes: BTreeSet<NodeId>) {
+        // Where the nodes are drawn, which is where the plane cuts, e.g. with an exploded
+        // view.
         let positions: Vec<DVec3> = nodes
             .iter()
-            .filter_map(|&id| model.mesh.node(id))
-            .map(DVec3::from)
+            .filter_map(|&id| model.node_position(model.mesh.node_index(id)?))
+            .map(|p| p.as_dvec3() + model.origin())
             .collect();
         if positions.is_empty() {
             return;
