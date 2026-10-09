@@ -1,0 +1,1138 @@
+//! PrePoMax's "Search Contact Pairs": finds surfaces of different parts that lie on each other
+//! and decides which side is master and which slave, following `CaeMesh.ContactSearch` and
+//! `ContactGraph`.
+//!
+//! Surfaces are the smooth patches of the part skins, which stand for the CAD faces the way
+//! PrePoMax's geometry surfaces do. Two surfaces are in contact where triangles of both face
+//! each other within the search distance and angle. The pairs found are grouped (by parts,
+//! by the contact graph or not at all) and resolved so that a slave surface is a slave only
+//! once, which CalculiX requires of ties.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+
+use crate::element::ElementFamily;
+use crate::mesh::{ElementId, FeMesh};
+use crate::skin::PartSkin;
+
+/// A surface patch: part index and patch (region) of the part's skin.
+pub type SurfaceId = (usize, usize);
+
+/// How the pairs of touching surfaces become contact pairs, PrePoMax's "Group by".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum GroupBy {
+    /// One contact pair per pair of touching surfaces.
+    None,
+    /// One contact pair per pair of touching parts.
+    #[default]
+    Parts,
+    /// Surfaces sharing mesh nodes are merged, so that a node is a slave only once.
+    Graph,
+}
+
+/// Search parameters of the dialog.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchParameters {
+    /// Largest gap between touching surfaces.
+    pub distance: f64,
+    /// Largest deviation of the surfaces from facing each other, in degrees.
+    pub angle_deg: f64,
+    pub group_by: GroupBy,
+    /// Merge pairs that would make a surface a slave more than once into an unresolved
+    /// item, as PrePoMax does for ties.
+    pub resolve: bool,
+}
+
+/// A master and a slave side of a contact pair found, each a set of surfaces.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MasterSlaveItem {
+    pub master_name: String,
+    pub slave_name: String,
+    pub master: BTreeSet<SurfaceId>,
+    pub slave: BTreeSet<SurfaceId>,
+    /// Surfaces whose contacts could not be resolved into master and slave; shown to the
+    /// user as one surface in `master`.
+    pub unresolved: bool,
+}
+
+impl MasterSlaveItem {
+    /// PrePoMax's name of the pair, `<master>_to_<slave>`, shortened to 35 characters.
+    pub fn name(&self) -> String {
+        if self.unresolved {
+            return self.master_name.clone();
+        }
+        let join = |a: &str, b: &str| format!("{a}_to_{b}");
+        let mut name = join(&self.master_name, &self.slave_name);
+        if name.len() > 35 {
+            name = if self.master_name.len() > self.slave_name.len() {
+                join("Item", &self.slave_name)
+            } else {
+                join(&self.master_name, "Item")
+            };
+        }
+        if name.len() > 35 {
+            name = join("Item", "Item");
+        }
+        name
+    }
+
+    pub fn swap(&mut self) {
+        std::mem::swap(&mut self.master_name, &mut self.slave_name);
+        std::mem::swap(&mut self.master, &mut self.slave);
+    }
+}
+
+/// One surface patch prepared for the search.
+struct Surface {
+    id: SurfaceId,
+    /// Corner node indices of each face, normals pointing out of the material.
+    faces: Vec<Vec<usize>>,
+    /// Bounds of each face, enlarged by half the search distance.
+    face_bounds: Vec<Bounds>,
+    bounds: Bounds,
+    nodes: BTreeSet<usize>,
+    /// The other side of a surface shared with another part, which is no contact.
+    internal: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Bounds {
+    min: [f64; 3],
+    max: [f64; 3],
+}
+
+impl Bounds {
+    fn empty() -> Self {
+        Self {
+            min: [f64::INFINITY; 3],
+            max: [f64::NEG_INFINITY; 3],
+        }
+    }
+
+    fn include(&mut self, p: [f64; 3]) {
+        for (k, value) in p.into_iter().enumerate() {
+            self.min[k] = self.min[k].min(value);
+            self.max[k] = self.max[k].max(value);
+        }
+    }
+
+    fn union(&mut self, other: &Bounds) {
+        self.include(other.min);
+        self.include(other.max);
+    }
+
+    fn inflate(&mut self, by: f64) {
+        for k in 0..3 {
+            self.min[k] -= by;
+            self.max[k] += by;
+        }
+    }
+
+    fn intersects(&self, other: &Bounds) -> bool {
+        (0..3).all(|k| self.min[k] <= other.max[k] && other.min[k] <= self.max[k])
+    }
+
+    fn intersection(&self, other: &Bounds) -> Bounds {
+        let mut out = *self;
+        for k in 0..3 {
+            out.min[k] = self.min[k].max(other.min[k]);
+            out.max[k] = self.max[k].min(other.max[k]);
+        }
+        out
+    }
+}
+
+/// Contact pairs between the solid surfaces of the parts marked in `searched`; `skins` are
+/// the skins of all parts of the mesh, in the order of its parts.
+pub fn find_contact_pairs(
+    mesh: &FeMesh,
+    skins: &[PartSkin],
+    searched: &[bool],
+    parameters: &SearchParameters,
+) -> Vec<MasterSlaveItem> {
+    let surfaces = contact_surfaces(mesh, skins, searched, parameters.distance);
+    let angle = parameters.angle_deg.to_radians();
+    let coords = mesh.coords();
+    let mut touching = Vec::new();
+    for i in 0..surfaces.len() {
+        for j in i + 1..surfaces.len() {
+            if surfaces_touch(
+                coords,
+                &surfaces[i],
+                &surfaces[j],
+                parameters.distance,
+                angle,
+            ) {
+                touching.push((surfaces[i].id, surfaces[j].id));
+            }
+        }
+    }
+    let areas = surface_areas(coords, &surfaces);
+    let names: Vec<&str> = mesh.parts.iter().map(|p| p.name.as_str()).collect();
+    let context = Context {
+        skins,
+        areas: &areas,
+        names: &names,
+    };
+    match parameters.group_by {
+        GroupBy::None => {
+            let items = (touching.iter())
+                .map(|&(a, b)| item_of(&context, [a].into(), [b].into()))
+                .collect::<Vec<_>>();
+            ContactGraph::new(&context, &items, false).master_slave_items(parameters.resolve)
+        }
+        GroupBy::Parts => {
+            let mut by_parts: BTreeMap<(usize, usize), (BTreeSet<SurfaceId>, BTreeSet<SurfaceId>)> =
+                BTreeMap::new();
+            for &(a, b) in &touching {
+                // The part found first is the master.
+                let (master, slave) = if a.0 < b.0 { (a, b) } else { (b, a) };
+                let entry = by_parts.entry((master.0, slave.0)).or_default();
+                entry.0.insert(master);
+                entry.1.insert(slave);
+            }
+            let items = (by_parts.into_values())
+                .map(|(master, slave)| item_of(&context, master, slave))
+                .collect::<Vec<_>>();
+            ContactGraph::new(&context, &items, false).master_slave_items(parameters.resolve)
+        }
+        GroupBy::Graph => {
+            let items = (touching.iter())
+                .map(|&(a, b)| item_of(&context, [a].into(), [b].into()))
+                .collect::<Vec<_>>();
+            ContactGraph::new(&context, &items, true).grouped_master_slave_items()
+        }
+    }
+}
+
+/// Element faces (element id, CalculiX face number) of surface patches.
+pub fn surface_faces(
+    mesh: &FeMesh,
+    skins: &[PartSkin],
+    surfaces: &BTreeSet<SurfaceId>,
+) -> Vec<(ElementId, u8)> {
+    let elements = mesh.elements();
+    let mut faces = Vec::new();
+    for (part, skin) in skins.iter().enumerate() {
+        for face in &skin.faces {
+            if surfaces.contains(&(part, face.region)) {
+                faces.push((elements[face.element].id, face.face as u8 + 1));
+            }
+        }
+    }
+    faces.sort_unstable();
+    faces
+}
+
+/// The solid surface patches of the searched parts.
+fn contact_surfaces(
+    mesh: &FeMesh,
+    skins: &[PartSkin],
+    searched: &[bool],
+    distance: f64,
+) -> Vec<Surface> {
+    let coords = mesh.coords();
+    let elements = mesh.elements();
+    let mut surfaces = Vec::new();
+    for (part, skin) in skins.iter().enumerate() {
+        if !searched.get(part).copied().unwrap_or(false) {
+            continue;
+        }
+        let mut patches: BTreeMap<usize, Surface> = BTreeMap::new();
+        for face in &skin.faces {
+            if elements[face.element].shape.family() != ElementFamily::Solid
+                || face.corners.len() < 3
+            {
+                continue;
+            }
+            let surface = patches.entry(face.region).or_insert_with(|| Surface {
+                id: (part, face.region),
+                faces: Vec::new(),
+                face_bounds: Vec::new(),
+                bounds: Bounds::empty(),
+                nodes: BTreeSet::new(),
+                internal: false,
+            });
+            // Element faces are numbered with their normal into the element.
+            let corners: Vec<usize> = face.corners.iter().rev().copied().collect();
+            let mut bounds = Bounds::empty();
+            for &corner in &corners {
+                bounds.include(coords[corner]);
+            }
+            bounds.inflate(distance * 0.5);
+            surface.bounds.union(&bounds);
+            surface.nodes.extend(face.corners.iter().chain(&face.mids));
+            surface.faces.push(corners);
+            surface.face_bounds.push(bounds);
+        }
+        surfaces.extend(patches.into_values());
+    }
+    // The same faces in two parts are the interface of parts meshed together.
+    for i in 0..surfaces.len() {
+        for j in i + 1..surfaces.len() {
+            let (a, b) = (&surfaces[i], &surfaces[j]);
+            if a.nodes.len() == b.nodes.len()
+                && a.bounds.intersects(&b.bounds)
+                && a.nodes == b.nodes
+            {
+                surfaces[i].internal = true;
+                surfaces[j].internal = true;
+            }
+        }
+    }
+    surfaces
+}
+
+fn surface_areas(coords: &[[f64; 3]], surfaces: &[Surface]) -> HashMap<SurfaceId, f64> {
+    surfaces
+        .iter()
+        .map(|s| {
+            let area = (s.faces.iter())
+                .map(|f| {
+                    let points: Vec<[f64; 3]> = f.iter().map(|&n| coords[n]).collect();
+                    triangles(&points)
+                        .map(|t| 0.5 * length(cross(sub(t[1], t[0]), sub(t[2], t[0]))))
+                        .sum::<f64>()
+                })
+                .sum();
+            (s.id, area)
+        })
+        .collect()
+}
+
+/// Whether two surfaces face each other somewhere within the distance and angle,
+/// PrePoMax's `CheckSurfaceToSurfaceDistance`.
+fn surfaces_touch(
+    coords: &[[f64; 3]],
+    a: &Surface,
+    b: &Surface,
+    distance: f64,
+    angle: f64,
+) -> bool {
+    if a.internal || b.internal || a.id.0 == b.id.0 || !a.bounds.intersects(&b.bounds) {
+        return false;
+    }
+    let common = a.bounds.intersection(&b.bounds);
+    for (face_a, bounds_a) in a.faces.iter().zip(&a.face_bounds) {
+        if !bounds_a.intersects(&common) {
+            continue;
+        }
+        let points_a: Vec<[f64; 3]> = face_a.iter().map(|&n| coords[n]).collect();
+        for (face_b, bounds_b) in b.faces.iter().zip(&b.face_bounds) {
+            if !bounds_a.intersects(bounds_b) {
+                continue;
+            }
+            let points_b: Vec<[f64; 3]> = face_b.iter().map(|&n| coords[n]).collect();
+            for t1 in triangles(&points_a) {
+                for t2 in triangles(&points_b) {
+                    if triangles_touch(&t1, &t2, distance, angle) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// The triangles of a face: one, or two of a quadrilateral as PrePoMax splits it.
+fn triangles(points: &[[f64; 3]]) -> impl Iterator<Item = [[f64; 3]; 3]> + '_ {
+    (1..points.len() - 1).map(move |k| [points[0], points[k], points[k + 1]])
+}
+
+/// PrePoMax's `CheckTriangleToTriangleDistance` for solid surfaces, which may penetrate each
+/// other: the triangles face each other within the angle, are closer than the distance, lie
+/// one above the other, and still are after shrinking them, so that touching only at a corner
+/// or an edge does not count.
+fn triangles_touch(t1: &[[f64; 3]; 3], t2: &[[f64; 3]; 3], distance: f64, angle: f64) -> bool {
+    let n1 = normalize(cross(sub(t1[1], t1[0]), sub(t1[2], t1[0])));
+    let n2 = normalize(cross(sub(t2[1], t2[0]), sub(t2[2], t2[0])));
+    let between = std::f64::consts::PI - dot(n1, n2).clamp(-1.0, 1.0).acos();
+    if between >= angle {
+        return false;
+    }
+    let (dist, p, q) = triangle_distance(t1, t2);
+    if dist >= distance {
+        return false;
+    }
+    if dist > 0.0 {
+        let pq = normalize(sub(q, p));
+        // The closest points must lie one above the other, within about 5 degrees.
+        if dot(pq, n1).abs() < 0.995 && dot(pq, n2).abs() < 0.995 {
+            return false;
+        }
+    }
+    let s1 = shrink(t1, 3.0 * distance);
+    let s2 = shrink(t2, 3.0 * distance);
+    triangle_distance(&s1, &s2).0 <= distance
+}
+
+/// Moves the corners towards the centre by `by`, at most nine tenths of the way.
+fn shrink(t: &[[f64; 3]; 3], by: f64) -> [[f64; 3]; 3] {
+    let center = scale(add(add(t[0], t[1]), t[2]), 1.0 / 3.0);
+    t.map(|p| {
+        let to_center = sub(center, p);
+        let len = length(to_center);
+        let k = if len > 0.0 {
+            (by / len).clamp(0.0, 0.9)
+        } else {
+            0.0
+        };
+        add(p, scale(to_center, k))
+    })
+}
+
+/// Distance between two triangles with the closest points on each.
+fn triangle_distance(t1: &[[f64; 3]; 3], t2: &[[f64; 3]; 3]) -> (f64, [f64; 3], [f64; 3]) {
+    for (a, b) in [(t1, t2), (t2, t1)] {
+        for k in 0..3 {
+            if let Some(point) = segment_triangle_intersection(a[k], a[(k + 1) % 3], b) {
+                return (0.0, point, point);
+            }
+        }
+    }
+    let mut best = (f64::INFINITY, t1[0], t2[0]);
+    let mut consider = |p: [f64; 3], q: [f64; 3]| {
+        let d = length(sub(q, p));
+        if d < best.0 {
+            best = (d, p, q);
+        }
+    };
+    for i in 0..3 {
+        for j in 0..3 {
+            let (p, q) = segment_segment(t1[i], t1[(i + 1) % 3], t2[j], t2[(j + 1) % 3]);
+            consider(p, q);
+        }
+        consider(t1[i], point_triangle(t1[i], t2));
+        consider(point_triangle(t2[i], t1), t2[i]);
+    }
+    best
+}
+
+/// Where a segment crosses a triangle, if it does.
+fn segment_triangle_intersection(p: [f64; 3], q: [f64; 3], t: &[[f64; 3]; 3]) -> Option<[f64; 3]> {
+    let dir = sub(q, p);
+    let e1 = sub(t[1], t[0]);
+    let e2 = sub(t[2], t[0]);
+    let h = cross(dir, e2);
+    let det = dot(e1, h);
+    let scale_len = length(e1) * length(e2) * length(dir);
+    if det.abs() <= 1e-12 * scale_len {
+        return None;
+    }
+    let s = sub(p, t[0]);
+    let u = dot(s, h) / det;
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let qv = cross(s, e1);
+    let v = dot(dir, qv) / det;
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let along = dot(e2, qv) / det;
+    (0.0..=1.0)
+        .contains(&along)
+        .then(|| add(p, scale(dir, along)))
+}
+
+/// Closest points of two segments (Ericson, Real-Time Collision Detection 5.1.9).
+fn segment_segment(p1: [f64; 3], q1: [f64; 3], p2: [f64; 3], q2: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let d1 = sub(q1, p1);
+    let d2 = sub(q2, p2);
+    let r = sub(p1, p2);
+    let a = dot(d1, d1);
+    let e = dot(d2, d2);
+    let f = dot(d2, r);
+    let (s, t);
+    if a <= f64::EPSILON && e <= f64::EPSILON {
+        return (p1, p2);
+    }
+    if a <= f64::EPSILON {
+        s = 0.0;
+        t = (f / e).clamp(0.0, 1.0);
+    } else {
+        let c = dot(d1, r);
+        if e <= f64::EPSILON {
+            t = 0.0;
+            s = (-c / a).clamp(0.0, 1.0);
+        } else {
+            let b = dot(d1, d2);
+            let denom = a * e - b * b;
+            let mut s0 = if denom > 0.0 {
+                ((b * f - c * e) / denom).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let mut t0 = (b * s0 + f) / e;
+            if t0 < 0.0 {
+                t0 = 0.0;
+                s0 = (-c / a).clamp(0.0, 1.0);
+            } else if t0 > 1.0 {
+                t0 = 1.0;
+                s0 = ((b - c) / a).clamp(0.0, 1.0);
+            }
+            s = s0;
+            t = t0;
+        }
+    }
+    (add(p1, scale(d1, s)), add(p2, scale(d2, t)))
+}
+
+/// Closest point of a triangle to a point (Ericson 5.1.5).
+fn point_triangle(p: [f64; 3], t: &[[f64; 3]; 3]) -> [f64; 3] {
+    let [a, b, c] = *t;
+    let ab = sub(b, a);
+    let ac = sub(c, a);
+    let ap = sub(p, a);
+    let d1 = dot(ab, ap);
+    let d2 = dot(ac, ap);
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return a;
+    }
+    let bp = sub(p, b);
+    let d3 = dot(ab, bp);
+    let d4 = dot(ac, bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return b;
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        return add(a, scale(ab, d1 / (d1 - d3)));
+    }
+    let cp = sub(p, c);
+    let d5 = dot(ab, cp);
+    let d6 = dot(ac, cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return c;
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        return add(a, scale(ac, d2 / (d2 - d6)));
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        return add(b, scale(sub(c, b), (d4 - d3) / ((d4 - d3) + (d5 - d6))));
+    }
+    let denom = 1.0 / (va + vb + vc);
+    add(a, add(scale(ab, vb * denom), scale(ac, vc * denom)))
+}
+
+fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn scale(a: [f64; 3], k: f64) -> [f64; 3] {
+    a.map(|c| c * k)
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn length(a: [f64; 3]) -> f64 {
+    dot(a, a).sqrt()
+}
+
+fn normalize(a: [f64; 3]) -> [f64; 3] {
+    let len = length(a);
+    if len > 0.0 { scale(a, 1.0 / len) } else { a }
+}
+
+/// What the grouping needs to know about the surfaces.
+struct Context<'a> {
+    skins: &'a [PartSkin],
+    areas: &'a HashMap<SurfaceId, f64>,
+    names: &'a [&'a str],
+}
+
+impl Context<'_> {
+    /// PrePoMax's `GetNameFromItemIds`: the part name if all surfaces are of one part, else
+    /// the next free "Merged-n".
+    fn name(&self, ids: &BTreeSet<SurfaceId>, taken: &[String]) -> String {
+        let parts: BTreeSet<usize> = ids.iter().map(|id| id.0).collect();
+        if parts.len() == 1 {
+            let part = *parts.iter().next().expect("one part");
+            return self.names.get(part).copied().unwrap_or("Part").to_string();
+        }
+        (1..)
+            .map(|n| format!("Merged-{n}"))
+            .find(|name| !taken.contains(name))
+            .expect("unbounded range")
+    }
+
+    fn size(&self, ids: &BTreeSet<SurfaceId>) -> f64 {
+        ids.iter()
+            .map(|id| self.areas.get(id).copied().unwrap_or(0.0))
+            .sum()
+    }
+
+    /// Mesh nodes of a surface patch.
+    fn nodes(&self, id: SurfaceId) -> BTreeSet<usize> {
+        let mut nodes = BTreeSet::new();
+        if let Some(skin) = self.skins.get(id.0) {
+            for face in skin.faces.iter().filter(|f| f.region == id.1) {
+                nodes.extend(face.corners.iter().chain(&face.mids));
+            }
+        }
+        nodes
+    }
+}
+
+fn item_of(
+    context: &Context,
+    master: BTreeSet<SurfaceId>,
+    slave: BTreeSet<SurfaceId>,
+) -> MasterSlaveItem {
+    MasterSlaveItem {
+        master_name: context.name(&master, &[]),
+        slave_name: context.name(&slave, &[]),
+        master,
+        slave,
+        unresolved: false,
+    }
+}
+
+/// A node of the contact graph: surfaces that act together as one side.
+#[derive(Clone, Debug)]
+struct GraphNode {
+    id: usize,
+    name: String,
+    items: BTreeSet<SurfaceId>,
+    size: f64,
+}
+
+/// An undirected graph as PrePoMax's `Graph<T>`: nodes in order, and per node its neighbours
+/// in the order the edges were added, an edge added twice listed twice.
+#[derive(Clone, Debug, Default)]
+struct Graph {
+    order: Vec<usize>,
+    neighbours: HashMap<usize, Vec<usize>>,
+}
+
+impl Graph {
+    fn add_node(&mut self, node: usize) {
+        self.order.push(node);
+        self.neighbours.entry(node).or_default();
+    }
+
+    fn add_edge(&mut self, a: usize, b: usize) {
+        self.neighbours.entry(a).or_default().push(b);
+        self.neighbours.entry(b).or_default().push(a);
+    }
+
+    fn neighbours(&self, node: usize) -> &[usize] {
+        self.neighbours.get(&node).map_or(&[], Vec::as_slice)
+    }
+
+    /// Removes a node and one reference to it from each other node.
+    fn remove(&mut self, node: usize) {
+        self.order.retain(|&n| n != node);
+        self.neighbours.remove(&node);
+        for list in self.neighbours.values_mut() {
+            if let Some(index) = list.iter().position(|&n| n == node) {
+                list.remove(index);
+            }
+        }
+    }
+
+    fn subgraph(&self, nodes: &[usize]) -> Graph {
+        Graph {
+            order: nodes.to_vec(),
+            neighbours: (nodes.iter())
+                .map(|&n| (n, self.neighbours(n).to_vec()))
+                .collect(),
+        }
+    }
+
+    /// Connected parts, starting from the largest nodes as PrePoMax sorts them.
+    fn connected(&self, sizes: &HashMap<usize, f64>) -> Vec<Graph> {
+        let mut order = self.order.clone();
+        order.sort_by(|a, b| sizes[b].total_cmp(&sizes[a]));
+        let mut visited = HashSet::new();
+        let mut graphs = Vec::new();
+        for &start in &order {
+            if visited.contains(&start) {
+                continue;
+            }
+            let mut nodes = Vec::new();
+            let mut queue = VecDeque::from([start]);
+            while let Some(node) = queue.pop_front() {
+                if visited.insert(node) {
+                    nodes.push(node);
+                    queue.extend(self.neighbours(node));
+                }
+            }
+            graphs.push(self.subgraph(&nodes));
+        }
+        graphs
+    }
+
+    fn is_tree(&self) -> bool {
+        let Some(&first) = self.order.first() else {
+            return true;
+        };
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::from([(first, first)]);
+        while let Some((node, parent)) = queue.pop_front() {
+            if !visited.insert(node) {
+                return false;
+            }
+            for &neighbour in self.neighbours(node) {
+                if neighbour != parent {
+                    queue.push_back((neighbour, node));
+                }
+            }
+        }
+        true
+    }
+
+    fn has_one_cycle(&self) -> bool {
+        let mut copy = self.clone();
+        loop {
+            let leaves: Vec<usize> = (copy.order.iter())
+                .copied()
+                .filter(|&n| copy.neighbours(n).len() <= 1)
+                .collect();
+            if leaves.is_empty() {
+                break;
+            }
+            for leaf in leaves {
+                copy.remove(leaf);
+            }
+        }
+        copy.order.iter().all(|&n| copy.neighbours(n).len() <= 2)
+    }
+}
+
+/// PrePoMax's `ContactGraph`: sides of contact pairs as nodes, the pairs as edges.
+struct ContactGraph<'a> {
+    context: &'a Context<'a>,
+    nodes: HashMap<usize, GraphNode>,
+    graph: Graph,
+}
+
+impl<'a> ContactGraph<'a> {
+    fn new(context: &'a Context<'a>, items: &[MasterSlaveItem], merge_shared_nodes: bool) -> Self {
+        let groups = merge_shared_nodes.then(|| node_groups(context, items));
+        let overlap = |a: &BTreeSet<SurfaceId>, b: &BTreeSet<SurfaceId>| {
+            if !a.is_disjoint(b) {
+                return true;
+            }
+            let Some(groups) = &groups else {
+                return false;
+            };
+            let first: HashSet<SurfaceId> = a.iter().map(|id| groups[id]).collect();
+            b.iter().any(|id| first.contains(&groups[id]))
+        };
+        // Sides that share surfaces become one node.
+        let mut sets: Vec<BTreeSet<SurfaceId>> = Vec::new();
+        for item in items {
+            for side in [&item.master, &item.slave] {
+                let mut merged = side.clone();
+                sets.retain(|set| {
+                    if overlap(set, &merged) {
+                        merged.extend(set.iter().copied());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                sets.push(merged);
+            }
+        }
+        let mut nodes = HashMap::new();
+        let mut graph = Graph::default();
+        let mut taken = Vec::new();
+        for items in sets {
+            let id = graph.order.len() + 1;
+            let name = context.name(&items, &taken);
+            taken.push(name.clone());
+            let size = context.size(&items);
+            nodes.insert(
+                id,
+                GraphNode {
+                    id,
+                    name,
+                    items,
+                    size,
+                },
+            );
+            graph.add_node(id);
+        }
+        for item in items {
+            let find = |side: &BTreeSet<SurfaceId>| {
+                (graph.order.iter())
+                    .copied()
+                    .find(|n| !nodes[n].items.is_disjoint(side))
+            };
+            if let (Some(master), Some(slave)) = (find(&item.master), find(&item.slave))
+                && master != slave
+            {
+                graph.add_edge(master, slave);
+            }
+        }
+        Self {
+            context,
+            nodes,
+            graph,
+        }
+    }
+
+    fn sizes(&self) -> HashMap<usize, f64> {
+        self.nodes.iter().map(|(&id, n)| (id, n.size)).collect()
+    }
+
+    fn item(&self, master: usize, slave: usize, prefix: &str) -> MasterSlaveItem {
+        let (m, s) = (&self.nodes[&master], &self.nodes[&slave]);
+        MasterSlaveItem {
+            master_name: format!("{prefix}{}", m.name),
+            slave_name: s.name.clone(),
+            master: m.items.clone(),
+            slave: s.items.clone(),
+            unresolved: false,
+        }
+    }
+
+    /// PrePoMax's `GetMasterSlaveItems`.
+    fn master_slave_items(&self, resolve: bool) -> Vec<MasterSlaveItem> {
+        let mut items = Vec::new();
+        for graph in self.graph.connected(&self.sizes()) {
+            if graph.is_tree() {
+                items.extend(self.peel_tree(graph).0);
+            } else if graph.has_one_cycle() {
+                items.extend(self.resolve_one_cycle(graph));
+            } else {
+                items.extend(self.resolve_cycles(graph, resolve));
+            }
+        }
+        items
+    }
+
+    /// Peels off nodes with one neighbour, one at a time: each is the master of its
+    /// neighbour.
+    fn peel_tree(&self, mut graph: Graph) -> (Vec<MasterSlaveItem>, Graph) {
+        let mut items = Vec::new();
+        loop {
+            let leaf = (graph.order.iter())
+                .copied()
+                .find(|&n| graph.neighbours(n).len() == 1);
+            let Some(leaf) = leaf else {
+                break;
+            };
+            let neighbour = graph.neighbours(leaf)[0];
+            items.push(self.item(leaf, neighbour, ""));
+            graph.remove(leaf);
+        }
+        (items, graph)
+    }
+
+    fn resolve_one_cycle(&self, graph: Graph) -> Vec<MasterSlaveItem> {
+        let (mut items, reduced) = self.peel_tree(graph);
+        let Some(&first) = reduced.order.first() else {
+            return items;
+        };
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::from([(first, first)]);
+        while let Some((node, parent)) = queue.pop_front() {
+            if !visited.insert(node) {
+                continue;
+            }
+            if let Some(&next) = reduced.neighbours(node).iter().find(|&&n| n != parent) {
+                items.push(self.item(node, next, ""));
+                queue.push_back((next, node));
+            }
+        }
+        items
+    }
+
+    fn resolve_cycles(&self, graph: Graph, resolve: bool) -> Vec<MasterSlaveItem> {
+        let mut items = Vec::new();
+        let mut prefix = "";
+        if resolve {
+            let all: BTreeSet<SurfaceId> = (graph.order.iter())
+                .flat_map(|n| self.nodes[n].items.iter().copied())
+                .collect();
+            items.push(MasterSlaveItem {
+                master_name: "Unresolved".into(),
+                slave_name: String::new(),
+                master: all,
+                slave: BTreeSet::new(),
+                unresolved: true,
+            });
+            prefix = "Unresolved_";
+        }
+        let (tree_items, mut reduced) = self.peel_tree(graph);
+        items.extend(tree_items);
+        for node in reduced.order.clone() {
+            for neighbour in reduced.neighbours(node).to_vec() {
+                items.push(self.item(node, neighbour, prefix));
+                if let Some(list) = reduced.neighbours.get_mut(&neighbour)
+                    && let Some(index) = list.iter().position(|&n| n == node)
+                {
+                    list.remove(index);
+                }
+            }
+            if let Some(list) = reduced.neighbours.get_mut(&node) {
+                list.clear();
+            }
+        }
+        items
+    }
+
+    /// PrePoMax's `GetGroupedMasterSlaveItems`: a two-colourable part becomes one pair with
+    /// the larger side as master; otherwise each node is the slave of its larger neighbours.
+    fn grouped_master_slave_items(&self) -> Vec<MasterSlaveItem> {
+        let mut items = Vec::new();
+        let mut taken = Vec::new();
+        for graph in self.graph.connected(&self.sizes()) {
+            if let Some((first, second)) = self.bipartite(&graph) {
+                if first.is_empty() || second.is_empty() {
+                    continue;
+                }
+                let size = |nodes: &[usize]| nodes.iter().map(|n| self.nodes[n].size).sum::<f64>();
+                if size(&first) >= size(&second) {
+                    items.push(self.grouped_item(&first, &second, &mut taken));
+                } else {
+                    items.push(self.grouped_item(&second, &first, &mut taken));
+                }
+            } else {
+                self.by_node_size(&graph, &mut items, &mut taken);
+            }
+        }
+        items
+    }
+
+    fn bipartite(&self, graph: &Graph) -> Option<(Vec<usize>, Vec<usize>)> {
+        let mut color: HashMap<usize, bool> = HashMap::new();
+        let (mut first, mut second) = (Vec::new(), Vec::new());
+        for &start in &graph.order {
+            if color.contains_key(&start) {
+                continue;
+            }
+            color.insert(start, false);
+            let mut queue = VecDeque::from([start]);
+            while let Some(node) = queue.pop_front() {
+                let current = color[&node];
+                if current {
+                    second.push(node);
+                } else {
+                    first.push(node);
+                }
+                for &neighbour in graph.neighbours(node) {
+                    match color.get(&neighbour) {
+                        Some(&c) if c == current => return None,
+                        Some(_) => {}
+                        None => {
+                            color.insert(neighbour, !current);
+                            queue.push_back(neighbour);
+                        }
+                    }
+                }
+            }
+        }
+        Some((first, second))
+    }
+
+    fn by_node_size(
+        &self,
+        graph: &Graph,
+        items: &mut Vec<MasterSlaveItem>,
+        taken: &mut Vec<String>,
+    ) {
+        let mut ordered = graph.order.clone();
+        ordered.sort_by(|a, b| {
+            let (a, b) = (&self.nodes[a], &self.nodes[b]);
+            b.size.total_cmp(&a.size).then(a.id.cmp(&b.id))
+        });
+        let rank: HashMap<usize, usize> =
+            ordered.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+        let mut groups: Vec<(BTreeSet<usize>, Vec<usize>)> = Vec::new();
+        for &node in &ordered {
+            let masters: BTreeSet<usize> = (graph.neighbours(node).iter())
+                .copied()
+                .filter(|n| rank[n] < rank[&node])
+                .collect();
+            if masters.is_empty() {
+                continue;
+            }
+            match groups.iter_mut().find(|(m, _)| *m == masters) {
+                Some((_, slaves)) => slaves.push(node),
+                None => groups.push((masters, vec![node])),
+            }
+        }
+        for (masters, slaves) in groups {
+            let masters: Vec<usize> = masters.into_iter().collect();
+            items.push(self.grouped_item(&masters, &slaves, taken));
+        }
+    }
+
+    fn grouped_item(
+        &self,
+        masters: &[usize],
+        slaves: &[usize],
+        taken: &mut Vec<String>,
+    ) -> MasterSlaveItem {
+        let collect = |nodes: &[usize]| -> BTreeSet<SurfaceId> {
+            (nodes.iter())
+                .flat_map(|n| self.nodes[n].items.iter().copied())
+                .collect()
+        };
+        let (master, slave) = (collect(masters), collect(slaves));
+        let master_name = self.context.name(&master, taken);
+        taken.push(master_name.clone());
+        let slave_name = self.context.name(&slave, taken);
+        taken.push(slave_name.clone());
+        MasterSlaveItem {
+            master_name,
+            slave_name,
+            master,
+            slave,
+            unresolved: false,
+        }
+    }
+}
+
+/// Groups of surfaces connected by shared mesh nodes, as union-find roots.
+fn node_groups(context: &Context, items: &[MasterSlaveItem]) -> HashMap<SurfaceId, SurfaceId> {
+    let all: BTreeSet<SurfaceId> = (items.iter())
+        .flat_map(|i| i.master.iter().chain(&i.slave).copied())
+        .collect();
+    let mut parent: HashMap<SurfaceId, SurfaceId> = all.iter().map(|&id| (id, id)).collect();
+    fn root(parent: &HashMap<SurfaceId, SurfaceId>, mut id: SurfaceId) -> SurfaceId {
+        while parent[&id] != id {
+            id = parent[&id];
+        }
+        id
+    }
+    let mut owner: HashMap<usize, SurfaceId> = HashMap::new();
+    for &id in &all {
+        for node in context.nodes(id) {
+            match owner.get(&node) {
+                Some(&other) => {
+                    let (a, b) = (root(&parent, other), root(&parent, id));
+                    if a != b {
+                        let (low, high) = if a < b { (a, b) } else { (b, a) };
+                        parent.insert(high, low);
+                    }
+                }
+                None => {
+                    owner.insert(node, id);
+                }
+            }
+        }
+    }
+    all.iter().map(|&id| (id, root(&parent, id))).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Element, ElementShape, Part, extract_part_skin};
+
+    /// Unit hex blocks: part i is the cube at `origins[i]`, with own nodes.
+    fn blocks(origins: &[[f64; 3]]) -> FeMesh {
+        let mut mesh = FeMesh::default();
+        for (b, origin) in origins.iter().enumerate() {
+            let base = 8 * b as u32;
+            let corners = [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [0.0, 1.0, 1.0],
+            ];
+            for (k, c) in corners.iter().enumerate() {
+                mesh.set_node(base + k as u32 + 1, add(*origin, *c));
+            }
+            mesh.add_element(Element {
+                id: b as u32 + 1,
+                type_name: "C3D8".into(),
+                shape: ElementShape::Hex8,
+                nodes: (base + 1..=base + 8).collect(),
+            })
+            .unwrap();
+            mesh.parts.push(Part {
+                name: format!("PART-{}", b + 1),
+                elements: vec![b as u32 + 1],
+            });
+        }
+        mesh
+    }
+
+    fn search(mesh: &FeMesh, group_by: GroupBy, resolve: bool) -> Vec<MasterSlaveItem> {
+        let skins: Vec<PartSkin> = (mesh.parts.iter())
+            .map(|p| extract_part_skin(mesh, p, 30.0))
+            .collect();
+        let parameters = SearchParameters {
+            distance: 0.01,
+            angle_deg: 35.0,
+            group_by,
+            resolve,
+        };
+        find_contact_pairs(mesh, &skins, &vec![true; mesh.parts.len()], &parameters)
+    }
+
+    #[test]
+    fn finds_the_faces_where_two_blocks_touch() {
+        // The second block sits on the first with a small gap, shifted sideways by half.
+        let mesh = blocks(&[[0.0, 0.0, 0.0], [0.5, 0.0, 1.005]]);
+        let items = search(&mesh, GroupBy::Parts, false);
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.name(), "PART-1_to_PART-2");
+        let skins: Vec<PartSkin> = (mesh.parts.iter())
+            .map(|p| extract_part_skin(&mesh, p, 30.0))
+            .collect();
+        // The top face S2 of the first block and the bottom face S1 of the second.
+        let mut faces = surface_faces(&mesh, &skins, &item.master);
+        faces.extend(surface_faces(&mesh, &skins, &item.slave));
+        faces.sort_unstable();
+        assert_eq!(faces, [(1, 2), (2, 1)]);
+    }
+
+    #[test]
+    fn blocks_apart_or_side_by_side_at_a_corner_are_no_contact() {
+        assert!(search(&blocks(&[[0.0; 3], [0.0, 0.0, 1.5]]), GroupBy::Parts, false).is_empty());
+        // Touching along an edge only.
+        let edge = blocks(&[[0.0; 3], [1.0, 0.0, 1.0]]);
+        assert!(search(&edge, GroupBy::Parts, false).is_empty());
+    }
+
+    #[test]
+    fn a_chain_of_blocks_makes_every_block_a_slave_once() {
+        let mesh = blocks(&[[0.0; 3], [0.0, 0.0, 1.0], [0.0, 0.0, 2.0]]);
+        for group_by in [GroupBy::None, GroupBy::Parts, GroupBy::Graph] {
+            let items = search(&mesh, group_by, true);
+            assert_eq!(items.len(), 2, "{group_by:?}");
+            let slaves: Vec<_> = items.iter().map(|i| i.slave.clone()).collect();
+            assert_ne!(slaves[0], slaves[1], "{group_by:?}");
+        }
+    }
+
+    #[test]
+    fn long_names_are_shortened_like_prepomax() {
+        let item = MasterSlaveItem {
+            master_name: "A_VERY_LONG_PART_NAME_INDEED_REALLY".into(),
+            slave_name: "B".into(),
+            master: BTreeSet::new(),
+            slave: BTreeSet::new(),
+            unresolved: false,
+        };
+        assert_eq!(item.name(), "Item_to_B");
+    }
+}

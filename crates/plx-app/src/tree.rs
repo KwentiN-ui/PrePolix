@@ -46,6 +46,9 @@ pub enum TreeItem {
     Surface(String),
     Material(usize),
     Section(usize),
+    Constraint(usize),
+    SurfaceInteraction(usize),
+    ContactPair(usize),
     Step(usize),
     /// A container inside a step, such as "BCs".
     StepGroup(usize, &'static str),
@@ -101,6 +104,8 @@ pub struct TreeResponse {
     pub mesh_part: Option<usize>,
     /// Evaluate the hot spots with the current results.
     pub evaluate_hot_spots: bool,
+    /// Open PrePoMax's Search Contact Pairs.
+    pub search_contacts: bool,
 }
 
 /// What the user asked of the analysis, PrePoMax's analysis context menu.
@@ -176,11 +181,15 @@ const INVALID: Color32 = Color32::from_rgb(255, 0, 0);
 const INACTIVE: Color32 = Color32::from_rgb(128, 128, 128);
 
 /// Items that can be deactivated, as far as prepolix has them; PrePoMax also deactivates
-/// materials, constraints, contacts and outputs.
+/// materials, surface interactions and outputs.
 fn can_deactivate(item: &TreeItem) -> bool {
     matches!(
         item,
-        TreeItem::Step(_) | TreeItem::BoundaryCondition(..) | TreeItem::Load(..)
+        TreeItem::Step(_)
+            | TreeItem::BoundaryCondition(..)
+            | TreeItem::Load(..)
+            | TreeItem::Constraint(_)
+            | TreeItem::ContactPair(_)
     )
 }
 
@@ -210,6 +219,18 @@ fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
             TreeItem::Section(i),
             vec![TreeItem::Group("Sections"), TreeItem::Model],
         ),
+        ModelItem::Constraint(i) => (
+            TreeItem::Constraint(i),
+            vec![TreeItem::Group("Constraints"), TreeItem::Model],
+        ),
+        ModelItem::ContactPair(i) => (
+            TreeItem::ContactPair(i),
+            vec![
+                TreeItem::Group("Contact Pairs"),
+                TreeItem::Group("Contacts"),
+                TreeItem::Model,
+            ],
+        ),
         ModelItem::BoundaryCondition(s, i) => (TreeItem::BoundaryCondition(s, i), step(s, "BCs")),
         ModelItem::Load(s, i) => (TreeItem::Load(s, i), step(s, "Loads")),
     }
@@ -221,6 +242,9 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::Group("Materials") => Some(NewItem::Material),
         TreeItem::Group("Sections") => Some(NewItem::Section),
         TreeItem::Group("Steps") => Some(NewItem::Step),
+        TreeItem::Group("Constraints") => Some(NewItem::Constraint),
+        TreeItem::Group("Surface Interactions") => Some(NewItem::SurfaceInteraction),
+        TreeItem::Group("Contact Pairs") => Some(NewItem::ContactPair),
         TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
         TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
         TreeItem::Group(HOT_SPOTS) => Some(NewItem::HotSpot),
@@ -250,6 +274,9 @@ fn is_fe_item(item: &TreeItem) -> bool {
         item,
         TreeItem::Material(_)
             | TreeItem::Section(_)
+            | TreeItem::Constraint(_)
+            | TreeItem::SurfaceInteraction(_)
+            | TreeItem::ContactPair(_)
             | TreeItem::Step(_)
             | TreeItem::BoundaryCondition(..)
             | TreeItem::Load(..)
@@ -479,6 +506,13 @@ impl Tree<'_> {
                     }
                     if ui.button("Alle Parts vernetzen").clicked() {
                         self.response.generate_mesh = true;
+                    }
+                }
+                // PrePoMax offers the search on constraints and contact pairs.
+                if matches!(item, TreeItem::Group("Constraints" | "Contact Pairs")) {
+                    ui.separator();
+                    if ui.button("Kontaktpaare suchen …").clicked() {
+                        self.response.search_contacts = true;
                     }
                 }
                 if item == TreeItem::Group(HOT_SPOTS) {
@@ -962,12 +996,29 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
             .map(|(i, s)| (TreeItem::Section(i), s.name.as_str()))
             .collect();
         tree.container(ui, "Sections", sections);
-        tree.leaf(ui, TreeItem::Group("Constraints"), "Constraints");
-        let contacts = TreeItem::Group("Contacts");
-        tree.branch(ui, contacts, "Contacts", false, |tree, ui| {
-            for name in ["Surface Interactions", "Contact Pairs"] {
-                tree.leaf(ui, TreeItem::Group(name), name);
+        for (i, constraint) in fe.constraints.iter().enumerate() {
+            if !constraint.active() {
+                tree.inactive.insert(TreeItem::Constraint(i));
             }
+        }
+        for (i, _) in (fe.contact_pairs.iter().enumerate()).filter(|(_, c)| !c.active) {
+            tree.inactive.insert(TreeItem::ContactPair(i));
+        }
+        let constraints = (fe.constraints.iter().enumerate())
+            .map(|(i, c)| (TreeItem::Constraint(i), c.name()))
+            .collect();
+        tree.container(ui, "Constraints", constraints);
+        let contacts = TreeItem::Group("Contacts");
+        let open = !fe.surface_interactions.is_empty() || !fe.contact_pairs.is_empty();
+        tree.branch(ui, contacts, "Contacts", open, |tree, ui| {
+            let interactions = (fe.surface_interactions.iter().enumerate())
+                .map(|(i, s)| (TreeItem::SurfaceInteraction(i), s.name.as_str()))
+                .collect();
+            tree.container(ui, "Surface Interactions", interactions);
+            let pairs = (fe.contact_pairs.iter().enumerate())
+                .map(|(i, c)| (TreeItem::ContactPair(i), c.name.as_str()))
+                .collect();
+            tree.container(ui, "Contact Pairs", pairs);
         });
         for name in ["Distributions", "Amplitudes", "Initial Conditions"] {
             tree.leaf(ui, TreeItem::Group(name), name);
