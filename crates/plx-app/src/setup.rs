@@ -27,6 +27,8 @@ pub enum NewItem {
     Step,
     BoundaryCondition(usize),
     Load(usize),
+    /// A field output derived from results, created in the Results tree.
+    ResultFieldOutput,
 }
 
 /// How a region is given.
@@ -457,6 +459,7 @@ impl Editor {
                     region,
                 )
             }
+            NewItem::ResultFieldOutput => return None,
         };
         Some(Self {
             draft,

@@ -5,6 +5,7 @@ use plx_render::StandardView;
 
 use crate::analysis::{Analysis, MonitorEvent};
 use crate::animation::{AnimationKind, ColorLimits, Playback};
+use crate::field_output_dialog::{DialogAction, FieldOutputDialog};
 use crate::icons::{self, Icon};
 use crate::keywords::KeywordEditor;
 use crate::material_library::{LibraryResult, MaterialLibraryEditor};
@@ -58,6 +59,8 @@ struct Workbench {
     keyword_editor: Option<KeywordEditor>,
     /// Open material library editor.
     material_library: Option<MaterialLibraryEditor>,
+    /// Open dialog creating or editing a field output derived from the shown results.
+    field_output_dialog: Option<FieldOutputDialog>,
     /// The tree selection whose region is highlighted.
     highlighted: Option<(TreeView, TreeItem)>,
     analysis: Option<Analysis>,
@@ -111,6 +114,7 @@ impl PrepolixApp {
                 editor: None,
                 keyword_editor: None,
                 material_library: None,
+                field_output_dialog: None,
                 highlighted: None,
                 analysis: None,
                 open_results: None,
@@ -438,6 +442,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.editor_window(&ctx);
         self.workbench.keyword_editor_window(&ctx);
         self.workbench.material_library_window(&ctx);
+        self.workbench.field_output_window(&ctx);
         self.workbench.run_analysis(&ctx);
         if let Some(path) = self.workbench.open_results.take() {
             self.open_path(path, &ctx);
@@ -505,6 +510,7 @@ impl Workbench {
                     ));
                 }
                 self.dialog = None;
+                self.field_output_dialog = None;
                 self.viewport.labels = Default::default();
                 if let Some(view) = &model.results {
                     // A results file joins the results collection and leaves the FE model
@@ -626,7 +632,9 @@ impl Workbench {
             results.component = component;
             self.results_changed = true;
         }
-        if let Some(item) = response.open {
+        if let Some(TreeItem::ResultFieldOutput(field)) = response.open {
+            self.edit_field_output(field);
+        } else if let Some(item) = response.open {
             let model = self.model.as_ref().filter(|_| view != TreeView::Results);
             match model.and_then(|m| Editor::edit(&item, &m.fe, &m.mesh)) {
                 Some(editor) => self.editor = Some(editor),
@@ -636,7 +644,9 @@ impl Workbench {
         if let Some(kind) = response.create {
             self.create(kind);
         }
-        if let (Some(item), Some(model)) = (response.delete, self.model.as_mut())
+        if let Some(TreeItem::ResultFieldOutput(field)) = response.delete {
+            self.delete_field_output(field);
+        } else if let (Some(item), Some(model)) = (response.delete, self.model.as_mut())
             && crate::setup::delete(&mut model.fe, &item)
         {
             self.tree.selected = None;
@@ -725,6 +735,7 @@ impl Workbench {
                 ));
             }
             self.dialog = None;
+            self.field_output_dialog = None;
             self.viewport.labels = Default::default();
             self.results_changed = true;
         }
@@ -746,6 +757,7 @@ impl Workbench {
         self.current_result = self
             .current_result
             .min(self.results.len().saturating_sub(1));
+        self.field_output_dialog = None;
         if self.tree_view == TreeView::Results {
             self.dialog = None;
             self.tree.selected = None;
@@ -802,6 +814,14 @@ impl Workbench {
     }
 
     fn create(&mut self, kind: NewItem) {
+        if kind == NewItem::ResultFieldOutput {
+            if let Some(model) = self.results.get(self.current_result)
+                && let Some(view) = &model.results
+            {
+                self.field_output_dialog = Some(FieldOutputDialog::create(view, &model.mesh));
+            }
+            return;
+        }
         if let Some(model) = self.setup_model() {
             self.editor = Editor::create(kind, &model.fe);
             self.set_tree_view(TreeView::FeModel);
@@ -1085,6 +1105,90 @@ impl Workbench {
             _ => Default::default(),
         };
         self.viewport.preview = preview;
+    }
+
+    /// Opens the dialog of the derived field output that computes the given field.
+    fn edit_field_output(&mut self, field: usize) {
+        let Some(model) = self.results.get(self.current_result) else {
+            return;
+        };
+        let Some(view) = &model.results else { return };
+        if let Some(index) = view.field_output_index(field) {
+            self.field_output_dialog = FieldOutputDialog::edit(view, &model.mesh, index);
+        }
+    }
+
+    fn delete_field_output(&mut self, field: usize) {
+        let Some(model) = self.results.get_mut(self.current_result) else {
+            return;
+        };
+        let Some(view) = &mut model.results else {
+            return;
+        };
+        let Some(index) = view.field_output_index(field) else {
+            return;
+        };
+        let name = view.field_outputs[index].name.clone();
+        let warnings = view.remove_field_output(index, &model.mesh);
+        self.output.push(format!("Feldausgabe {name} gelöscht"));
+        for warning in warnings {
+            self.output.push(format!("Warnung: {warning}"));
+        }
+        self.tree.selected = None;
+        self.field_output_dialog = None;
+        self.results_changed = true;
+    }
+
+    fn field_output_window(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.field_output_dialog else {
+            return;
+        };
+        let (output, next) = match dialog.show(ctx) {
+            DialogAction::Open => return,
+            DialogAction::Cancel => {
+                self.field_output_dialog = None;
+                return;
+            }
+            DialogAction::Ok { output, next } => (output, next),
+        };
+        let Some(model) = self.results.get_mut(self.current_result) else {
+            self.field_output_dialog = None;
+            return;
+        };
+        let Some(view) = &mut model.results else {
+            return;
+        };
+        let name = output.name.clone();
+        let edit = dialog.edit;
+        match view.set_field_output(edit, output, &model.mesh) {
+            Ok(warnings) => {
+                let verb = if edit.is_some() {
+                    "geändert"
+                } else {
+                    "erstellt"
+                };
+                self.output.push(format!("Feldausgabe {name} {verb}"));
+                for warning in warnings {
+                    self.output.push(format!("Warnung: {warning}"));
+                }
+                // PrePoMax shows a new field output right away.
+                if edit.is_none()
+                    && let Some(field) = (view.current_increment())
+                        .and_then(|i| i.fields.iter().position(|f| f.name == name))
+                {
+                    view.field = field;
+                    view.component = 0;
+                    self.tree.selected = Some((TreeView::Results, TreeItem::Component(field, 0)));
+                }
+                self.results_changed = true;
+                if next {
+                    dialog.next(&name);
+                } else {
+                    self.field_output_dialog = None;
+                }
+            }
+            Err(error) => dialog.error = Some(error),
+        }
     }
 
     fn editor_window(&mut self, ctx: &egui::Context) {

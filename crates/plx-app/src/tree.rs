@@ -48,6 +48,8 @@ pub enum TreeItem {
     FieldOutputs,
     /// Field of the current increment, by index.
     Field(usize),
+    /// Field of the current increment computed from a derived field output, by index.
+    ResultFieldOutput(usize),
     Component(usize, usize),
 }
 
@@ -120,6 +122,7 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::Group("Steps") => Some(NewItem::Step),
         TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
         TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
+        TreeItem::FieldOutputs => Some(NewItem::ResultFieldOutput),
         _ => None,
     }
 }
@@ -187,7 +190,7 @@ impl Tree<'_> {
                 None => {}
             }
         }
-        let editable = is_fe_item(&item);
+        let editable = is_fe_item(&item) || matches!(item, TreeItem::ResultFieldOutput(_));
         if creates.is_some() || editable || item == TreeItem::Analysis {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -519,7 +522,8 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                 .map(|f| {
                     let components: Vec<String> =
                         f.components.iter().map(|c| c.name.clone()).collect();
-                    (f.name.clone(), components)
+                    let derived = view.field_outputs.iter().any(|o| o.name == f.name);
+                    (f.name.clone(), components, derived)
                 })
                 .collect();
         }
@@ -540,9 +544,14 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                 tree.leaf(ui, TreeItem::FieldOutputs, text);
             } else {
                 tree.branch(ui, TreeItem::FieldOutputs, text, true, |tree, ui| {
-                    for (f, (name, components)) in fields.into_iter().enumerate() {
+                    for (f, (name, components, derived)) in fields.into_iter().enumerate() {
+                        let item = if derived {
+                            TreeItem::ResultFieldOutput(f)
+                        } else {
+                            TreeItem::Field(f)
+                        };
                         // PrePoMax opens the first two fields.
-                        tree.branch(ui, TreeItem::Field(f), name, f < 2, |tree, ui| {
+                        tree.branch(ui, item, name, f < 2, |tree, ui| {
                             for (c, component) in components.into_iter().enumerate() {
                                 let item = TreeItem::Component(f, c);
                                 if tree.leaf(ui, item, component).clicked()

@@ -3,6 +3,7 @@
 mod analysis;
 mod animation;
 mod app;
+mod field_output_dialog;
 mod icons;
 mod keywords;
 mod material_library;
@@ -50,6 +51,10 @@ mod tests {
             ("analysis.rs", include_str!("analysis.rs")),
             ("animation.rs", include_str!("animation.rs")),
             ("app.rs", include_str!("app.rs")),
+            (
+                "field_output_dialog.rs",
+                include_str!("field_output_dialog.rs"),
+            ),
             ("icons.rs", include_str!("icons.rs")),
             ("keywords.rs", include_str!("keywords.rs")),
             ("material_library.rs", include_str!("material_library.rs")),
