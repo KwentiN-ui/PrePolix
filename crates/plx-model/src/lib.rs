@@ -6,6 +6,7 @@
 //! file is written, so the user never has to define sets by hand.
 
 mod amplitude;
+mod checks;
 mod constraint;
 mod contact;
 pub mod convert;
@@ -19,6 +20,7 @@ pub mod units;
 mod validity;
 
 pub use amplitude::{Amplitude, AmplitudeTime};
+pub use checks::{Finding, MeshCheck, Problem, Severity, diagnose_solver_output};
 pub use constraint::{CompressionOnly, PointSpring, SurfaceSpring, SurfaceToSurfaceSpring};
 pub use contact::{
     Constraint, ContactMethod, ContactPair, DEFAULT_SURFACE_COLOR, Friction, GapConductance,

@@ -1094,6 +1094,66 @@ fn calculix_carries_the_load_across_a_contact() {
     }
 }
 
+/// Plane strain: a strip of 4 x 1 resting on another of the same size only by contact on
+/// their edges carries the pressure on its top into the supports of the lower one.
+#[test]
+fn calculix_carries_the_load_across_a_contact_in_2d() {
+    let (width, pressure) = (4.0, 50.0);
+    let mut mesh = rectangle(0.0, width, 1.0, 4, 1);
+    // The upper strip: the same rectangle with own nodes and elements, one higher.
+    let upper = rectangle(0.0, width, 1.0, 4, 1);
+    for (&id, c) in upper.node_ids().iter().zip(upper.coords()) {
+        mesh.set_node(id + 1000, [c[0], c[1] + 1.0, c[2]]);
+    }
+    for element in upper.elements() {
+        let mut element = element.clone();
+        element.id += 100;
+        element.nodes.iter_mut().for_each(|n| *n += 1000);
+        mesh.add_element(element).unwrap();
+    }
+    mesh.parts.push(plx_mesh::Part {
+        name: "UPPER".into(),
+        elements: (101..=104).collect(),
+    });
+    let on_line = |y: f64, upper: bool| -> Vec<(ElementId, u8)> {
+        (edges_at(&mesh, 1, y).into_iter())
+            .filter(|&(element, _)| (element > 100) == upper)
+            .collect()
+    };
+    let (lower_top, upper_bottom, upper_top) =
+        (on_line(1.0, false), on_line(1.0, true), on_line(2.0, true));
+    let bottom = nodes_at(&mesh, 1, 0.0);
+    // Held sideways at its top, the upper strip rests on the lower one only by contact.
+    let top: Vec<NodeId> = (nodes_at(&mesh, 1, 2.0).into_iter())
+        .filter(|&n| n > 1000)
+        .collect();
+    let mut model = plane_model(
+        ModelSpace::PlaneStrain,
+        1.0,
+        vec![(bottom.clone(), FIX_Y), (vec![1], FIX_X), (top, FIX_X)],
+        LoadKind::Pressure(pressure),
+        Region::Faces(upper_top),
+    );
+    model.sections[0].region = Region::Parts(vec!["PLATE".into(), "UPPER".into()]);
+    model.surface_interactions.push(SurfaceInteraction {
+        name: "Surface_Interaction-1".into(),
+        properties: vec![InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)],
+    });
+    let mut pair = ContactPair::new("Contact_Pair-1", "Surface_Interaction-1");
+    pair.master = Region::Faces(lower_top);
+    pair.slave = Region::Faces(upper_bottom);
+    model.contact_pairs.push(pair);
+    let Some(frd) = run_ccx("kontakt-2d", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let reaction = node_sum(&frd, "FORC", "F2", &bottom);
+    let expected = pressure * width;
+    assert!(
+        (reaction - expected).abs() < 0.01 * expected,
+        "{reaction} != {expected}"
+    );
+}
+
 /// Two steel blocks of 1 x 1 x 1 hexahedra, `a` from z = 0 to 1 and `b` from z = 1.1 to 2.1,
 /// with `n` elements per edge each. Returns the mesh and the bottom and top faces of
 /// each block.

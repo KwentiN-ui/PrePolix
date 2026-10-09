@@ -16,6 +16,14 @@ pub enum ModelItem {
     BoundaryCondition(usize, usize),
     /// Load by step and index.
     Load(usize, usize),
+    Material(usize),
+    /// Part of the mesh by index.
+    Part(usize),
+    Step(usize),
+    /// The boundary conditions of a step as a whole.
+    BoundaryConditions(usize),
+    /// The analysis, for problems CalculiX reported.
+    Analysis,
     InitialCondition(usize),
     Amplitude(usize),
 }

@@ -41,6 +41,8 @@ use plx_render::RenderMesh;
 enum LoadEvent {
     Started(PathBuf),
     Finished(PathBuf, Result<Box<LoadedModel>, String>),
+    /// CAD files added to the geometry of the open model.
+    Added(Vec<PathBuf>, Result<Box<plx_mesher::CadAddition>, String>),
 }
 
 struct Workbench {
@@ -104,6 +106,10 @@ struct Workbench {
     /// `None` until it is computed, so a dialog's highlight is cleared once it closes.
     highlighted: Option<Option<(TreeView, TreeItem)>>,
     analysis: Option<Analysis>,
+    /// Problems CalculiX reported when the last analysis failed, shown in the tree.
+    solver_findings: Vec<plx_model::Finding>,
+    /// The findings of a tree item whose warning sign was clicked, explained in a window.
+    findings_window: Option<Vec<plx_model::Finding>>,
     /// Results file the user asked to open; read by the app on a worker thread.
     open_results: Option<PathBuf>,
     screenshot: Screenshot,
@@ -205,6 +211,8 @@ impl PrepolixApp {
                 history_table: None,
                 highlighted: None,
                 analysis: None,
+                solver_findings: Vec::new(),
+                findings_window: None,
                 open_results: None,
                 screenshot: Screenshot::default(),
                 hot_spot_dialog: None,
@@ -289,7 +297,8 @@ impl PrepolixApp {
     }
 
     /// PrePoMax's Geometry > Import: one or several STEP, IGES or BREP files, read into
-    /// one geometry.
+    /// one geometry. A model that already has geometry or a mesh keeps it; the new parts
+    /// are added.
     fn import_dialog(&mut self, ctx: &egui::Context) {
         if self.loading.is_some() {
             return;
@@ -297,13 +306,34 @@ impl PrepolixApp {
         let sender = self.load_events.0.clone();
         let ctx = ctx.clone();
         let units = self.workbench.import_units();
+        // What the new parts are added to: the geometry, if any, and the names of the
+        // mesh parts they must not take.
+        let base = (self.workbench.model.as_ref())
+            .filter(|m| m.geometry.is_some() || m.mesh.element_count() > 0)
+            .map(|m| {
+                let taken: Vec<String> = m.parts.iter().map(|p| p.name.clone()).collect();
+                (m.geometry.clone(), taken, m.fe.properties.units)
+            });
         std::thread::spawn(move || {
             let picked = rfd::FileDialog::new()
                 .set_title("Geometrie importieren")
                 .add_filter(GEOMETRY_FILTER.0, GEOMETRY_FILTER.1)
                 .pick_files();
-            if let Some(paths) = picked.filter(|p| !p.is_empty()) {
-                load_geometry_in_background(paths, units, sender, ctx);
+            let Some(paths) = picked.filter(|p| !p.is_empty()) else {
+                return;
+            };
+            match base {
+                Some((geometry, taken, units)) => {
+                    let _ = sender.send(LoadEvent::Started(paths[0].clone()));
+                    ctx.request_repaint();
+                    let result =
+                        plx_mesher::add_cad_files(geometry.as_ref(), &paths, units, &taken)
+                            .map(Box::new)
+                            .map_err(|e| e.to_string());
+                    let _ = sender.send(LoadEvent::Added(paths, result));
+                    ctx.request_repaint();
+                }
+                None => load_geometry_in_background(paths, units, sender, ctx),
             }
         });
     }
@@ -331,6 +361,10 @@ impl PrepolixApp {
                 LoadEvent::Finished(path, result) => {
                     self.loading = None;
                     self.workbench.model_loaded(path, result);
+                }
+                LoadEvent::Added(paths, result) => {
+                    self.loading = None;
+                    self.workbench.geometry_added(&paths, result);
                 }
             }
         }
@@ -829,6 +863,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.update_symbols(&ctx);
         self.workbench.update_hot_spot_preview();
         self.workbench.hot_spot_window(&ctx);
+        self.workbench.findings_window(&ctx);
         self.workbench.settings_window(&ctx);
         self.workbench.model_dialog_window(&ctx);
         if std::mem::take(&mut self.workbench.import_requested) {
@@ -1135,7 +1170,15 @@ impl Workbench {
             status: a.status(),
             results: a.results().is_some(),
         });
-        let response = tree::show(ui, view, shown, &mesh_items, job, &mut self.tree);
+        let response = tree::show(
+            ui,
+            view,
+            shown,
+            &mesh_items,
+            job,
+            &self.solver_findings,
+            &mut self.tree,
+        );
         self.tree_response(ui.ctx(), view, response);
     }
 
@@ -1223,6 +1266,67 @@ impl Workbench {
         }
         if response.search_contacts {
             self.open_contact_search();
+        }
+        if let Some(findings) = response.findings {
+            self.findings_window = Some(findings);
+        }
+    }
+
+    /// Explains the findings of the tree item whose warning sign was clicked: what is wrong,
+    /// why CalculiX cannot cope with it and how to fix it.
+    fn findings_window(&mut self, ctx: &egui::Context) {
+        let Some(findings) = &self.findings_window else {
+            return;
+        };
+        let mut open = true;
+        let mut close = false;
+        egui::Window::new("Modellprüfung")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(460.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(ctx.content_rect().height() * 0.6)
+                    .show(ui, |ui| {
+                        for (i, finding) in findings.iter().enumerate() {
+                            if i > 0 {
+                                ui.separator();
+                            }
+                            let (kind, color) = match finding.severity() {
+                                plx_model::Severity::Error => {
+                                    ("Fehler", egui::Color32::from_rgb(200, 0, 0))
+                                }
+                                plx_model::Severity::Warning => {
+                                    ("Warnung", egui::Color32::from_rgb(170, 110, 0))
+                                }
+                            };
+                            ui.horizontal(|ui| {
+                                ui.colored_label(color, egui::RichText::new(kind).strong());
+                                ui.label(egui::RichText::new(finding.problem.title()).strong());
+                            });
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(&finding.detail).weak())
+                                    .wrap(),
+                            );
+                            ui.add_space(4.0);
+                            ui.add(egui::Label::new(finding.problem.explanation()).wrap());
+                            ui.add_space(4.0);
+                            ui.add(
+                                egui::Label::new(format!("Abhilfe: {}", finding.problem.fix()))
+                                    .wrap(),
+                            );
+                        }
+                    });
+                ui.separator();
+                ui.vertical_centered(|ui| {
+                    close = ui.button("Schließen").clicked();
+                });
+            });
+        if !open || close {
+            self.findings_window = None;
         }
     }
 
@@ -2134,8 +2238,20 @@ impl Workbench {
                 .push("Das Modell hat noch kein Netz: Netz > Netz erzeugen".into());
             return;
         }
+        let findings = model.findings();
         match Analysis::start(&self.settings.solver, model, default_solver, check_model) {
-            Ok(analysis) => {
+            Ok(mut analysis) => {
+                // Problems the checks found go into the monitor first, so that an abort is
+                // explained even before CalculiX says anything.
+                for finding in
+                    (findings.iter()).filter(|f| f.severity() == plx_model::Severity::Error)
+                {
+                    analysis.note(format!(
+                        "Modellprüfung: {}: {}",
+                        finding.problem.title(),
+                        finding.detail
+                    ));
+                }
                 self.output.push(format!(
                     "{} gestartet: {}",
                     if check_model {
@@ -2146,6 +2262,7 @@ impl Workbench {
                     self.settings.solver.work_dir().display()
                 ));
                 self.analysis = Some(analysis);
+                self.solver_findings.clear();
             }
             Err(error) => self.output.push(error),
         }
@@ -2162,6 +2279,27 @@ impl Workbench {
         if let Some(status) = analysis.poll() {
             self.output
                 .push(format!("Analyse {}", Analysis::status_text(status)));
+            if matches!(
+                status,
+                plx_job::JobStatus::Failed | plx_job::JobStatus::FailedWithResults
+            ) && let Some(model) = self.model.as_ref()
+            {
+                self.solver_findings =
+                    plx_model::diagnose_solver_output(analysis.output(), &model.mesh);
+                for finding in (self.solver_findings.iter())
+                    .filter(|f| f.item == plx_model::ModelItem::Analysis)
+                {
+                    analysis.note(format!(
+                        "Mögliche Ursache: {}. {}",
+                        finding.problem.title(),
+                        finding.problem.fix()
+                    ));
+                }
+                if !self.solver_findings.is_empty() {
+                    analysis
+                        .note("Das Warnsymbol an der Analyse im Baum erklärt die Ursache.".into());
+                }
+            }
         }
         if analysis.monitor
             && let MonitorEvent::OpenResults(path) = analysis.window(ctx)
@@ -2817,6 +2955,79 @@ impl Workbench {
         }
     }
 
+    /// PrePoMax's import into a model with geometry or a mesh: the new parts join the
+    /// geometry. The parts already there keep their names, and the selections on the
+    /// geometry and the mesh follow Gmsh's new numbering of the faces, edges and vertices.
+    fn geometry_added(
+        &mut self,
+        paths: &[PathBuf],
+        result: Result<Box<plx_mesher::CadAddition>, String>,
+    ) {
+        let files: Vec<String> = (paths.iter())
+            .map(|p| {
+                p.file_name().map_or_else(
+                    || p.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        let files = files.join(", ");
+        let addition = match result {
+            Ok(addition) => *addition,
+            Err(error) => {
+                self.output
+                    .push(format!("Fehler beim Import von {files}: {error}"));
+                return;
+            }
+        };
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        let plx_mesher::CadAddition {
+            import,
+            renumbered,
+            added,
+        } = addition;
+        let view = Model::geometry_view(&model.path, import.display);
+        match geometry_check(model.fe.properties.space, &view) {
+            Ok(faces) if !faces.is_empty() => {
+                let faces: Vec<String> = faces.iter().map(i32::to_string).collect();
+                self.output.push(format!(
+                    "Hinweis: Normale von Fläche {} zeigt in -z; die Elemente werden beim \
+                     Vernetzen umgedreht.",
+                    faces.join(", ")
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.output
+                    .push(format!("Fehler beim Import von {files}: {error}"));
+                return;
+            }
+        }
+        if model.geometry.is_some() {
+            model.fe.renumber_cad(&renumbered);
+            if model.has_cad() {
+                let mut mesh = model.mesh.clone();
+                mesh.cad = mesh.cad.renumbered(&renumbered);
+                model.set_mesh(mesh);
+            }
+        }
+        model.geometry = Some(import.geometry);
+        for warning in &import.warnings {
+            self.output.push(format!("Warnung: {warning}"));
+        }
+        self.output.push(format!(
+            "{files} importiert: {} Part(s) hinzugefügt ({})",
+            added.len(),
+            added.join(", ")
+        ));
+        self.geometry = Some(view);
+        self.after_parts_changed();
+        self.set_tree_view(TreeView::Geometry);
+        self.view_command = Some(ViewCommand::Fit);
+    }
+
     /// PrePoMax's Delete of a geometry part: the geometry loses the solid or face; a mesh
     /// already generated from it stays, as a part of the FE model.
     fn delete_geometry_part(&mut self, index: usize) {
@@ -2860,7 +3071,7 @@ impl Workbench {
         };
         model.geometry = smaller;
         self.output.push(format!("Part {name} gelöscht"));
-        self.after_part_deleted();
+        self.after_parts_changed();
     }
 
     /// PrePoMax's Delete of a mesh part: its elements go, with the nodes no other part has.
@@ -2874,10 +3085,10 @@ impl Workbench {
         let smaller = plx_mesher::delete_mesh_part(&model.mesh, &name);
         model.set_mesh(smaller);
         self.output.push(format!("Part {name} gelöscht"));
-        self.after_part_deleted();
+        self.after_parts_changed();
     }
 
-    fn after_part_deleted(&mut self) {
+    fn after_parts_changed(&mut self) {
         self.tree.selected = None;
         self.menu_part = None;
         self.dialog = None;
@@ -4009,17 +4220,8 @@ impl Workbench {
                 .filter_map(|&id| model.node_position(model.mesh.node_index(id)?))
                 .chain(transformation.iter().flat_map(|d| d.points(model)))
                 .collect(),
-            edges: (model.highlight.lines.iter())
-                .filter_map(|ends| {
-                    let [a, b] = ends.map(|id| {
-                        model
-                            .mesh
-                            .node_index(id)
-                            .and_then(|n| model.node_position(n))
-                    });
-                    Some([a?, b?])
-                })
-                .collect(),
+            edges: render_lines(model, &model.highlight.lines),
+            secondary_edges: render_lines(model, &model.highlight.secondary_lines),
             axis,
             paths: self.overlay_paths(),
             lines: transformation.map_or_else(Vec::new, |d| d.lines(model)),
@@ -4028,6 +4230,21 @@ impl Workbench {
         };
         self.update_feature_overlay();
     }
+}
+
+/// Lines between nodes in render coordinates; lines with an unknown node are left out.
+fn render_lines(model: &Model, lines: &[[plx_mesh::NodeId; 2]]) -> Vec<[glam::Vec3; 2]> {
+    (lines.iter())
+        .filter_map(|ends| {
+            let [a, b] = ends.map(|id| {
+                model
+                    .mesh
+                    .node_index(id)
+                    .and_then(|n| model.node_position(n))
+            });
+            Some([a?, b?])
+        })
+        .collect()
 }
 
 /// What the results tool bar asks for.
