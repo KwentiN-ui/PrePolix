@@ -332,6 +332,8 @@ pub enum StepKind {
     Static(StaticStep),
     /// Eigenfrequencies and mode shapes (`*FREQUENCY`).
     Frequency(FrequencyStep),
+    /// Buckling factors and buckling modes (`*BUCKLE`).
+    Buckle(BuckleStep),
     /// Temperatures only (`*HEAT TRANSFER`).
     HeatTransfer(HeatTransferStep),
     /// Temperatures and displacements solved together
@@ -344,6 +346,7 @@ impl StepKind {
         match self {
             StepKind::Static(settings) => &mut settings.solver,
             StepKind::Frequency(settings) => &mut settings.solver,
+            StepKind::Buckle(settings) => &mut settings.solver,
             StepKind::HeatTransfer(settings) | StepKind::CoupledTempDisp(settings) => {
                 &mut settings.increments.solver
             }
@@ -537,6 +540,31 @@ impl Default for FrequencyStep {
     }
 }
 
+/// Settings of a `*BUCKLE` step, with PrePoMax's defaults. The loads of the step are the
+/// reference loads; the buckling factors scale them to the critical loads.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BuckleStep {
+    /// Number of buckling factors to compute.
+    pub num_factors: u32,
+    /// Accuracy of the eigenvalue solver.
+    pub accuracy: f64,
+    /// Adds the stiffness of the deformed state of the previous step, e.g. of a preload that
+    /// is not scaled by the buckling factor (`*STEP, PERTURBATION`).
+    pub perturbation: bool,
+    pub solver: EquationSolver,
+}
+
+impl Default for BuckleStep {
+    fn default() -> Self {
+        Self {
+            num_factors: 1,
+            accuracy: 1e-4,
+            perturbation: false,
+            solver: EquationSolver::Default,
+        }
+    }
+}
+
 impl Step {
     /// A static step with PrePoMax's default field outputs.
     pub fn new_static(name: impl Into<String>) -> Self {
@@ -561,6 +589,19 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             field_outputs: FieldOutput::frequency_defaults(),
+        }
+    }
+
+    /// A buckle step with PrePoMax's default field outputs.
+    pub fn new_buckle(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            active: true,
+            kind: StepKind::Buckle(BuckleStep::default()),
+            boundary_conditions: Vec::new(),
+            loads: Vec::new(),
+            history_outputs: Vec::new(),
+            field_outputs: FieldOutput::defaults(),
         }
     }
 

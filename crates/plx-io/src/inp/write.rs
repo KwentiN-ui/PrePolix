@@ -11,10 +11,10 @@ use std::fmt::Write as _;
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
-    Amplitude, AmplitudeTime, BoundaryKind, Constraint, ContactMethod, ContactPair, FeModel,
-    FieldOutput, FrequencyStep, GapConductance, HeatTransferStep, HistoryKind, HistoryOutput,
-    Incrementation, InitialConditionKind, InteractionProperty, LoadKind, ModelSpace, NodeTie,
-    OutputKind, Region, Section, SectionKind, StaticStep, Step, StepKind, SurfaceBehavior,
+    Amplitude, AmplitudeTime, BoundaryKind, BuckleStep, Constraint, ContactMethod, ContactPair,
+    FeModel, FieldOutput, FrequencyStep, GapConductance, HeatTransferStep, HistoryKind,
+    HistoryOutput, Incrementation, InitialConditionKind, InteractionProperty, LoadKind, ModelSpace,
+    NodeTie, OutputKind, Region, Section, SectionKind, StaticStep, Step, StepKind, SurfaceBehavior,
     SurfaceInteraction, Totals, UserKeyword, line_tangent,
 };
 
@@ -117,6 +117,23 @@ pub fn write_inp(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<String
     let mut tree = model_keywords(mesh, model, heading)?;
     insert_user_keywords(&mut tree, &model.user_keywords);
     Ok(write_keywords(&tree))
+}
+
+/// An input file with only the mesh, its nodes moved by `scale` times `displacements` (one per
+/// node, in the order of [`FeMesh::coords`]), as PrePoMax's "Export deformed mesh": the
+/// deformed shape, e.g. a buckling mode as imperfection, can be imported into another model.
+pub fn write_deformed_mesh_inp(
+    mesh: &FeMesh,
+    displacements: &[[f32; 3]],
+    scale: f64,
+    heading: &str,
+) -> Result<String, WriteError> {
+    let mut deformed = mesh.clone();
+    for ((&id, coords), u) in mesh.node_ids().iter().zip(mesh.coords()).zip(displacements) {
+        let moved = std::array::from_fn(|k| coords[k] + scale * f64::from(u[k]));
+        deformed.set_node(id, moved);
+    }
+    write_inp(&deformed, &FeModel::default(), heading)
 }
 
 /// The input file for PrePoMax's "Check Model": every step's procedure is replaced by
@@ -1192,6 +1209,7 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
     let (header, procedure) = match &step.kind {
         StepKind::Static(settings) => static_step(settings),
         StepKind::Frequency(settings) => frequency_step(settings),
+        StepKind::Buckle(settings) => buckle_step(settings),
         StepKind::HeatTransfer(settings) => heat_transfer_step(settings, "*Heat transfer", false),
         StepKind::CoupledTempDisp(settings) => {
             heat_transfer_step(settings, "*Coupled temperature-displacement", true)
@@ -1382,6 +1400,7 @@ fn deactivated_step(step: &Step) -> Keyword {
     let procedure = match step.kind {
         StepKind::Static(_) => "StaticStep",
         StepKind::Frequency(_) => "FrequencyStep",
+        StepKind::Buckle(_) => "BuckleStep",
         StepKind::HeatTransfer(_) => "HeatTransferStep",
         StepKind::CoupledTempDisp(_) => "CoupledTempDispStep",
     };
@@ -1604,6 +1623,27 @@ fn frequency_step(settings: &FrequencyStep) -> (String, String) {
         }
     }
     procedure.push('\n');
+    (header, procedure)
+}
+
+/// The `*Step` line and the procedure keyword of a buckle step, as PrePoMax's
+/// `CalBuckleStep` writes them.
+fn buckle_step(settings: &BuckleStep) -> (String, String) {
+    let mut header = String::from("*Step");
+    if settings.perturbation {
+        header.push_str(", Perturbation");
+    }
+    header.push('\n');
+    let mut procedure = String::from("*Buckle");
+    if let Some(solver) = settings.solver.keyword() {
+        let _ = write!(procedure, ", Solver={solver}");
+    }
+    let _ = writeln!(
+        procedure,
+        "\n{}, {}",
+        settings.num_factors,
+        number(settings.accuracy)
+    );
     (header, procedure)
 }
 

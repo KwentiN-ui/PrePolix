@@ -671,7 +671,7 @@ impl FeModel {
                 ));
             }
         }
-        // Free-free eigenfrequencies are fine; a static step needs every part held. Own
+        // Free-free eigenfrequencies are fine; a static or buckle step needs every part held. Own
         // keywords may hold parts in ways the model does not know of.
         let constrained_by_keywords = self.user_keywords.iter().any(|k| {
             let text = k.text.to_ascii_uppercase();
@@ -687,9 +687,10 @@ impl FeModel {
                 .iter()
                 .any(|w| text.contains(w))
         });
+        // A buckle step solves the static state of its loads first.
         let static_mechanical = matches!(
             step.kind,
-            StepKind::Static(_) | StepKind::CoupledTempDisp(_)
+            StepKind::Static(_) | StepKind::Buckle(_) | StepKind::CoupledTempDisp(_)
         );
         if static_mechanical && !constrained_by_keywords {
             self.check_rigid_body(s, mesh, check, trusses, &fixed, findings);

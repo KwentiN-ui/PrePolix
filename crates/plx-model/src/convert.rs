@@ -91,6 +91,8 @@ impl FeModel {
                     c.option(&mut f.lower_frequency, Quantity::Frequency);
                     c.option(&mut f.upper_frequency, Quantity::Frequency);
                 }
+                // Buckling factors and the accuracy have no unit.
+                StepKind::Buckle(_) => {}
             }
             for bc in &mut step.boundary_conditions {
                 match &mut bc.kind {

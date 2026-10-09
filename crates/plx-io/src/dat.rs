@@ -372,6 +372,18 @@ pub fn parse_dat(text: &str) -> DatImport {
             }
             continue;
         }
+        // A buckle step lists its buckling factors by mode, as PrePoMax's buckling history.
+        if trimmed == "B U C K L I N G   F A C T O R   O U T P U T" {
+            let table = table_after(&lines, &mut i);
+            let set = format!("STEP_{step}");
+            for values in table.iter().filter(|v| v.len() == 2) {
+                let m = values[0] as u32;
+                let row = data.row(step, m, values[1]);
+                let name = "BUCKLING_FACTOR";
+                data.add(&set, "BUCKLING_FACTOR_OUTPUT", name, name, row, values[1]);
+            }
+            continue;
+        }
         let modal = [
             (
                 "P A R T I C I P A T I O N   F A C T O R S",
