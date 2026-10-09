@@ -2572,3 +2572,156 @@ fn calculix_holds_an_amplitude_after_its_last_point() {
         "{held} statt {full}"
     );
 }
+
+#[test]
+fn history_outputs_become_print_keywords_with_their_sets() {
+    let (mesh, mut model) = cantilever(tip_force());
+    let step = &mut model.steps[0];
+    let mut nodes = HistoryOutput::node("NH_Output-1", Region::Nodes(vec![99]));
+    nodes.totals = Totals::Yes;
+    step.history_outputs.push(nodes);
+    let mut elements = HistoryOutput::element("EH_Output-1", Region::Parts(vec!["EALL".into()]));
+    elements.variables = vec!["S".into(), "EVOL".into()];
+    step.history_outputs.push(elements);
+    let mut off = HistoryOutput::node("NH_Output-2", Region::NodeSet("FIX".into()));
+    off.active = false;
+    step.history_outputs.push(off);
+    let mut empty = HistoryOutput::node("NH_Output-3", Region::NodeSet("FIX".into()));
+    empty.variables.clear();
+    step.history_outputs.push(empty);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for expected in [
+        "*Nset, Nset=Internal_Selection-1_NH_Output-1\n99\n",
+        "*Elset, Elset=Internal_Selection-1_EH_Output-1\nEALL\n",
+        "** History outputs +++++++++++++++++++++++++++++++++++++++++\n**\n\
+         ** Name: NH_Output-1\n\
+         *Node print, Nset=Internal_Selection-1_NH_Output-1, Totals=Yes\nRF, U\n\
+         ** Name: EH_Output-1\n\
+         *El print, Elset=Internal_Selection-1_EH_Output-1\nS, EVOL\n\
+         ** Name: NH_Output-2: Deactivated\n**\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\nfehlt in\n{text}");
+    }
+    assert!(!text.contains("NH_Output-3"));
+    // A deactivated step lists its history outputs as comments.
+    model.steps[0].active = false;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("** Name: NH_Output-1: Deactivated\n"));
+    assert!(!text.contains("*Node print"));
+}
+
+#[test]
+fn contact_forces_need_an_active_contact_pair() {
+    let (mesh, mut model) = cantilever(tip_force());
+    let mut output = HistoryOutput::contact("CH_Output-1", "Contact_Pair-1");
+    model.steps[0].history_outputs.push(output.clone());
+    // Without contact forces no surfaces are needed.
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("** Name: CH_Output-1\n*Contact print\nCDIS, CSTR\n"));
+    output.variables.push("CF".into());
+    model.steps[0].history_outputs[0] = output;
+    assert_eq!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::UnknownContactPair {
+            item: "CH_Output-1".into(),
+            pair: "Contact_Pair-1".into(),
+        })
+    );
+}
+
+#[test]
+fn calculix_prints_the_history_outputs_into_the_dat_file() {
+    let (mesh, mut model) = cantilever(tip_force());
+    let step = &mut model.steps[0];
+    let mut reactions = HistoryOutput::node("NH_Output-1", Region::NodeSet("FIX".into()));
+    reactions.variables = vec!["RF".into()];
+    reactions.totals = Totals::Only;
+    step.history_outputs.push(reactions);
+    step.history_outputs
+        .push(HistoryOutput::node("NH_Output-2", Region::Nodes(vec![99])));
+    let mut volume = HistoryOutput::element("EH_Output-1", Region::Parts(vec!["EALL".into()]));
+    volume.variables = vec!["S".into(), "EVOL".into()];
+    volume.totals = Totals::Yes;
+    step.history_outputs.push(volume);
+    let Some(dat) = run_ccx_dat("historie", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let import = crate::dat::parse_dat(&dat);
+    assert!(import.warnings.is_empty(), "{:?}", import.warnings);
+    let set = |name: &str| import.sets.iter().find(|s| s.name == name).unwrap();
+    let total = set("FIX").field("TOTAL_FORCE").unwrap();
+    let rf3 = &total.component("RF3").unwrap().entries[0].values;
+    assert!((rf3[0] - 100.0).abs() < 1e-6, "{rf3:?}");
+    let tip = set("NH_OUTPUT-2").field("DISPLACEMENTS").unwrap();
+    let u3 = tip.component("U3").unwrap();
+    assert_eq!(u3.entries[0].name, "99");
+    assert!(u3.entries[0].values[0] < 0.0);
+    let elements = set("EH_OUTPUT-1");
+    assert!(
+        elements
+            .field("STRESSES")
+            .unwrap()
+            .component("MISES")
+            .is_some()
+    );
+    let volume = elements.field("TOTAL_VOLUME").unwrap().components[0].entries[0].values[0];
+    let bounds = mesh.bounds().unwrap();
+    let expected: f64 = (0..3).map(|i| bounds.1[i] - bounds.0[i]).product();
+    assert!(
+        (volume - expected).abs() < 1e-6 * expected,
+        "{volume} {expected}"
+    );
+}
+
+#[test]
+fn calculix_prints_the_contact_force_of_a_pair() {
+    let (mesh, lower, upper) = two_blocks(0.0);
+    let mut model = stacked_blocks(&mesh);
+    let top: Vec<NodeId> = (119..=127).collect();
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Side-1".into(),
+        active: true,
+        region: Region::Nodes(top),
+        kind: BoundaryKind::Displacement([Some(0.0), Some(0.0), None, None, None, None]),
+        amplitude: None,
+    });
+    model.surface_interactions.push(SurfaceInteraction {
+        name: "Surface_Interaction-1".into(),
+        properties: vec![InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)],
+    });
+    let mut pair = ContactPair::new("Contact_Pair-1", "Surface_Interaction-1");
+    pair.master = Region::Faces(lower);
+    pair.slave = Region::Faces(upper);
+    model.contact_pairs.push(pair);
+    let mut output = HistoryOutput::contact("CH_Output-1", "Contact_Pair-1");
+    output.variables = ["CDIS", "CSTR", "CNUM", "CF"].map(String::from).to_vec();
+    model.steps[0].history_outputs.push(output);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains(
+        "*Contact print, Master=Internal_Selection-1_Contact_Pair-1_Master, \
+         Slave=Internal_Selection-1_Contact_Pair-1_Slave\nCDIS, CSTR, CNUM, CF\n"
+    ));
+    let Some(dat) = run_ccx_dat("kontakt-historie", &text) else {
+        return;
+    };
+    let import = crate::dat::parse_dat(&dat);
+    assert!(import.warnings.is_empty(), "{:?}", import.warnings);
+    let pair = import
+        .sets
+        .iter()
+        .find(|s| s.name == "CONTACT_PAIR-1")
+        .unwrap();
+    let force = pair
+        .field("TOTAL_SURFACE_FORCE")
+        .unwrap()
+        .component("FZ")
+        .unwrap();
+    let fz = *force.entries[0].values.last().unwrap();
+    // 10 MPa on 10 x 10 mm press the blocks together.
+    assert!((fz.abs() - 1000.0).abs() < 10.0, "{fz}");
+    let all = (import.sets.iter())
+        .find(|s| s.name == crate::dat::ALL_CONTACT_ELEMENTS)
+        .unwrap();
+    assert!(all.field("CONTACT_STRESS").is_some());
+    assert!(all.field("TOTAL_NUMBER_OF_CONTACT_ELEMENTS").is_some());
+}

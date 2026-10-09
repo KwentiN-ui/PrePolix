@@ -11,9 +11,10 @@ use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
     Amplitude, BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, BoundaryKind,
     Constraint, ContactPair, Elastic, EquationSolver, FeModel, FieldOutput, FrequencyStep,
-    HeatTransferStep, Incrementation, InitialCondition, InitialConditionKind, Load, LoadKind,
-    Material, ModelSpace, NodeTie, OutputKind, Quantity, Region, Section, SectionKind, StaticStep,
-    Step, StepKind, SurfaceInteraction, UnitSystem, next_name,
+    HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
+    InitialConditionKind, Load, LoadKind, Material, ModelSpace, NodeTie, OutputKind, Quantity,
+    Region, Section, SectionKind, StaticStep, Step, StepKind, SurfaceInteraction, UnitSystem,
+    next_name,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row};
@@ -34,6 +35,8 @@ pub enum NewItem {
     Step,
     BoundaryCondition(usize),
     Load(usize),
+    /// A history output of a step, printed into the `.dat` file.
+    HistoryOutput(usize),
     /// A spring, support or tie, chosen in the dialog.
     Constraint,
     SurfaceInteraction,
@@ -599,6 +602,8 @@ enum Draft {
     Load(usize, Load, RegionDraft),
     InitialCondition(InitialCondition, RegionDraft),
     FieldOutput(usize, FieldOutput),
+    /// The region draft is unused by contact history outputs.
+    HistoryOutput(usize, HistoryOutput, RegionDraft),
     Constraint(ConstraintDraft),
     SurfaceInteraction(SurfaceInteraction, contacts::InteractionView),
     ContactPair(ContactPair, MasterSlave),
@@ -616,6 +621,7 @@ fn draft_region(draft: &Draft) -> Option<&RegionDraft> {
         | Draft::NodeTie(_, r) => Some(r),
         Draft::ContactPair(_, regions) => Some(regions.current()),
         Draft::Constraint(c) => Some(c.region()),
+        Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         _ => None,
     }
 }
@@ -629,6 +635,7 @@ fn draft_region_mut(draft: &mut Draft) -> Option<&mut RegionDraft> {
         | Draft::NodeTie(_, r) => Some(r),
         Draft::ContactPair(_, regions) => Some(regions.current_mut()),
         Draft::Constraint(c) => Some(c.region_mut()),
+        Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         _ => None,
     }
 }
@@ -852,6 +859,15 @@ impl Editor {
                     load_region(&kind, None, fe, &FeMesh::default()),
                 )
             }
+            NewItem::HistoryOutput(step) => {
+                let target = fe.steps.get(step)?;
+                let output = HistoryOutput::node(
+                    next_name("NH_Output", names(&target.history_outputs, |h| &h.name)),
+                    Region::Nodes(Vec::new()),
+                );
+                let region = history_region(&output.kind, fe, &FeMesh::default());
+                Draft::HistoryOutput(step, output, region)
+            }
             NewItem::Constraint => Draft::Constraint(ConstraintDraft::new(fe)),
             NewItem::SurfaceInteraction => {
                 let existing = names(&fe.surface_interactions, |s| &s.name);
@@ -934,6 +950,11 @@ impl Editor {
                 let output = fe.steps.get(s)?.field_outputs.get(i)?.clone();
                 (Draft::FieldOutput(s, output), i)
             }
+            TreeItem::HistoryOutput(s, i) => {
+                let output = fe.steps.get(s)?.history_outputs.get(i)?.clone();
+                let region = history_region(&output.kind, fe, mesh);
+                (Draft::HistoryOutput(s, output, region), i)
+            }
             TreeItem::Constraint(i) => (
                 Draft::Constraint(ConstraintDraft::edit(
                     fe.constraints.get(i)?,
@@ -982,6 +1003,7 @@ impl Editor {
             Draft::Load(_, l, _) => ("Last", &l.name),
             Draft::InitialCondition(c, _) => ("Anfangsbedingung", &c.name),
             Draft::FieldOutput(_, f) => ("Field Output", &f.name),
+            Draft::HistoryOutput(_, h, _) => ("History Output", &h.name),
             Draft::Constraint(c) => ("Constraint", c.name()),
             Draft::SurfaceInteraction(s, _) => ("Surface Interaction", &s.name),
             Draft::ContactPair(c, _) => ("Contact Pair", &c.name),
@@ -1416,6 +1438,9 @@ impl Editor {
                 });
                 ui.end_row();
             }
+            Draft::HistoryOutput(_, output, region) => {
+                history_output_form(ui, model, output, region, &taken);
+            }
             Draft::Constraint(c) => c.form(ui, model, &taken, self.index.is_none()),
             // Laid out by their own dialogs, see show.
             Draft::SurfaceInteraction(..) | Draft::Amplitude(..) => {}
@@ -1438,6 +1463,7 @@ impl Editor {
             Draft::Load(step, ..) => names(&fe.steps[*step].loads, |l| &l.name),
             Draft::InitialCondition(..) => names(&fe.initial_conditions, |i| &i.name),
             Draft::FieldOutput(step, _) => names(&fe.steps[*step].field_outputs, |f| &f.name),
+            Draft::HistoryOutput(step, ..) => names(&fe.steps[*step].history_outputs, |h| &h.name),
             Draft::Constraint(_) => fe.constraints.iter().map(Constraint::name).collect(),
             Draft::SurfaceInteraction(..) => names(&fe.surface_interactions, |s| &s.name),
             Draft::ContactPair(..) => names(&fe.contact_pairs, |c| &c.name),
@@ -1459,6 +1485,7 @@ impl Editor {
             Draft::Load(_, l, _) => &l.name,
             Draft::InitialCondition(c, _) => &c.name,
             Draft::FieldOutput(_, f) => &f.name,
+            Draft::HistoryOutput(_, h, _) => &h.name,
             Draft::Constraint(c) => c.name(),
             Draft::SurfaceInteraction(s, _) => &s.name,
             Draft::ContactPair(c, _) => &c.name,
@@ -1511,6 +1538,9 @@ impl Editor {
                 contacts::validate_interaction(interaction)?;
             }
             Draft::Amplitude(amplitude, _) => amplitude_dialog::validate(amplitude)?,
+            Draft::HistoryOutput(_, output, region) => {
+                validate_history_output(output, region, fe)?;
+            }
             _ => {
                 if self.region().is_some_and(RegionDraft::is_empty) {
                     return Err("Die Region ist leer.".into());
@@ -1621,6 +1651,17 @@ impl Editor {
                 }
                 put(&mut fe.node_ties, index, tie);
             }
+            Draft::HistoryOutput(s, mut output, region) => {
+                if let Some(target) = output.kind.region_mut() {
+                    *target = region.region();
+                }
+                output.normalize_variables();
+                let list = &mut fe.steps[s].history_outputs;
+                if let Some(existing) = index.and_then(|i| list.get(i)) {
+                    output.active = existing.active;
+                }
+                put(list, index, output);
+            }
             Draft::Constraint(draft) => {
                 let mut constraint = draft.finish();
                 if let Some(existing) = index.and_then(|i| fe.constraints.get(i)) {
@@ -1642,6 +1683,9 @@ impl Editor {
                 (pair.master, pair.slave) = regions.regions();
                 if let Some(existing) = index.and_then(|i| fe.contact_pairs.get(i)) {
                     pair.active = existing.active;
+                    // Contact history outputs follow a renamed pair.
+                    let old = existing.name.clone();
+                    fe.rename_contact_pair(&old, &pair.name);
                 }
                 put(&mut fe.contact_pairs, index, pair);
             }
@@ -1678,6 +1722,10 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
             .steps
             .get_mut(s)
             .is_some_and(|st| remove(&mut st.field_outputs, i)),
+        TreeItem::HistoryOutput(s, i) => fe
+            .steps
+            .get_mut(s)
+            .is_some_and(|st| remove(&mut st.history_outputs, i)),
         TreeItem::InitialCondition(i) => remove(&mut fe.initial_conditions, i),
         TreeItem::Constraint(i) => remove(&mut fe.constraints, i),
         TreeItem::SurfaceInteraction(i) => remove(&mut fe.surface_interactions, i),
@@ -1699,6 +1747,9 @@ pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::Load(s, i) => (fe.steps.get_mut(s))
             .and_then(|st| st.loads.get_mut(i))
             .map(|l| &mut l.active),
+        TreeItem::HistoryOutput(s, i) => (fe.steps.get_mut(s))
+            .and_then(|st| st.history_outputs.get_mut(i))
+            .map(|h| &mut h.active),
         TreeItem::Constraint(i) => fe.constraints.get_mut(i).map(Constraint::active_mut),
         TreeItem::ContactPair(i) => fe.contact_pairs.get_mut(i).map(|c| &mut c.active),
         TreeItem::NodeTie(i) => fe.node_ties.get_mut(i).map(|t| &mut t.active),
@@ -1744,6 +1795,8 @@ pub fn swap_master_slave(fe: &mut FeModel, item: &TreeItem) -> bool {
                 let free = next_name(&name, others);
                 fe.contact_pairs[i].name = free;
             }
+            let new = fe.contact_pairs[i].name.clone();
+            fe.rename_contact_pair(&old, &new);
             true
         }
         _ => false,
@@ -1756,6 +1809,15 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
     let master_slave = match *item {
         TreeItem::Constraint(i) => fe.constraints.get(i).and_then(Constraint::master_slave),
         TreeItem::ContactPair(i) => fe.contact_pairs.get(i).map(|c| [&c.master, &c.slave]),
+        TreeItem::HistoryOutput(s, i) => {
+            let output = fe.steps.get(s).and_then(|st| st.history_outputs.get(i));
+            match output.map(|h| &h.kind) {
+                Some(HistoryKind::Contact { pair }) => (fe.contact_pairs.iter())
+                    .find(|c| c.name == *pair)
+                    .map(|c| [&c.master, &c.slave]),
+                _ => None,
+            }
+        }
         _ => None,
     };
     if let Some([master, slave]) = master_slave {
@@ -1777,11 +1839,139 @@ pub fn item_region<'a>(fe: &'a FeModel, item: &TreeItem) -> Option<&'a Region> {
             .get(i)
             .map(|b| &b.region),
         TreeItem::Load(s, i) => fe.steps.get(s)?.loads.get(i).map(|l| &l.region),
+        TreeItem::HistoryOutput(s, i) => fe.steps.get(s)?.history_outputs.get(i)?.kind.region(),
         TreeItem::InitialCondition(i) => fe.initial_conditions.get(i).map(|c| &c.region),
         TreeItem::Constraint(i) => fe.constraints.get(i)?.regions().first().copied(),
         TreeItem::NodeTie(i) => fe.node_ties.get(i).map(|t| &t.region),
         _ => None,
     }
+}
+
+/// The region draft of a history output: nodes for nodal values, elements for element
+/// values.
+fn history_region(kind: &HistoryKind, fe: &FeModel, mesh: &FeMesh) -> RegionDraft {
+    let (sources, target) = match kind {
+        HistoryKind::Element { .. } => (SOLID_SOURCES, face_target(fe)),
+        _ => (NODE_SOURCES, Target::Nodes),
+    };
+    match kind.region() {
+        Some(region) => RegionDraft::from_region(region, sources, target, mesh),
+        None => RegionDraft::new(sources, target),
+    }
+}
+
+/// PrePoMax's history output dialog: the kind, the variables, the totals and the region or
+/// contact pair.
+fn history_output_form(
+    ui: &mut Ui,
+    model: &Model,
+    output: &mut HistoryOutput,
+    region: &mut RegionDraft,
+    taken: &[&str],
+) {
+    name_row(ui, &mut output.name);
+    ui.label("Art");
+    ui.horizontal(|ui| {
+        let current = output.kind.prefix();
+        let pair = (model.fe.contact_pairs.first()).map_or(String::new(), |c| c.name.clone());
+        let kinds = [
+            HistoryKind::Node {
+                region: Region::Nodes(Vec::new()),
+            },
+            HistoryKind::Element {
+                region: Region::Parts(Vec::new()),
+            },
+            HistoryKind::Contact { pair },
+        ];
+        for kind in kinds {
+            let selected = kind.prefix() == current;
+            if ui.radio(selected, kind.label()).clicked() && !selected {
+                *region = history_region(&kind, &model.fe, &model.mesh);
+                let defaults = match &kind {
+                    HistoryKind::Node { region } => HistoryOutput::node("", region.clone()),
+                    HistoryKind::Element { region } => HistoryOutput::element("", region.clone()),
+                    HistoryKind::Contact { pair } => HistoryOutput::contact("", pair.clone()),
+                };
+                output.variables = defaults.variables;
+                rename_default(&mut output.name, current, kind.prefix(), taken);
+                output.kind = kind;
+            }
+        }
+    });
+    ui.end_row();
+    ui.label("Variablen");
+    let choices = output.kind.choices();
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(320.0);
+        for &variable in choices {
+            let mut on = output.variables.iter().any(|v| v == variable);
+            if ui.checkbox(&mut on, variable).changed() {
+                output.variables.retain(|v| v != variable);
+                if on {
+                    output.variables.push(variable.to_string());
+                }
+                output.normalize_variables();
+            }
+        }
+    });
+    ui.end_row();
+    ui.label("Summen");
+    egui::ComboBox::from_id_salt("history totals")
+        .selected_text(output.totals.label())
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            for totals in plx_model::Totals::ALL {
+                ui.selectable_value(&mut output.totals, totals, totals.label());
+            }
+        });
+    ui.end_row();
+    match &mut output.kind {
+        HistoryKind::Contact { pair } => {
+            ui.label("Contact Pair");
+            egui::ComboBox::from_id_salt("history contact pair")
+                .selected_text(pair.as_str())
+                .width(200.0)
+                .show_ui(ui, |ui| {
+                    for contact in &model.fe.contact_pairs {
+                        let name = contact.name.clone();
+                        ui.selectable_value(pair, name, &contact.name);
+                    }
+                });
+            ui.end_row();
+            ui.label("");
+            ui.weak(
+                "CalculiX gibt die Werte aller Kontaktelemente aus;
+                 das Paar bestimmt die Flächen der Kontaktkräfte CF.",
+            );
+            ui.end_row();
+        }
+        _ => region.ui(ui, model),
+    }
+}
+
+fn validate_history_output(
+    output: &HistoryOutput,
+    region: &RegionDraft,
+    fe: &FeModel,
+) -> Result<(), String> {
+    if output.variables.is_empty() {
+        return Err("Bitte mindestens eine Variable wählen.".into());
+    }
+    match &output.kind {
+        HistoryKind::Contact { pair } => {
+            if !fe.contact_pairs.iter().any(|c| c.name == *pair) {
+                return Err(
+                    "Bitte ein Contact Pair wählen; zuerst unter Contact Pairs anlegen.".into(),
+                );
+            }
+        }
+        _ => {
+            if region.is_empty() {
+                return Err("Die Region ist leer.".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Keeps a default name in step with the item kind, e.g. Fixed-1 becomes the next free

@@ -67,7 +67,10 @@ pub struct ResultsView {
     pub field_outputs: Vec<FieldOutput>,
     /// History outputs the user derived, in the order they are computed.
     pub history_outputs: Vec<HistoryOutput>,
-    /// Data of the history outputs that could be computed, by name.
+    /// History CalculiX printed into the `.dat` file next to the results.
+    pub file_history: Vec<HistorySet>,
+    /// The sets of the `.dat` file followed by the data of the derived history outputs that
+    /// could be computed, by name.
     pub history: Vec<HistorySet>,
     /// Mirrored and patterned copies drawn besides the results, as PrePoMax's
     /// transformations; the legend and the extremes include them.
@@ -129,6 +132,7 @@ impl ResultsView {
             superposition: None,
             field_outputs: Vec::new(),
             history_outputs: Vec::new(),
+            file_history: Vec::new(),
             history: Vec::new(),
             transformations: Vec::new(),
             coordinate_systems: Vec::new(),
@@ -312,9 +316,15 @@ impl ResultsView {
         let at = index.filter(|&i| i < self.history_outputs.len());
         // An equation sees the outputs before it.
         let before = at.unwrap_or(self.history_outputs.len());
-        let earlier: Vec<HistorySet> = (self.history.iter())
-            .filter(|set| (self.history_outputs[..before].iter()).any(|o| o.name == set.name))
-            .cloned()
+        let derived = &self.history[self.file_history.len().min(self.history.len())..];
+        let earlier: Vec<HistorySet> = (self.file_history.iter().cloned())
+            .chain(
+                (derived.iter())
+                    .filter(|set| {
+                        (self.history_outputs[..before].iter()).any(|o| o.name == set.name)
+                    })
+                    .cloned(),
+            )
             .collect();
         history_output::compute(&output, &self.increments, mesh, &earlier)?;
         match at {
@@ -332,10 +342,11 @@ impl ResultsView {
         self.recompute_history(mesh)
     }
 
-    /// Computes all history outputs again, in order; failures leave an output without data.
+    /// Computes all history outputs again, in order, after the sets of the `.dat` file, which
+    /// their equations may use; failures leave an output without data.
     pub fn recompute_history(&mut self, mesh: &FeMesh) -> Vec<String> {
         let mut warnings = Vec::new();
-        let mut sets = Vec::new();
+        let mut sets = self.file_history.clone();
         for output in &self.history_outputs {
             match history_output::compute(output, &self.increments, mesh, &sets) {
                 Ok(set) => sets.push(set),
@@ -346,10 +357,19 @@ impl ResultsView {
         warnings
     }
 
-    /// Index of the history output of a computed set.
+    /// Index of the history output of a computed set; the sets of the `.dat` file have none.
     pub fn history_output_index(&self, set: usize) -> Option<usize> {
+        if set < self.file_history.len() {
+            return None;
+        }
         let name = &self.history.get(set)?.name;
         self.history_outputs.iter().position(|o| o.name == *name)
+    }
+
+    /// Sets the history of the `.dat` file, before the derived history outputs.
+    pub fn set_file_history(&mut self, sets: Vec<HistorySet>, mesh: &FeMesh) -> Vec<String> {
+        self.file_history = sets;
+        self.recompute_history(mesh)
     }
 
     /// Entry of the increment list, "step, increment" as in PrePoMax's results toolbar.

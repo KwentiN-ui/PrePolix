@@ -60,6 +60,8 @@ pub enum TreeItem {
     BoundaryCondition(usize, usize),
     Load(usize, usize),
     FieldOutput(usize, usize),
+    /// A history output of a step, by step and index.
+    HistoryOutput(usize, usize),
     Analysis,
     /// Features of the FE model or of the shown results, by index.
     ReferencePoint(usize),
@@ -351,6 +353,9 @@ fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
         ),
         ModelItem::BoundaryCondition(s, i) => (TreeItem::BoundaryCondition(s, i), step(s, "BCs")),
         ModelItem::Load(s, i) => (TreeItem::Load(s, i), step(s, "Loads")),
+        ModelItem::HistoryOutput(s, i) => {
+            (TreeItem::HistoryOutput(s, i), step(s, "History Outputs"))
+        }
         ModelItem::Amplitude(i) => (
             TreeItem::Amplitude(i),
             vec![TreeItem::Group("Amplitudes"), TreeItem::Model],
@@ -393,6 +398,7 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::Group("Initial Conditions") => Some(NewItem::InitialCondition),
         TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
         TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
+        TreeItem::StepGroup(step, "History Outputs") => Some(NewItem::HistoryOutput(step)),
         TreeItem::Group(HOT_SPOTS) => Some(NewItem::ResultHotSpot),
         TreeItem::Group(REFERENCE_POINTS) => Some(NewItem::Feature(FeatureKind::ReferencePoint)),
         TreeItem::Group(COORDINATE_SYSTEMS) => {
@@ -449,6 +455,7 @@ fn is_fe_item(item: &TreeItem) -> bool {
             | TreeItem::BoundaryCondition(..)
             | TreeItem::Load(..)
             | TreeItem::FieldOutput(..)
+            | TreeItem::HistoryOutput(..)
     )
 }
 
@@ -1334,6 +1341,9 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                 for (i, _) in (step.loads.iter().enumerate()).filter(|(_, l)| !l.active) {
                     tree.inactive.insert(TreeItem::Load(s, i));
                 }
+                for (i, _) in (step.history_outputs.iter().enumerate()).filter(|(_, h)| !h.active) {
+                    tree.inactive.insert(TreeItem::HistoryOutput(s, i));
+                }
                 if !step.kind.supports_loads() {
                     tree.closed.insert(
                         TreeItem::StepGroup(s, "Loads"),
@@ -1345,7 +1355,10 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                         .map(|(i, f)| (TreeItem::FieldOutput(s, i), f.name.as_str()))
                         .collect();
                     tree.step_container(ui, s, "Field Outputs", outputs);
-                    tree.step_container(ui, s, "History Outputs", Vec::new());
+                    let outputs = (step.history_outputs.iter().enumerate())
+                        .map(|(i, h)| (TreeItem::HistoryOutput(s, i), h.name.as_str()))
+                        .collect();
+                    tree.step_container(ui, s, "History Outputs", outputs);
                     let bcs = (step.boundary_conditions.iter().enumerate())
                         .map(|(i, b)| (TreeItem::BoundaryCondition(s, i), b.name.as_str()))
                         .collect();
@@ -1484,9 +1497,11 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                 tree.branch(ui, group, text, true, |tree, ui| {
                     for (s, (name, fields)) in history.into_iter().enumerate() {
                         tree.branch(ui, TreeItem::HistorySet(s), name, true, |tree, ui| {
+                            // Sets with many fields, as CalculiX prints them, start closed.
+                            let open = fields.len() <= 2;
                             for (f, (name, components)) in fields.into_iter().enumerate() {
                                 let item = TreeItem::HistoryField(s, f);
-                                tree.branch(ui, item, name, true, |tree, ui| {
+                                tree.branch(ui, item, name, open, |tree, ui| {
                                     for (c, component) in components.into_iter().enumerate() {
                                         let item = TreeItem::HistoryComponent(s, f, c);
                                         tree.leaf(ui, item, component);

@@ -12,10 +12,10 @@ use std::fmt::Write as _;
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
     Amplitude, AmplitudeTime, BoundaryKind, Constraint, ContactMethod, ContactPair, FeModel,
-    FieldOutput, FrequencyStep, GapConductance, HeatTransferStep, Incrementation,
-    InitialConditionKind, InteractionProperty, LoadKind, ModelSpace, NodeTie, OutputKind, Region,
-    Section, SectionKind, StaticStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction,
-    UserKeyword, line_tangent,
+    FieldOutput, FrequencyStep, GapConductance, HeatTransferStep, HistoryKind, HistoryOutput,
+    Incrementation, InitialConditionKind, InteractionProperty, LoadKind, ModelSpace, NodeTie,
+    OutputKind, Region, Section, SectionKind, StaticStep, Step, StepKind, SurfaceBehavior,
+    SurfaceInteraction, Totals, UserKeyword, line_tangent,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -32,6 +32,9 @@ pub enum WriteError {
     InvalidAmplitude { item: String, reason: String },
     #[error("{item}: Surface {surface} existiert nicht")]
     UnknownSurface { item: String, surface: String },
+    /// Contact forces need the surfaces of an active contact pair.
+    #[error("{item}: Contact Pair {pair} existiert nicht oder ist deaktiviert")]
+    UnknownContactPair { item: String, pair: String },
     /// A section that does not fit its elements, see [`Section::kind_problem`].
     #[error("{item}: {reason}")]
     InvalidSection { item: String, reason: String },
@@ -262,7 +265,7 @@ pub fn model_keywords(
     let mut materials = materials;
     materials.extend(generated.material);
     let interactions = model.surface_interactions.iter().map(interaction).collect();
-    let mut contact_pairs = contact_pairs(&mut sets, model)?;
+    let (mut contact_pairs, pair_surfaces) = contact_pairs(&mut sets, model)?;
     contact_pairs.extend(node_ties(&mut sets, model, &lines)?);
     let initial_conditions = initial_conditions(&mut sets, model)?;
     let amplitudes = amplitudes(model)?;
@@ -271,15 +274,15 @@ pub fn model_keywords(
         .steps
         .iter()
         .map(|step| {
-            write_step(
-                &mut sets,
-                step,
-                generated.boundary.as_ref(),
+            let context = StepContext {
+                extra_boundary: generated.boundary.as_ref(),
                 space,
-                &lines,
+                lines: &lines,
                 flux_kinds,
-                &model.amplitudes,
-            )
+                amplitudes: &model.amplitudes,
+                pair_surfaces: &pair_surfaces,
+            };
+            write_step(&mut sets, step, &context)
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -1111,8 +1114,15 @@ fn interaction(interaction: &SurfaceInteraction) -> Keyword {
 }
 
 /// Contact pairs as PrePoMax's `CalContactPair` writes them: slave surface first.
-fn contact_pairs(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+/// Master and slave surface of each active contact pair, by the pair's name.
+type PairSurfaces = BTreeMap<String, (String, String)>;
+
+fn contact_pairs(
+    sets: &mut Sets,
+    model: &FeModel,
+) -> Result<(Vec<Keyword>, PairSurfaces), WriteError> {
     let mut keywords = Vec::new();
+    let mut surfaces = PairSurfaces::new();
     for pair in &model.contact_pairs {
         if !pair.active {
             keywords.push(deactivated(&pair.name));
@@ -1127,8 +1137,9 @@ fn contact_pairs(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, Write
         let master = sets.surface(&pair.name, "Master", &pair.master)?;
         let slave = sets.surface(&pair.name, "Slave", &pair.slave)?;
         keywords.push(Keyword::generated(contact_pair(pair, &master, &slave)));
+        surfaces.insert(pair.name.clone(), (master, slave));
     }
-    Ok(keywords)
+    Ok((keywords, surfaces))
 }
 
 fn contact_pair(pair: &ContactPair, master: &str, slave: &str) -> String {
@@ -1149,20 +1160,30 @@ fn contact_pair(pair: &ContactPair, master: &str, slave: &str) -> String {
     out
 }
 
+/// What the steps share: the model's settings and the items written before them.
+struct StepContext<'a> {
+    extra_boundary: Option<&'a Keyword>,
+    space: ModelSpace,
+    lines: &'a LineElements,
+    flux_kinds: FluxKinds,
+    amplitudes: &'a [Amplitude],
+    pair_surfaces: &'a PairSurfaces,
+}
+
 /// A step as PrePoMax structures it: the step title holds `*Step`, which holds the procedure
 /// and a title for each kind of item, down to the one holding `*End step`.
 ///
 /// Like PrePoMax, a deactivated step or item keeps its place in the file as a comment
 /// (`** Name: Fixed-1: Deactivated`), and nothing of it is written, not even its sets.
-fn write_step(
-    sets: &mut Sets,
-    step: &Step,
-    extra_boundary: Option<&Keyword>,
-    space: ModelSpace,
-    lines: &LineElements,
-    flux_kinds: FluxKinds,
-    amplitudes: &[Amplitude],
-) -> Result<Keyword, WriteError> {
+fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Keyword, WriteError> {
+    let &StepContext {
+        extra_boundary,
+        space,
+        lines,
+        flux_kinds,
+        amplitudes,
+        pair_surfaces,
+    } = context;
     // Nodes of 2D models move in the x-y plane only; CalculiX fails on rotations there.
     let dofs = if space.is_2d() { 2 } else { 6 };
     if !step.active {
@@ -1323,6 +1344,14 @@ fn write_step(
         }
         loads.push(Keyword::generated(out));
     }
+    let mut history_outputs = Vec::new();
+    for output in &step.history_outputs {
+        if !output.active {
+            history_outputs.push(deactivated(&output.name));
+        } else if let Some(keyword) = history_output(sets, output, pair_surfaces)? {
+            history_outputs.push(keyword);
+        }
+    }
     let field_outputs = step.field_outputs.iter().filter_map(field_output).collect();
     let end = Keyword::generated("*End step\n".into());
     let contents = vec![
@@ -1332,7 +1361,7 @@ fn write_step(
         Keyword::title("Boundary conditions", boundaries),
         Keyword::title("Loads", loads),
         Keyword::title("Defined fields", Vec::new()),
-        Keyword::title("History outputs", Vec::new()),
+        Keyword::title("History outputs", history_outputs),
         Keyword::title("Field outputs", field_outputs),
         Keyword::title("End step", vec![end]),
     ];
@@ -1372,7 +1401,10 @@ fn deactivated_step(step: &Step) -> Keyword {
         ),
         Keyword::title("Loads", loads),
         Keyword::title("Defined fields", Vec::new()),
-        Keyword::title("History outputs", Vec::new()),
+        Keyword::title(
+            "History outputs",
+            all(step.history_outputs.iter().map(|h| h.name.as_str())),
+        ),
         Keyword::title(
             "Field outputs",
             all(step.field_outputs.iter().map(|f| f.name.as_str())),
@@ -1595,6 +1627,53 @@ fn field_output(output: &FieldOutput) -> Option<Keyword> {
         "** Name: {}\n{keyword}\n{variables}\n",
         output.name
     )))
+}
+
+/// `*Node print`, `*El print` or `*Contact print` of a history output, as PrePoMax's
+/// `CalNodePrint`, `CalElPrint` and `CalContactPrint` write them; none without variables.
+fn history_output(
+    sets: &mut Sets,
+    output: &HistoryOutput,
+    pair_surfaces: &PairSurfaces,
+) -> Result<Option<Keyword>, WriteError> {
+    if output.variables.is_empty() {
+        return Ok(None);
+    }
+    let totals = match output.totals {
+        Totals::No => "",
+        Totals::Yes => ", Totals=Yes",
+        Totals::Only => ", Totals=Only",
+    };
+    let header = match &output.kind {
+        HistoryKind::Node { region } => {
+            let set = sets.node_set(&output.name, region)?;
+            format!("*Node print, Nset={set}{totals}")
+        }
+        HistoryKind::Element { region } => {
+            let set = sets.element_set(&output.name, region)?;
+            format!("*El print, Elset={set}{totals}")
+        }
+        HistoryKind::Contact { pair } => {
+            // Contact forces are summed over the slave surface of the pair.
+            let mut header = format!("*Contact print{totals}");
+            if output.variables.iter().any(|v| v == "CF") {
+                let (master, slave) =
+                    pair_surfaces
+                        .get(pair)
+                        .ok_or_else(|| WriteError::UnknownContactPair {
+                            item: output.name.clone(),
+                            pair: pair.clone(),
+                        })?;
+                let _ = write!(header, ", Master={master}, Slave={slave}");
+            }
+            header
+        }
+    };
+    Ok(Some(Keyword::generated(format!(
+        "** Name: {}\n{header}\n{}\n",
+        output.name,
+        output.variables.join(", ")
+    ))))
 }
 
 /// A keyword line followed by ids, 16 per line, the most CalculiX reads on one line.
