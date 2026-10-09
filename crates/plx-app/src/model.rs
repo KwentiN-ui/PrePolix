@@ -69,6 +69,16 @@ pub struct Highlight {
     pub nodes: Vec<NodeId>,
 }
 
+impl Highlight {
+    /// A whole part, such as one selected in the tree or clicked in the 3D view.
+    pub fn part(index: usize) -> Self {
+        Self {
+            parts: HashSet::from([index]),
+            ..Self::default()
+        }
+    }
+}
+
 /// A visible face under the mouse.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hit {
@@ -241,6 +251,13 @@ impl Model {
             return;
         }
         let whole = self.highlight.parts.contains(&part);
+        if whole {
+            // The outline too, which stays visible over the colours of a result, as in
+            // PrePoMax.
+            for vertex in &mut mesh.feature_edges {
+                vertex.color = HIGHLIGHT_COLOR;
+            }
+        }
         let elements = self.mesh.elements();
         let mut start = 0;
         for face in &skin.faces {
@@ -310,6 +327,36 @@ impl Model {
             .flat_map(|(skin, _)| &skin.faces)
             .map(|f| (elements[f.element].id, f.face as u8 + 1))
             .collect()
+    }
+
+    /// Renames a part as CalculiX needs it: upper case, unique among parts, sets and
+    /// surfaces. Sections, boundary conditions and loads on the part follow.
+    pub fn rename_part(&mut self, index: usize, name: &str) -> Result<(), String> {
+        let name = name.trim().to_ascii_uppercase();
+        if name.is_empty() {
+            return Err("Der Name darf nicht leer sein.".into());
+        }
+        if name.len() > 80 {
+            return Err("Der Name darf höchstens 80 Zeichen lang sein.".into());
+        }
+        if !(name.chars()).all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            return Err("Erlaubt sind Buchstaben ohne Umlaute, Ziffern, _ und -.".into());
+        }
+        let current = self
+            .parts
+            .get(index)
+            .ok_or("Das Part gibt es nicht mehr.")?;
+        if current.name == name {
+            return Ok(());
+        }
+        if self.mesh.name_in_use(&name) {
+            return Err(format!("Der Name {name} ist bereits vergeben."));
+        }
+        if let Some(old) = self.mesh.rename_part(index, &name) {
+            self.fe.rename_part(&old, &name);
+        }
+        self.parts[index].name = name;
+        Ok(())
     }
 
     /// The nearest visible face hit by a ray, both relative to the model origin.
@@ -448,6 +495,30 @@ mod tests {
         assert_eq!(loaded.render_meshes.len(), 2);
         let (min, max) = model.visible_bounds().unwrap();
         assert_eq!(max - min, Vec3::new(20.0, 20.0, 15.0));
+    }
+
+    #[test]
+    fn renamed_parts_keep_their_references() {
+        let mut model = load(&testdata("platte_mit_stuetzen.inp")).unwrap().model;
+        let (first, second) = (model.parts[0].name.clone(), model.parts[1].name.clone());
+        model.fe.sections.push(plx_model::Section {
+            name: "Section-1".into(),
+            material: "Steel".into(),
+            region: plx_model::Region::Parts(vec![first.clone()]),
+        });
+        assert!(model.rename_part(0, "").is_err());
+        assert!(model.rename_part(0, "zwei wörter").is_err());
+        assert!(model.rename_part(0, &second.to_lowercase()).is_err());
+        assert_eq!(model.rename_part(0, " Platte-1 "), Ok(()));
+        assert_eq!(model.parts[0].name, "PLATTE-1");
+        assert_eq!(model.mesh.parts[0].name, "PLATTE-1");
+        assert!(model.mesh.element_sets.contains_key("PLATTE-1"));
+        assert!(!model.mesh.element_sets.contains_key(&first));
+        assert_eq!(
+            model.fe.sections[0].region,
+            plx_model::Region::Parts(vec!["PLATTE-1".into()])
+        );
+        assert_eq!(model.rename_part(0, "platte-1"), Ok(()));
     }
 
     #[test]

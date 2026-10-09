@@ -48,8 +48,9 @@ fn field_name(model: &Model, field: usize) -> String {
         .map_or_else(String::new, |f| f.name.clone())
 }
 
-/// Shows the properties of `item` in a grid.
-pub fn show(ui: &mut egui::Ui, model: Option<&Model>, item: &TreeItem) {
+/// Shows the properties of `item` in a grid; with `name`, the name can be edited.
+pub fn show(ui: &mut egui::Ui, model: Option<&Model>, item: &TreeItem, name: Option<&mut String>) {
+    let mut name = name;
     let mut rows: Vec<(&'static str, String)> = Vec::new();
     match model {
         Some(model) => rows_of(model, item, &mut rows),
@@ -65,7 +66,15 @@ pub fn show(ui: &mut egui::Ui, model: Option<&Model>, item: &TreeItem) {
         .show(ui, |ui| {
             for (key, value) in rows {
                 ui.label(key);
-                ui.label(value);
+                match name.as_deref_mut().filter(|_| key == "Name") {
+                    Some(name) => {
+                        let edit = egui::TextEdit::singleline(name).desired_width(200.0);
+                        ui.add(edit);
+                    }
+                    None => {
+                        ui.label(value);
+                    }
+                }
                 ui.end_row();
             }
         });
