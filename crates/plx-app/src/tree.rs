@@ -392,7 +392,7 @@ pub fn show(
 
 fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
     // A results file has no FE model, as in PrePoMax; its mesh lives in the Results tree.
-    let model = model.filter(|m| !m.results_only);
+    let model = model.filter(|m| !m.is_results());
     let fe = model.as_ref().map(|m| m.fe.clone()).unwrap_or_default();
     let has_model = model.is_some();
     tree.branch(ui, TreeItem::Model, "Model", true, |tree, ui| {

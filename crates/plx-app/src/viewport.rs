@@ -139,6 +139,11 @@ impl Viewport {
         self.renderer.set_parts(&self.render_state.device, parts);
     }
 
+    /// Exchanges the camera, so the FE model and the results each keep their own view.
+    pub fn swap_camera(&mut self, camera: &mut Camera) {
+        std::mem::swap(&mut self.camera, camera);
+    }
+
     pub fn set_part_visible(&mut self, index: usize, visible: bool) {
         self.renderer.set_part_visible(index, visible);
     }
