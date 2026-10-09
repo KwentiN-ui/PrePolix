@@ -12,7 +12,7 @@ const OUTLINE: Color32 = Color32::from_rgb(70, 70, 70);
 const FACE: Color32 = Color32::from_rgb(232, 232, 232);
 const ACCENT: Color32 = Color32::from_rgb(70, 140, 215);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Icon {
     New,
     Open,
@@ -29,6 +29,9 @@ pub enum Icon {
     /// Play triangle; also opens the animation.
     Animate,
     Pause,
+    /// Arrow of the material library's copy and move buttons, pointing in this direction
+    /// (unit vector, y down).
+    Arrow(Vec2),
 }
 
 /// Flat toolbar button in the Windows style: frame only while hovered or checked.
@@ -67,6 +70,25 @@ pub fn button(ui: &mut Ui, icon: Icon, tooltip: &str, enabled: bool, checked: bo
         painter.extend(shapes);
     }
     response.on_hover_text(tooltip)
+}
+
+/// Dialog button with a frame like a text button, showing an icon.
+pub fn dialog_button(ui: &mut Ui, icon: Icon, tooltip: &str, enabled: bool) -> Response {
+    let response = ui
+        .add_enabled(enabled, egui::Button::new("").min_size(vec2(26.0, 24.0)))
+        .on_hover_text(tooltip);
+    if ui.is_rect_visible(response.rect) {
+        let area = Rect::from_center_size(response.rect.center(), Vec2::splat(ICON));
+        let mut shapes = Vec::new();
+        paint(&mut shapes, icon, area);
+        if !enabled {
+            for shape in &mut shapes {
+                fade(shape);
+            }
+        }
+        ui.painter().extend(shapes);
+    }
+    response
 }
 
 fn fade(shape: &mut Shape) {
@@ -228,6 +250,25 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
                     color,
                 ));
             }
+        }
+        Icon::Arrow(direction) => {
+            // Drawn pointing right, then turned into the direction.
+            let c = r.center();
+            let normal = direction.rot90();
+            let at = |x: f32, y: f32| c + direction * x + normal * y;
+            let color = Color32::from_rgb(50, 50, 50);
+            polygon(
+                shapes,
+                vec![at(-6.0, -1.8), at(0.5, -1.8), at(0.5, 1.8), at(-6.0, 1.8)],
+                color,
+                color,
+            );
+            polygon(
+                shapes,
+                vec![at(0.0, -5.0), at(6.0, 0.0), at(0.0, 5.0)],
+                color,
+                color,
+            );
         }
         Icon::First | Icon::Previous | Icon::Next | Icon::Last => {
             let forward = matches!(icon, Icon::Next | Icon::Last);

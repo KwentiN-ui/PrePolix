@@ -7,6 +7,7 @@ use crate::analysis::{Analysis, MonitorEvent};
 use crate::animation::{AnimationKind, ColorLimits, Playback};
 use crate::icons::{self, Icon};
 use crate::keywords::KeywordEditor;
+use crate::material_library::{LibraryResult, MaterialLibraryEditor};
 use crate::model::{self, LoadedModel, Model};
 use crate::overlay::{Marker, Overlay};
 use crate::properties;
@@ -48,6 +49,8 @@ struct Workbench {
     editor: Option<Editor>,
     /// Open CalculiX keyword editor.
     keyword_editor: Option<KeywordEditor>,
+    /// Open material library editor.
+    material_library: Option<MaterialLibraryEditor>,
     /// The tree selection whose region is highlighted.
     highlighted: Option<(TreeView, TreeItem)>,
     analysis: Option<Analysis>,
@@ -96,6 +99,7 @@ impl PrepolixApp {
                 frame_cache: Default::default(),
                 editor: None,
                 keyword_editor: None,
+                material_library: None,
                 highlighted: None,
                 analysis: None,
                 open_results: None,
@@ -412,6 +416,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.properties_window(&ctx);
         self.workbench.editor_window(&ctx);
         self.workbench.keyword_editor_window(&ctx);
+        self.workbench.material_library_window(&ctx);
         self.workbench.run_analysis(&ctx);
         if let Some(path) = self.workbench.open_results.take() {
             self.read_results(path, &ctx);
@@ -597,6 +602,9 @@ impl Workbench {
         if response.run {
             self.start_analysis();
         }
+        if response.material_library {
+            self.open_material_library();
+        }
     }
 
     /// The model, when it can be set up (not a results file).
@@ -662,6 +670,34 @@ impl Workbench {
             Err(error) => self
                 .output
                 .push(format!("Keyword-Editor nicht möglich: {error}")),
+        }
+    }
+
+    /// PrePoMax's Material Library Editor, from the context menu of Materials.
+    fn open_material_library(&mut self) {
+        if let Some(model) = self.setup_model() {
+            self.material_library = Some(MaterialLibraryEditor::new(&model.fe.materials));
+        }
+    }
+
+    fn material_library_window(&mut self, ctx: &egui::Context) {
+        let Some(editor) = &mut self.material_library else {
+            return;
+        };
+        match editor.show(ctx) {
+            LibraryResult::Open => {}
+            LibraryResult::Ok(materials) => {
+                self.material_library = None;
+                if let Some(materials) = materials
+                    && let Some(model) = self.model.as_mut().filter(|m| !m.results_only)
+                {
+                    model.fe.materials = materials;
+                    // Material indices may have changed.
+                    self.tree.selected = None;
+                    self.editor = None;
+                }
+            }
+            LibraryResult::Cancel => self.material_library = None,
         }
     }
 
