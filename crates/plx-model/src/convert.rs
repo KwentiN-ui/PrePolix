@@ -58,6 +58,9 @@ impl FeModel {
         }
         for section in &mut self.sections {
             c.value(&mut section.thickness, Quantity::Length);
+            if let crate::SectionKind::Shell { thickness, .. } = &mut section.kind {
+                c.value(thickness, Quantity::Length);
+            }
         }
         for constraint in &mut self.constraints {
             constraint.convert_units(&c);

@@ -1141,6 +1141,10 @@ impl Editor {
                     .width(200.0)
                     .show_ui(ui, |ui| {
                         for kind in SectionKind::ALL {
+                            // Shells live in 3D models; 2D elements get a solid section.
+                            if matches!(kind, SectionKind::Shell { .. }) && two_d {
+                                continue;
+                            }
                             let selected = kind.prefix() == section.kind.prefix();
                             if ui.selectable_label(selected, kind.label()).clicked() && !selected {
                                 section.kind = kind;
@@ -1188,6 +1192,23 @@ impl Editor {
                         ui.end_row();
                     }
                     SectionKind::Beam(beam) => beam_form(ui, beam, units),
+                    SectionKind::Shell { thickness, offset } => {
+                        ui.label("Thickness");
+                        ui.add(
+                            numeric::quantity(thickness, units, Quantity::Length)
+                                .range(0.0..=f64::MAX),
+                        );
+                        ui.end_row();
+                        ui.label("Offset");
+                        ui.add(numeric::drag_value(offset).speed(0.01).range(-1.0..=1.0));
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak("Offset of the mesh from the mid-surface as a fraction");
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak("of the thickness: 0.5 puts the mesh on the top face.");
+                        ui.end_row();
+                    }
                 }
                 region.ui(ui, model);
             }
@@ -1512,6 +1533,12 @@ impl Editor {
                     return Err("Die Querschnittsfläche muss größer als 0 sein.".into());
                 }
                 SectionKind::Truss { .. } => {}
+                SectionKind::Shell { thickness, .. }
+                    if !(thickness.is_finite() && *thickness > 0.0) =>
+                {
+                    return Err("The shell thickness must be greater than 0.".into());
+                }
+                SectionKind::Shell { .. } => {}
                 SectionKind::Beam(beam) => {
                     if !beam.profile.is_valid() {
                         return Err(

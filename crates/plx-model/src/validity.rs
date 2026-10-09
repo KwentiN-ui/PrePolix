@@ -191,6 +191,11 @@ impl Section {
                     return Some("Die Profilmaße sind ungültig".into());
                 }
             }
+            SectionKind::Shell { thickness, .. } => {
+                if !(thickness.is_finite() && *thickness > 0.0) {
+                    return Some("The shell thickness must be greater than 0".into());
+                }
+            }
         }
         let elements = self.region.elements(mesh);
         for element in elements.iter().filter_map(|&id| mesh.element(id)) {
