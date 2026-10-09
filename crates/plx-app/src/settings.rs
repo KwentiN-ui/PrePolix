@@ -85,19 +85,36 @@ impl Default for Solver {
 
 impl Solver {
     pub fn work_dir(&self) -> std::path::PathBuf {
-        if self.work_dir.trim().is_empty() {
-            default_work_dir()
-        } else {
-            std::path::PathBuf::from(self.work_dir.trim())
+        match clean_path(&self.work_dir) {
+            "" => default_work_dir(),
+            dir => std::path::PathBuf::from(dir),
         }
     }
 
     pub fn job_solver(&self) -> plx_job::Solver {
         plx_job::Solver {
-            executable: self.executable.trim().into(),
+            executable: clean_path(&self.executable).into(),
             threads: self.threads.max(1),
         }
     }
+}
+
+/// A path as typed or pasted: without surrounding spaces and the quotes that Windows'
+/// "Als Pfad kopieren" adds.
+pub fn clean_path(text: &str) -> &str {
+    let text = text.trim();
+    ['"', '\'']
+        .iter()
+        .find_map(|&quote| text.strip_prefix(quote)?.strip_suffix(quote))
+        .map_or(text, str::trim)
+}
+
+/// Why the executable cannot be started, if it is given as a path to a missing file;
+/// a bare name is left to the `PATH` lookup.
+pub fn missing_executable(executable: &std::path::Path) -> Option<String> {
+    let is_path = executable.components().count() > 1 || executable.is_absolute();
+    (is_path && !executable.is_file())
+        .then(|| format!("Datei nicht gefunden: {}", executable.display()))
 }
 
 /// PrePoMax's default work directory: a `Temp` folder next to the program. Where that is
@@ -351,6 +368,37 @@ mod tests {
         assert!(settings.post.min_label);
         assert!(settings.post.max_label);
         assert!(settings.graphics.global_axes);
+    }
+
+    #[test]
+    fn paths_lose_quotes_and_spaces() {
+        assert_eq!(
+            clean_path(r#" "C:\Program Files\ccx.exe" "#),
+            r"C:\Program Files\ccx.exe"
+        );
+        assert_eq!(clean_path("'/opt/ccx' "), "/opt/ccx");
+        assert_eq!(clean_path("ccx"), "ccx");
+        assert_eq!(clean_path("\"ccx"), "\"ccx");
+        let solver = Solver {
+            executable: "\"/opt/ccx\"".into(),
+            work_dir: " \"/tmp/plx\" ".into(),
+            ..Solver::default()
+        };
+        assert_eq!(
+            solver.job_solver().executable,
+            std::path::Path::new("/opt/ccx")
+        );
+        assert_eq!(solver.work_dir(), std::path::Path::new("/tmp/plx"));
+    }
+
+    #[test]
+    fn missing_files_are_reported_but_names_are_looked_up() {
+        assert!(missing_executable(std::path::Path::new("ccx")).is_none());
+        let missing = std::env::temp_dir().join("plx-gibt-es-nicht").join("ccx");
+        let message = missing_executable(&missing).unwrap();
+        assert!(message.starts_with("Datei nicht gefunden"), "{message}");
+        let exe = std::env::current_exe().unwrap();
+        assert!(missing_executable(&exe).is_none());
     }
 
     #[test]
