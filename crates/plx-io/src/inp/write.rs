@@ -38,6 +38,10 @@ pub enum WriteError {
     /// A section that does not fit its elements, see [`Section::kind_problem`].
     #[error("{item}: {reason}")]
     InvalidSection { item: String, reason: String },
+    /// A boundary condition or load on a reference point no active rigid body is driven by,
+    /// or a rigid body whose reference point does not exist.
+    #[error("{item}: Reference Point {point} has no active rigid body")]
+    UnknownReferencePoint { item: String, point: String },
 }
 
 /// One entry of the keyword tree of an input file, the structure PrePoMax's keyword editor
@@ -258,8 +262,8 @@ pub fn model_keywords(
     // Regions are resolved first: their sets must precede the materials and steps.
     let materials = materials(model);
     let mut sections = sections(&mut sets, model)?;
-    let generated = constraints::springs(&mut sets, model)?;
-    let mut constraints = constraints(&mut sets, model)?;
+    let mut generated = constraints::springs(&mut sets, model)?;
+    let mut constraints = constraints(&mut sets, model, &mut generated)?;
     constraints.extend(generated.equations);
     sections.extend(generated.sections);
     let mut materials = materials;
@@ -509,6 +513,18 @@ struct Sets<'a> {
     used: BTreeSet<String>,
     /// Face element sets and node set of each element surface.
     surface_sets: BTreeMap<String, (Vec<(String, u8)>, String)>,
+    /// Reference and rotation node of each reference point an active rigid body is driven
+    /// by, and the node set holding the reference node once something refers to it.
+    reference_nodes: BTreeMap<String, ReferenceNodes>,
+}
+
+/// The nodes CalculiX's `*Rigid body` adds for a reference point: the reference node takes
+/// the translations, the rotation node the rotations as its displacements.
+#[derive(Clone, Debug)]
+struct ReferenceNodes {
+    reference: NodeId,
+    rotation: NodeId,
+    set: Option<String>,
 }
 
 impl<'a> Sets<'a> {
@@ -527,6 +543,7 @@ impl<'a> Sets<'a> {
                 .chain(mesh.surfaces.keys().map(|n| n.to_ascii_uppercase()))
                 .collect(),
             surface_sets: BTreeMap::new(),
+            reference_nodes: BTreeMap::new(),
         };
         for (name, ids) in &mesh.node_sets {
             sets.node_sets.push((name.clone(), ids.clone()));
@@ -627,10 +644,29 @@ impl<'a> Sets<'a> {
         Ok(set)
     }
 
+    /// The nodes of the rigid body a reference point drives.
+    fn reference_nodes(&mut self, item: &str, point: &str) -> Result<ReferenceNodes, WriteError> {
+        let Some(nodes) = self.reference_nodes.get(point).cloned() else {
+            return Err(WriteError::UnknownReferencePoint {
+                item: item.to_string(),
+                point: point.to_string(),
+            });
+        };
+        if nodes.set.is_none() {
+            let set = self.free_name("Internal_Selection", &name(point));
+            self.node_sets.push((set.clone(), vec![nodes.reference]));
+            self.reference_nodes.get_mut(point).unwrap().set = Some(set);
+        }
+        Ok(self.reference_nodes[point].clone())
+    }
+
     /// Node set holding the nodes of a region.
     fn node_set(&mut self, item: &str, region: &Region) -> Result<String, WriteError> {
         match region {
             Region::NodeSet(set) => return Ok(set.clone()),
+            Region::ReferencePoint(point) => {
+                return Ok(self.reference_nodes(item, point)?.set.unwrap());
+            }
             Region::Surface(surface) => {
                 if let Some((_, nodes)) = self.surface_sets.get(surface) {
                     return Ok(nodes.clone());
@@ -944,8 +980,16 @@ fn beam_groups(sets: &mut Sets, section: &Section) -> Result<Vec<([f64; 3], Stri
 
 /// Tie constraints as PrePoMax's `CalTie` writes them: slave surface first. Springs and
 /// supports are written as elements, see [`constraints::springs`].
-fn constraints(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+fn constraints(
+    sets: &mut Sets,
+    model: &FeModel,
+    generated: &mut constraints::Generated,
+) -> Result<Vec<Keyword>, WriteError> {
     let mut keywords = Vec::new();
+    let mut next_node = (sets.mesh.node_ids().iter().copied())
+        .chain(generated.nodes.iter().map(|(id, _)| *id))
+        .max()
+        .map_or(1, |n| n + 1);
     for constraint in &model.constraints {
         if !constraint.active() {
             keywords.push(deactivated(constraint.name()));
@@ -958,6 +1002,32 @@ fn constraints(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteEr
             | Constraint::SurfaceToSurfaceSpring(_) => {}
             // Moved to the model's node ties when the project was read.
             Constraint::NodeTie(_) => {}
+            Constraint::RigidBody(body) => {
+                let Some(point) = model.reference_point(&body.reference_point) else {
+                    return Err(WriteError::UnknownReferencePoint {
+                        item: body.name.clone(),
+                        point: body.reference_point.clone(),
+                    });
+                };
+                let set = sets.node_set(&body.name, &body.region)?;
+                // Both nodes sit on the reference point, as PrePoMax writes them.
+                let (reference, rotation) = (next_node, next_node + 1);
+                next_node += 2;
+                generated.nodes.push((reference, point.position));
+                generated.nodes.push((rotation, point.position));
+                sets.reference_nodes.insert(
+                    body.reference_point.clone(),
+                    ReferenceNodes {
+                        reference,
+                        rotation,
+                        set: None,
+                    },
+                );
+                keywords.push(Keyword::generated(format!(
+                    "** Name: {}\n*Rigid body, Nset={set}, Ref node={reference}, Rot node={rotation}\n",
+                    body.name
+                )));
+            }
             Constraint::Tie(tie) => {
                 let master = sets.surface(&tie.name, "Master", &tie.master)?;
                 let slave = sets.surface(&tie.name, "Slave", &tie.slave)?;
@@ -1212,19 +1282,40 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
             dofs
         };
         let set = sets.node_set(&bc.name, &bc.region)?;
+        // The rotations of a rigid body are the displacements of its rotation node.
+        let rotation_node = match bc.region.reference_point() {
+            Some(point) => Some(sets.reference_nodes(&bc.name, point)?.rotation),
+            None => None,
+        };
         // Fixed supports stay zero; an amplitude would not change them.
         let reference = bc.amplitude.as_ref().filter(|_| bc.kind.takes_amplitude());
         let amplitude =
             amplitude_parameter(amplitudes, &bc.name, "Amplitude", &reference.cloned())?;
         let mut out = format!("** Name: {}\n*Boundary{amplitude}\n", bc.name);
         match bc.kind {
-            BoundaryKind::Fixed => {
-                let _ = writeln!(out, "{set}, 1, {dofs}, 0");
-            }
+            BoundaryKind::Fixed => match rotation_node {
+                Some(rotation) => {
+                    let _ = writeln!(out, "{set}, 1, {}, 0", dofs.min(3));
+                    if dofs > 3 {
+                        let _ = writeln!(out, "{rotation}, 1, {}, 0", dofs - 3);
+                    }
+                }
+                None => {
+                    let _ = writeln!(out, "{set}, 1, {dofs}, 0");
+                }
+            },
             BoundaryKind::Displacement(values) => {
                 for (dof, value) in (1..).zip(values).take(dofs) {
                     if let Some(value) = value {
-                        let _ = writeln!(out, "{set}, {dof}, {dof}, {}", number(value));
+                        match rotation_node {
+                            Some(rotation) if dof > 3 => {
+                                let d = dof - 3;
+                                let _ = writeln!(out, "{rotation}, {d}, {d}, {}", number(value));
+                            }
+                            _ => {
+                                let _ = writeln!(out, "{set}, {dof}, {dof}, {}", number(value));
+                            }
+                        }
                     }
                 }
             }
@@ -1288,6 +1379,23 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
                 for (dof, value) in (1..).zip(force).take(dofs) {
                     if value != 0.0 {
                         let _ = writeln!(out, "{set}, {dof}, {}", number(value));
+                    }
+                }
+            }
+            LoadKind::Moment(moment) => {
+                // Moments at a reference point act on the rotation node of its rigid body,
+                // at nodes of beams and shells on their rotations.
+                let (target, first_dof) = match load.region.reference_point() {
+                    Some(point) => {
+                        let nodes = sets.reference_nodes(&load.name, point)?;
+                        (nodes.rotation.to_string(), 1)
+                    }
+                    None => (sets.node_set(&load.name, &load.region)?, 4),
+                };
+                let _ = writeln!(out, "*Cload{amplitude}");
+                for (dof, value) in (0..).zip(moment) {
+                    if value != 0.0 && dof + 4 <= dofs {
+                        let _ = writeln!(out, "{target}, {}, {}", first_dof + dof, number(value));
                     }
                 }
             }

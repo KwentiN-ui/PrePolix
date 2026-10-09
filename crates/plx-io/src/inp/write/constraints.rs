@@ -58,6 +58,8 @@ pub(super) fn springs(sets: &mut Sets, model: &FeModel) -> Result<Generated, Wri
                 writer.compression_only(sets, support)?;
                 nonlinear |= support.nonlinear;
             }
+            // Written as `*Rigid body` by the caller.
+            Constraint::RigidBody(_) => {}
             Constraint::SurfaceToSurfaceSpring(spring) => {
                 writer.surface_to_surface(sets, spring)?
             }

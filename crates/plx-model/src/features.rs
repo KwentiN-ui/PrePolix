@@ -345,8 +345,25 @@ impl FeModel {
         }
     }
 
-    /// Points referring to a renamed reference point follow it.
+    /// Points referring to a renamed reference point follow it, as do rigid bodies and the
+    /// boundary conditions and loads on it.
     pub fn rename_reference_point(&mut self, old: &str, new: &str) {
+        for constraint in &mut self.constraints {
+            if let crate::Constraint::RigidBody(body) = constraint
+                && body.reference_point == old
+            {
+                body.reference_point = new.to_string();
+            }
+        }
+        for step in &mut self.steps {
+            let regions = (step.boundary_conditions.iter_mut().map(|bc| &mut bc.region))
+                .chain(step.loads.iter_mut().map(|load| &mut load.region));
+            for region in regions {
+                if matches!(region, crate::Region::ReferencePoint(n) if n == old) {
+                    *region = crate::Region::ReferencePoint(new.to_string());
+                }
+            }
+        }
         let paths = (self.result_paths.iter_mut()).flat_map(|p| [&mut p.start, &mut p.end]);
         let planes = self.planes.iter_mut().flat_map(Plane::point_refs_mut);
         for point in paths.chain(planes) {

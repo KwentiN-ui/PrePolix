@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId};
 
+use crate::Region;
+
 use crate::{
     BoundaryKind, Constraint, FeModel, LoadKind, ModelItem, ModelSpace, SectionKind, StepKind,
 };
@@ -32,6 +34,9 @@ pub enum Problem {
     NoSection,
     NoElastic,
     NoDensity,
+    /// A boundary condition or load on a reference point that no active rigid body is driven
+    /// by: the point has no node in the input file.
+    NoRigidBody,
     NoConductivity,
     NoSpecificHeat,
     NoInitialTemperature,
@@ -74,6 +79,7 @@ impl Problem {
             Problem::NoSection => "Elemente ohne Material",
             Problem::NoElastic => "Material ohne Elastizität",
             Problem::NoDensity => "Material ohne Dichte",
+            Problem::NoRigidBody => "Reference point without rigid body",
             Problem::NoConductivity => "Material ohne Wärmeleitfähigkeit",
             Problem::NoSpecificHeat => "Material ohne Wärmekapazität",
             Problem::NoInitialTemperature => "Keine Anfangstemperatur",
@@ -116,6 +122,11 @@ impl Problem {
                 "Ein Frequency Step und eine instationäre Wärmeübertragung brauchen die \
                  Masse des Modells. Ohne Dichte bricht CalculiX mit \"no density was \
                  assigned\" ab."
+            }
+            Problem::NoRigidBody => {
+                "A boundary condition or load on a reference point acts on the rigid body the \
+                 point drives. Without an active rigid body constraint with this reference \
+                 point there is no node to apply it to; the input file would be incomplete."
             }
             Problem::NoConductivity => {
                 "Eine Wärmeübertragung braucht die Wärmeleitfähigkeit jedes Materials. \
@@ -246,6 +257,10 @@ impl Problem {
             Problem::InvalidElastic => {
                 "Elastizitätsmodul größer als 0 und Querkontraktionszahl kleiner als 0,5 \
                  eintragen (Stahl: 210000 MPa, 0,3)."
+            }
+            Problem::NoRigidBody => {
+                "Create a Rigid Body constraint on the surface or nodes the reference point \
+                 shall drive, or put the boundary condition or load on nodes of the mesh."
             }
             Problem::DistortedElements => {
                 "Den Part neu vernetzen: kleinere Elementgröße an engen Radien oder dünnen \
@@ -579,6 +594,31 @@ impl FeModel {
         let step = &self.steps[s];
         let space = self.properties.space;
         let dofs = if space.is_2d() { 2 } else { 6 };
+        let driven = |region: &Region| {
+            region.reference_point().is_none_or(|point| {
+                self.constraints.iter().any(|c| {
+                    matches!(c, Constraint::RigidBody(body) if body.active && body.reference_point == point)
+                })
+            })
+        };
+        for (i, bc) in step.boundary_conditions.iter().enumerate() {
+            if bc.active && step.kind.supports_boundary(&bc.kind) && !driven(&bc.region) {
+                findings.push(Finding::new(
+                    ModelItem::BoundaryCondition(s, i),
+                    Problem::NoRigidBody,
+                    format!("{}: {}", bc.name, bc.region.describe()),
+                ));
+            }
+        }
+        for (i, load) in step.loads.iter().enumerate() {
+            if load.active && step.kind.supports_load(&load.kind) && !driven(&load.region) {
+                findings.push(Finding::new(
+                    ModelItem::Load(s, i),
+                    Problem::NoRigidBody,
+                    format!("{}: {}", load.name, load.region.describe()),
+                ));
+            }
+        }
         // Value of each constrained node and degree of freedom, with the boundary condition.
         let mut fixed: HashMap<(NodeId, usize), (usize, f64)> = HashMap::new();
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
@@ -597,8 +637,10 @@ impl FeModel {
                 // Degree of freedom 11.
                 BoundaryKind::Temperature(t) => vec![(10, t)],
             };
+            // The rotations of a reference point turn its rigid body.
             if let BoundaryKind::Displacement(values) = bc.kind
                 && values[3..].iter().any(Option::is_some)
+                && bc.region.reference_point().is_none()
                 && (space.is_2d() || !trusses.rotational.iter().any(|&r| r))
             {
                 findings.push(Finding::new(
@@ -644,6 +686,10 @@ impl FeModel {
                     LoadKind::ConcentratedForce(f) | LoadKind::SurfaceTraction(f) => {
                         (0..3).filter(|&d| f[d] != 0.0 && d < dofs).collect()
                     }
+                    LoadKind::Moment(m) => (0..3)
+                        .filter(|&d| m[d] != 0.0 && d + 3 < dofs)
+                        .map(|d| d + 3)
+                        .collect(),
                     LoadKind::Pressure(_) => (0..dofs.min(3)).collect(),
                     // Heat flows go into temperatures, which nothing but a temperature holds.
                     _ => Vec::new(),
@@ -701,6 +747,32 @@ impl FeModel {
     /// body motions a support at point x in direction n prevents are those with
     /// n . (t + w x (x - c)) != 0, so a piece is held when the rows [n, (x - c) x n] of its
     /// supports have full rank. Ties join pieces; contact pairs join them only loosely.
+    /// Degrees of freedom (0..6) the active boundary conditions of the step prescribe at a
+    /// reference point.
+    fn point_dofs(&self, s: usize, point: &str) -> Vec<usize> {
+        let step = &self.steps[s];
+        let dofs = if self.properties.space.is_2d() { 2 } else { 6 };
+        let mut out = Vec::new();
+        for bc in &step.boundary_conditions {
+            if !bc.active
+                || !step.kind.supports_boundary(&bc.kind)
+                || bc.region.reference_point() != Some(point)
+            {
+                continue;
+            }
+            match bc.kind {
+                BoundaryKind::Fixed => out.extend(0..dofs),
+                BoundaryKind::Displacement(values) => {
+                    out.extend((0..dofs).filter(|&d| values[d].is_some()));
+                }
+                BoundaryKind::Temperature(_) => {}
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     fn check_rigid_body(
         &self,
         s: usize,
@@ -797,6 +869,38 @@ impl FeModel {
                     let tied = pieces(&c.region);
                     join(&mut ties, &tied, &[]);
                     join(&mut contacts, &tied, &[]);
+                }
+                Constraint::RigidBody(body) => {
+                    let tied = pieces(&body.region);
+                    join(&mut ties, &tied, &[]);
+                    join(&mut contacts, &tied, &[]);
+                    // A boundary condition on the reference point holds the body: its
+                    // translations like a support at the node nearest the point, its
+                    // rotations like those of a beam node.
+                    let Some(point) = self.reference_point(&body.reference_point) else {
+                        continue;
+                    };
+                    let nearest = (body.region.nodes(mesh).into_iter())
+                        .filter_map(|n| mesh.node(n).map(|x| (n, x)))
+                        .min_by(|a, b| {
+                            let d = |x: &[f64; 3]| {
+                                (0..3)
+                                    .map(|i| (x[i] - point.position[i]).powi(2))
+                                    .sum::<f64>()
+                            };
+                            d(&a.1).total_cmp(&d(&b.1))
+                        })
+                        .map(|(n, _)| n);
+                    let Some(node) = nearest else {
+                        continue;
+                    };
+                    for dof in self.point_dofs(s, &body.reference_point) {
+                        if dof < 3 {
+                            support(node, axis(dof), false);
+                        } else if dof < 6 && space == ModelSpace::ThreeD {
+                            support(node, axis(dof - 3), true);
+                        }
+                    }
                 }
             }
         }
@@ -945,6 +1049,11 @@ impl FeModel {
                 Constraint::Tie(_) | Constraint::SurfaceToSurfaceSpring(_) => {
                     for region in constraint.master_slave().into_iter().flatten() {
                         mark(region, &mut held_otherwise);
+                    }
+                }
+                Constraint::RigidBody(body) => {
+                    if !self.point_dofs(s, &body.reference_point).is_empty() {
+                        mark(&body.region, &mut held_otherwise);
                     }
                 }
             }
@@ -1430,8 +1539,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        BoundaryCondition, ContactPair, Elastic, Load, Material, Region, Section, Step,
-        SurfaceInteraction, Tie,
+        BoundaryCondition, ContactPair, Elastic, Load, Material, ReferencePoint, Region, RigidBody,
+        Section, Step, SurfaceInteraction, Tie,
     };
 
     /// Unit cubes side by side along x, one C3D8 and one part each; neighbours share nodes
@@ -1651,6 +1760,59 @@ mod tests {
         assert_eq!(
             problems(&check(&model, &mesh)),
             [(ModelItem::Material(0), Problem::InvalidElastic)]
+        );
+    }
+
+    #[test]
+    fn a_reference_point_needs_an_active_rigid_body_and_holds_it() {
+        let mesh = cubes(1, false);
+        let mut model = model(&mesh);
+        model.reference_points.push(ReferencePoint {
+            name: "RP-1".into(),
+            position: [0.0, 0.5, 0.5],
+        });
+        // The support moves from the nodes to the reference point: without a rigid body
+        // the point has no node, the cube is loose.
+        model.steps[0].boundary_conditions[0].region = Region::ReferencePoint("RP-1".into());
+        let found = problems(&check(&model, &mesh));
+        assert!(
+            found.contains(&(ModelItem::BoundaryCondition(0, 0), Problem::NoRigidBody)),
+            "{found:?}"
+        );
+        assert!(
+            found.contains(&(ModelItem::Part(0), Problem::RigidBodyMotion)),
+            "{found:?}"
+        );
+        let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+        body.region = Region::Nodes(vec![1, 4, 5, 8]);
+        model.constraints.push(Constraint::RigidBody(body));
+        assert_eq!(problems(&check(&model, &mesh)), []);
+        // An inactive body does not count.
+        *model.constraints[0].active_mut() = false;
+        let found = problems(&check(&model, &mesh));
+        assert!(
+            found.contains(&(ModelItem::BoundaryCondition(0, 0), Problem::NoRigidBody)),
+            "{found:?}"
+        );
+        *model.constraints[0].active_mut() = true;
+        // Only the translations held: the cube can still turn about the point.
+        model.steps[0].boundary_conditions[0].kind =
+            BoundaryKind::Displacement([Some(0.0), Some(0.0), Some(0.0), None, None, None]);
+        let found = problems(&check(&model, &mesh));
+        assert!(
+            found.contains(&(ModelItem::Part(0), Problem::RigidBodyMotion)),
+            "{found:?}"
+        );
+        // A moment on the point without the body is flagged too.
+        model.steps[0].boundary_conditions[0].kind = BoundaryKind::Fixed;
+        model.steps[0].loads[0].region = Region::ReferencePoint("RP-1".into());
+        model.steps[0].loads[0].kind = LoadKind::Moment([1.0, 0.0, 0.0]);
+        assert_eq!(problems(&check(&model, &mesh)), []);
+        model.constraints.clear();
+        let found = problems(&check(&model, &mesh));
+        assert!(
+            found.contains(&(ModelItem::Load(0, 0), Problem::NoRigidBody)),
+            "{found:?}"
         );
     }
 

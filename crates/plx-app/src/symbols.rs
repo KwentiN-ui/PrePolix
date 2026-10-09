@@ -66,6 +66,8 @@ pub enum SymbolShape {
     Arrow,
     /// Arrow ending at the point, such as pressure pushing onto a face.
     ArrowOnto,
+    /// Arrow with two heads, a moment about its axis.
+    MomentArrow,
     /// Cone with its tip at the point: a held translation.
     Cone,
     /// Rod with a plate: a held rotation.
@@ -99,6 +101,12 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                 let points = node_points(model, &item.region, &visible);
                 for index in sample(&points) {
                     add(points[index], DVec3::from(force), SymbolShape::Arrow);
+                }
+            }
+            Kind::Load(LoadKind::Moment(moment)) => {
+                let points = node_points(model, &item.region, &visible);
+                for index in sample(&points) {
+                    add(points[index], DVec3::from(moment), SymbolShape::MomentArrow);
                 }
             }
             Kind::Load(LoadKind::Pressure(pressure)) => {
@@ -200,6 +208,12 @@ impl Visible {
 }
 
 fn node_points(model: &Model, region: &Region, visible: &Visible) -> Vec<DVec3> {
+    // A reference point has no node; its symbols sit on the point itself.
+    if let Region::ReferencePoint(name) = region {
+        return (model.fe.reference_point(name).into_iter())
+            .map(|point| DVec3::from(point.position))
+            .collect();
+    }
     let coords = model.exploded_coords();
     region
         .nodes(&model.mesh)
@@ -392,7 +406,7 @@ struct Solid {
 /// with a 0.4 thick plate of width 0.9.
 fn solids(shape: SymbolShape, direction: Vec3) -> Vec<Solid> {
     let size = match shape {
-        SymbolShape::Arrow | SymbolShape::ArrowOnto => ARROW_SIZE,
+        SymbolShape::Arrow | SymbolShape::ArrowOnto | SymbolShape::MomentArrow => ARROW_SIZE,
         SymbolShape::Cone | SymbolShape::RotationLock | SymbolShape::Ball => SUPPORT_SIZE,
     };
     let axis = direction * size;
@@ -425,6 +439,11 @@ fn solids(shape: SymbolShape, direction: Vec3) -> Vec<Solid> {
                 cone(start + 0.7, start + 1.0, 0.1),
             ]
         }
+        SymbolShape::MomentArrow => vec![
+            cylinder(0.05, 0.55, 0.03),
+            cone(0.55, 0.8, 0.1),
+            cone(0.8, 1.05, 0.1),
+        ],
         SymbolShape::Cone => vec![cone(-1.0, 0.0, 0.5)],
         SymbolShape::Ball => {
             // Three great circles; their outline is round from every side.

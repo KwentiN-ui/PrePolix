@@ -35,6 +35,30 @@ impl NodeTie {
     }
 }
 
+/// Nodes that move as one rigid body with a reference point (`*RIGID BODY`), PrePoMax's rigid
+/// body constraint. Boundary conditions and loads on the reference point drive the body:
+/// its translations and rotations, forces and moments.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RigidBody {
+    pub name: String,
+    #[serde(default = "crate::active")]
+    pub active: bool,
+    pub region: Region,
+    /// Name of the reference point ([`crate::ReferencePoint`]) the body is driven by.
+    pub reference_point: String,
+}
+
+impl RigidBody {
+    pub fn new(name: impl Into<String>, reference_point: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            active: true,
+            region: Region::Faces(Vec::new()),
+            reference_point: reference_point.into(),
+        }
+    }
+}
+
 /// Springs from every node of the region to ground (`SPRING1`), PrePoMax's point spring.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PointSpring {
