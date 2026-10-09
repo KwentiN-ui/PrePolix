@@ -1072,9 +1072,16 @@ impl Workbench {
         }
     }
 
-    /// A click in the 3D view picks for the open dialog.
+    /// A click in the 3D view picks for the open dialog; without one, a click into empty
+    /// space clears the tree selection and with it the highlighted region.
     fn click(&mut self, click: Click) {
         if !self.picking() {
+            let empty = self
+                .shown()
+                .is_none_or(|model| model.pick(click.origin, click.direction).is_none());
+            if empty && self.tree_view != TreeView::Results {
+                self.tree.selected = None;
+            }
             return;
         }
         let (Some(editor), Some(model)) = (&mut self.editor, &self.model) else {
