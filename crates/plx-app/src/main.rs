@@ -10,6 +10,7 @@ mod properties;
 mod results;
 mod settings;
 mod setup;
+mod solver_check;
 mod style;
 mod tree;
 mod viewport;
@@ -52,6 +53,7 @@ mod tests {
             ("results.rs", include_str!("results.rs")),
             ("settings.rs", include_str!("settings.rs")),
             ("setup.rs", include_str!("setup.rs")),
+            ("solver_check.rs", include_str!("solver_check.rs")),
             ("style.rs", include_str!("style.rs")),
             ("tree.rs", include_str!("tree.rs")),
             ("viewport.rs", include_str!("viewport.rs")),

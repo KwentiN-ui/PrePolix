@@ -144,6 +144,16 @@ pub struct SettingsWindow {
     page: Page,
     draft: Settings,
     default_work_dir: String,
+    solver_check: SolverCheck,
+}
+
+/// State of the CalculiX self test on the settings page.
+#[derive(Default)]
+enum SolverCheck {
+    #[default]
+    NotRun,
+    Running(std::sync::mpsc::Receiver<Vec<crate::solver_check::CheckResult>>),
+    Done(Vec<crate::solver_check::CheckResult>),
 }
 
 /// What the user decided in the settings window.
@@ -162,6 +172,7 @@ impl SettingsWindow {
             page: Page::PostProcessing,
             draft: settings.clone(),
             default_work_dir: default_work_dir().display().to_string(),
+            solver_check: SolverCheck::NotRun,
         }
     }
 
@@ -269,6 +280,61 @@ impl SettingsWindow {
                         );
                         ui.end_row();
                     });
+                ui.add_space(8.0);
+                self.solver_check_ui(ui);
+            }
+        }
+    }
+
+    /// Button and results of the CalculiX self test, run with the settings in the window.
+    fn solver_check_ui(&mut self, ui: &mut egui::Ui) {
+        if let SolverCheck::Running(receiver) = &self.solver_check
+            && let Ok(results) = receiver.try_recv()
+        {
+            self.solver_check = SolverCheck::Done(results);
+        }
+        let running = matches!(self.solver_check, SolverCheck::Running(_));
+        ui.horizontal(|ui| {
+            let button = ui
+                .add_enabled(!running, egui::Button::new("CalculiX testen"))
+                .on_hover_text(
+                    "Startet das Programm und rechnet kleine Kragbalken, deren Ergebnisse mit der Balkentheorie verglichen werden.",
+                );
+            if button.clicked() {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let (solver, work_dir) = (self.draft.solver.job_solver(), self.draft.solver.work_dir());
+                let ctx = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    let _ = sender.send(crate::solver_check::run(&solver, &work_dir));
+                    ctx.request_repaint();
+                });
+                self.solver_check = SolverCheck::Running(receiver);
+            }
+            if running {
+                ui.spinner();
+                ui.label("Test läuft …");
+            }
+        });
+        if let SolverCheck::Done(results) = &self.solver_check {
+            egui::Grid::new("solver check")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    for result in results {
+                        if result.passed {
+                            ui.colored_label(egui::Color32::from_rgb(0, 128, 0), "OK");
+                        } else {
+                            ui.colored_label(egui::Color32::from_rgb(200, 0, 0), "Fehler");
+                        }
+                        ui.vertical(|ui| {
+                            ui.strong(result.name);
+                            ui.add(egui::Label::new(&result.message).wrap());
+                        });
+                        ui.end_row();
+                    }
+                });
+            if results.iter().all(|r| r.passed) {
+                ui.label("CalculiX arbeitet korrekt.");
             }
         }
     }
