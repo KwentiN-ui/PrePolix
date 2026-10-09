@@ -5,7 +5,7 @@
 //! As in PrePoMax a click without modifier replaces the selection, Shift adds, Ctrl removes
 //! and Shift+Ctrl keeps the intersection. A click into empty space clears the selection.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glam::{DVec3, Vec3};
 use plx_mesh::{CadEntity, ElementId, NodeId, SkinFace, face_normal};
@@ -404,7 +404,7 @@ impl Picker {
             return Items::Geometry(BTreeSet::from([entity]));
         }
         if hit.line {
-            return self.pick_line(model, hit, target);
+            return self.pick_line(model, hit, target, precision);
         }
         let picker = MeshPicker::new(model, hit.part);
         if target == Target::Edges {
@@ -487,18 +487,29 @@ impl Picker {
     }
 
     /// What a click on a line segment (beam, truss) selects: the nearest node, the nodes of
-    /// the element or of the part's lines; lines have no faces.
-    fn pick_line(&self, model: &Model, hit: &Hit, target: Target) -> Items {
+    /// the element or of the part's lines; lines have no faces. In the geometry modes a
+    /// click within `precision` of an end of the part's lines picks the node there, as a
+    /// corner point of a solid, else the nodes of all its lines, as an edge.
+    fn pick_line(&self, model: &Model, hit: &Hit, target: Target, precision: f32) -> Items {
         if target != Target::Nodes {
             return Items::Faces(BTreeSet::new());
         }
         let skin = model.skin(hit.part);
         let elements = model.mesh.elements();
+        let part_nodes = || -> BTreeSet<NodeId> {
+            (skin.line_elements.iter())
+                .flat_map(|&e| elements[e].nodes.iter().copied())
+                .collect()
+        };
         let nodes: BTreeSet<NodeId> = match self.select_by {
             SelectBy::Node => BTreeSet::from([model.hit_node(hit)]),
-            SelectBy::GeometryPart | SelectBy::Part => (skin.line_elements.iter())
-                .flat_map(|&e| elements[e].nodes.iter().copied())
-                .collect(),
+            SelectBy::GeometryPart | SelectBy::Part => part_nodes(),
+            SelectBy::Geometry | SelectBy::GeometryEdgeAngle | SelectBy::GeometrySurfaceAngle => {
+                match line_end_near(model, hit, precision) {
+                    Some(end) => BTreeSet::from([end]),
+                    None => part_nodes(),
+                }
+            }
             _ => (elements[skin.line_elements[hit.face]].nodes.iter())
                 .copied()
                 .collect(),
@@ -922,6 +933,31 @@ fn corner_edges(corners: &[usize]) -> impl Iterator<Item = (usize, usize)> + '_ 
     (0..corners.len()).map(|i| (corners[i], corners[(i + 1) % corners.len()]))
 }
 
+/// The end of the hit part's lines within `precision` of the click: a node only one of
+/// its line elements uses, like a corner point of a solid.
+fn line_end_near(model: &Model, hit: &Hit, precision: f32) -> Option<NodeId> {
+    let skin = model.skin(hit.part);
+    let elements = model.mesh.elements();
+    let mut uses: BTreeMap<NodeId, usize> = BTreeMap::new();
+    // The skin lists an element once per segment it is drawn with.
+    let line_elements: BTreeSet<usize> = skin.line_elements.iter().copied().collect();
+    for e in line_elements {
+        let nodes = &elements[e].nodes;
+        for &n in [nodes[0], nodes[nodes.len() - 1]].iter() {
+            *uses.entry(n).or_default() += 1;
+        }
+    }
+    (uses.into_iter())
+        .filter(|&(_, count)| count == 1)
+        .filter_map(|(n, _)| {
+            let position = model.render_position(model.mesh.node_index(n)?);
+            Some((n, position.distance(hit.point)))
+        })
+        .filter(|&(_, d)| d <= precision)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(n, _)| n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1045,6 +1081,53 @@ mod tests {
             outline.len() > 11,
             "a 95° limit follows the outline around the corners"
         );
+    }
+
+    /// A beam of two quadratic lines along x from 0 to 100, hit by looking down at x.
+    fn line_hit(x: f32) -> (Model, Hit) {
+        use plx_mesh::{Element, ElementShape, FeMesh, Part};
+        let mut mesh = FeMesh::default();
+        for i in 0..5u32 {
+            mesh.set_node(i + 1, [25.0 * f64::from(i), 0.0, 0.0]);
+        }
+        for (id, nodes) in [(1, vec![1, 2, 3]), (2, vec![3, 4, 5])] {
+            mesh.add_element(Element {
+                id,
+                type_name: "B32".into(),
+                shape: ElementShape::Line3,
+                nodes,
+            })
+            .unwrap();
+        }
+        mesh.parts.push(Part {
+            name: "BEAM".into(),
+            elements: vec![1, 2],
+        });
+        let model = Model::new(std::path::Path::new("balken.inp"), mesh);
+        // Render coordinates are relative to the model centre, node 1 is at the origin.
+        let origin = Vec3::new(x, 0.0, 50.0) + model.render_position(0);
+        let (_, hit) = model.pick_line(origin, Vec3::NEG_Z, |_| 1.0).unwrap();
+        (model, hit)
+    }
+
+    #[test]
+    fn geometry_mode_picks_the_ends_of_lines_as_points() {
+        let pick = |x, mode| {
+            let (model, hit) = line_hit(x);
+            nodes(picker(mode).pick(&model, &hit, Target::Nodes, 1.0))
+        };
+        // Within the tolerance of an end the geometry mode takes the node there, as a
+        // corner point; elsewhere all nodes of the part's lines, as an edge.
+        assert_eq!(pick(99.5, SelectBy::Geometry), BTreeSet::from([5]));
+        assert_eq!(pick(0.5, SelectBy::Geometry), BTreeSet::from([1]));
+        assert_eq!(
+            pick(50.5, SelectBy::Geometry),
+            BTreeSet::from([1, 2, 3, 4, 5])
+        );
+        assert_eq!(pick(60.0, SelectBy::Geometry).len(), 5);
+        assert_eq!(pick(60.0, SelectBy::Node), BTreeSet::from([3]));
+        assert_eq!(pick(60.0, SelectBy::Element), BTreeSet::from([3, 4, 5]));
+        assert_eq!(pick(60.0, SelectBy::Part).len(), 5);
     }
 
     #[test]
