@@ -624,6 +624,27 @@ fn edges_outside_faces_are_meshed_as_line_parts() {
         assert!((b[0] - a[0]).abs() - 5.0 < 1e-6);
     }
     assert_eq!(mesh.parts[2].elements.len(), 4);
+    // The two lines meet at (50, 0, 0) and share the node there, so they form an L; the
+    // CAD map knows the edges, their segments and the vertex at the corner.
+    let corner = |part: usize, k: usize| mesh.element(mesh.parts[part].elements[k]).unwrap();
+    let shared = corner(1, 5).nodes[2];
+    assert_eq!(corner(2, 0).nodes[0], shared);
+    assert_eq!(mesh.node(shared).unwrap(), [50.0, 0.0, 0.0]);
+    let line_nodes: BTreeSet<_> = (mesh.parts[1..].iter())
+        .flat_map(|p| p.elements.iter())
+        .flat_map(|&id| mesh.element(id).unwrap().nodes.iter().copied())
+        .collect();
+    assert_eq!(line_nodes.len(), 13 + 9 - 1);
+    let edge_nodes = |edge: i32| mesh.cad.nodes.get(&CadEntity::Edge(edge)).cloned();
+    assert_eq!(edge_nodes(13).map(|n| n.len()), Some(13));
+    assert_eq!(edge_nodes(14).map(|n| n.len()), Some(9));
+    assert_eq!(mesh.cad.segments[&14].len(), 4);
+    // The lines share the CAD vertex at the corner, which maps to the shared node.
+    let vertex_nodes: Vec<Vec<_>> = (mesh.cad.nodes.iter())
+        .filter(|(e, n)| matches!(e, CadEntity::Vertex(_)) && n.contains(&shared))
+        .map(|(_, n)| n.clone())
+        .collect();
+    assert_eq!(vertex_nodes, [[shared]], "{:?}", mesh.cad.nodes);
     // The lines and the box share no nodes; the parts keep their own numbering.
     assert!(
         mesh.parts[0]

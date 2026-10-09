@@ -1981,6 +1981,12 @@ impl Workbench {
                     }
                     mesh = plx_mesher::merge_part(&mesh, part.mesh);
                 }
+                let joined = mesh.join_line_ends(mesh.line_join_tolerance());
+                if joined > 0 {
+                    self.output.push(format!(
+                        "{joined} Knoten an gemeinsamen Enden von Linien zusammengelegt"
+                    ));
+                }
                 model.set_mesh(mesh);
                 let lost = lost_selections(&model.fe, &model.mesh);
                 if had_mesh && lost > 0 {

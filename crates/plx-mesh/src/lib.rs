@@ -5,6 +5,7 @@ mod contact_search;
 mod element;
 mod fast_map;
 mod jacobian;
+mod join;
 mod mesh;
 mod skin;
 
