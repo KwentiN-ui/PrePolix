@@ -210,6 +210,53 @@ impl FeMesh {
         }
     }
 
+    /// Replaces nodes by others everywhere they are referred to (elements, sets, surfaces,
+    /// the CAD map) and drops them, e.g. to join line parts at a point.
+    pub fn merge_nodes(&mut self, replaced: &BTreeMap<NodeId, NodeId>) {
+        if replaced.is_empty() {
+            return;
+        }
+        let new = |n: NodeId| replaced.get(&n).copied().unwrap_or(n);
+        let relist = |nodes: &[NodeId]| -> Vec<NodeId> {
+            let mut nodes: Vec<NodeId> = nodes.iter().map(|&n| new(n)).collect();
+            nodes.sort_unstable();
+            nodes.dedup();
+            nodes
+        };
+        for element in &mut self.elements {
+            for node in &mut element.nodes {
+                *node = new(*node);
+            }
+        }
+        for nodes in self.node_sets.values_mut() {
+            *nodes = relist(nodes);
+        }
+        for surface in self.surfaces.values_mut() {
+            if let SurfaceDefinition::Nodes(nodes) = surface {
+                *nodes = relist(nodes);
+            }
+        }
+        self.cad = CadMap {
+            nodes: (self.cad.nodes.iter())
+                .map(|(&entity, nodes)| (entity, relist(nodes)))
+                .collect(),
+            faces: self.cad.faces.clone(),
+            segments: (self.cad.segments.iter())
+                .map(|(&edge, segments)| (edge, segments.iter().map(|s| s.map(new)).collect()))
+                .collect(),
+        };
+        let (ids, coords): (Vec<NodeId>, Vec<[f64; 3]>) = (self.node_ids.iter().copied())
+            .zip(self.coords.iter().copied())
+            .filter(|(id, _)| !replaced.contains_key(id))
+            .unzip();
+        self.node_ids = ids;
+        self.coords = coords;
+        self.node_lookup = (self.node_ids.iter().copied())
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect();
+    }
+
     /// Whether a part, set or surface already has this name; CalculiX ignores case.
     pub fn name_in_use(&self, name: &str) -> bool {
         let same = |n: &String| n.eq_ignore_ascii_case(name);
@@ -301,6 +348,39 @@ impl TryFrom<MeshFile> for FeMesh {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merged_nodes_vanish_everywhere() {
+        use crate::cad::CadEntity;
+        let mut mesh = FeMesh::default();
+        for (id, x) in [(1, 0.0), (2, 10.0), (3, 10.0), (4, 20.0)] {
+            mesh.set_node(id, [x, 0.0, 0.0]);
+        }
+        for (id, nodes) in [(1, vec![1, 2]), (2, vec![3, 4])] {
+            mesh.add_element(Element {
+                id,
+                type_name: "B31".into(),
+                shape: ElementShape::Line2,
+                nodes,
+            })
+            .unwrap();
+        }
+        mesh.node_sets.insert("ENDS".into(), vec![2, 3, 4]);
+        mesh.surfaces
+            .insert("S".into(), SurfaceDefinition::Nodes(vec![3]));
+        mesh.cad.nodes.insert(CadEntity::Vertex(2), vec![2, 3]);
+        mesh.cad.segments.insert(2, vec![[3, 4]]);
+        mesh.merge_nodes(&BTreeMap::from([(3, 2)]));
+        assert_eq!(mesh.node_ids(), [1, 2, 4]);
+        assert_eq!(mesh.node_index(4), Some(2));
+        assert!(mesh.node(3).is_none());
+        assert_eq!(mesh.element(2).unwrap().nodes, [2, 4]);
+        assert_eq!(mesh.node_sets["ENDS"], [2, 4]);
+        assert_eq!(mesh.surfaces["S"], SurfaceDefinition::Nodes(vec![2]));
+        assert_eq!(mesh.cad.nodes[&CadEntity::Vertex(2)], [2]);
+        assert_eq!(mesh.cad.segments[&2], [[2, 4]]);
+        assert!(mesh.missing_nodes().is_empty());
+    }
 
     #[test]
     fn meshes_survive_serialization() {

@@ -7,10 +7,12 @@ use std::collections::{BTreeSet, HashSet};
 
 use egui::Ui;
 use plx_mesh::{
-    ElementId, GroupBy, MasterSlaveItem, SearchParameters, find_contact_pairs, surface_faces,
+    CadEntity, ElementId, GroupBy, LineJoint, MasterSlaveItem, SearchParameters,
+    find_contact_pairs, find_line_joints, surface_faces,
 };
 use plx_model::{
-    Constraint, ContactMethod, ContactPair, FeModel, Quantity, Region, Tie, UnitSystem, next_name,
+    Constraint, ContactMethod, ContactPair, FeModel, NodeTie, Quantity, Region, Tie, UnitSystem,
+    next_name,
 };
 
 use crate::model::{Highlight, Model};
@@ -39,11 +41,16 @@ const METHODS: [ContactMethod; 2] = [
     ContactMethod::SurfaceToSurface,
 ];
 
-/// A row of the table: a pair found with the settings it is created with.
+/// A row of the table: a pair found with the settings it is created with, or line ends
+/// meeting at a point, which become a node tie.
 #[derive(Clone, Debug)]
 struct Row {
     name: String,
     item: MasterSlaveItem,
+    /// Line ends on one point; `item` then only names their parts.
+    joint: Option<LineJoint>,
+    /// A node tie ties the rotations too.
+    rotations: bool,
     kind: PairType,
     interaction: String,
     method: ContactMethod,
@@ -55,12 +62,23 @@ struct Row {
 }
 
 impl Row {
-    /// What touches, as in PrePoMax's table: solids, or the edges of a 2D model.
+    /// What touches, as in PrePoMax's table: solids, the edges of a 2D model, or line ends.
     fn geometry(&self, plane: bool) -> &'static str {
-        if plane {
+        if self.joint.is_some() {
+            "Line end-Line end"
+        } else if plane {
             "Shell edge-Shell edge"
         } else {
             "Solid-Solid"
+        }
+    }
+
+    /// The type cell: a node tie for line ends, else the pair type.
+    fn type_label(&self) -> &'static str {
+        if self.joint.is_some() {
+            "Node tie"
+        } else {
+            self.kind.label()
         }
     }
 }
@@ -77,6 +95,8 @@ pub struct ContactSearchDialog {
     angle: f64,
     group_by: GroupBy,
     ignore_hidden: bool,
+    /// Also searches the ends of beams and trusses meeting at a point.
+    line_ends: bool,
     kind: PairType,
     interaction: String,
     method: ContactMethod,
@@ -106,6 +126,7 @@ impl ContactSearchDialog {
             angle: 35.0,
             group_by: GroupBy::Parts,
             ignore_hidden: true,
+            line_ends: true,
             kind: PairType::Tie,
             interaction: (fe.surface_interactions.first())
                 .map(|s| s.name.clone())
@@ -124,7 +145,12 @@ impl ContactSearchDialog {
     pub fn highlight(&self, model: &Model) -> Highlight {
         let mut master = BTreeSet::new();
         let mut slave = BTreeSet::new();
+        let mut nodes = Vec::new();
         for row in self.rows.iter().filter(|r| r.selected) {
+            if let Some(joint) = &row.joint {
+                nodes.extend(joint.nodes.iter().copied());
+                continue;
+            }
             master.extend(row.item.master.iter().copied());
             slave.extend(row.item.slave.iter().copied());
         }
@@ -134,12 +160,14 @@ impl ContactSearchDialog {
             // The faces of 2D elements are edges, drawn as lines.
             let lines = |faces: Vec<_>| edge_lines(model, &faces.into_iter().collect());
             return Highlight {
+                nodes,
                 lines: lines(master),
                 secondary_lines: lines(slave),
                 ..Highlight::default()
             };
         }
         Highlight {
+            nodes,
             faces: master.into_iter().collect(),
             secondary_faces: slave.into_iter().collect(),
             ..Highlight::default()
@@ -163,6 +191,8 @@ impl ContactSearchDialog {
                 checked: true,
                 name: item.name(),
                 item,
+                joint: None,
+                rotations: true,
                 kind: self.kind,
                 interaction: self.interaction.clone(),
                 method: self.method,
@@ -171,6 +201,33 @@ impl ContactSearchDialog {
                 selected: false,
             })
             .collect();
+        if self.line_ends {
+            let joints = find_line_joints(&model.mesh, &searched, self.distance);
+            for (n, joint) in joints.into_iter().enumerate() {
+                let parts: Vec<&str> = (joint.parts.iter())
+                    .filter_map(|&p| model.parts.get(p))
+                    .map(|p| p.name.as_str())
+                    .collect();
+                self.rows.push(Row {
+                    checked: true,
+                    name: format!("Node_Tie-{}", n + 1),
+                    item: MasterSlaveItem {
+                        master_name: parts.join("_"),
+                        slave_name: String::new(),
+                        master: BTreeSet::new(),
+                        slave: BTreeSet::new(),
+                    },
+                    joint: Some(joint),
+                    rotations: true,
+                    kind: self.kind,
+                    interaction: self.interaction.clone(),
+                    method: self.method,
+                    adjust: false,
+                    distance: self.distance,
+                    selected: false,
+                });
+            }
+        }
         self.part_names = model.parts.iter().map(|p| p.name.clone()).collect();
         self.searched = true;
     }
@@ -271,6 +328,8 @@ impl ContactSearchDialog {
                 } else {
                     edges.on_disabled_hover_text(unsupported);
                 }
+                ui.checkbox(&mut self.line_ends, "Line end")
+                    .on_hover_text("Enden von Balken und Stäben, die auf einem Punkt liegen");
                 ui.checkbox(&mut self.ignore_hidden, "Ausgeblendete Parts ignorieren");
             });
             group(ui, "Kontaktpaar-Parameter", |ui| {
@@ -383,7 +442,7 @@ impl ContactSearchDialog {
                     let cells = [
                         row.name.clone(),
                         row.geometry(self.plane).to_string(),
-                        row.kind.label().to_string(),
+                        row.type_label().to_string(),
                         if contact {
                             row.interaction.clone()
                         } else {
@@ -442,7 +501,10 @@ impl ContactSearchDialog {
         if ui.button("Master/Slave tauschen").clicked() {
             action = Some(RowAction::Swap);
         }
-        let several = self.rows.iter().filter(|r| r.selected).count() > 1;
+        let several = (self.rows.iter())
+            .filter(|r| r.selected && r.joint.is_none())
+            .count()
+            > 1;
         if ui
             .add_enabled(
                 several,
@@ -472,7 +534,7 @@ impl ContactSearchDialog {
     }
 
     fn swap(&mut self) {
-        for row in self.rows.iter_mut().filter(|r| r.selected) {
+        for row in (self.rows.iter_mut()).filter(|r| r.selected && r.joint.is_none()) {
             row.item.swap();
             row.name = row.item.name();
         }
@@ -481,7 +543,7 @@ impl ContactSearchDialog {
     /// PrePoMax's "Merge by Master/Slave": the selected pairs become one.
     fn merge(&mut self) {
         let selected: Vec<usize> = (self.rows.iter().enumerate())
-            .filter(|(_, r)| r.selected)
+            .filter(|(_, r)| r.selected && r.joint.is_none())
             .map(|(i, _)| i)
             .collect();
         let Some((&first, rest)) = selected.split_first() else {
@@ -522,6 +584,42 @@ impl ContactSearchDialog {
         let mut row = self.rows[first].clone();
         // The values keep a fixed width, so that long names do not widen the column.
         ui.spacing_mut().combo_width = PROPERTY_VALUE_WIDTH;
+        if row.joint.is_some() {
+            egui::Grid::new("joint properties")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    if selected.len() == 1 {
+                        ui.label("Name");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut row.name)
+                                .desired_width(PROPERTY_VALUE_WIDTH),
+                        );
+                        ui.end_row();
+                    }
+                    ui.label("Typ");
+                    ui.label("Node tie");
+                    ui.end_row();
+                    ui.label("Rotationen");
+                    yes_no(ui, "row rotations", &mut row.rotations);
+                    ui.end_row();
+                });
+            ui.add_space(8.0);
+            ui.weak(
+                "Die Knoten der Linienenden folgen einander als Gleichungen. Rotationen: \
+                 biegesteif statt Gelenk; Stäbe haben keine.",
+            );
+            let old = self.rows[first].clone();
+            for &i in &selected {
+                let target = &mut self.rows[i];
+                if i == first {
+                    target.name = row.name.clone();
+                }
+                if row.rotations != old.rotations && target.joint.is_some() {
+                    target.rotations = row.rotations;
+                }
+            }
+            return;
+        }
         egui::Grid::new("pair properties")
             .num_columns(2)
             .show(ui, |ui| {
@@ -576,6 +674,9 @@ impl ContactSearchDialog {
             if i == first {
                 target.name = row.name.clone();
             }
+            if target.joint.is_some() {
+                continue;
+            }
             if row.kind != old.kind {
                 target.kind = row.kind;
             }
@@ -615,6 +716,14 @@ impl ContactSearchDialog {
             name
         };
         for row in self.rows.iter().filter(|r| r.checked) {
+            if let Some(joint) = &row.joint {
+                ties.push(Constraint::NodeTie(NodeTie {
+                    region: joint_region(model, joint),
+                    rotations: row.rotations,
+                    ..NodeTie::new(unique(&row.name, &mut tie_names))
+                }));
+                continue;
+            }
             // Surfaces of whole CAD faces are kept by geometry, so that they survive
             // remeshing.
             let region = |surface| {
@@ -659,6 +768,25 @@ impl ContactSearchDialog {
 enum RowAction {
     Swap,
     Merge,
+}
+
+/// The nodes of a joint as a region: the CAD vertices they lie on, if those have no other
+/// nodes, so that the tie survives remeshing; else the nodes themselves.
+fn joint_region(model: &Model, joint: &LineJoint) -> Region {
+    let vertices: BTreeSet<CadEntity> = (model.mesh.cad.nodes.iter())
+        .filter(|(entity, nodes)| {
+            matches!(entity, CadEntity::Vertex(_)) && nodes.iter().any(|n| joint.nodes.contains(n))
+        })
+        .map(|(&entity, _)| entity)
+        .collect();
+    let covered: BTreeSet<_> = (vertices.iter())
+        .flat_map(|v| model.mesh.cad.nodes[v].iter().copied())
+        .collect();
+    if !vertices.is_empty() && covered == joint.nodes.iter().copied().collect() {
+        Region::Geometry(vertices.into_iter().collect())
+    } else {
+        Region::Nodes(joint.nodes.clone())
+    }
 }
 
 /// Name of a merged side: its part, or the next free "Merged-n".

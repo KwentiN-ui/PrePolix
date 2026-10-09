@@ -3,7 +3,7 @@ use std::process::Command;
 
 use plx_model::{
     BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, Elastic, EquationSolver, Load,
-    Material, Section, SectionKind, UserKeyword,
+    Material, NodeTie, Section, SectionKind, UserKeyword,
 };
 
 use super::*;
@@ -190,7 +190,10 @@ fn run_ccx(name: &str, text: &str) -> Option<FrdImport> {
     let log = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && !log.contains("*ERROR"), "{log}");
     let frd = read_frd(&dir.join(format!("{name}.frd"))).unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
+    // PLX_KEEP_CCX keeps the files for a look at them.
+    if std::env::var_os("PLX_KEEP_CCX").is_none() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     Some(frd)
 }
 
@@ -1625,6 +1628,220 @@ fn trusses_are_written_as_t3d2_with_translations_only() {
     ] {
         assert!(text.contains(line), "{line} fehlt in\n{text}");
     }
+}
+
+/// Two chains of `n` line elements each along x, part BEAM from 0 to 50 with nodes from 1
+/// and part BEAM2 from 50 to 100 with nodes from 101, meeting at x = 50 with a node each.
+fn two_chains(n: u32, quadratic: bool) -> FeMesh {
+    use plx_mesh::{Element, ElementShape, Part};
+    let mut mesh = line_chain(n, 0, 50.0, quadratic);
+    let per_element = if quadratic { 2 } else { 1 };
+    let count = n * per_element;
+    for i in 0..=count {
+        let x = 50.0 + 50.0 * f64::from(i) / f64::from(count);
+        mesh.set_node(101 + i, [x, 0.0, 0.0]);
+    }
+    let mut elements = Vec::new();
+    for e in 0..n {
+        let first = 101 + e * per_element;
+        let (shape, type_name, nodes) = if quadratic {
+            (
+                ElementShape::Line3,
+                "B32",
+                vec![first, first + 1, first + 2],
+            )
+        } else {
+            (ElementShape::Line2, "B31", vec![first, first + 1])
+        };
+        mesh.add_element(Element {
+            id: 101 + e,
+            type_name: type_name.into(),
+            shape,
+            nodes,
+        })
+        .unwrap();
+        elements.push(101 + e);
+    }
+    mesh.parts.push(Part {
+        name: "BEAM2".into(),
+        elements,
+    });
+    mesh
+}
+
+/// The two chains with their section on both parts and a node tie at x = 50.
+fn tied_chains(n: u32, quadratic: bool, kind: SectionKind, load: LoadKind) -> (FeMesh, FeModel) {
+    let mesh = two_chains(n, quadratic);
+    let mut model = line_model(&mesh, kind, load);
+    model.sections[0].region = Region::Parts(vec!["BEAM".into(), "BEAM2".into()]);
+    let middle = n * if quadratic { 2 } else { 1 } + 1;
+    model.constraints.push(Constraint::NodeTie(NodeTie {
+        region: Region::Nodes(vec![middle, 101]),
+        ..NodeTie::new("Node_Tie-1")
+    }));
+    (mesh, model)
+}
+
+#[test]
+fn node_ties_merge_the_nodes_or_hinge_beams_with_equations() {
+    let (mesh, mut model) = tied_chains(
+        2,
+        false,
+        rect_beam(BeamOrientation::Automatic),
+        LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+    );
+    // Tied rigidly, the second beam starts at the first one's end node; the node set of a
+    // boundary condition on the merged node names the node that stays.
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Held".into(),
+        active: true,
+        amplitude: None,
+        region: Region::Nodes(vec![101]),
+        kind: BoundaryKind::Displacement([None, None, Some(0.0), None, None, None]),
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Element, Type=B31, Elset=BEAM2\n101, 3, 102\n102, 102, 103\n",
+        "** Name: Node_Tie-1\n** Knoten 3 (zusammengelegt)\n",
+        "*Nset, Nset=Internal_Selection-1_Held\n3\n",
+    ] {
+        assert!(text.contains(line), "{line} fehlt in\n{text}");
+    }
+    assert!(!text.contains("*Node\n101,") && !text.contains("\n101, 50, 0, 0\n"));
+    assert!(!text.contains("*Equation"));
+    // A hinge between beams keeps the nodes and ties their translations.
+    let Constraint::NodeTie(tie) = &mut model.constraints[0] else {
+        unreachable!()
+    };
+    tie.rotations = false;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let expected: String = (1..=3)
+        .map(|dof| format!("*Equation\n2\n101, {dof}, 1, 3, {dof}, -1\n"))
+        .collect();
+    assert!(
+        text.contains(&format!("** Name: Node_Tie-1\n{expected}")) && !text.contains("101, 4, 1"),
+        "{text}"
+    );
+    assert!(text.contains("*Element, Type=B31, Elset=BEAM2\n101, 101, 102\n"));
+    // Trusses have no rotations: a hinge is the same as a rigid tie, one node.
+    model.sections[0].kind = SectionKind::Truss { area: 50.0 };
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Element, Type=T3D2, Elset=BEAM2\n101, 3, 102\n"));
+    assert!(!text.contains("*Equation"));
+    // A deactivated tie is a comment, an empty one an error.
+    model.constraints[0] = Constraint::NodeTie(NodeTie {
+        active: false,
+        ..NodeTie::new("Node_Tie-1")
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("** Name: Node_Tie-1: Deactivated\n"));
+    assert!(text.contains("*Element, Type=T3D2, Elset=BEAM2\n101, 101, 102\n"));
+    model.constraints[0] = Constraint::NodeTie(NodeTie::new("Node_Tie-1"));
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::EmptyRegion { .. })
+    ));
+}
+
+/// Two beams of five elements each tied rigidly at their ends bend like one cantilever.
+#[test]
+fn calculix_bends_two_beams_tied_at_a_node_like_one() {
+    let expected = cantilever_deflection(100.0, 100.0, 10.0 * 125.0 / 12.0);
+    let (mesh, model) = tied_chains(
+        5,
+        false,
+        rect_beam(BeamOrientation::Automatic),
+        LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+    );
+    let Some(frd) = run_ccx("balken_node_tie", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let deflection = -min_u2(&frd);
+    assert!(
+        (deflection - expected).abs() < 0.005 * expected,
+        "{deflection} statt {expected}"
+    );
+}
+
+/// Two beams clamped at their far ends and hinged together at x = 50 move together there,
+/// but bend less stiffly than tied rigidly: a hinge carries no moment.
+#[test]
+fn calculix_hinges_two_beams_at_a_node() {
+    let deflection = |rotations: bool| {
+        let (mesh, mut model) = tied_chains(
+            5,
+            false,
+            rect_beam(BeamOrientation::Automatic),
+            LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+        );
+        let Constraint::NodeTie(tie) = &mut model.constraints[0] else {
+            unreachable!()
+        };
+        tie.rotations = rotations;
+        let step = &mut model.steps[0];
+        step.boundary_conditions[0].region = Region::Nodes(vec![1, 106]);
+        step.loads[0].region = Region::Nodes(vec![3]);
+        let name = if rotations {
+            "balken_starr"
+        } else {
+            "balken_gelenk"
+        };
+        let frd = run_ccx(name, &write_inp(&mesh, &model, "").unwrap())?;
+        // The expanded nodes at x = 50 of both beams move alike; tied rigidly, the beams
+        // share the node there and CalculiX expands it once.
+        let at_joint: Vec<f64> = (frd.mesh.node_ids().iter().zip(frd.mesh.coords()))
+            .filter(|(_, c)| (c[0] - 50.0).abs() < 1e-6)
+            .map(|(&n, _)| node_value(&frd, "DISP", "U2", n))
+            .collect();
+        assert_eq!(
+            at_joint.len(),
+            if rotations { 4 } else { 8 },
+            "{at_joint:?}"
+        );
+        let mean = at_joint.iter().sum::<f64>() / at_joint.len() as f64;
+        assert!(
+            at_joint
+                .iter()
+                .all(|u| (u - mean).abs() < 1e-3 * mean.abs()),
+            "{at_joint:?}"
+        );
+        Some(-mean)
+    };
+    let (Some(hinged), Some(rigid)) = (deflection(false), deflection(true)) else {
+        return;
+    };
+    assert!(hinged > 1.2 * rigid && rigid > 0.0, "{hinged} vs {rigid}");
+}
+
+/// Two trusses tied at their ends stretch like one bar of their whole length.
+#[test]
+fn calculix_stretches_two_trusses_tied_at_a_node_like_one() {
+    let (mesh, mut model) = tied_chains(
+        5,
+        true,
+        SectionKind::Truss { area: 50.0 },
+        LoadKind::ConcentratedForce([1000.0, 0.0, 0.0]),
+    );
+    // A straight chain of trusses is a mechanism sideways; hold the nodes in the axis.
+    let nodes: Vec<NodeId> = (mesh.node_ids().iter().copied())
+        .filter(|&n| n % 2 == 1)
+        .collect();
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Sideways".into(),
+        active: true,
+        amplitude: None,
+        region: Region::Nodes(nodes),
+        kind: BoundaryKind::Displacement([None, Some(0.0), Some(0.0), None, None, None]),
+    });
+    let Some(frd) = run_ccx("stab_node_tie", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let expected = 1000.0 * 100.0 / (210_000.0 * 50.0);
+    let stretch = node_value(&frd, "DISP", "U1", 111);
+    assert!(
+        (stretch - expected).abs() < 1e-6 * expected,
+        "{stretch} statt {expected}"
+    );
 }
 
 /// Deflection of a cantilever of length `l` under a tip force `f` after beam theory.
