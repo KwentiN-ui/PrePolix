@@ -6,6 +6,7 @@ use plx_render::StandardView;
 use crate::analysis::{Analysis, MonitorEvent};
 use crate::animation::{AnimationKind, ColorLimits, Playback};
 use crate::contact_search::{ContactSearchDialog, SearchResult};
+use crate::exploded::{ExplodedDialog, ExplodedResult};
 use crate::field_output_dialog::{DialogAction, FieldOutputDialog};
 use crate::history_output_dialog::HistoryOutputDialog;
 use crate::history_table::HistoryTable;
@@ -108,9 +109,20 @@ struct Workbench {
     transformation_dialog: Option<TransformationDialog>,
     /// The section view shown in the scene of the given version, to rebuild it on changes.
     section_shown: Option<(u64, SectionView)>,
-    /// The boundary conditions and loads, with the shown parts, whose symbols are drawn.
-    symbols_shown: Option<(Vec<symbols::Item>, Vec<bool>)>,
+    /// The boundary conditions and loads, with the shown parts and the exploded view, whose
+    /// symbols are drawn.
+    symbols_shown: Option<(Vec<symbols::Item>, Vec<bool>, u64)>,
+    /// Open exploded view dialog with the model it edits.
+    exploded_dialog: Option<(ExplodedDialog, ShownModel)>,
+    /// The exploded view last applied, where the next one starts, as in PrePoMax.
+    last_exploded: crate::exploded::Parameters,
+    /// Version of the exploded view of the FE model the hot spot paths were drawn for.
+    hot_spot_explosion: u64,
 }
+
+/// Which model the 3D view shows: the geometry, the FE model or one of the results.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ShownModel(TreeView, usize);
 
 pub struct PrepolixApp {
     workbench: Workbench,
@@ -181,6 +193,9 @@ impl PrepolixApp {
                 transformation_dialog: None,
                 section_shown: None,
                 symbols_shown: None,
+                exploded_dialog: None,
+                last_exploded: Default::default(),
+                hot_spot_explosion: 0,
             },
             load_events: channel(),
             loading: None,
@@ -341,6 +356,20 @@ impl PrepolixApp {
                     self.workbench.section = None;
                     self.workbench.section_dialog = None;
                 }
+                ui.separator();
+                if ui
+                    .add_enabled(has_model, egui::Button::new("Explosionsansicht …"))
+                    .clicked()
+                {
+                    self.workbench.open_exploded_dialog();
+                }
+                let exploded = self.workbench.exploded_applied();
+                if ui
+                    .add_enabled(exploded, egui::Button::new("Explosionsansicht aus"))
+                    .clicked()
+                {
+                    self.workbench.toggle_exploded();
+                }
             });
             ui.menu_button("Geometrie", |ui| {
                 let import = egui::Button::new("Importieren …");
@@ -422,6 +451,18 @@ impl PrepolixApp {
             if icons::button(ui, Icon::SectionView, "Schnittansicht", shown, sectioned).clicked() {
                 self.workbench.open_section_dialog();
             }
+            // PrePoMax: a left click turns the exploded view on and off, a right click opens
+            // its dialog.
+            let exploded =
+                self.workbench.exploded_applied() || self.workbench.exploded_dialog.is_some();
+            let tooltip = "Explosionsansicht ein/aus (Rechtsklick: Einstellungen)";
+            let button = icons::button(ui, Icon::ExplodedView, tooltip, shown, exploded);
+            if button.clicked() {
+                self.workbench.toggle_exploded();
+            }
+            if button.secondary_clicked() {
+                self.workbench.open_exploded_dialog();
+            }
         });
     }
 
@@ -464,6 +505,46 @@ impl PrepolixApp {
 
 fn not_implemented(ui: &mut egui::Ui) {
     ui.label("Noch nicht implementiert");
+}
+
+/// Moves the parts of a model between two scales of an exploded view: through the levels of a
+/// sequential disassembly one after the other, else in one animation.
+fn animate_explosion(
+    model: &mut Model,
+    parameters: &crate::exploded::Parameters,
+    from: f64,
+    to: f64,
+) {
+    let sequential =
+        parameters.method == crate::exploded::Method::Disassembly && parameters.sequential;
+    let stops = if sequential {
+        model.explosion_layout(parameters).sequence(from, to)
+    } else {
+        vec![to]
+    };
+    let duration = if stops.len() > 1 {
+        crate::exploded::STEP_TIME
+    } else {
+        crate::exploded::ANIMATION_TIME
+    };
+    let targets = stops
+        .into_iter()
+        .map(|scale| {
+            let offsets = model
+                .explosion_layout(parameters)
+                .offsets(scale, parameters.sequential);
+            (offsets, duration)
+        })
+        .collect();
+    model.explosion.show_sequence(targets, true);
+}
+
+/// Shows the exploded view being edited in a dialog.
+fn preview_explosion(model: &mut Model, dialog: &mut ExplodedDialog, animate: bool) {
+    let parameters = dialog.draft.clone();
+    dialog.step_count = model.explosion_layout(&parameters).step_count();
+    let offsets = model.explosion_offsets(&parameters);
+    model.explosion.show(offsets, animate);
 }
 
 fn load_in_background(path: PathBuf, sender: Sender<LoadEvent>, ctx: egui::Context) {
@@ -621,6 +702,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.editor_window(&ctx);
         self.workbench.contact_search_window(&ctx);
         self.workbench.section_window(&ctx);
+        self.workbench.exploded_window(&ctx);
         self.workbench.keyword_editor_window(&ctx);
         self.workbench.material_library_window(&ctx);
         self.workbench.mesh_setup_window(&ctx);
@@ -639,6 +721,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.update_hot_spot_preview();
         self.workbench.hot_spot_window(&ctx);
         self.workbench.settings_window(&ctx);
+        self.workbench.update_explosion(&ctx);
         self.workbench.rebuild_if_results_changed();
         self.workbench.update_section();
 
@@ -1026,9 +1109,13 @@ impl Workbench {
                 .and_then(|m| m.fe.hot_spots.get(*i).cloned()),
             _ => None,
         };
-        if wanted.as_ref() == self.hot_spot_preview.as_ref().map(|(h, _)| h) {
+        let version = (self.model.as_ref()).map_or(0, |m| m.explosion.version());
+        if wanted.as_ref() == self.hot_spot_preview.as_ref().map(|(h, _)| h)
+            && version == self.hot_spot_explosion
+        {
             return;
         }
+        self.hot_spot_explosion = version;
         let paths = match (&wanted, &self.model) {
             (Some(hot_spot), Some(model)) => crate::hot_spots::preview(model, hot_spot),
             _ => Vec::new(),
@@ -2360,11 +2447,19 @@ impl Workbench {
     /// as PrePoMax does for the step chosen to show: the step of the edited or selected
     /// item, else the last step. The selected or edited item is drawn in red.
     fn update_symbols(&mut self, ctx: &egui::Context) {
-        let items = self.symbol_items();
+        // As in PrePoMax, symbols rest while the exploded view is edited or moves.
+        let exploding = self.exploded_dialog.is_some()
+            || (self.model.as_ref()).is_some_and(|m| m.explosion.is_animating());
+        let items = if exploding {
+            Vec::new()
+        } else {
+            self.symbol_items()
+        };
         let shown = (self.model.as_ref())
             .map(|m| m.parts.iter().map(|p| p.visible).collect())
             .unwrap_or_default();
-        let key = (items, shown);
+        let version = (self.model.as_ref()).map_or(0, |m| m.explosion.version());
+        let key = (items, shown, version);
         if self.symbols_shown.as_ref() == Some(&key) {
             return;
         }
@@ -2434,6 +2529,145 @@ impl Workbench {
         items
     }
 
+    fn shown_model(&self) -> ShownModel {
+        ShownModel(self.tree_view, self.current_result)
+    }
+
+    fn model_mut(&mut self, which: ShownModel) -> Option<&mut Model> {
+        match which.0 {
+            TreeView::Results => self.results.get_mut(which.1),
+            TreeView::Geometry => self.geometry.as_mut(),
+            TreeView::FeModel => self.model.as_mut(),
+        }
+    }
+
+    /// Whether the shown model is exploded.
+    fn exploded_applied(&self) -> bool {
+        self.shown().is_some_and(|m| m.explosion.applied.is_some())
+    }
+
+    /// PrePoMax's toolbar button: explodes the shown model by the last used parameters at
+    /// half the scale, or puts it back together, animated either way.
+    fn toggle_exploded(&mut self) {
+        if self.exploded_dialog.is_some() {
+            return;
+        }
+        let last = self.last_exploded.clone();
+        let Some(model) = self.shown_mut() else {
+            return;
+        };
+        let (from, to, parameters) = match model.explosion.applied.take() {
+            Some(parameters) => (parameters.scale(), 0.0, parameters),
+            None if model.parts.len() > 1 => {
+                let parameters = crate::exploded::Parameters {
+                    scale_factor: 0.5,
+                    ..last
+                };
+                model.explosion.applied = Some(parameters.clone());
+                (0.0, parameters.scale(), parameters)
+            }
+            None => return,
+        };
+        animate_explosion(model, &parameters, from, to);
+        if model.explosion.applied.is_some() {
+            self.last_exploded = parameters;
+        }
+        self.viewport.preview = Default::default();
+    }
+
+    /// Opens the exploded view dialog on the shown model and previews it at once.
+    fn open_exploded_dialog(&mut self) {
+        if self.exploded_dialog.is_some() {
+            return;
+        }
+        let which = self.shown_model();
+        let last = self.last_exploded.clone();
+        let Some(model) = self.model_mut(which) else {
+            return;
+        };
+        let center = model.mesh.bounds().map_or(glam::DVec3::ZERO, |(a, b)| {
+            (glam::DVec3::from(a) + glam::DVec3::from(b)) * 0.5
+        });
+        let mut dialog = ExplodedDialog::new(model.explosion.applied.clone(), &last, center);
+        preview_explosion(model, &mut dialog, true);
+        self.exploded_dialog = Some((dialog, which));
+    }
+
+    fn exploded_window(&mut self, ctx: &egui::Context) {
+        let Some((mut dialog, which)) = self.exploded_dialog.take() else {
+            return;
+        };
+        // Switching to another model ends the dialog as if it was cancelled.
+        let (result, change) = if which == self.shown_model() {
+            dialog.show(ctx)
+        } else {
+            (ExplodedResult::Cancel, None)
+        };
+        let Some(model) = self.model_mut(which) else {
+            return;
+        };
+        if let Some(change) = change {
+            let animate = change == crate::exploded::dialog::Change::Parameter;
+            preview_explosion(model, &mut dialog, animate);
+        }
+        match result {
+            ExplodedResult::Open => {
+                self.exploded_dialog = Some((dialog, which));
+                return;
+            }
+            ExplodedResult::Ok => {
+                let parameters = dialog.draft.clone();
+                let offsets = model.explosion_offsets(&parameters);
+                let nothing = offsets.iter().all(|o| *o == glam::DVec3::ZERO);
+                // A scale factor of zero shows the model assembled, which is no exploded view.
+                model.explosion.applied = (!nothing).then(|| parameters.clone());
+                if !model.explosion.is_animating() {
+                    model.explosion.show(offsets, false);
+                }
+                self.last_exploded = parameters;
+            }
+            ExplodedResult::Cancel => {
+                match &dialog.before {
+                    Some(before) => {
+                        let offsets = model.explosion_offsets(before);
+                        model.explosion.show(offsets, true);
+                    }
+                    None => model.explosion.show(Vec::new(), true),
+                }
+                model.explosion.applied = dialog.before.clone();
+            }
+            ExplodedResult::Disable => {
+                model.explosion.show(Vec::new(), true);
+                model.explosion.applied = None;
+            }
+        }
+        self.viewport.preview = Default::default();
+    }
+
+    /// Advances the exploded view animations; the shown model is rebuilt when it moved.
+    fn update_explosion(&mut self, ctx: &egui::Context) {
+        let now = std::time::Instant::now();
+        let shown = self.shown_model();
+        let mut animating = false;
+        let mut moved = false;
+        let models = (self.model.iter_mut().map(|m| (TreeView::FeModel, 0, m)))
+            .chain(self.geometry.iter_mut().map(|m| (TreeView::Geometry, 0, m)))
+            .chain((self.results.iter_mut().enumerate()).map(|(i, m)| (TreeView::Results, i, m)));
+        for (view, index, model) in models {
+            let changed = model.explosion.tick(now);
+            animating |= model.explosion.is_animating();
+            let is_shown = view == shown.0 && (view != TreeView::Results || index == shown.1);
+            moved |= changed && is_shown;
+        }
+        if moved {
+            self.results_changed = true;
+            self.viewport.preview = Default::default();
+        }
+        if animating {
+            ctx.request_repaint();
+        }
+    }
+
     fn section_picks(&self) -> bool {
         self.section_dialog
             .as_ref()
@@ -2475,11 +2709,15 @@ impl Workbench {
     /// Cuts the scene at the section plane being edited or shown, when it or the scene
     /// changed.
     fn update_section(&mut self) {
+        // As in PrePoMax, the section view rests while the exploded view is edited or moves.
+        let exploding = self.exploded_dialog.is_some()
+            || self.shown().is_some_and(|m| m.explosion.is_animating());
         let wanted = self
             .section_dialog
             .as_ref()
             .map(|d| &d.draft)
             .or(self.section.as_ref())
+            .filter(|_| !exploding)
             .map(|s| (self.viewport.scene_version(), s.clone()));
         if wanted == self.section_shown {
             return;
@@ -2612,6 +2850,7 @@ impl Workbench {
         self.dialog = None;
         self.section = None;
         self.section_dialog = None;
+        self.exploded_dialog = None;
         self.editor = None;
         self.highlighted = None;
         self.parked_camera = None;
@@ -2816,6 +3055,11 @@ impl Workbench {
         for (index, (part, mesh)) in model.parts.iter_mut().zip(meshes).enumerate() {
             part.bounds = mesh.bounds();
             self.viewport.set_part_visible(index, part.visible);
+        }
+        if model.explosion.is_shown()
+            && let Some(bounds) = model.visible_bounds()
+        {
+            self.viewport.cover(bounds);
         }
         self.update_contour();
     }

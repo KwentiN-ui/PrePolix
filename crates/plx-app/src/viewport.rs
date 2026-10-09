@@ -245,6 +245,14 @@ impl Viewport {
         self.scene_version
     }
 
+    /// Widens the clipping range so that nothing of the box is cut off, e.g. when the parts
+    /// are pulled apart; the view itself stays.
+    pub fn cover(&mut self, (min, max): (Vec3, Vec3)) {
+        let target = self.camera.target;
+        let reach = (target - min).abs().max((max - target).abs()).length();
+        self.camera.scene_radius = self.camera.scene_radius.max(reach * 0.5);
+    }
+
     /// Exchanges the camera, so the FE model and the results each keep their own view.
     pub fn swap_camera(&mut self, camera: &mut Camera) {
         std::mem::swap(&mut self.camera, camera);
