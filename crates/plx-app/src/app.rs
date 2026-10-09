@@ -3923,17 +3923,8 @@ impl Workbench {
                 .filter_map(|&id| model.node_position(model.mesh.node_index(id)?))
                 .chain(transformation.iter().flat_map(|d| d.points(model)))
                 .collect(),
-            edges: (model.highlight.lines.iter())
-                .filter_map(|ends| {
-                    let [a, b] = ends.map(|id| {
-                        model
-                            .mesh
-                            .node_index(id)
-                            .and_then(|n| model.node_position(n))
-                    });
-                    Some([a?, b?])
-                })
-                .collect(),
+            edges: render_lines(model, &model.highlight.lines),
+            secondary_edges: render_lines(model, &model.highlight.secondary_lines),
             axis,
             paths: self.overlay_paths(),
             lines: transformation.map_or_else(Vec::new, |d| d.lines(model)),
@@ -3942,6 +3933,21 @@ impl Workbench {
         };
         self.update_feature_overlay();
     }
+}
+
+/// Lines between nodes in render coordinates; lines with an unknown node are left out.
+fn render_lines(model: &Model, lines: &[[plx_mesh::NodeId; 2]]) -> Vec<[glam::Vec3; 2]> {
+    (lines.iter())
+        .filter_map(|ends| {
+            let [a, b] = ends.map(|id| {
+                model
+                    .mesh
+                    .node_index(id)
+                    .and_then(|n| model.node_position(n))
+            });
+            Some([a?, b?])
+        })
+        .collect()
 }
 
 /// What the results tool bar asks for.

@@ -100,6 +100,7 @@ pub fn master_slave_highlight(model: &Model, master: &Region, slave: &Region) ->
     let mut highlight = region_highlight(model, master);
     let slave = region_highlight(model, slave);
     highlight.secondary_faces = slave.faces;
+    highlight.secondary_lines = slave.lines;
     highlight.nodes.extend(slave.nodes);
     highlight
 }
