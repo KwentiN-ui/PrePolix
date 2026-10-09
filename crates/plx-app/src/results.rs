@@ -1,6 +1,7 @@
 use plx_render::contour::DEFAULT_LEVELS;
 
 use crate::animation::{Animation, AnimationKind, ColorLimits};
+use crate::sound::ModeSound;
 use plx_results::{AnalysisKind, Component, Field, Increment};
 
 /// How the deformed shape is scaled, as in PrePoMax's results toolbar.
@@ -52,6 +53,8 @@ pub struct ResultsView {
     pub time: Option<String>,
     /// Running animation, if the animation window is open.
     pub animation: Option<Animation>,
+    /// Settings of the sound window, if it is open.
+    pub sound: Option<ModeSound>,
     /// Characteristic model size for the automatic scale (PrePoMax: cube root of the bounding
     /// box volume, square root of the area for flat models).
     model_size: f64,
@@ -79,6 +82,7 @@ impl ResultsView {
             date: None,
             time: None,
             animation: None,
+            sound: None,
             model_size: bounds.map_or(1.0, model_size),
         };
         view.increment = view.default_increment();

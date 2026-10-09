@@ -7,7 +7,7 @@ Vorbild für Bedienung und Funktionsumfang ist [PrePoMax](https://prepomax.fs.um
 
 ## Bauen und starten
 
-Voraussetzung ist ein aktuelles stabiles Rust (`rustup`).
+Voraussetzung ist ein aktuelles stabiles Rust (`rustup`). Unter Linux braucht der Build außerdem die ALSA-Entwicklungsdateien für die Audioausgabe (Debian/Ubuntu: `sudo apt install libasound2-dev`, Fedora: `alsa-lib-devel`).
 
 ```sh
 cargo run --release

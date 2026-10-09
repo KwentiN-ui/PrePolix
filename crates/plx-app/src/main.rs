@@ -16,6 +16,7 @@ mod selection;
 mod settings;
 mod setup;
 mod solver_check;
+mod sound;
 mod style;
 mod tree;
 mod tree_icons;
