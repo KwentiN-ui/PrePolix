@@ -65,6 +65,13 @@ impl Row {
     }
 }
 
+/// Width of the table of the pairs found.
+const TABLE_WIDTH: f32 = 640.0;
+/// Width of the properties of the selected pairs beside the table.
+const PROPERTIES_WIDTH: f32 = 290.0;
+/// Width of the value column of the properties.
+const PROPERTY_VALUE_WIDTH: f32 = 150.0;
+
 pub struct ContactSearchDialog {
     distance: f64,
     angle: f64,
@@ -181,12 +188,14 @@ impl ContactSearchDialog {
                 self.parameters(ui, model);
                 ui.separator();
                 ui.label("Kontaktpaare");
+                // Fixed widths: a table sized by the window would grow the window whenever
+                // the properties beside it need more room, without end.
                 ui.horizontal_top(|ui| {
-                    let size = egui::vec2((ui.available_width() - 260.0).max(300.0), 340.0);
+                    let size = egui::vec2(TABLE_WIDTH, 340.0);
                     ui.allocate_ui(size, |ui| self.table(ui));
                     ui.add_space(8.0);
                     ui.vertical(|ui| {
-                        ui.set_width(240.0);
+                        ui.set_width(PROPERTIES_WIDTH);
                         self.properties(ui, model);
                     });
                 });
@@ -511,12 +520,17 @@ impl ContactSearchDialog {
             return;
         };
         let mut row = self.rows[first].clone();
+        // The values keep a fixed width, so that long names do not widen the column.
+        ui.spacing_mut().combo_width = PROPERTY_VALUE_WIDTH;
         egui::Grid::new("pair properties")
             .num_columns(2)
             .show(ui, |ui| {
                 if selected.len() == 1 {
                     ui.label("Name");
-                    ui.text_edit_singleline(&mut row.name);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut row.name)
+                            .desired_width(PROPERTY_VALUE_WIDTH),
+                    );
                     ui.end_row();
                 }
                 ui.label("Typ");
