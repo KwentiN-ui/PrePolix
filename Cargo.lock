@@ -2629,8 +2629,10 @@ dependencies = [
 name = "plx-results"
 version = "0.1.0"
 dependencies = [
+ "glam",
  "plx-core",
  "plx-mesh",
+ "plx-model",
 ]
 
 [[package]]
