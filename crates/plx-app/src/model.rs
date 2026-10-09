@@ -206,7 +206,7 @@ impl Model {
                 deformed = view.show_undeformed;
             }
             if let (Some((_, component)), Some(legend)) = (view.current(), view.legend()) {
-                let amplitude = view.amplitude();
+                let amplitude = view.value_amplitude();
                 let values: Vec<f32> = component.values.iter().map(|v| v * amplitude).collect();
                 scalars = Some(normalize(&values, legend.min, legend.max));
             }

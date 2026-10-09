@@ -167,16 +167,9 @@ impl ResultsView {
         lines
     }
 
-    /// Node index and value of the largest value of the shown component.
+    /// Node index and value of the largest value on screen, animation frame included.
     pub fn maximum(&self) -> Option<(usize, f32)> {
-        let (_, component) = self.current()?;
-        component
-            .values
-            .iter()
-            .copied()
-            .enumerate()
-            .filter(|(_, v)| v.is_finite())
-            .reduce(|a, b| if b.1 > a.1 { b } else { a })
+        self.extreme(|a, b| b > a)
     }
 
     /// Displacement scale factor for the current increment and deformation setting.
@@ -211,9 +204,19 @@ impl ResultsView {
         }
     }
 
-    /// Factor on deformation and values of the shown animation frame; 1 without animation.
+    /// Factor on the deformation of the shown animation frame; 1 without animation.
     pub fn amplitude(&self) -> f32 {
         self.animation.as_ref().map_or(1.0, Animation::amplitude)
+    }
+
+    /// Factor on the shown values: the deformation factor, without its sign for magnitudes and
+    /// equivalent values, which stay positive while a mode shape swings (as in PrePoMax).
+    pub fn value_amplitude(&self) -> f32 {
+        let amplitude = self.amplitude();
+        match self.current() {
+            Some((_, component)) if component.is_invariant() => amplitude.abs(),
+            _ => amplitude,
+        }
     }
 
     /// Opens an animation of the given kind over the step of the shown increment.
@@ -224,10 +227,13 @@ impl ResultsView {
             .map_or(self.increment, |a| a.start_increment);
         self.select_increment(start);
         let step = self.current_increment().map(|i| i.step);
+        let modal = self
+            .current_increment()
+            .is_some_and(|i| matches!(i.kind, AnalysisKind::Frequency | AnalysisKind::Buckling));
         let increments = (0..self.increments.len())
             .filter(|&i| Some(self.increments[i].step) == step)
             .collect();
-        self.animation = Some(Animation::new(kind, increments, start));
+        self.animation = Some(Animation::new(kind, increments, start, modal));
         self.show_animation_frame();
     }
 
@@ -256,8 +262,15 @@ impl ResultsView {
         };
         match (animation.kind, animation.limits) {
             (AnimationKind::ScaleFactor, ColorLimits::CurrentFrame) => {
-                let a = animation.amplitude();
-                Some((a * min, a * max))
+                // A negative factor swaps the ends.
+                let (a, b) = (self.value_amplitude() * min, self.value_amplitude() * max);
+                Some((a.min(b), a.max(b)))
+            }
+            // A mode shape swings every value between minus and plus its full size.
+            (AnimationKind::ScaleFactor, ColorLimits::AllFrames)
+                if animation.modal && !component.is_invariant() =>
+            {
+                Some((min.min(-max), max.max(-min)))
             }
             // Scaling runs every value from zero to its full size.
             (AnimationKind::ScaleFactor, ColorLimits::AllFrames) => {
@@ -278,16 +291,21 @@ impl ResultsView {
         }
     }
 
-    /// Node index and value of the smallest value of the shown component.
+    /// Node index and value of the smallest value on screen, animation frame included.
     pub fn minimum(&self) -> Option<(usize, f32)> {
+        self.extreme(|a, b| b < a)
+    }
+
+    fn extreme(&self, better: impl Fn(f32, f32) -> bool) -> Option<(usize, f32)> {
         let (_, component) = self.current()?;
+        let amplitude = self.value_amplitude();
         component
             .values
             .iter()
-            .copied()
+            .map(|v| v * amplitude)
             .enumerate()
             .filter(|(_, v)| v.is_finite())
-            .reduce(|a, b| if b.1 < a.1 { b } else { a })
+            .reduce(|a, b| if better(a.1, b.1) { b } else { a })
     }
 
     pub fn legend(&self) -> Option<Legend> {
@@ -464,6 +482,32 @@ mod tests {
         view.stop_animation();
         assert_eq!(view.increment, 0);
         assert_eq!(view.amplitude(), 1.0);
+    }
+
+    #[test]
+    fn mode_shape_animation_swings_signed_values_but_not_magnitudes() {
+        let mode = [[0.0, 0.0, 1.0], [0.0, 0.0, 3.0]];
+        let mut view = ResultsView::new(
+            vec![increment(1, 1, AnalysisKind::Frequency, &mode)],
+            Some(([0.0; 3], [10.0; 3])),
+        );
+        view.component = 3; // U3
+        view.start_animation(AnimationKind::ScaleFactor);
+        let animation = view.animation.as_mut().unwrap();
+        assert!(animation.modal);
+        animation.go_to(0);
+        assert_eq!(view.amplitude(), -1.0);
+        assert_eq!(view.legend().map(|l| (l.min, l.max)), Some((-3.0, -1.0)));
+        assert_eq!(view.maximum(), Some((0, -1.0)));
+        assert_eq!(view.minimum(), Some((1, -3.0)));
+        view.animation.as_mut().unwrap().limits = ColorLimits::AllFrames;
+        assert_eq!(view.legend().map(|l| (l.min, l.max)), Some((-3.0, 3.0)));
+
+        view.component = 0; // ALL stays positive
+        assert_eq!(view.value_amplitude(), 1.0);
+        assert_eq!(view.legend().map(|l| (l.min, l.max)), Some((0.0, 3.0)));
+        view.animation.as_mut().unwrap().limits = ColorLimits::CurrentFrame;
+        assert_eq!(view.legend().map(|l| (l.min, l.max)), Some((1.0, 3.0)));
     }
 
     #[test]
