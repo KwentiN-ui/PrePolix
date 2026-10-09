@@ -4,8 +4,9 @@
 use std::path::PathBuf;
 
 use egui::{RichText, Ui, vec2};
+use plx_model::convert::Conversion;
 use plx_model::library::{LibraryNode, LibraryPath, ROOT_NAME, name_for_model};
-use plx_model::{Material, MaterialLibrary};
+use plx_model::{Material, MaterialLibrary, Quantity, UnitSystem};
 
 use crate::icons::{self, Icon};
 use crate::keywords::{frame, tree_row};
@@ -42,6 +43,8 @@ pub struct MaterialLibraryEditor {
     load_error: Option<String>,
     library_changed: bool,
     materials: Vec<Material>,
+    /// Unit system of the model's materials.
+    units: UnitSystem,
     materials_changed: bool,
     /// Selected node of the library tree; the empty path is the root.
     library_selected: Option<LibraryPath>,
@@ -58,7 +61,7 @@ pub struct MaterialLibraryEditor {
 }
 
 impl MaterialLibraryEditor {
-    pub fn new(materials: &[Material]) -> Self {
+    pub fn new(materials: &[Material], units: UnitSystem) -> Self {
         let file = library_file();
         let (library, file, load_error) = match file.as_deref().map(plx_io::library::read_library) {
             Some(Ok(library)) => (library, file, None),
@@ -75,6 +78,7 @@ impl MaterialLibraryEditor {
             load_error,
             library_changed: false,
             materials: materials.to_vec(),
+            units,
             materials_changed: false,
             library_selected: None,
             material_selected: None,
@@ -108,11 +112,12 @@ impl MaterialLibraryEditor {
         self.library.material(self.library_selected.as_deref()?)
     }
 
-    /// The material shown in the preview: the one selected in the list used last.
-    fn previewed(&self) -> Option<&Material> {
+    /// The material shown in the preview, the one selected in the list used last, with the
+    /// units of its values.
+    fn previewed(&self) -> Option<(&Material, UnitSystem)> {
         match self.side {
-            Side::Library => self.selected_library_material(),
-            Side::Model => self.materials.get(self.material_selected?),
+            Side::Library => Some((self.selected_library_material()?, self.library.units)),
+            Side::Model => Some((self.materials.get(self.material_selected?)?, self.units)),
         }
     }
 
@@ -125,6 +130,7 @@ impl MaterialLibraryEditor {
             return;
         };
         let mut material = material.clone();
+        material.convert_units(&Conversion::new(self.library.units, self.units));
         material.name = name_for_model(
             &material.name,
             self.materials.iter().map(|m| m.name.as_str()),
@@ -143,7 +149,9 @@ impl MaterialLibraryEditor {
             );
             return;
         };
-        if let Some(path) = self.library.add_material(selected, &self.materials[index]) {
+        let mut material = self.materials[index].clone();
+        material.convert_units(&Conversion::new(self.units, self.library.units));
+        if let Some(path) = self.library.add_material(selected, &material) {
             self.library_changed = true;
             self.select_library(path);
         }
@@ -551,7 +559,7 @@ impl MaterialLibraryEditor {
     /// material and their values, read only.
     fn preview_window(&mut self, ctx: &egui::Context, at: egui::Pos2) {
         let mut open = true;
-        let material = self.previewed().cloned();
+        let material = self.previewed().map(|(m, units)| (m.clone(), units));
         egui::Window::new("Materialeigenschaften")
             .open(&mut open)
             .collapsible(false)
@@ -560,7 +568,7 @@ impl MaterialLibraryEditor {
             // Follows the editor, so that it never covers it.
             .current_pos(at)
             .show(ctx, |ui| {
-                let Some(material) = material else {
+                let Some((material, units)) = material else {
                     ui.weak("Kein Material gewählt.");
                     return;
                 };
@@ -579,7 +587,7 @@ impl MaterialLibraryEditor {
                     });
                 ui.add_space(6.0);
                 ui.strong("Materialmodelle");
-                let models = material_models(&material);
+                let models = material_models(&material, units);
                 if !models.iter().any(|(label, _)| *label == self.preview_model)
                     && let Some((first, _)) = models.first()
                 {
@@ -616,7 +624,7 @@ impl MaterialLibraryEditor {
                         });
                 });
                 ui.add_space(4.0);
-                ui.weak("Einheiten: mm, t, s");
+                ui.weak(format!("Einheitensystem: {}", units.label()));
             });
         if !open {
             self.preview = false;
@@ -628,19 +636,31 @@ const DENSITY: &str = "Dichte";
 const ELASTIC: &str = "Elastisch";
 
 /// Material models with their property rows (name, value with unit).
-fn material_models(material: &Material) -> Vec<(&'static str, Vec<(&'static str, String)>)> {
+fn material_models(
+    material: &Material,
+    units: UnitSystem,
+) -> Vec<(&'static str, Vec<(&'static str, String)>)> {
+    let with_unit = |value, quantity| {
+        let unit = units.unit(quantity);
+        let value = format_value(value);
+        if unit.is_empty() {
+            value
+        } else {
+            format!("{value} {unit}")
+        }
+    };
     let mut models = Vec::new();
     if let Some(density) = material.density {
         models.push((
             DENSITY,
-            vec![("Dichte", format!("{} t/mm³", format_value(density)))],
+            vec![("Dichte", with_unit(density, Quantity::Density))],
         ));
     }
     if let Some(elastic) = material.elastic {
         models.push((
             ELASTIC,
             vec![
-                ("E-Modul", format!("{} MPa", format_value(elastic.young))),
+                ("E-Modul", with_unit(elastic.young, Quantity::Pressure)),
                 ("Querkontraktionszahl", format_value(elastic.poisson)),
             ],
         ));
@@ -742,7 +762,11 @@ mod tests {
     use super::*;
 
     fn editor() -> MaterialLibraryEditor {
-        let mut editor = MaterialLibraryEditor::new(&[]);
+        editor_in(UnitSystem::MmTonSC)
+    }
+
+    fn editor_in(units: UnitSystem) -> MaterialLibraryEditor {
+        let mut editor = MaterialLibraryEditor::new(&[], units);
         // Tests never touch the user's own library file.
         editor.library = MaterialLibrary::default();
         editor.file = None;
@@ -786,10 +810,28 @@ mod tests {
     #[test]
     fn preview_lists_the_material_models() {
         let editor = editor();
-        let models = material_models(editor.previewed().unwrap());
+        let (material, units) = editor.previewed().unwrap();
+        let models = material_models(material, units);
         let labels: Vec<&str> = models.iter().map(|(label, _)| *label).collect();
         assert_eq!(labels, [DENSITY, ELASTIC]);
         assert_eq!(models[0].1[0].1, "7.85E-9 t/mm³");
         assert_eq!(models[1].1[0].1, "210000 MPa");
+    }
+
+    #[test]
+    fn materials_are_converted_between_library_and_model_units() {
+        let mut editor = editor_in(UnitSystem::MKgSC);
+        editor.copy_to_model();
+        let steel = &editor.materials[0];
+        assert!((steel.density.unwrap() - 7850.0).abs() < 1e-9);
+        assert!((steel.elastic.unwrap().young - 2.1e11).abs() < 1.0);
+        let (_, units) = editor.previewed().unwrap();
+        assert_eq!(units, UnitSystem::MKgSC);
+        // Back in the library, the values are in its units again.
+        editor.select_library(vec![0, 0, 0]);
+        editor.side = Side::Model;
+        editor.copy_to_library();
+        let copy = editor.selected_library_material().unwrap();
+        assert!((copy.elastic.unwrap().young - 210_000.0).abs() < 1e-6);
     }
 }

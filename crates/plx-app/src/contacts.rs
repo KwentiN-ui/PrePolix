@@ -6,8 +6,8 @@
 use egui::{RichText, Ui};
 use plx_mesh::FeMesh;
 use plx_model::{
-    ContactMethod, ContactPair, FeModel, Friction, GapConductance, InteractionProperty, Region,
-    SurfaceBehavior, SurfaceInteraction, Tie,
+    ContactMethod, ContactPair, FeModel, Friction, GapConductance, InteractionProperty, Quantity,
+    Region, SurfaceBehavior, SurfaceInteraction, Tie, UnitSystem,
 };
 
 use crate::icons::{self, Icon};
@@ -15,7 +15,7 @@ use crate::keywords::{frame, tree_row};
 use crate::model::{Highlight, Model};
 use crate::numeric;
 use crate::selection::Target;
-use crate::setup::{FACE_SOURCES, RegionDraft, number, region_highlight};
+use crate::setup::{FACE_SOURCES, RegionDraft, region_highlight};
 
 /// Which of the two regions clicks in the 3D view pick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -111,18 +111,31 @@ fn color_row(ui: &mut Ui, label: &str, color: &mut [u8; 3]) {
 }
 
 /// A value that may be left to CalculiX: a check box and the number.
-fn optional_row(ui: &mut Ui, label: &str, value: &mut Option<f64>, default: f64) {
+fn optional_row(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut Option<f64>,
+    default: f64,
+    (units, quantity): (UnitSystem, Quantity),
+) {
     let mut set = value.is_some();
     ui.checkbox(&mut set, label);
     let mut number_value = value.unwrap_or(default);
-    ui.add_enabled(set, number(&mut number_value));
+    ui.add_enabled(set, numeric::physical(&mut number_value, units, quantity));
     *value = set.then_some(number_value);
     ui.end_row();
 }
 
 /// The properties of a tie below the constraint dialog's type list.
 pub fn tie_form(ui: &mut Ui, model: &Model, tie: &mut Tie, regions: &mut MasterSlave) {
-    optional_row(ui, "Positionstoleranz", &mut tie.position_tolerance, 0.05);
+    let length = (model.fe.properties.units, Quantity::Length);
+    optional_row(
+        ui,
+        "Positionstoleranz",
+        &mut tie.position_tolerance,
+        0.05,
+        length,
+    );
     ui.label("");
     ui.checkbox(
         &mut tie.adjust,
@@ -179,7 +192,14 @@ pub fn contact_pair_form(
     );
     ui.end_row();
     if pair.adjust {
-        optional_row(ui, "Abstand für Adjust", &mut pair.adjustment_size, 0.01);
+        let length = (model.fe.properties.units, Quantity::Length);
+        optional_row(
+            ui,
+            "Abstand für Adjust",
+            &mut pair.adjustment_size,
+            0.01,
+            length,
+        );
     }
     regions.ui(ui, model);
     color_row(ui, "Farbe Master", &mut pair.master_color);
@@ -225,6 +245,7 @@ pub fn interaction_dialog(
     ui: &mut Ui,
     interaction: &mut SurfaceInteraction,
     view: &mut InteractionView,
+    units: UnitSystem,
 ) {
     // As wide as the title, which grows with the name.
     ui.set_min_width(420.0);
@@ -263,6 +284,7 @@ pub fn interaction_dialog(
                 category(ui, property.name());
                 let mut rows = Rows {
                     focus: &mut view.focus,
+                    units,
                 };
                 egui::Grid::new(("interaction properties", property.name()))
                     .num_columns(2)
@@ -421,6 +443,7 @@ fn group(ui: &mut Ui, title: &str, contents: impl FnOnce(&mut Ui)) {
 /// Rows of the property grid; a click on a row or its editor shows its description.
 struct Rows<'a> {
     focus: &'a mut Option<Description>,
+    units: UnitSystem,
 }
 
 impl Rows<'_> {
@@ -438,9 +461,10 @@ impl Rows<'_> {
         ui.end_row();
     }
 
-    fn value(&mut self, ui: &mut Ui, description: Description, value: &mut f64) {
+    fn value(&mut self, ui: &mut Ui, description: Description, value: &mut f64, of: Quantity) {
+        let units = self.units;
         self.row(ui, description, |ui| {
-            ui.add_sized(field_size(ui), number(value))
+            ui.add_sized(field_size(ui), numeric::physical(value, units, of))
         });
     }
 
@@ -451,13 +475,17 @@ impl Rows<'_> {
         description: Description,
         value: &mut Option<f64>,
         default: f64,
+        of: Quantity,
     ) {
+        let units = self.units;
         let mut set = value.is_some();
         let mut number_value = value.unwrap_or(default);
         let label = ui.checkbox(&mut set, description.0);
         let size = field_size(ui);
         let response = ui
-            .add_enabled_ui(set, |ui| ui.add_sized(size, number(&mut number_value)))
+            .add_enabled_ui(set, |ui| {
+                ui.add_sized(size, numeric::physical(&mut number_value, units, of))
+            })
             .inner;
         if label.changed() || response.has_focus() || response.changed() {
             *self.focus = Some(description);
@@ -489,26 +517,49 @@ impl Rows<'_> {
         match behavior {
             SurfaceBehavior::Hard => {}
             SurfaceBehavior::Linear { k, sigma_inf, c0 } => {
-                let k_text = "Steigung der Kennlinie, etwa 5- bis 50-mal der E-Modul.";
-                self.value(ui, ("K", k_text), k);
+                let k_text = "Steigung der Kennlinie, etwa 5- bis 50-mal der E-Modul je Länge.";
+                self.value(ui, ("K", k_text), k, Quantity::ForcePerVolume);
                 let sigma_text = "Zugspannung bei großem Spalt, etwa 0,25 % der größten \
                                   erwarteten Vergleichsspannung.";
-                self.value(ui, ("Sigma unendlich", sigma_text), sigma_inf);
+                self.value(
+                    ui,
+                    ("Sigma unendlich", sigma_text),
+                    sigma_inf,
+                    Quantity::Pressure,
+                );
                 let c0_text = "Optionaler Parameter c0 der linearen Kennlinie, siehe \
                                *SURFACE BEHAVIOR im CalculiX-Handbuch.";
-                self.optional(ui, ("c0", c0_text), c0, 1.0);
+                self.optional(ui, ("c0", c0_text), c0, 1.0, Quantity::Length);
             }
             SurfaceBehavior::Exponential { c0, p0 } => {
                 let c0_text = "Spalt, bei dem der Kontaktdruck auf 1 % von p0 gefallen ist.";
-                self.value(ui, ("c0", c0_text), c0);
-                self.value(ui, ("p0", "Kontaktdruck bei Spalt null."), p0);
+                self.value(ui, ("c0", c0_text), c0, Quantity::Length);
+                self.value(
+                    ui,
+                    ("p0", "Kontaktdruck bei Spalt null."),
+                    p0,
+                    Quantity::Pressure,
+                );
             }
             SurfaceBehavior::Tabular(rows) => {
                 let text = "Je Zeile ein Kontaktdruck und die zugehörige Eindringung.";
-                self.table(ui, ("Tabelle", text), rows, ["Druck", "Eindringung"]);
+                self.table(
+                    ui,
+                    ("Tabelle", text),
+                    rows,
+                    [
+                        ("Druck", Quantity::Pressure),
+                        ("Eindringung", Quantity::Length),
+                    ],
+                );
             }
             SurfaceBehavior::Tied { k } => {
-                self.value(ui, ("K", "Steifigkeit der Verbindung."), k);
+                self.value(
+                    ui,
+                    ("K", "Steifigkeit der Verbindung."),
+                    k,
+                    Quantity::ForcePerVolume,
+                );
             }
         }
     }
@@ -523,7 +574,13 @@ impl Rows<'_> {
         });
         let text = "Steigung lambda der Schubspannung über dem Schlupf im Haftbereich; \
                     ohne Angabe wählt CalculiX sie selbst.";
-        self.optional(ui, ("Haftsteigung", text), &mut friction.stick_slope, 1e5);
+        self.optional(
+            ui,
+            ("Haftsteigung", text),
+            &mut friction.stick_slope,
+            1e5,
+            Quantity::ForcePerVolume,
+        );
     }
 
     fn gap_conductance(&mut self, ui: &mut Ui, conductance: &mut GapConductance) {
@@ -547,7 +604,12 @@ impl Rows<'_> {
         match conductance {
             GapConductance::Constant(value) => {
                 let text = "Wärmestrom je Fläche und Temperaturdifferenz über den Spalt.";
-                self.value(ui, ("Leitwert", text), value);
+                self.value(
+                    ui,
+                    ("Leitwert", text),
+                    value,
+                    Quantity::HeatTransferCoefficient,
+                );
             }
             GapConductance::Tabular(rows) => {
                 let text = "Je Zeile ein Leitwert mit dem Kontaktdruck und der Temperatur, \
@@ -556,7 +618,11 @@ impl Rows<'_> {
                     ui,
                     ("Tabelle", text),
                     rows,
-                    ["Leitwert", "Druck", "Temperatur"],
+                    [
+                        ("Leitwert", Quantity::HeatTransferCoefficient),
+                        ("Druck", Quantity::Pressure),
+                        ("Temperatur", Quantity::Temperature),
+                    ],
                 );
             }
         }
@@ -568,21 +634,31 @@ impl Rows<'_> {
         ui: &mut Ui,
         description: Description,
         rows: &mut Vec<[f64; N]>,
-        header: [&str; N],
+        columns: [(&str, Quantity); N],
     ) {
+        let units = self.units;
         self.row(ui, description, |ui| {
             ui.vertical(|ui| {
                 let mut response = ui.response();
                 egui::Grid::new(("interaction table", description.1)).show(ui, |ui| {
-                    for title in header {
-                        ui.strong(title);
+                    for (title, quantity) in columns {
+                        let unit = units.unit(quantity);
+                        if unit.is_empty() {
+                            ui.strong(title);
+                        } else {
+                            ui.strong(format!("{title} [{unit}]"));
+                        }
                     }
                     ui.end_row();
                     let mut remove = None;
                     let rows_len = rows.len();
                     for (i, row) in rows.iter_mut().enumerate() {
-                        for value in row.iter_mut() {
-                            response |= ui.add(number(value).min_decimals(1));
+                        for (value, (_, quantity)) in row.iter_mut().zip(columns) {
+                            // The unit stands in the column title.
+                            let field = numeric::without_unit(value, units, quantity)
+                                .speed(0.0)
+                                .custom_formatter(|v, _| numeric::format_physical(v));
+                            response |= ui.add(field);
                         }
                         if ui
                             .add_enabled(rows_len > 1, egui::Button::new("x").small())

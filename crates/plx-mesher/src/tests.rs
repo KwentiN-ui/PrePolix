@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use plx_model::{Algorithm2d, Algorithm3d, MeshSetupItem, MeshSetupKind};
+use plx_model::{Algorithm2d, Algorithm3d, MeshSetupItem, MeshSetupKind, UnitSystem};
 
 use super::*;
 
@@ -71,7 +71,7 @@ fn step_files_import_with_faces_and_edges() {
     if !gmsh_available() {
         return;
     }
-    let import = import_cad(&testdata("platte_mit_loch.step")).unwrap();
+    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC).unwrap();
     let display = &import.display;
     assert_eq!(display.solids, 1);
     // Four sides, top and bottom with the hole, and the hole's wall.
@@ -104,12 +104,36 @@ fn step_files_import_with_faces_and_edges() {
     assert_eq!(geometry.meshing.max_size, 5.0);
 }
 
+/// The extent of the geometry's display mesh along x.
+fn width(display: &GeometryDisplay) -> f64 {
+    let (min, max) = display.mesh.bounds().unwrap();
+    max[0] - min[0]
+}
+
+#[test]
+fn step_files_import_in_the_models_length_unit() {
+    if !gmsh_available() {
+        return;
+    }
+    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MKgSC).unwrap();
+    assert!((width(&import.display) - 0.1).abs() < 1e-6);
+    assert_eq!(import.geometry.meshing.max_size, 0.005);
+    // Scaled back to millimetres, the plate is as wide as one read in millimetres.
+    let scaled = scale_geometry(&import.geometry, 1000.0).unwrap();
+    let display = tessellate(&scaled).unwrap();
+    assert!((width(&display) - 100.0).abs() < 1e-3);
+    assert_eq!(display.faces, import.display.faces);
+    // The option does not stick to later imports.
+    let again = tessellate(&import.geometry).unwrap();
+    assert!((width(&again) - 0.1).abs() < 1e-6);
+}
+
 #[test]
 fn quadratic_tetrahedra_follow_calculix_numbering() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("platte_mit_loch.step"))
+    let mut geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC)
         .unwrap()
         .geometry;
     geometry.meshing.max_size = 8.0;
@@ -147,7 +171,9 @@ fn every_solid_becomes_a_part_and_size_controls_the_count() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("zwei_bloecke.step")).unwrap().geometry;
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
     geometry.meshing.second_order = false;
     geometry.meshing.max_size = 5.0;
     let coarse = generate_mesh(&geometry).unwrap().mesh;
@@ -178,7 +204,9 @@ fn a_remeshed_part_replaces_its_old_mesh_and_leaves_the_others() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("zwei_bloecke.step")).unwrap().geometry;
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
     geometry.meshing.second_order = false;
     geometry.meshing.max_size = 5.0;
     assert_eq!(part_names(&geometry).unwrap(), ["SOLID-1", "SOLID-2"]);
@@ -229,7 +257,7 @@ fn local_mesh_sizes_refine_faces_and_edges() {
     if !gmsh_available() {
         return;
     }
-    let import = import_cad(&testdata("platte_mit_loch.step")).unwrap();
+    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC).unwrap();
     let mut geometry = import.geometry;
     geometry.meshing.max_size = 8.0;
     geometry.meshing.second_order = false;
@@ -270,7 +298,7 @@ fn every_gmsh_algorithm_gives_valid_tetrahedra() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("platte_mit_loch.step"))
+    let mut geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC)
         .unwrap()
         .geometry;
     geometry.meshing.max_size = 8.0;
@@ -306,11 +334,13 @@ fn invalid_sizes_and_files_are_reported() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("zwei_bloecke.step")).unwrap().geometry;
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
     geometry.meshing.max_size = 0.0;
     assert!(generate_mesh(&geometry).is_err());
-    assert!(import_cad(&testdata("wuerfel_c3d10.inp")).is_err());
-    assert!(import_cad(&testdata("gibt_es_nicht.step")).is_err());
+    assert!(import_cad(&testdata("wuerfel_c3d10.inp"), UnitSystem::MmTonSC).is_err());
+    assert!(import_cad(&testdata("gibt_es_nicht.step"), UnitSystem::MmTonSC).is_err());
 }
 
 #[test]

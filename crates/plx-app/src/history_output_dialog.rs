@@ -529,7 +529,9 @@ mod tests {
     fn results() -> Model {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata/kragbalken_c3d8.frd");
-        crate::model::load(&path).unwrap().model
+        crate::model::load(&path, plx_model::UnitSystem::MmTonSC)
+            .unwrap()
+            .model
     }
 
     #[test]

@@ -7,7 +7,7 @@ use plx_io::frd::{FrdImport, read_frd};
 use plx_io::inp::{InpImport, read_inp};
 use plx_mesh::{ElementId, FeMesh, NodeId, PartSkin, extract_part_skin};
 use plx_mesher::{CadEntity, GeometryDisplay};
-use plx_model::{FeModel, Geometry};
+use plx_model::{FeModel, Geometry, UnitSystem};
 use plx_render::contour::normalize;
 use plx_render::{
     ClipPlane, RenderMesh, SectionCells, Vertex, lighten, part_color, part_render_mesh,
@@ -163,12 +163,15 @@ pub struct LoadedModel {
     pub geometry_view: Option<Model>,
 }
 
-pub fn load(path: &Path) -> Result<LoadedModel, String> {
+/// Loads a project, input, results or CAD file. CAD geometry is read in the length unit of
+/// `units`, the unit system of the model it goes into.
+pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     let start = Instant::now();
     let extension = |e: &str| path.extension().is_some_and(|x| x.eq_ignore_ascii_case(e));
     if plx_mesher::is_cad_file(path) {
-        let import = plx_mesher::import_cad(path).map_err(|e| e.to_string())?;
+        let import = plx_mesher::import_cad(path, units).map_err(|e| e.to_string())?;
         let mut model = Model::new(path, FeMesh::default());
+        model.fe.properties.units = units;
         model.geometry = Some(import.geometry);
         model.warnings = import.warnings;
         let view = Model::geometry_view(path, import.display);
@@ -946,7 +949,7 @@ mod tests {
 
     #[test]
     fn loads_testdata_with_part_summaries() {
-        let loaded = load(&testdata("platte_mit_stuetzen.inp")).unwrap();
+        let loaded = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::MmTonSC).unwrap();
         let model = &loaded.model;
         assert_eq!(model.included_files, 1);
         assert_eq!(model.parts.len(), 2);
@@ -960,7 +963,9 @@ mod tests {
 
     #[test]
     fn renamed_parts_keep_their_references() {
-        let mut model = load(&testdata("platte_mit_stuetzen.inp")).unwrap().model;
+        let mut model = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         let (first, second) = (model.parts[0].name.clone(), model.parts[1].name.clone());
         model.fe.sections.push(plx_model::Section {
             name: "Section-1".into(),
@@ -985,14 +990,16 @@ mod tests {
 
     #[test]
     fn projects_open_with_their_fe_model() {
-        let mut model = load(&testdata("platte_mit_stuetzen.inp")).unwrap().model;
+        let mut model = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         assert!(!model.is_project());
         model.fe.steps.push(plx_model::Step::new_static("Step-1"));
         let dir = std::env::temp_dir().join(format!("prepolix-model-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("platte.plx");
         plx_io::project::save_project(&path, None, &model.mesh, &model.fe).unwrap();
-        let loaded = load(&path).unwrap();
+        let loaded = load(&path, UnitSystem::MmTonSC).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(loaded.model.is_project());
         assert!(!loaded.model.is_results());
@@ -1002,7 +1009,9 @@ mod tests {
 
     #[test]
     fn hidden_parts_do_not_count_for_fitting() {
-        let mut model = load(&testdata("platte_mit_stuetzen.inp")).unwrap().model;
+        let mut model = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         model.parts[1].visible = false;
         let (min, max) = model.visible_bounds().unwrap();
         assert_eq!(max.z - min.z, 0.0);
@@ -1010,7 +1019,7 @@ mod tests {
 
     #[test]
     fn loads_frd_results_with_deformation() {
-        let loaded = load(&testdata("kragbalken_c3d8.frd")).unwrap();
+        let loaded = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::MmTonSC).unwrap();
         let model = &loaded.model;
         assert_eq!(model.parts[0].name, "STEEL");
         let view = model.results.as_ref().unwrap();
@@ -1031,7 +1040,9 @@ mod tests {
     #[test]
     fn transformed_copies_are_drawn_with_mirrored_values() {
         use plx_results::transformation::{SymmetryPlane, Transformation};
-        let mut model = load(&testdata("kragbalken_c3d8.frd")).unwrap().model;
+        let mut model = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         let single = model.render_meshes()[0].vertices.len();
         let view = model.results.as_mut().unwrap();
         let fields = &view.current_increment().unwrap().fields;
@@ -1057,7 +1068,9 @@ mod tests {
 
     #[test]
     fn multi_part_results_open_in_true_scale() {
-        let single = load(&testdata("kragbalken_c3d8.frd")).unwrap().model;
+        let single = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         assert_eq!(
             single.results.unwrap().deformation,
             Deformation::Automatic(1.0)
@@ -1071,7 +1084,7 @@ mod tests {
         );
         let path = std::env::temp_dir().join("prepolix_test_zwei_parts.frd");
         std::fs::write(&path, text).unwrap();
-        let multi = load(&path).unwrap().model;
+        let multi = load(&path, UnitSystem::MmTonSC).unwrap().model;
         std::fs::remove_file(&path).ok();
         assert_eq!(multi.parts.len(), 2);
         assert_eq!(multi.results.unwrap().deformation, Deformation::TrueScale);
@@ -1079,7 +1092,9 @@ mod tests {
 
     #[test]
     fn picking_finds_faces_and_nodes() {
-        let model = load(&testdata("kragbalken_c3d8.inp")).unwrap().model;
+        let model = load(&testdata("kragbalken_c3d8.inp"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         // The beam spans 0..100 x 0..10 x 0..10; look straight down at x = 95, y = 5.
         let origin = Vec3::new(95.0, 5.0, 50.0) - model.origin.as_vec3();
         let hit = model.pick(origin, Vec3::NEG_Z).unwrap();
@@ -1107,7 +1122,7 @@ mod tests {
         if !gmsh_available() {
             return;
         }
-        let loaded = load(&testdata("zwei_bloecke.step")).unwrap();
+        let loaded = load(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC).unwrap();
         let view = loaded.geometry_view.unwrap();
         assert!(view.is_geometry());
         assert_eq!(view.parts.len(), 2);
@@ -1133,7 +1148,7 @@ mod tests {
         let path = dir.join("bloecke.plx");
         plx_io::project::save_project(&path, model.geometry.as_ref(), &model.mesh, &model.fe)
             .unwrap();
-        let reopened = load(&path).unwrap();
+        let reopened = load(&path, UnitSystem::MmTonSC).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(reopened.model.geometry, Some(geometry));
         assert_eq!(
@@ -1159,7 +1174,9 @@ mod tests {
         use plx_model::{
             BoundaryCondition, BoundaryKind, Elastic, Material, Region, Section, Step,
         };
-        let mut model = load(&testdata("platte_mit_loch.step")).unwrap().model;
+        let mut model = load(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         let mut geometry = model.geometry.clone().unwrap();
         geometry.meshing.max_size = 4.0;
         model.set_mesh(plx_mesher::generate_mesh(&geometry).unwrap().mesh);
@@ -1225,6 +1242,6 @@ mod tests {
 
     #[test]
     fn file_without_elements_is_rejected() {
-        assert!(load(&testdata("platte_knoten.inp")).is_err());
+        assert!(load(&testdata("platte_knoten.inp"), UnitSystem::MmTonSC).is_err());
     }
 }
