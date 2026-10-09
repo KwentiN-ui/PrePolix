@@ -622,7 +622,7 @@ impl FeatureDialog {
             values.len()
         ));
         let distances: Vec<f64> = points.iter().map(|p| p.distance).collect();
-        plot(ui, &distances, &values);
+        plot(ui, &distances, &values, "Abstand", false);
         ui.horizontal(|ui| {
             if ui.button("In Zwischenablage kopieren").clicked() {
                 ui.ctx()
@@ -1089,9 +1089,10 @@ fn point_ref_rows(
     }
 }
 
-/// Values over the distance along the path; gaps where the path leaves the mesh. Hovering
-/// shows the value at the nearest point.
-fn plot(ui: &mut Ui, distances: &[f64], values: &[f64]) {
+/// Values over the distance along a path or over time, with `x_label` under the axis; gaps
+/// where values are not finite, e.g. where a path leaves the mesh. `markers` draws a dot at
+/// every point. Hovering shows the value at the nearest point.
+pub(crate) fn plot(ui: &mut Ui, distances: &[f64], values: &[f64], x_label: &str, markers: bool) {
     let width = ui.available_width().max(360.0);
     let (rect, response) = ui.allocate_exact_size(vec2(width, 220.0), egui::Sense::hover());
     let painter = ui.painter_at(rect);
@@ -1099,10 +1100,13 @@ fn plot(ui: &mut Ui, distances: &[f64], values: &[f64]) {
     let area = Rect::from_min_max(rect.min + vec2(64.0, 10.0), rect.max - vec2(12.0, 28.0));
     let axis_stroke = Stroke::new(1.0, Color32::from_gray(80));
     let grid = Stroke::new(1.0, Color32::from_gray(225));
-    let (x0, x1) = (
+    let (mut x0, mut x1) = (
         distances.first().copied().unwrap_or(0.0),
         distances.last().copied().unwrap_or(1.0),
     );
+    if x1 - x0 <= 1e-12 * x0.abs().max(x1.abs()).max(1e-30) {
+        (x0, x1) = (x0 - 1.0, x1 + 1.0);
+    }
     let (mut y0, mut y1) = values
         .iter()
         .filter(|v| v.is_finite())
@@ -1173,6 +1177,11 @@ fn plot(ui: &mut Ui, distances: &[f64], values: &[f64]) {
         }
     }
     flush(&mut segment);
+    if markers {
+        for (&x, &y) in distances.iter().zip(values).filter(|(_, y)| y.is_finite()) {
+            painter.circle_filled(to_screen(x, y), 3.0, color);
+        }
+    }
     if let Some(hover) = response.hover_pos().filter(|p| area.contains(*p)) {
         let nearest = (distances.iter().zip(values))
             .filter(|(_, y)| y.is_finite())
@@ -1195,7 +1204,7 @@ fn plot(ui: &mut Ui, distances: &[f64], values: &[f64]) {
     painter.text(
         pos2(rect.left() + 4.0, rect.bottom() - 2.0),
         egui::Align2::LEFT_BOTTOM,
-        "Abstand",
+        x_label,
         egui::FontId::proportional(12.0),
         text,
     );

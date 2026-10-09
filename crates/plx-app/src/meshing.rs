@@ -14,8 +14,8 @@ use plx_model::{
 
 use crate::model::{Highlight, Hit, Model};
 use crate::numeric;
-use crate::selection::{History, Operation};
-use crate::viewport::Preview;
+use crate::selection::{History, Operation, PartPicks, Picker};
+use crate::viewport::{BoxSelect, Preview};
 
 const ERROR: egui::Color32 = egui::Color32::from_rgb(200, 0, 0);
 
@@ -163,8 +163,8 @@ const ALGORITHMS_3D: [(Algorithm3d, &str); 3] = [
     (Algorithm3d::Hxt, "HXT"),
 ];
 
-/// PrePoMax's dialog to create or edit a mesh setup item. Parts are ticked in the dialog or
-/// clicked in the 3D view, faces and edges of a local mesh size are clicked on the geometry.
+/// PrePoMax's dialog to create or edit a mesh setup item. Parts, and the faces and edges of
+/// a local mesh size, are clicked on the geometry.
 pub struct MeshItemEditor {
     draft: MeshSetupItem,
     /// Index of the edited item; `None` creates a new one.
@@ -173,6 +173,10 @@ pub struct MeshItemEditor {
     others: Vec<String>,
     /// Faces and edges of a local mesh size.
     picks: History<CadEntity>,
+    /// Parts of the other item types, written to the draft as they change.
+    parts: PartPicks,
+    /// The selection window, restricted to parts while they are picked.
+    picker: Picker,
     error: Option<String>,
     /// Unit system of the model, the unit of the sizes.
     units: UnitSystem,
@@ -195,6 +199,8 @@ impl MeshItemEditor {
             index: None,
             others,
             picks: History::default(),
+            parts: PartPicks::default(),
+            picker: Picker::default(),
             error: None,
             units,
         }
@@ -213,11 +219,20 @@ impl MeshItemEditor {
             ),
             _ => History::default(),
         };
+        let parts = match &draft.kind {
+            MeshSetupKind::MeshingParameters { parts, .. }
+            | MeshSetupKind::TetrahedralGmsh { parts, .. } => {
+                PartPicks::from_names(parts.iter().cloned())
+            }
+            MeshSetupKind::LocalMeshSize { .. } => PartPicks::default(),
+        };
         Some(Self {
             draft,
             index: Some(index),
             others,
             picks,
+            parts,
+            picker: Picker::default(),
             error: None,
             units,
         })
@@ -243,7 +258,7 @@ impl MeshItemEditor {
     ) -> MeshItemResult {
         let mut result = MeshItemResult::Open;
         let mut open = true;
-        egui::Window::new(self.title())
+        let window = egui::Window::new(self.title())
             .id(egui::Id::new("mesh item editor"))
             .open(&mut open)
             .collapsible(false)
@@ -270,6 +285,7 @@ impl MeshItemEditor {
                                         self.others.iter().map(String::as_str),
                                     );
                                     self.picks.clear();
+                                    self.sync_parts();
                                 }
                             }
                         });
@@ -279,7 +295,7 @@ impl MeshItemEditor {
                 egui::Grid::new("mesh item form")
                     .num_columns(2)
                     .spacing([12.0, 6.0])
-                    .show(ui, |ui| self.form(ui, view));
+                    .show(ui, |ui| self.form(ui));
                 if let Some(error) = &self.error {
                     ui.colored_label(ERROR, error);
                 }
@@ -296,22 +312,43 @@ impl MeshItemEditor {
                     }
                 });
             });
+        if let (Some(window), Some(view)) = (window, view)
+            && self.has_parts()
+        {
+            let anchor = window.response.rect;
+            let can_undo = self.parts.can_undo();
+            if let Some(action) = self.picker.parts_window(ctx, anchor, can_undo) {
+                self.parts.action(view, action);
+                self.sync_parts();
+            }
+        }
         if !open {
             result = MeshItemResult::Cancel;
         }
         result
     }
 
-    fn form(&mut self, ui: &mut egui::Ui, view: Option<&Model>) {
+    /// Whether the item is made of whole parts.
+    fn has_parts(&self) -> bool {
+        !matches!(self.draft.kind, MeshSetupKind::LocalMeshSize { .. })
+    }
+
+    /// Writes the picked parts to the draft.
+    fn sync_parts(&mut self) {
+        if let MeshSetupKind::MeshingParameters { parts, .. }
+        | MeshSetupKind::TetrahedralGmsh { parts, .. } = &mut self.draft.kind
+        {
+            *parts = self.parts.names().into_iter().collect();
+        }
+    }
+
+    fn form(&mut self, ui: &mut egui::Ui) {
         ui.label("Name");
         ui.text_edit_singleline(&mut self.draft.name);
         ui.end_row();
-        let part_names: Vec<&str> = view
-            .map(|v| v.parts.iter().map(|p| p.name.as_str()).collect())
-            .unwrap_or_default();
         match &mut self.draft.kind {
-            MeshSetupKind::MeshingParameters { parts, parameters } => {
-                parts_ui(ui, parts, &part_names);
+            MeshSetupKind::MeshingParameters { parameters, .. } => {
+                parts_ui(ui, &mut self.parts);
                 parameters_ui(ui, parameters, self.units);
             }
             MeshSetupKind::LocalMeshSize { size, .. } => {
@@ -348,11 +385,11 @@ impl MeshItemEditor {
                 ui.end_row();
             }
             MeshSetupKind::TetrahedralGmsh {
-                parts,
                 algorithm_2d,
                 algorithm_3d,
+                ..
             } => {
-                parts_ui(ui, parts, &part_names);
+                parts_ui(ui, &mut self.parts);
                 ui.label("Algorithmus Flächen");
                 algorithm_combo(ui, "algorithm 2d", algorithm_2d, &ALGORITHMS_2D);
                 ui.end_row();
@@ -361,6 +398,7 @@ impl MeshItemEditor {
                 ui.end_row();
             }
         }
+        self.sync_parts();
     }
 
     /// The item as entered, or what is missing.
@@ -416,22 +454,13 @@ impl MeshItemEditor {
         Ok(item)
     }
 
-    /// A click on the geometry: toggles the clicked part, or picks the face or edge for a
-    /// local mesh size.
+    /// A click on the geometry: picks the clicked part, or the face or edge for a local mesh
+    /// size.
     pub fn click(&mut self, view: &Model, pick: Option<(&Hit, f32)>, operation: Operation) {
         match &mut self.draft.kind {
-            MeshSetupKind::MeshingParameters { parts, .. }
-            | MeshSetupKind::TetrahedralGmsh { parts, .. } => {
-                let Some((hit, _)) = pick else { return };
-                let name = &view.parts[hit.part].name;
-                let index = parts.iter().position(|p| p == name);
-                match (index, operation) {
-                    (Some(index), Operation::Subtract | Operation::Replace) => {
-                        parts.remove(index);
-                    }
-                    (None, Operation::Subtract) | (Some(_), _) => {}
-                    (None, _) => parts.push(name.clone()),
-                }
+            MeshSetupKind::MeshingParameters { .. } | MeshSetupKind::TetrahedralGmsh { .. } => {
+                self.parts.click(view, pick.map(|(hit, _)| hit), operation);
+                self.sync_parts();
             }
             MeshSetupKind::LocalMeshSize { .. } => match pick {
                 Some((hit, precision)) => {
@@ -447,13 +476,21 @@ impl MeshItemEditor {
         }
     }
 
+    /// A selection box dragged on the geometry picks the parts inside it.
+    pub fn box_select(&mut self, view: &Model, area: &BoxSelect, operation: Operation) {
+        if self.has_parts() {
+            self.parts.box_select(view, area, operation);
+            self.sync_parts();
+        }
+    }
+
     /// What a click at the hit would select, for the hover preview.
     pub fn preview(&self, view: &Model, hit: &Hit, precision: f32) -> Preview {
         match self.draft.kind {
             MeshSetupKind::LocalMeshSize { .. } => cad_pick(view, hit, precision)
                 .map(|entity| entity_preview(view, entity))
                 .unwrap_or_default(),
-            _ => Preview::default(),
+            _ => PartPicks::preview(view, hit),
         }
     }
 
@@ -466,21 +503,10 @@ impl MeshItemEditor {
     }
 }
 
-fn parts_ui(ui: &mut egui::Ui, parts: &mut Vec<String>, names: &[&str]) {
+fn parts_ui(ui: &mut egui::Ui, parts: &mut PartPicks) {
     ui.label("Parts");
-    ui.vertical(|ui| {
-        for &name in names {
-            let mut checked = parts.iter().any(|p| p == name);
-            if ui.checkbox(&mut checked, name).changed() {
-                if checked {
-                    parts.push(name.to_string());
-                } else {
-                    parts.retain(|p| p != name);
-                }
-            }
-        }
-        ui.weak("Auch per Klick im 3D-Fenster");
-    });
+    // The only selection of the dialog: clicks always pick for it.
+    parts.ui(ui, true);
     ui.end_row();
 }
 
@@ -750,8 +776,8 @@ mod tests {
             MeshSetupKind::MeshingParameters { parts, .. } if parts == &["SOLID-1"]
         ));
         assert_eq!(item_highlight(&view, &item.kind).parts.len(), 1);
-        // A second plain click on the part takes it out again.
-        editor.click(&view, Some((&hit, 0.5)), Operation::Replace);
+        // Ctrl+click takes it out again, as in every selection.
+        editor.click(&view, Some((&hit, 0.5)), Operation::Subtract);
         assert!(editor.finish().is_err());
 
         let mut with_item = geometry.clone();

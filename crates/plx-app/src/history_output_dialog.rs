@@ -10,7 +10,7 @@ use crate::keywords::{frame, tree_row};
 use crate::model::{Highlight, Hit, Model};
 use crate::results::ResultsView;
 use crate::selection::{Operation, Picker, Target};
-use crate::setup::{FACE_SOURCES, NODE_SOURCES, RegionDraft, SOLID_SOURCES, Source};
+use crate::setup::{FACE_SOURCES, NODE_SOURCES, RegionDraft, SOLID_SOURCES};
 use crate::viewport::{BoxSelect, Preview};
 
 /// The types of the list, in PrePoMax's order, with the prefix of their default names.
@@ -205,8 +205,7 @@ impl HistoryOutputDialog {
 
     /// Whether clicks in the 3D view pick for this dialog.
     pub fn picks(&self) -> bool {
-        self.region()
-            .is_some_and(|r| matches!(r.source, Source::Selection | Source::Parts))
+        self.region().is_some_and(RegionDraft::picks)
     }
 
     pub fn click(&mut self, model: &Model, pick: Option<(&Hit, f32)>, operation: Operation) {
@@ -355,17 +354,12 @@ impl HistoryOutputDialog {
                     }
                 });
             });
-        if let Some(window) = window
-            && let Some(region) = self.region()
-            && region.source == Source::Selection
-        {
-            let (target, can_undo) = (region.target, region.can_undo());
-            let picked = self
-                .picker
-                .window(ctx, window.response.rect, target, can_undo);
-            if let (Some(picked), Some(region)) = (picked, self.region_mut()) {
-                region.action(model, picked);
+        if let Some(window) = window {
+            let mut picker = std::mem::take(&mut self.picker);
+            if let Some(region) = self.region_mut() {
+                region.picker_window(ctx, window.response.rect, &mut picker, model);
             }
+            self.picker = picker;
         }
         if !open {
             action = DialogAction::Cancel;
