@@ -10,6 +10,7 @@ use crate::model::{self, LoadedModel, Model};
 use crate::overlay::{Marker, Overlay};
 use crate::properties;
 use crate::results::{Deformation, ResultsView, format_legend_value};
+use crate::selection::Operation;
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::setup::{Editor, EditorResult, NewItem};
 use crate::tree::{self, TreeItem, TreeState, TreeView};
@@ -564,8 +565,8 @@ impl Workbench {
             self.results_changed = true;
         }
         if let Some(item) = response.open {
-            let fe = self.model.as_ref().map(|m| &m.fe);
-            match fe.and_then(|fe| Editor::edit(&item, fe)) {
+            let model = self.model.as_ref();
+            match model.and_then(|m| Editor::edit(&item, &m.fe, &m.mesh)) {
                 Some(editor) => self.editor = Some(editor),
                 None => self.dialog = Some(item),
             }
@@ -822,9 +823,13 @@ impl Workbench {
         if !editor.picks() {
             return;
         }
-        if let Some(hit) = model.pick(click.origin, click.direction) {
-            editor.click(model, &hit, click.remove);
-        }
+        let hit = model.pick(click.origin, click.direction);
+        let pick = hit.as_ref().map(|hit| (hit, click.precision_at(hit.point)));
+        editor.click(
+            model,
+            pick,
+            Operation::from_modifiers(click.shift, click.ctrl),
+        );
     }
 
     fn editor_window(&mut self, ctx: &egui::Context) {

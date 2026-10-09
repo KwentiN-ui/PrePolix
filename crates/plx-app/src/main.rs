@@ -8,6 +8,7 @@ mod model;
 mod overlay;
 mod properties;
 mod results;
+mod selection;
 mod settings;
 mod setup;
 mod solver_check;
@@ -51,6 +52,7 @@ mod tests {
             ("overlay.rs", include_str!("overlay.rs")),
             ("properties.rs", include_str!("properties.rs")),
             ("results.rs", include_str!("results.rs")),
+            ("selection.rs", include_str!("selection.rs")),
             ("settings.rs", include_str!("settings.rs")),
             ("setup.rs", include_str!("setup.rs")),
             ("solver_check.rs", include_str!("solver_check.rs")),
