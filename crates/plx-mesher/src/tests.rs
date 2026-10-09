@@ -717,6 +717,43 @@ fn a_deleted_part_leaves_the_others_with_their_names_and_local_sizes() {
 }
 
 #[test]
+fn parts_deleted_together_are_renumbered_as_one_by_one() {
+    if !gmsh_available() {
+        return;
+    }
+    let geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
+    let paths = [testdata("platte_mit_loch.step")];
+    let three = add_cad_files(Some(&geometry), &paths, UnitSystem::MmTonSC, &[])
+        .unwrap()
+        .import
+        .geometry;
+    let mut names = part_names(&three).unwrap();
+    names.sort();
+    assert_eq!(names, ["SOLID-1", "SOLID-2", "SOLID-3"]);
+
+    let deleted = ["SOLID-1".to_string(), "SOLID-3".to_string()];
+    let (together, tags) = delete_parts_renumbered(&three, &deleted).unwrap();
+    let together = together.unwrap();
+    assert_eq!(part_names(&together).unwrap(), ["SOLID-2"]);
+
+    let (first, first_tags) = delete_part_renumbered(&three, "SOLID-1").unwrap();
+    let (second, second_tags) = delete_part_renumbered(&first.unwrap(), "SOLID-3").unwrap();
+    assert_eq!(part_names(&second.unwrap()).unwrap(), ["SOLID-2"]);
+    // The renumbering of both at once is that of one after the other.
+    let chained: BTreeMap<_, _> = (first_tags.iter())
+        .filter_map(|(old, mid)| Some((*old, *second_tags.get(mid)?)))
+        .collect();
+    assert!(!tags.is_empty());
+    assert_eq!(tags, chained);
+
+    assert!(delete_parts_renumbered(&three, &["SOLID-9".to_string()]).is_err());
+    let all = ["SOLID-1", "SOLID-2", "SOLID-3"].map(String::from);
+    assert_eq!(delete_parts_renumbered(&three, &all).unwrap().0, None);
+}
+
+#[test]
 fn a_deleted_mesh_part_takes_its_elements_and_nodes() {
     if !gmsh_available() {
         return;

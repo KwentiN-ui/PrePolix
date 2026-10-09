@@ -372,18 +372,33 @@ pub fn delete_part_renumbered(
     geometry: &Geometry,
     part: &str,
 ) -> Result<(Option<Geometry>, BTreeMap<CadEntity, CadEntity>), GmshError> {
+    delete_parts_renumbered(geometry, &[part.to_owned()])
+}
+
+/// [`delete_part_renumbered`] for several parts at once, as selected together: Gmsh
+/// removes them all and numbers the rest anew once, so the renumbering maps the old tags
+/// straight to the final ones.
+pub fn delete_parts_renumbered(
+    geometry: &Geometry,
+    deleted: &[String],
+) -> Result<(Option<Geometry>, BTreeMap<CadEntity, CadEntity>), GmshError> {
     let file = TempFile::with_contents("brep", &geometry.brep)?;
     let smaller = TempFile::new("brep");
     let (names, old_boxes) = with_gmsh(|gmsh| {
         gmsh.import_shapes(&file.0)?;
-        let mut parts = parts(gmsh, geometry)?;
-        let index = (parts.iter().position(|(_, n)| n == part))
-            .ok_or_else(|| GmshError::Other(format!("Die Geometrie hat kein Part {part}")))?;
+        let parts = parts(gmsh, geometry)?;
+        if let Some(part) = (deleted.iter()).find(|d| !parts.iter().any(|(_, n)| n == *d)) {
+            return Err(GmshError::Other(format!(
+                "Die Geometrie hat kein Part {part}"
+            )));
+        }
         let boxes = entity_boxes(gmsh)?;
-        let (entity, _) = parts.remove(index);
-        gmsh.remove(&[entity])?;
+        let (gone, kept): (Vec<_>, Vec<_>) =
+            (parts.into_iter()).partition(|(_, n)| deleted.contains(n));
+        let entities: Vec<Entity> = gone.into_iter().map(|(entity, _)| entity).collect();
+        gmsh.remove(&entities)?;
         gmsh.write(&smaller.0)?;
-        Ok((parts.into_iter().map(|(_, n)| n).collect::<Vec<_>>(), boxes))
+        Ok((kept.into_iter().map(|(_, n)| n).collect::<Vec<_>>(), boxes))
     })?;
     if names.is_empty() {
         return Ok((None, BTreeMap::new()));
