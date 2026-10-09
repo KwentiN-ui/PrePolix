@@ -624,27 +624,29 @@ fn edges_outside_faces_are_meshed_as_line_parts() {
         assert!((b[0] - a[0]).abs() - 5.0 < 1e-6);
     }
     assert_eq!(mesh.parts[2].elements.len(), 4);
-    // The two lines meet at (50, 0, 0) and share the node there, so they form an L; the
-    // CAD map knows the edges, their segments and the vertex at the corner.
+    // The two lines meet at (50, 0, 0), each with a node of its own there, as parts share
+    // no nodes; the CAD map knows the edges, their segments and the vertex at the corner,
+    // with both nodes.
     let corner = |part: usize, k: usize| mesh.element(mesh.parts[part].elements[k]).unwrap();
-    let shared = corner(1, 5).nodes[2];
-    assert_eq!(corner(2, 0).nodes[0], shared);
-    assert_eq!(mesh.node(shared).unwrap(), [50.0, 0.0, 0.0]);
-    let line_nodes: BTreeSet<_> = (mesh.parts[1..].iter())
-        .flat_map(|p| p.elements.iter())
-        .flat_map(|&id| mesh.element(id).unwrap().nodes.iter().copied())
-        .collect();
-    assert_eq!(line_nodes.len(), 13 + 9 - 1);
+    let ends = [corner(1, 5).nodes[2], corner(2, 0).nodes[0]];
+    assert_ne!(ends[0], ends[1]);
+    for end in ends {
+        assert_eq!(mesh.node(end).unwrap(), [50.0, 0.0, 0.0]);
+    }
     let edge_nodes = |edge: i32| mesh.cad.nodes.get(&CadEntity::Edge(edge)).cloned();
     assert_eq!(edge_nodes(13).map(|n| n.len()), Some(13));
     assert_eq!(edge_nodes(14).map(|n| n.len()), Some(9));
     assert_eq!(mesh.cad.segments[&14].len(), 4);
-    // The lines share the CAD vertex at the corner, which maps to the shared node.
     let vertex_nodes: Vec<Vec<_>> = (mesh.cad.nodes.iter())
-        .filter(|(e, n)| matches!(e, CadEntity::Vertex(_)) && n.contains(&shared))
+        .filter(|(e, n)| matches!(e, CadEntity::Vertex(_)) && n.contains(&ends[0]))
         .map(|(_, n)| n.clone())
         .collect();
-    assert_eq!(vertex_nodes, [[shared]], "{:?}", mesh.cad.nodes);
+    assert_eq!(vertex_nodes, [ends.to_vec()], "{:?}", mesh.cad.nodes);
+    // The contact search finds the two ends as one joint.
+    let joints = plx_mesh::find_line_joints(&mesh, &[true; 3], 1e-6);
+    assert_eq!(joints.len(), 1);
+    assert_eq!(joints[0].nodes, ends.to_vec());
+    assert_eq!(joints[0].parts, BTreeSet::from([1, 2]));
     // The lines and the box share no nodes; the parts keep their own numbering.
     assert!(
         mesh.parts[0]

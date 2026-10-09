@@ -4,7 +4,7 @@
 use egui::Ui;
 use plx_mesh::FeMesh;
 use plx_model::{
-    CompressionOnly, Constraint, FeModel, PointSpring, Quantity, Region, SurfaceSpring,
+    CompressionOnly, Constraint, FeModel, NodeTie, PointSpring, Quantity, Region, SurfaceSpring,
     SurfaceToSurfaceSpring, Tie, UnitSystem, next_name,
 };
 
@@ -16,7 +16,7 @@ use crate::setup::{FACE_SOURCES, NODE_SOURCES, RegionDraft};
 
 /// PrePoMax's list of constraint types, with prepolix's spring connection added; `None` for
 /// those prepolix does not have yet.
-const TYPES: [(&str, Option<Type>); 6] = [
+const TYPES: [(&str, Option<Type>); 7] = [
     ("Point Spring", Some(Type::PointSpring)),
     ("Surface Spring", Some(Type::SurfaceSpring)),
     ("Compression Only", Some(Type::CompressionOnly)),
@@ -26,6 +26,7 @@ const TYPES: [(&str, Option<Type>); 6] = [
         "Surface To Surface Spring",
         Some(Type::SurfaceToSurfaceSpring),
     ),
+    ("Node Tie", Some(Type::NodeTie)),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +36,7 @@ enum Type {
     CompressionOnly,
     Tie,
     SurfaceToSurfaceSpring,
+    NodeTie,
 }
 
 impl Type {
@@ -45,6 +47,7 @@ impl Type {
             Constraint::CompressionOnly(_) => Type::CompressionOnly,
             Constraint::Tie(_) => Type::Tie,
             Constraint::SurfaceToSurfaceSpring(_) => Type::SurfaceToSurfaceSpring,
+            Constraint::NodeTie(_) => Type::NodeTie,
         }
     }
 
@@ -56,7 +59,14 @@ impl Type {
             Type::CompressionOnly => "Compression_Only",
             Type::Tie => "Tie",
             Type::SurfaceToSurfaceSpring => "Surface_To_Surface_Spring",
+            Type::NodeTie => "Node_Tie",
         }
+    }
+
+    /// Point springs and node ties sit on nodes, all other single-region constraints on
+    /// faces.
+    fn on_nodes(self) -> bool {
+        matches!(self, Type::PointSpring | Type::NodeTie)
     }
 
     fn has_master_slave(self) -> bool {
@@ -91,6 +101,7 @@ impl Type {
                 nonlinear: false,
             }),
             Type::Tie => Constraint::Tie(Tie::new(name)),
+            Type::NodeTie => Constraint::NodeTie(NodeTie::new(name)),
             Type::SurfaceToSurfaceSpring => {
                 Constraint::SurfaceToSurfaceSpring(SurfaceToSurfaceSpring {
                     name,
@@ -104,11 +115,11 @@ impl Type {
         }
     }
 
-    /// Point springs sit on nodes, all other single-region constraints on faces.
     fn region_draft(self) -> RegionDraft {
-        match self {
-            Type::PointSpring => RegionDraft::new(NODE_SOURCES, Target::Nodes),
-            _ => RegionDraft::new(FACE_SOURCES, Target::Faces),
+        if self.on_nodes() {
+            RegionDraft::new(NODE_SOURCES, Target::Nodes)
+        } else {
+            RegionDraft::new(FACE_SOURCES, Target::Faces)
         }
     }
 }
@@ -141,9 +152,10 @@ impl ConstraintDraft {
                 MasterSlave::from_regions(master, slave, mesh),
             ),
             None => {
-                let (sources, target) = match kind {
-                    Type::PointSpring => (NODE_SOURCES, Target::Nodes),
-                    _ => (FACE_SOURCES, Target::Faces),
+                let (sources, target) = if kind.on_nodes() {
+                    (NODE_SOURCES, Target::Nodes)
+                } else {
+                    (FACE_SOURCES, Target::Faces)
                 };
                 let region = RegionDraft::from_region(regions[0], sources, target, mesh);
                 (region, MasterSlave::new())
@@ -268,6 +280,19 @@ impl ConstraintDraft {
                 compression_only_rows(ui, support, units);
             }
             Constraint::Tie(tie) => contacts::tie_form(ui, model, tie, &mut self.pair),
+            Constraint::NodeTie(tie) => {
+                self.region.ui(ui, model);
+                ui.label("Rotationen");
+                ui.checkbox(&mut tie.rotations, "biegesteif");
+                ui.end_row();
+                hint(
+                    ui,
+                    "Alle Knoten der Region folgen dem ersten, beim Export als Gleichungen. \
+                     Verbindet die Enden von Balken oder Stäben verschiedener Parts; die \
+                     Kontaktsuche findet sie. Biegesteif koppelt auch die Rotationen, sonst \
+                     ist die Verbindung ein Gelenk; Stäbe haben keine Rotationen.",
+                );
+            }
             Constraint::SurfaceToSurfaceSpring(spring) => {
                 self.pair.ui(ui, model);
                 per_area_row(ui, &mut spring.per_area);
@@ -295,7 +320,7 @@ impl ConstraintDraft {
             self.constraint.name().to_owned()
         };
         self.constraint = kind.create(name);
-        if (old == Type::PointSpring) != (kind == Type::PointSpring) {
+        if old.on_nodes() != kind.on_nodes() {
             self.region = kind.region_draft();
         }
     }
@@ -312,6 +337,7 @@ fn name_row(ui: &mut Ui, constraint: &mut Constraint) {
         Constraint::CompressionOnly(c) => &mut c.name,
         Constraint::Tie(c) => &mut c.name,
         Constraint::SurfaceToSurfaceSpring(c) => &mut c.name,
+        Constraint::NodeTie(c) => &mut c.name,
     };
     ui.label("Name");
     ui.add(egui::TextEdit::singleline(name).desired_width(200.0));

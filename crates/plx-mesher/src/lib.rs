@@ -297,8 +297,9 @@ pub fn tessellate(geometry: &Geometry) -> Result<GeometryDisplay, GmshError> {
     })
 }
 
-/// Meshes every part of the geometry, one after the other as PrePoMax does, and joins the
-/// line parts where their ends meet (see [`FeMesh::join_line_ends`]).
+/// Meshes every part of the geometry, one after the other as PrePoMax does. Parts share no
+/// nodes, line parts meeting at a point included: the contact search finds such ends and
+/// ties them.
 pub fn generate_mesh(geometry: &Geometry) -> Result<GeneratedMesh, GmshError> {
     let mut mesh = FeMesh::default();
     let mut warnings = Vec::new();
@@ -307,7 +308,6 @@ pub fn generate_mesh(geometry: &Geometry) -> Result<GeneratedMesh, GmshError> {
         mesh = merge_part(&mesh, part.mesh);
         warnings.extend(part.warnings);
     }
-    mesh.join_line_ends(mesh.line_join_tolerance());
     Ok(GeneratedMesh { mesh, warnings })
 }
 

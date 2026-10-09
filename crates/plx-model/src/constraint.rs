@@ -9,6 +9,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::Region;
 
+/// Nodes tied to each other (`*EQUATION`), prepolix's node tie: the ends of beams or trusses
+/// meeting at a point, which have nodes of their own since parts share no nodes. Every
+/// node of the region moves with the first.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NodeTie {
+    pub name: String,
+    #[serde(default = "crate::active")]
+    pub active: bool,
+    pub region: Region,
+    /// Ties the rotations too, a rigid joint between beams; a hinge otherwise. Nodes
+    /// without rotations (trusses, solids) are tied in their translations only either way.
+    pub rotations: bool,
+}
+
+impl NodeTie {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            active: true,
+            region: Region::Nodes(Vec::new()),
+            rotations: true,
+        }
+    }
+}
+
 /// Springs from every node of the region to ground (`SPRING1`), PrePoMax's point spring.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PointSpring {

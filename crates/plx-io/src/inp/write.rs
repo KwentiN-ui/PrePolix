@@ -13,8 +13,8 @@ use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
     BoundaryKind, Constraint, ContactMethod, ContactPair, FeModel, FieldOutput, FrequencyStep,
     GapConductance, HeatTransferStep, Incrementation, InitialConditionKind, InteractionProperty,
-    LoadKind, ModelSpace, OutputKind, Region, Section, SectionKind, StaticStep, Step, StepKind,
-    SurfaceBehavior, SurfaceInteraction, UserKeyword, line_tangent,
+    LoadKind, ModelSpace, NodeTie, OutputKind, Region, Section, SectionKind, StaticStep, Step,
+    StepKind, SurfaceBehavior, SurfaceInteraction, UserKeyword, line_tangent,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -230,13 +230,28 @@ pub fn model_keywords(
     } else {
         mesh
     };
+    let lines = LineElements::new(mesh, model)?;
+    // Node ties of beams, and of anything without rotations, are written as one shared node.
+    let merged_nodes = node_merges(mesh, model, &lines);
+    let (merged_mesh, merged_model);
+    let (mesh, model) = if merged_nodes.is_empty() {
+        (mesh, model)
+    } else {
+        let mut copy = mesh.clone();
+        copy.merge_nodes(&merged_nodes);
+        merged_mesh = copy;
+        let mut copy = model.clone();
+        copy.merge_nodes(&merged_nodes);
+        merged_model = copy;
+        (&merged_mesh, &merged_model)
+    };
     let mut sets = Sets::new(mesh);
     let lines = LineElements::new(mesh, model)?;
     // Regions are resolved first: their sets must precede the materials and steps.
     let materials = materials(model);
     let mut sections = sections(&mut sets, model)?;
     let generated = constraints::springs(&mut sets, model)?;
-    let mut constraints = constraints(&mut sets, model)?;
+    let mut constraints = constraints(&mut sets, model, &lines)?;
     constraints.extend(generated.equations);
     sections.extend(generated.sections);
     let mut materials = materials;
@@ -329,6 +344,8 @@ pub fn model_keywords(
 struct LineElements {
     types: BTreeMap<ElementId, &'static str>,
     truss_nodes: BTreeSet<NodeId>,
+    /// Nodes of beams, which have rotations.
+    beam_nodes: BTreeSet<NodeId>,
 }
 
 impl LineElements {
@@ -356,17 +373,25 @@ impl LineElements {
         // its rotations back.
         let mut truss_nodes = BTreeSet::new();
         let mut other_nodes = BTreeSet::new();
+        let mut beam_nodes = BTreeSet::new();
         for element in mesh.elements() {
-            let truss = types.get(&element.id) == Some(&"T3D2");
-            let nodes = if truss {
+            let type_name = types.get(&element.id).copied();
+            let nodes = if type_name == Some("T3D2") {
                 &mut truss_nodes
             } else {
                 &mut other_nodes
             };
             nodes.extend(element.nodes.iter().copied());
+            if type_name.is_some_and(|t| t.starts_with('B')) {
+                beam_nodes.extend(element.nodes.iter().copied());
+            }
         }
         truss_nodes.retain(|n| !other_nodes.contains(n));
-        Ok(Self { types, truss_nodes })
+        Ok(Self {
+            types,
+            truss_nodes,
+            beam_nodes,
+        })
     }
 
     /// Type and nodes an element is written with. A truss is always `T3D2`, so a 3-node line
@@ -854,7 +879,11 @@ fn beam_groups(sets: &mut Sets, section: &Section) -> Result<Vec<([f64; 3], Stri
 
 /// Tie constraints as PrePoMax's `CalTie` writes them: slave surface first. Springs and
 /// supports are written as elements, see [`constraints::springs`].
-fn constraints(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+fn constraints(
+    sets: &mut Sets,
+    model: &FeModel,
+    lines: &LineElements,
+) -> Result<Vec<Keyword>, WriteError> {
     let mut keywords = Vec::new();
     for constraint in &model.constraints {
         if !constraint.active() {
@@ -866,6 +895,7 @@ fn constraints(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteEr
             | Constraint::SurfaceSpring(_)
             | Constraint::CompressionOnly(_)
             | Constraint::SurfaceToSurfaceSpring(_) => {}
+            Constraint::NodeTie(tie) => keywords.push(node_tie(sets, tie, lines)?),
             Constraint::Tie(tie) => {
                 let master = sets.surface(&tie.name, "Master", &tie.master)?;
                 let slave = sets.surface(&tie.name, "Slave", &tie.slave)?;
@@ -882,6 +912,61 @@ fn constraints(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteEr
         }
     }
     Ok(keywords)
+}
+
+/// Whether a node tie is a hinge between beams, written as equations of the translations.
+/// Every other tie is written as one shared node (see [`node_merges`]): CalculiX 2.21 does
+/// not couple the rotations of beam nodes through equations, and nodes without rotations
+/// (trusses, solids) are joined completely by their translations anyway.
+fn hinge_between_beams(tie: &NodeTie, nodes: &[NodeId], lines: &LineElements) -> bool {
+    !tie.rotations && nodes.iter().all(|n| lines.beam_nodes.contains(n))
+}
+
+/// The nodes every active node tie merges into its first node, as nodes to replace by the
+/// node that stays.
+fn node_merges(mesh: &FeMesh, model: &FeModel, lines: &LineElements) -> BTreeMap<NodeId, NodeId> {
+    let mut replaced = BTreeMap::new();
+    for constraint in model.constraints.iter().filter(|c| c.active()) {
+        let Constraint::NodeTie(tie) = constraint else {
+            continue;
+        };
+        let nodes = tie.region.nodes(mesh);
+        if hinge_between_beams(tie, &nodes, lines) {
+            continue;
+        }
+        if let Some((&first, rest)) = nodes.split_first() {
+            let first = replaced.get(&first).copied().unwrap_or(first);
+            for &node in rest {
+                if node != first {
+                    replaced.insert(node, first);
+                }
+            }
+        }
+    }
+    replaced
+}
+
+/// A node tie: a hinge between beams as equations of the translations, every other tie as
+/// one shared node, which [`node_merges`] put into the mesh already; the comment names it.
+fn node_tie(sets: &mut Sets, tie: &NodeTie, lines: &LineElements) -> Result<Keyword, WriteError> {
+    let nodes = tie.region.nodes(sets.mesh);
+    let Some((&first, rest)) = nodes.split_first() else {
+        return Err(WriteError::EmptyRegion {
+            item: tie.name.clone(),
+            what: "Knoten",
+        });
+    };
+    let mut out = format!("** Name: {}\n", tie.name);
+    if !hinge_between_beams(tie, &nodes, lines) {
+        let _ = writeln!(out, "** Knoten {first} (zusammengelegt)");
+        return Ok(Keyword::generated(out));
+    }
+    for &node in rest {
+        for dof in 1..=3 {
+            let _ = writeln!(out, "*Equation\n2\n{node}, {dof}, 1, {first}, {dof}, -1");
+        }
+    }
+    Ok(Keyword::generated(out))
 }
 
 /// A surface interaction with its models as children, like PrePoMax's

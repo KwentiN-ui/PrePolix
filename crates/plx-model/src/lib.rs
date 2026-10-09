@@ -19,7 +19,9 @@ pub mod units;
 mod validity;
 
 pub use checks::{Finding, MeshCheck, Problem, Severity, diagnose_solver_output};
-pub use constraint::{CompressionOnly, PointSpring, SurfaceSpring, SurfaceToSurfaceSpring};
+pub use constraint::{
+    CompressionOnly, NodeTie, PointSpring, SurfaceSpring, SurfaceToSurfaceSpring,
+};
 pub use contact::{
     Constraint, ContactMethod, ContactPair, DEFAULT_SURFACE_COLOR, Friction, GapConductance,
     InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
@@ -40,7 +42,7 @@ pub use section::{
 pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, Quantity, UnitSystem};
 pub use validity::{Invalid, ModelItem};
 
-use plx_mesh::CadEntity;
+use plx_mesh::{CadEntity, NodeId};
 use serde::{Deserialize, Serialize};
 
 /// Version of the project file format written by this build.
@@ -133,6 +135,24 @@ impl FeModel {
                     .collect();
             }
         }
+    }
+
+    /// Follows nodes merged into others, as [`plx_mesh::FeMesh::merge_nodes`] does: regions
+    /// of nodes name the nodes that stay.
+    pub fn merge_nodes(&mut self, replaced: &std::collections::BTreeMap<NodeId, NodeId>) {
+        let follow = |region: &mut Region| {
+            if let Region::Nodes(nodes) = region {
+                for node in nodes.iter_mut() {
+                    if let Some(&kept) = replaced.get(node) {
+                        *node = kept;
+                    }
+                }
+                nodes.sort_unstable();
+                nodes.dedup();
+            }
+        };
+        self.regions_mut().for_each(follow);
+        (self.initial_conditions.iter_mut()).for_each(|i| follow(&mut i.region));
     }
 
     fn regions_mut(&mut self) -> impl Iterator<Item = &mut Region> {
