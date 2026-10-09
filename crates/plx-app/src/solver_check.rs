@@ -11,8 +11,8 @@ use plx_io::frd::{FrdImport, read_frd};
 use plx_job::{Job, JobStatus};
 use plx_mesh::{Element, ElementId, ElementShape, FeMesh, NodeId, Part};
 use plx_model::{
-    BoundaryCondition, BoundaryKind, Elastic, FeModel, Load, LoadKind, Material, Region, Section,
-    Step,
+    BoundaryCondition, BoundaryKind, Elastic, EquationSolver, FeModel, Load, LoadKind, Material,
+    Region, Section, Step,
 };
 
 const LENGTH: f64 = 100.0;
@@ -32,20 +32,99 @@ pub struct CheckResult {
     pub message: String,
 }
 
+/// Outcome of the self test.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Report {
+    pub checks: Vec<CheckResult>,
+    /// Result of [`available_solvers`], if CalculiX started.
+    pub solvers: Option<Vec<EquationSolver>>,
+}
+
 /// Runs all checks one after another; stops after the version check if CalculiX does not
 /// start at all.
-pub fn run(solver: &plx_job::Solver, work_dir: &Path) -> Vec<CheckResult> {
+pub fn run(solver: &plx_job::Solver, work_dir: &Path) -> Report {
     let version = version(&solver.executable);
     let started = version.passed;
-    let mut results = vec![version];
+    let mut checks = vec![version];
+    let mut solvers = None;
     if started {
         let dir = work_dir.join("Selbsttest");
-        results.push(tip_force(solver, &dir));
-        results.push(pressure(solver, &dir));
+        checks.push(tip_force(solver, &dir));
+        checks.push(pressure(solver, &dir));
         let _ = std::fs::remove_dir_all(&dir);
+        solvers = available_solvers(solver, work_dir);
+        let names = solvers.iter().flatten().filter_map(|s| s.keyword());
+        let names = names.collect::<Vec<_>>().join(", ");
+        checks.push(check(
+            "Gleichungslöser",
+            solvers.is_some(),
+            match &solvers {
+                Some(_) if names.is_empty() => "Kein direkter Löser gefunden".into(),
+                Some(_) => format!("Vorhanden: {names}"),
+                None => "Nicht geprüft".into(),
+            },
+        ));
     }
-    results
+    Report { checks, solvers }
 }
+
+/// Direct solvers a CalculiX build may or may not include; the iterative ones are always there.
+const OPTIONAL_SOLVERS: [EquationSolver; 3] = [
+    EquationSolver::Pardiso,
+    EquationSolver::Spooles,
+    EquationSolver::PaStiX,
+];
+
+/// Which optional solvers the executable was built with. CalculiX has no option to list them,
+/// so a single element is solved with each: a build without the library stops with
+/// "the PARDISO library is not linked". `None` if CalculiX does not start.
+pub fn available_solvers(solver: &plx_job::Solver, work_dir: &Path) -> Option<Vec<EquationSolver>> {
+    let dir = work_dir.join("Solvertest");
+    let mut available = Vec::new();
+    for candidate in OPTIONAL_SOLVERS {
+        let keyword = candidate.keyword()?;
+        let input = SINGLE_ELEMENT.replace("*Static", &format!("*Static, Solver={keyword}"));
+        let Ok(mut job) = Job::start(solver, &dir, keyword, &input) else {
+            let _ = std::fs::remove_dir_all(&dir);
+            return None;
+        };
+        if job.wait() == JobStatus::Completed {
+            available.push(candidate);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    Some(available)
+}
+
+/// A clamped cube of one linear element with a force on a free corner.
+const SINGLE_ELEMENT: &str = "*Node
+1, 0, 0, 0
+2, 1, 0, 0
+3, 1, 1, 0
+4, 0, 1, 0
+5, 0, 0, 1
+6, 1, 0, 1
+7, 1, 1, 1
+8, 0, 1, 1
+*Element, Type=C3D8, Elset=E
+1, 1, 2, 3, 4, 5, 6, 7, 8
+*Material, Name=M
+*Elastic
+210000, 0.3
+*Solid section, Elset=E, Material=M
+*Step
+*Static
+*Boundary
+1, 1, 3
+2, 1, 3
+3, 1, 3
+4, 1, 3
+*Cload
+7, 3, -1
+*Node file
+U
+*End step
+";
 
 fn check(name: &'static str, passed: bool, message: String) -> CheckResult {
     CheckResult {
@@ -349,9 +428,11 @@ mod tests {
             executable: "plx-gibt-es-nicht".into(),
             threads: 1,
         };
-        let results = run(&solver, &std::env::temp_dir());
-        assert_eq!(results.len(), 1);
-        assert!(!results[0].passed);
+        let report = run(&solver, &std::env::temp_dir());
+        assert_eq!(report.checks.len(), 1);
+        assert!(!report.checks[0].passed);
+        assert_eq!(report.solvers, None);
+        assert_eq!(available_solvers(&solver, &std::env::temp_dir()), None);
     }
 
     #[test]
@@ -361,12 +442,15 @@ mod tests {
             return;
         }
         let dir = std::env::temp_dir().join(format!("plx-selbsttest-{}", std::process::id()));
-        let results = run(&plx_job::Solver::default(), &dir);
+        let report = run(&plx_job::Solver::default(), &dir);
         let _ = std::fs::remove_dir_all(&dir);
-        for result in &results {
+        for result in &report.checks {
             eprintln!("{}: {}", result.name, result.message);
         }
-        assert_eq!(results.len(), 3);
-        assert!(results.iter().all(|r| r.passed), "{results:#?}");
+        assert_eq!(report.checks.len(), 4);
+        assert!(report.checks.iter().all(|r| r.passed), "{report:#?}");
+        // Spooles is part of the usual CalculiX builds.
+        let solvers = report.solvers.unwrap();
+        assert!(solvers.contains(&EquationSolver::Spooles), "{solvers:?}");
     }
 }

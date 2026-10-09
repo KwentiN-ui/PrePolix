@@ -965,10 +965,14 @@ impl Workbench {
         if self.analysis.as_ref().is_some_and(Analysis::is_running) {
             return;
         }
+        if self.setup_model().is_none() {
+            return;
+        }
+        let default_solver = self.settings.solver.default_solver();
         let Some(model) = self.setup_model() else {
             return;
         };
-        match Analysis::start(&self.settings.solver, model) {
+        match Analysis::start(&self.settings.solver, model, default_solver) {
             Ok(analysis) => {
                 self.output.push(format!(
                     "Analyse gestartet: {}",
@@ -1038,11 +1042,17 @@ impl Workbench {
 
     /// Writes the input file of the set-up model to a file the user picks.
     fn export_inp(&mut self) {
+        if self.setup_model().is_none() {
+            return;
+        }
+        let default_solver = self.settings.solver.default_solver();
         let Some(model) = self.setup_model() else {
             return;
         };
         let heading = format!("prepolix: {}", model.file_name());
-        let text = match plx_io::inp::write_inp(&model.mesh, &model.fe, &heading) {
+        let mut fe = model.fe.clone();
+        fe.resolve_default_solver(default_solver);
+        let text = match plx_io::inp::write_inp(&model.mesh, &fe, &heading) {
             Ok(text) => text,
             Err(error) => {
                 self.output.push(format!("Export nicht möglich: {error}"));
