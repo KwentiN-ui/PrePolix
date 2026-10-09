@@ -111,6 +111,39 @@ fn width(display: &GeometryDisplay) -> f64 {
 }
 
 #[test]
+fn several_files_import_into_one_geometry() {
+    if !gmsh_available() {
+        return;
+    }
+    let single = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC).unwrap();
+    let blocks = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC).unwrap();
+    let paths = [
+        testdata("platte_mit_loch.step"),
+        testdata("zwei_bloecke.step"),
+    ];
+    let import = import_cad_files(&paths, UnitSystem::MmTonSC).unwrap();
+    let display = &import.display;
+    assert_eq!(
+        display.solids,
+        single.display.solids + blocks.display.solids
+    );
+    assert_eq!(display.faces, single.display.faces + blocks.display.faces);
+    assert_eq!(display.mesh.parts.len(), display.solids);
+    assert_eq!(
+        import.geometry.source,
+        "platte_mit_loch.step, zwei_bloecke.step"
+    );
+    // A file without geometry names itself in the error.
+    let empty = std::env::temp_dir().join("prepolix-leer.brep");
+    std::fs::write(&empty, "").unwrap();
+    let error = import_cad_files(&[paths[0].clone(), empty.clone()], UnitSystem::MmTonSC)
+        .unwrap_err()
+        .to_string();
+    let _ = std::fs::remove_file(&empty);
+    assert!(error.contains("prepolix-leer.brep"), "{error}");
+}
+
+#[test]
 fn step_files_import_in_the_models_length_unit() {
     if !gmsh_available() {
         return;

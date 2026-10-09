@@ -82,6 +82,15 @@ pub struct GeneratedMesh {
 /// the model's unit system, millimetres without one; BREP files have no unit. The mesh setup
 /// starts with PrePoMax's sizes for the geometry's extent.
 pub fn import_cad(path: &Path, units: UnitSystem) -> Result<CadImport, GmshError> {
+    import_cad_files(&[path.to_path_buf()], units)
+}
+
+/// Reads several STEP, IGES or BREP files into one geometry, like PrePoMax's import of
+/// several selected files: their parts sit side by side, numbered on from file to file.
+pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImport, GmshError> {
+    if paths.is_empty() {
+        return Err(GmshError::Other("Keine Datei gewählt".into()));
+    }
     let brep_file = TempFile::new("brep");
     let (diagonal, warnings) = with_gmsh(|gmsh| {
         let unit = match units {
@@ -90,15 +99,18 @@ pub fn import_cad(path: &Path, units: UnitSystem) -> Result<CadImport, GmshError
             UnitSystem::MmTonSC | UnitSystem::Unitless => "MM",
         };
         gmsh.set_string("Geometry.OCCTargetUnit", unit)?;
-        let shapes = gmsh.import_shapes(path);
+        let imported = paths.iter().try_for_each(|path| {
+            let shapes = gmsh.import_shapes(path)?;
+            if shapes.is_empty() {
+                return Err(GmshError::Other(format!(
+                    "{} enthält keine Geometrie",
+                    path.display()
+                )));
+            }
+            Ok(())
+        });
         gmsh.set_string("Geometry.OCCTargetUnit", "MM")?;
-        let shapes = shapes?;
-        if shapes.is_empty() {
-            return Err(GmshError::Other(format!(
-                "{} enthält keine Geometrie",
-                path.display()
-            )));
-        }
+        imported?;
         gmsh.write(&brep_file.0)?;
         let (min, max) = gmsh.bounding_box()?;
         let diagonal = (0..3)
@@ -110,10 +122,16 @@ pub fn import_cad(path: &Path, units: UnitSystem) -> Result<CadImport, GmshError
     let brep = std::fs::read_to_string(&brep_file.0)
         .map_err(|e| GmshError::Other(format!("{}: {e}", brep_file.0.display())))?;
     let geometry = Geometry {
-        source: path.file_name().map_or_else(
-            || path.display().to_string(),
-            |n| n.to_string_lossy().into(),
-        ),
+        source: paths
+            .iter()
+            .map(|path| {
+                path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
         brep,
         meshing: MeshingParameters::for_diagonal(diagonal),
         mesh_items: Vec::new(),

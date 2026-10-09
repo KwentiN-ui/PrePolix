@@ -359,6 +359,9 @@ mod tests {
                     young: 210000.0,
                     poisson: 0.3,
                 }),
+                conductivity: None,
+                specific_heat: None,
+                expansion: None,
             }],
             sections: vec![Section {
                 name: "Section-1".into(),

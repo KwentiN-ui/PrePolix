@@ -224,6 +224,10 @@ impl PrepolixApp {
             let (sender, ctx) = (app.load_events.0.clone(), cc.egui_ctx.clone());
             let units = app.workbench.import_units();
             std::thread::spawn(move || {
+                // Several CAD files make one geometry, as with Geometry > Import.
+                if paths.len() > 1 && paths.iter().all(|p| plx_mesher::is_cad_file(p)) {
+                    return load_geometry_in_background(paths, units, sender, ctx);
+                }
                 for path in paths {
                     load_in_background(path, units, sender.clone(), ctx.clone());
                 }
@@ -270,7 +274,8 @@ impl PrepolixApp {
         }
     }
 
-    /// PrePoMax's Geometry > Import: a STEP, IGES or BREP file.
+    /// PrePoMax's Geometry > Import: one or several STEP, IGES or BREP files, read into
+    /// one geometry.
     fn import_dialog(&mut self, ctx: &egui::Context) {
         if self.loading.is_some() {
             return;
@@ -282,9 +287,9 @@ impl PrepolixApp {
             let picked = rfd::FileDialog::new()
                 .set_title("Geometrie importieren")
                 .add_filter(GEOMETRY_FILTER.0, GEOMETRY_FILTER.1)
-                .pick_file();
-            if let Some(path) = picked {
-                load_in_background(path, units, sender, ctx);
+                .pick_files();
+            if let Some(paths) = picked.filter(|p| !p.is_empty()) {
+                load_geometry_in_background(paths, units, sender, ctx);
             }
         });
     }
@@ -294,6 +299,14 @@ impl PrepolixApp {
             let (sender, ctx) = (self.load_events.0.clone(), ctx.clone());
             let units = self.workbench.import_units();
             std::thread::spawn(move || load_in_background(path, units, sender, ctx));
+        }
+    }
+
+    fn open_geometry(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
+        if self.loading.is_none() {
+            let (sender, ctx) = (self.load_events.0.clone(), ctx.clone());
+            let units = self.workbench.import_units();
+            std::thread::spawn(move || load_geometry_in_background(paths, units, sender, ctx));
         }
     }
 
@@ -613,6 +626,22 @@ fn load_in_background(
     ctx.request_repaint();
 }
 
+/// Imports several CAD files into one geometry on the calling thread, reporting like
+/// [`load_in_background`] under the first file's path.
+fn load_geometry_in_background(
+    paths: Vec<PathBuf>,
+    units: UnitSystem,
+    sender: Sender<LoadEvent>,
+    ctx: egui::Context,
+) {
+    let path = paths[0].clone();
+    let _ = sender.send(LoadEvent::Started(path.clone()));
+    ctx.request_repaint();
+    let result = model::load_geometry(&paths, units).map(Box::new);
+    let _ = sender.send(LoadEvent::Finished(path, result));
+    ctx.request_repaint();
+}
+
 /// How many regions of the FE model consist of node or element numbers that a new mesh no
 /// longer has. Regions picked on the geometry are found on the new mesh again.
 fn lost_selections(fe: &plx_model::FeModel, mesh: &plx_mesh::FeMesh) -> usize {
@@ -664,14 +693,17 @@ impl eframe::App for PrepolixApp {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
             self.workbench.new_model(false);
         }
-        let dropped = ctx.input(|i| {
-            i.raw
-                .dropped_files
-                .iter()
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            (i.raw.dropped_files.iter())
                 .map(|f| f.path().to_path_buf())
-                .find(|p| !p.as_os_str().is_empty())
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect()
         });
-        if let Some(path) = dropped {
+        // Several CAD files dropped together are imported into one geometry, as with
+        // Geometry > Import; otherwise the first file opens.
+        if dropped.len() > 1 && dropped.iter().all(|p| plx_mesher::is_cad_file(p)) {
+            self.open_geometry(dropped, &ctx);
+        } else if let Some(path) = dropped.into_iter().next() {
             self.open_path(path, &ctx);
         }
 
@@ -837,9 +869,15 @@ impl Workbench {
                 }
                 match &geometry_view {
                     Some(view) if model.mesh.element_count() == 0 => {
+                        // Several files imported together are listed by name.
+                        let source = model.geometry.as_ref().map(|g| g.source.as_str());
+                        let single = path.file_name().and_then(|n| n.to_str()) == source;
+                        let what = match source {
+                            Some(names) if !single => names.to_string(),
+                            _ => path.display().to_string(),
+                        };
                         self.output.push(format!(
-                            "{} importiert: {} Parts ({} ms)",
-                            path.display(),
+                            "{what} importiert: {} Parts ({} ms)",
                             view.parts.len(),
                             model.load_time.as_millis()
                         ));
