@@ -11,6 +11,7 @@ use plx_model::FeModel;
 
 use crate::gizmo::{GizmoDrag, PlaneGizmo};
 use crate::model::{Highlight, Hit, Model};
+use crate::numeric;
 use crate::selection::{Items, Operation, Picker, PickerAction, Target};
 use crate::viewport::Preview;
 
@@ -459,7 +460,7 @@ impl SectionDialog {
                     });
                     ui.end_row();
                     ui.label(format!("Lage {}", plane.axis_label()));
-                    ui.add(egui::DragValue::new(offset).speed(speed));
+                    ui.add(numeric::drag_value(offset).speed(speed));
                     ui.end_row();
                 }
                 PlaneDefinition::Feature {
@@ -477,7 +478,7 @@ impl SectionDialog {
                         });
                     ui.end_row();
                     ui.label("Abstand");
-                    ui.add(egui::DragValue::new(offset).speed(speed));
+                    ui.add(numeric::drag_value(offset).speed(speed));
                     ui.end_row();
                     if frame.is_none() {
                         ui.label("");
