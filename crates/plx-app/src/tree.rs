@@ -124,6 +124,15 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
     }
 }
 
+/// Whether double-clicking opens a dialog. As in PrePoMax, containers such as "Mesh" or
+/// "Parts" have none: they create their kind of item or open and close.
+fn has_properties(item: &TreeItem) -> bool {
+    !matches!(
+        item,
+        TreeItem::Group(_) | TreeItem::Mesh | TreeItem::StepGroup(..) | TreeItem::FieldOutputs
+    )
+}
+
 /// Items of the FE model that have an edit dialog.
 fn is_fe_item(item: &TreeItem) -> bool {
     matches!(
@@ -173,7 +182,9 @@ impl Tree<'_> {
             match creates {
                 // PrePoMax creates an item when its container is double-clicked.
                 Some(kind) => self.response.create = Some(kind),
-                None => self.response.open = Some(item.clone()),
+                None if has_properties(&item) => self.response.open = Some(item.clone()),
+                // Other containers only open or close, see `branch`.
+                None => {}
             }
         }
         let editable = is_fe_item(&item);
@@ -248,10 +259,16 @@ impl Tree<'_> {
             // descendants are collapsed as well.
             state.set_open(open);
         }
-        state
+        let toggles = creates(&item).is_none() && !has_properties(&item);
+        let (_, header, _) = state
             .show_header(ui, |ui| self.label(ui, item, text))
             .body(|ui| body(self, ui));
         self.forced_open = outer;
+        if toggles && header.inner.double_clicked() {
+            let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, default_open);
+            state.toggle(ui);
+            state.store(ui.ctx());
+        }
     }
 
     /// Group node that may be empty: a placeholder leaf without children.
@@ -417,7 +434,7 @@ pub fn show(
 
 fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
     // A results file has no FE model, as in PrePoMax; its mesh lives in the Results tree.
-    let model = model.filter(|m| !m.results_only);
+    let model = model.filter(|m| !m.is_results());
     let fe = model.as_ref().map(|m| m.fe.clone()).unwrap_or_default();
     let has_model = model.is_some();
     tree.branch(ui, TreeItem::Model, "Model", true, |tree, ui| {
@@ -541,4 +558,24 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
             tree.leaf(ui, TreeItem::Group("History Outputs"), "History Outputs");
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn containers_have_no_properties_dialog() {
+        for item in [
+            TreeItem::Mesh,
+            TreeItem::Group("Parts"),
+            TreeItem::StepGroup(0, "BCs"),
+            TreeItem::FieldOutputs,
+        ] {
+            assert!(!has_properties(&item), "{item:?}");
+        }
+        for item in [TreeItem::Model, TreeItem::Part(0), TreeItem::Material(0)] {
+            assert!(has_properties(&item), "{item:?}");
+        }
+    }
 }

@@ -20,6 +20,8 @@ pub enum Icon {
     Fit,
     /// Standard view; the cube face looked at is highlighted.
     View(ViewIcon),
+    /// Vertical view: an arrow standing on the ground line.
+    Vertical,
     FeatureEdges,
     MeshEdges,
     First,
@@ -132,6 +134,16 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
     // Coordinates on a 16 × 16 grid.
     let p = |x: f32, y: f32| pos2(r.left() + x, r.top() + y);
     match icon {
+        Icon::Vertical => {
+            line(shapes, &[p(2.5, 14.0), p(13.5, 14.0)], 1.5, OUTLINE);
+            line(shapes, &[p(8.0, 13.0), p(8.0, 5.0)], 2.0, ACCENT);
+            polygon(
+                shapes,
+                vec![p(8.0, 1.0), p(11.5, 6.0), p(4.5, 6.0)],
+                ACCENT,
+                ACCENT,
+            );
+        }
         Icon::New => {
             polygon(
                 shapes,

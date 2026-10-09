@@ -11,6 +11,7 @@ use glam::{DVec3, Vec3};
 use plx_mesh::{ElementId, NodeId, SkinFace, face_normal};
 
 use crate::model::{Hit, Model};
+use crate::numeric;
 use crate::viewport::{BoxSelect, Preview};
 
 /// How a pick combines with the selection so far.
@@ -316,7 +317,7 @@ impl Picker {
                 });
                 ui.weak("Umschalt: hinzufügen, Strg: entfernen");
                 ui.weak("Ziehen: Rahmen (nach links: auch angeschnittene)");
-                ui.weak("Mittlere Maustaste: drehen");
+                ui.weak("Mittlere Maustaste: drehen, mit Umschalt verschieben");
             });
         action
     }
@@ -333,7 +334,7 @@ impl Picker {
                 if mode.angle_mode() {
                     ui.add_enabled(
                         self.select_by == mode,
-                        egui::DragValue::new(&mut self.angle)
+                        numeric::drag_value(&mut self.angle)
                             .range(0.0..=180.0)
                             .speed(1.0)
                             .suffix(" °"),

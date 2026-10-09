@@ -7,6 +7,7 @@ mod icons;
 mod keywords;
 mod material_library;
 mod model;
+mod numeric;
 mod overlay;
 mod properties;
 mod results;

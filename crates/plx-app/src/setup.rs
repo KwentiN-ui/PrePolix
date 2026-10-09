@@ -14,6 +14,7 @@ use plx_model::{
 };
 
 use crate::model::{Highlight, Hit, Model};
+use crate::numeric;
 use crate::selection::{History, Items, Operation, Picker, PickerAction, Target};
 use crate::tree::TreeItem;
 use crate::viewport::{BoxSelect, Preview};
@@ -677,7 +678,7 @@ impl Editor {
                         let mut set = value.is_some();
                         ui.checkbox(&mut set, label);
                         let mut number = value.unwrap_or(0.0);
-                        ui.add_enabled(set, egui::DragValue::new(&mut number).speed(0.01));
+                        ui.add_enabled(set, numeric::drag_value(&mut number).speed(0.01));
                         *value = set.then_some(number);
                         ui.end_row();
                     }
@@ -708,7 +709,7 @@ impl Editor {
                     LoadKind::ConcentratedForce(force) => {
                         for (value, label) in force.iter_mut().zip(["F1", "F2", "F3"]) {
                             ui.label(label);
-                            ui.add(egui::DragValue::new(value).speed(1.0));
+                            ui.add(numeric::drag_value(value).speed(1.0));
                             ui.end_row();
                         }
                         ui.label("");
@@ -717,13 +718,13 @@ impl Editor {
                     }
                     LoadKind::Pressure(pressure) => {
                         ui.label("Druck");
-                        ui.add(egui::DragValue::new(pressure).speed(0.1));
+                        ui.add(numeric::drag_value(pressure).speed(0.1));
                         ui.end_row();
                     }
                     LoadKind::SurfaceTraction(force) => {
                         for (value, label) in force.iter_mut().zip(["F1", "F2", "F3"]) {
                             ui.label(label);
-                            ui.add(egui::DragValue::new(value).speed(1.0));
+                            ui.add(numeric::drag_value(value).speed(1.0));
                             ui.end_row();
                         }
                         ui.label("");
@@ -919,7 +920,7 @@ fn material_form(ui: &mut Ui, material: &mut Material) {
     ui.label("    Querkontraktionszahl");
     ui.add_enabled(
         elastic,
-        egui::DragValue::new(&mut values.poisson)
+        numeric::drag_value(&mut values.poisson)
             .range(0.0..=0.5)
             .speed(0.01)
             .max_decimals(4),
@@ -956,7 +957,7 @@ fn step_form(ui: &mut Ui, step: &mut Step) {
     ui.label("Max. Inkremente");
     ui.add_enabled(
         custom,
-        egui::DragValue::new(&mut settings.max_increments).range(1..=1_000_000),
+        numeric::drag_value(&mut settings.max_increments).range(1..=1_000_000),
     );
     ui.end_row();
     for (label, value, enabled) in [
@@ -981,7 +982,7 @@ fn incrementation_label(incrementation: Incrementation) -> &'static str {
 
 /// Field for physical values that may be very small or large, such as a density of 7.85e-9.
 fn number(value: &mut f64) -> egui::DragValue<'_> {
-    egui::DragValue::new(value)
+    numeric::drag_value(value)
         .speed(0.0)
         .custom_formatter(|v, _| {
             if v != 0.0 && !(1e-3..1e7).contains(&v.abs()) {
@@ -990,7 +991,6 @@ fn number(value: &mut f64) -> egui::DragValue<'_> {
                 format!("{v}")
             }
         })
-        .custom_parser(|text| text.trim().replace(',', ".").parse().ok())
 }
 
 #[cfg(test)]
