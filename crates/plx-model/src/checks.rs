@@ -12,7 +12,9 @@ use std::collections::{HashMap, HashSet};
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId};
 
-use crate::{BoundaryKind, Constraint, FeModel, LoadKind, ModelItem, ModelSpace, StepKind};
+use crate::{
+    BoundaryKind, Constraint, FeModel, LoadKind, ModelItem, ModelSpace, SectionKind, StepKind,
+};
 
 /// Whether CalculiX aborts or the results are likely wrong.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -36,6 +38,8 @@ pub enum Problem {
     InvalidElastic,
     DistortedElements,
     RigidBodyMotion,
+    /// Truss nodes that no bar or support holds in some direction.
+    Mechanism,
     HeldOnlyByContact,
     ConflictingBoundaries,
     LoadOnFixedNodes,
@@ -76,6 +80,7 @@ impl Problem {
             Problem::InvalidElastic => "Ungültige Materialkonstanten",
             Problem::DistortedElements => "Verzerrte Elemente",
             Problem::RigidBodyMotion => "Starrkörperbewegung möglich",
+            Problem::Mechanism => "Stabwerk beweglich",
             Problem::HeldOnlyByContact => "Nur über Kontakt gehalten",
             Problem::ConflictingBoundaries => "Widersprüchliche Randbedingungen",
             Problem::LoadOnFixedNodes => "Last auf festgehaltenen Knoten",
@@ -146,6 +151,14 @@ impl Problem {
                  Tie verbindet sie mit gehaltenen Teilen. Die Steifigkeitsmatrix ist dann \
                  singulär. Je nach Gleichungslöser bricht CalculiX mit \"zero pivot\" ab \
                  oder liefert riesige, unbrauchbare Verschiebungen ohne Fehlermeldung."
+            }
+            Problem::Mechanism => {
+                "Stäbe (Truss Section) tragen nur Längskraft. Ein Knoten, an dem alle Stäbe \
+                 in einer Linie oder in einer Ebene liegen, ist quer dazu durch nichts \
+                 gehalten: Ein Stab aus mehreren Elementen knickt an jedem inneren Knoten \
+                 widerstandslos ab, und ein ebenes Fachwerk ist senkrecht zu seiner Ebene \
+                 beweglich. Die Steifigkeitsmatrix ist singulär; CalculiX meldet das nicht, \
+                 sondern liefert riesige, unbrauchbare Verschiebungen."
             }
             Problem::HeldOnlyByContact => {
                 "Diese Teile werden nur über Kontaktpaare gehalten. Zu Beginn der Rechnung \
@@ -244,6 +257,13 @@ impl Problem {
                  mit einer Tie an gehaltene Teile binden, oder schwache Federn (Constraints \
                  > Point Spring) gegen Masse setzen."
             }
+            Problem::Mechanism => {
+                "Jeden Stab mit genau einem Element vernetzen (Mesh Setup > Meshing \
+                 Parameters: maximale Elementgröße größer als der längste Stab). Ein ebenes \
+                 Fachwerk zusätzlich an allen Knoten senkrecht zur Ebene festhalten. Sollen \
+                 die Stäbe Biegung tragen, eine Beam Section statt der Truss Section \
+                 verwenden."
+            }
             Problem::HeldOnlyByContact => {
                 "Die Teile zusätzlich schwach lagern (Point Spring mit kleiner Steifigkeit), \
                  die Kontaktflächen zu Beginn berühren lassen (Adjust im Kontaktpaar) oder \
@@ -324,38 +344,22 @@ pub struct MeshCheck {
     piece_parts: Vec<Vec<usize>>,
     /// Elements with a nonpositive Jacobian determinant of each part, by part index.
     distorted: Vec<Vec<ElementId>>,
-    /// Whether the mesh has beams or shells, the only elements with rotations.
-    has_rotations: bool,
-    /// Whether each node, by node index, belongs to a beam or shell and so has rotations.
-    rotational: Vec<bool>,
 }
 
 impl MeshCheck {
     pub fn new(mesh: &FeMesh, space: ModelSpace) -> Self {
         let mut union = UnionFind::new(mesh.node_count());
         let mut used = vec![false; mesh.node_count()];
-        let mut rotational = vec![false; mesh.node_count()];
         for element in mesh.elements() {
-            // Beams (B31, B32) and shells (S3 to S8R) have rotations; trusses, plane and
-            // solid elements only displacements.
-            let rotations = match element.shape.family() {
-                ElementFamily::Line => element.type_name.to_ascii_uppercase().starts_with('B'),
-                ElementFamily::Surface => {
-                    !element.is_plane() && element.type_name.to_ascii_uppercase().starts_with('S')
-                }
-                ElementFamily::Solid => false,
-            };
             let mut first = None;
             for index in element.nodes.iter().filter_map(|&n| mesh.node_index(n)) {
                 used[index] = true;
-                rotational[index] |= rotations;
                 match first {
                     None => first = Some(index),
                     Some(first) => union.join(first, index),
                 }
             }
         }
-        let has_rotations = rotational.iter().any(|&r| r);
         let mut label = vec![u32::MAX; mesh.node_count()];
         let mut pieces = 0;
         let piece: Vec<u32> = (0..mesh.node_count())
@@ -396,8 +400,6 @@ impl MeshCheck {
             pieces,
             piece_parts,
             distorted,
-            has_rotations,
-            rotational,
         }
     }
 
@@ -444,8 +446,9 @@ impl FeModel {
             }
         }
         let initial_temperature = self.initial_conditions.iter().any(|c| c.active);
+        let trusses = Trusses::new(self, mesh);
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
-            self.check_step(s, mesh, mesh_check, &mut findings);
+            self.check_step(s, mesh, mesh_check, &trusses, &mut findings);
             if let StepKind::HeatTransfer(h) | StepKind::CoupledTempDisp(h) = &step.kind
                 && !h.steady_state
                 && !initial_temperature
@@ -565,7 +568,14 @@ impl FeModel {
         }
     }
 
-    fn check_step(&self, s: usize, mesh: &FeMesh, check: &MeshCheck, findings: &mut Vec<Finding>) {
+    fn check_step(
+        &self,
+        s: usize,
+        mesh: &FeMesh,
+        check: &MeshCheck,
+        trusses: &Trusses,
+        findings: &mut Vec<Finding>,
+    ) {
         let step = &self.steps[s];
         let space = self.properties.space;
         let dofs = if space.is_2d() { 2 } else { 6 };
@@ -589,7 +599,7 @@ impl FeModel {
             };
             if let BoundaryKind::Displacement(values) = bc.kind
                 && values[3..].iter().any(Option::is_some)
-                && (space.is_2d() || !check.has_rotations)
+                && (space.is_2d() || !trusses.rotational.iter().any(|&r| r))
             {
                 findings.push(Finding::new(
                     ModelItem::BoundaryCondition(s, i),
@@ -682,7 +692,8 @@ impl FeModel {
             StepKind::Static(_) | StepKind::CoupledTempDisp(_)
         );
         if static_mechanical && !constrained_by_keywords {
-            self.check_rigid_body(s, mesh, check, &fixed, findings);
+            self.check_rigid_body(s, mesh, check, trusses, &fixed, findings);
+            self.check_trusses(s, mesh, trusses, &fixed, findings);
         }
     }
 
@@ -695,6 +706,7 @@ impl FeModel {
         s: usize,
         mesh: &FeMesh,
         check: &MeshCheck,
+        trusses: &Trusses,
         fixed: &HashMap<(NodeId, usize), (usize, f64)>,
         findings: &mut Vec<Finding>,
     ) {
@@ -732,7 +744,7 @@ impl FeModel {
                 support(node, axis(dof), false);
             } else if dof < 6
                 && space == ModelSpace::ThreeD
-                && (mesh.node_index(node)).is_some_and(|i| check.rotational[i])
+                && (mesh.node_index(node)).is_some_and(|i| trusses.rotational[i])
             {
                 support(node, axis(dof - 3), true);
             }
@@ -856,6 +868,234 @@ impl FeModel {
                 findings.push(Finding::new(ModelItem::Part(part), problem, detail.clone()));
             }
         }
+    }
+
+    /// Finds truss nodes that can move without resistance in a static step. A bar holds its
+    /// end nodes along its axis only, so a node is held when its bars, supports and springs
+    /// span all three directions; tied nodes are written as one node and count together.
+    /// Inner nodes of a bar meshed with several elements and the nodes of a plane truss
+    /// fail this, and CalculiX solves the singular system without a word.
+    fn check_trusses(
+        &self,
+        s: usize,
+        mesh: &FeMesh,
+        trusses: &Trusses,
+        fixed: &HashMap<(NodeId, usize), (usize, f64)>,
+        findings: &mut Vec<Finding>,
+    ) {
+        if trusses.bars.is_empty() || self.properties.space != ModelSpace::ThreeD {
+            return;
+        }
+        let mut joined = UnionFind::new(mesh.node_count());
+        // Nodes held by something this check does not follow, such as a tie to a solid.
+        let mut held_otherwise = vec![false; mesh.node_count()];
+        let mark = |region: &crate::Region, held: &mut Vec<bool>| {
+            for index in region
+                .nodes(mesh)
+                .iter()
+                .filter_map(|&n| mesh.node_index(n))
+            {
+                held[index] = true;
+            }
+        };
+        let mut gram = vec![[[0.0; 6]; 6]; mesh.node_count()];
+        let add = |gram: &mut Vec<[[f64; 6]; 6]>, node: NodeId, d: [f64; 3]| {
+            if let Some(index) = mesh.node_index(node) {
+                for a in 0..3 {
+                    for b in 0..3 {
+                        gram[index][a][b] += d[a] * d[b];
+                    }
+                }
+            }
+        };
+        let axis =
+            |d: usize| -> [f64; 3] { std::array::from_fn(|i| if i == d { 1.0 } else { 0.0 }) };
+        for constraint in self.constraints.iter().filter(|c| c.active()) {
+            match constraint {
+                Constraint::NodeTie(c) => {
+                    let nodes: Vec<usize> = (c.region.nodes(mesh).into_iter())
+                        .filter_map(|n| mesh.node_index(n))
+                        .collect();
+                    for pair in nodes.windows(2) {
+                        joined.join(pair[0], pair[1]);
+                    }
+                }
+                Constraint::PointSpring(c) => {
+                    for node in c.region.nodes(mesh) {
+                        for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
+                            add(&mut gram, node, axis(d));
+                        }
+                    }
+                }
+                Constraint::SurfaceSpring(c) => {
+                    for node in c.region.nodes(mesh) {
+                        for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
+                            add(&mut gram, node, axis(d));
+                        }
+                    }
+                }
+                Constraint::CompressionOnly(c) => mark(&c.region, &mut held_otherwise),
+                Constraint::Tie(_) | Constraint::SurfaceToSurfaceSpring(_) => {
+                    for region in constraint.master_slave().into_iter().flatten() {
+                        mark(region, &mut held_otherwise);
+                    }
+                }
+            }
+        }
+        for pair in self.contact_pairs.iter().filter(|c| c.active) {
+            mark(&pair.master, &mut held_otherwise);
+            mark(&pair.slave, &mut held_otherwise);
+        }
+        for &(node, dof) in fixed.keys() {
+            if dof < 3 {
+                add(&mut gram, node, axis(dof));
+            }
+        }
+        for &(_, [a, b]) in &trusses.bars {
+            let (Some(x), Some(y)) = (mesh.node(a), mesh.node(b)) else {
+                continue;
+            };
+            let d: [f64; 3] = std::array::from_fn(|i| y[i] - x[i]);
+            let length = d.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if length > 0.0 {
+                let d = d.map(|v| v / length);
+                add(&mut gram, a, d);
+                add(&mut gram, b, d);
+            }
+        }
+        // Sum over the tied nodes; a group with a node of another element is held by it.
+        let mut groups: HashMap<usize, ([[f64; 6]; 6], bool, NodeId)> = HashMap::new();
+        for (index, &id) in mesh.node_ids().iter().enumerate() {
+            let (truss, other) = (trusses.truss[index], trusses.other[index]);
+            if !truss && !other {
+                continue;
+            }
+            let entry = (groups.entry(joined.root(index))).or_insert(([[0.0; 6]; 6], false, id));
+            for (sum, row) in entry.0.iter_mut().zip(&gram[index]) {
+                for (sum, value) in sum.iter_mut().zip(row) {
+                    *sum += value;
+                }
+            }
+            entry.1 |= other || held_otherwise[index];
+            entry.2 = entry.2.min(id);
+        }
+        let mut free: Vec<(NodeId, Vec<[f64; 6]>)> = (groups.into_values())
+            .filter(|(_, held, _)| !held)
+            .filter_map(|(gram, _, node)| {
+                let (values, vectors) = eigen(&gram, 3);
+                let free: Vec<[f64; 6]> = (0..3)
+                    .filter(|&i| values[i] <= 1e-9)
+                    .map(|i| vectors[i])
+                    .collect();
+                (!free.is_empty()).then_some((node, free))
+            })
+            .collect();
+        if free.is_empty() {
+            return;
+        }
+        free.sort_by_key(|(node, _)| *node);
+        let examples: Vec<String> = (free.iter().take(3))
+            .map(|(node, directions)| format!("{node} {}", describe_directions(directions)))
+            .collect();
+        let detail = format!(
+            "{}: {} Stabknoten nicht gehalten, z. B. Knoten {}",
+            self.steps[s].name,
+            free.len(),
+            examples.join(", ")
+        );
+        let free_nodes: HashSet<NodeId> = free.iter().map(|(node, _)| *node).collect();
+        findings.push(Finding::new(
+            ModelItem::BoundaryConditions(s),
+            Problem::Mechanism,
+            detail.clone(),
+        ));
+        for (part, p) in mesh.parts.iter().enumerate() {
+            let touched = (p.elements.iter().filter_map(|&e| mesh.element(e)))
+                .any(|e| e.nodes.iter().any(|n| free_nodes.contains(n)));
+            if touched {
+                findings.push(Finding::new(
+                    ModelItem::Part(part),
+                    Problem::Mechanism,
+                    detail.clone(),
+                ));
+            }
+        }
+    }
+}
+
+/// Whether the nodes of an element have rotations: beams (B31, B32) and shells (S3 to S8R)
+/// have them; trusses, plane and solid elements only displacements. A line element of a
+/// truss section is a truss whatever its type name says; see [`Trusses`].
+fn has_rotations(element: &plx_mesh::Element) -> bool {
+    match element.shape.family() {
+        ElementFamily::Line => element.type_name.to_ascii_uppercase().starts_with('B'),
+        ElementFamily::Surface => {
+            !element.is_plane() && element.type_name.to_ascii_uppercase().starts_with('S')
+        }
+        ElementFamily::Solid => false,
+    }
+}
+
+/// The trusses of the model. The mesh stores beams and trusses alike as line elements
+/// (meshed lines are `B32`); only a truss section makes one a truss, which has no rotations
+/// and is written as `T3D2` between its end nodes.
+struct Trusses {
+    /// Each truss element with its two end nodes.
+    bars: Vec<(ElementId, [NodeId; 2])>,
+    /// Whether each node, by node index, is an end node of a truss.
+    truss: Vec<bool>,
+    /// Whether each node, by node index, belongs to an element other than a truss.
+    other: Vec<bool>,
+    /// Whether each node, by node index, has rotations.
+    rotational: Vec<bool>,
+}
+
+impl Trusses {
+    fn new(model: &FeModel, mesh: &FeMesh) -> Self {
+        let ids: HashSet<ElementId> = (model.sections.iter())
+            .filter(|s| matches!(s.kind, SectionKind::Truss { .. }))
+            .flat_map(|s| s.region.elements(mesh))
+            .collect();
+        let mut bars = Vec::new();
+        let mut truss = vec![false; mesh.node_count()];
+        let mut other = vec![false; mesh.node_count()];
+        let mut rotational = vec![false; mesh.node_count()];
+        for element in mesh.elements() {
+            if element.shape.family() == ElementFamily::Line && ids.contains(&element.id) {
+                // The midside node of a 3-node line is left out of the written truss.
+                if let (Some(&a), Some(&b)) = (element.nodes.first(), element.nodes.last()) {
+                    bars.push((element.id, [a, b]));
+                    for index in [a, b].into_iter().filter_map(|n| mesh.node_index(n)) {
+                        truss[index] = true;
+                    }
+                }
+                continue;
+            }
+            let rotations = has_rotations(element);
+            for index in element.nodes.iter().filter_map(|&n| mesh.node_index(n)) {
+                other[index] = true;
+                rotational[index] |= rotations;
+            }
+        }
+        Self {
+            bars,
+            truss,
+            other,
+            rotational,
+        }
+    }
+}
+
+/// Names the directions a truss node is free in: two free directions are across a single
+/// bar, one is out of the plane of its bars.
+fn describe_directions(free: &[[f64; 6]]) -> String {
+    match free {
+        [f] => match (0..3).find(|&i| f[i].abs() > 0.99) {
+            Some(i) => format!("frei in {}", ["X", "Y", "Z"][i]),
+            None => "frei senkrecht zur Ebene der Stäbe".into(),
+        },
+        [_, _] => "frei quer zum Stab".into(),
+        _ => "ganz frei".into(),
     }
 }
 
@@ -1548,6 +1788,111 @@ mod tests {
         let trusses = line("T3D2");
         model.sections[0].kind = crate::SectionKind::Truss { area: 1.0 };
         assert_eq!(check(&model, &trusses)[0].problem, Problem::RigidBodyMotion);
+        // Meshed lines are B31 or B32 whatever their section; a truss section makes them
+        // trusses all the same.
+        assert_eq!(check(&model, &mesh)[0].problem, Problem::RigidBodyMotion);
+    }
+
+    /// A plane truss triangle in the XZ plane, as meshed lines (`B31`) with a truss section:
+    /// nodes 1 (0, 0, 0), 2 (2, 0, 0) and 3 (1, 0, 1), the bottom bar split into
+    /// `bottom` elements, held statically determinate in the plane and at every node in Y.
+    /// With `tied` the left bar ends in node 9 at node 3 instead, joined by a node tie.
+    fn truss_triangle(bottom: u32, tied: bool) -> (FeMesh, FeModel) {
+        let mut mesh = FeMesh::default();
+        mesh.set_node(1, [0.0, 0.0, 0.0]);
+        mesh.set_node(2, [2.0, 0.0, 0.0]);
+        mesh.set_node(3, [1.0, 0.0, 1.0]);
+        let mut bottom_nodes = vec![1];
+        for i in 1..bottom {
+            mesh.set_node(3 + i, [2.0 * f64::from(i) / f64::from(bottom), 0.0, 0.0]);
+            bottom_nodes.push(3 + i);
+        }
+        bottom_nodes.push(2);
+        let mut bars: Vec<Vec<Vec<NodeId>>> =
+            vec![(bottom_nodes.windows(2)).map(<[NodeId]>::to_vec).collect()];
+        bars.push(vec![vec![2, 3]]);
+        let top = if tied { 9 } else { 3 };
+        if tied {
+            mesh.set_node(9, [1.0, 0.0, 1.0]);
+        }
+        bars.push(vec![vec![top, 1]]);
+        let mut id = 1;
+        for (b, elements) in bars.into_iter().enumerate() {
+            let mut part = Vec::new();
+            for nodes in elements {
+                mesh.add_element(Element {
+                    id,
+                    type_name: "B31".into(),
+                    shape: ElementShape::Line2,
+                    nodes,
+                })
+                .unwrap();
+                part.push(id);
+                id += 1;
+            }
+            mesh.parts.push(Part {
+                name: format!("LINE-{}", b + 1),
+                elements: part,
+            });
+        }
+        let mut model = model(&mesh);
+        model.sections[0].kind = crate::SectionKind::Truss { area: 1.0 };
+        let bcs = &mut model.steps[0].boundary_conditions;
+        bcs[0].region = Region::Nodes(vec![1]);
+        bcs[0].kind = BoundaryKind::Displacement([Some(0.0), None, Some(0.0), None, None, None]);
+        bcs.push(BoundaryCondition {
+            name: "Roller".into(),
+            active: true,
+            region: Region::Nodes(vec![2]),
+            kind: BoundaryKind::Displacement([None, None, Some(0.0), None, None, None]),
+            amplitude: None,
+        });
+        bcs.push(BoundaryCondition {
+            name: "Plane".into(),
+            active: true,
+            region: Region::Nodes(mesh.node_ids().to_vec()),
+            kind: BoundaryKind::Displacement([None, Some(0.0), None, None, None, None]),
+            amplitude: None,
+        });
+        model.steps[0].loads[0].region = Region::Nodes(vec![3]);
+        if tied {
+            model.constraints.push(Constraint::NodeTie(crate::NodeTie {
+                name: "Node_Tie-1".into(),
+                active: true,
+                region: Region::Nodes(vec![3, 9]),
+                rotations: true,
+            }));
+        }
+        (mesh, model)
+    }
+
+    #[test]
+    fn truss_nodes_need_bars_or_supports_in_every_direction() {
+        let (mesh, model) = truss_triangle(1, false);
+        assert_eq!(check(&model, &mesh), []);
+        // A bar of two elements buckles at its inner node without resistance.
+        let (mesh, model) = truss_triangle(2, false);
+        let findings = check(&model, &mesh);
+        assert_eq!(
+            problems(&findings),
+            [
+                (ModelItem::BoundaryConditions(0), Problem::Mechanism),
+                (ModelItem::Part(0), Problem::Mechanism),
+            ]
+        );
+        assert_eq!(
+            findings[0].detail,
+            "Step-1: 1 Stabknoten nicht gehalten, z. B. Knoten 4 frei in Z"
+        );
+        // Without the supports in Y the plane truss moves out of its plane.
+        let (mesh, mut model) = truss_triangle(1, false);
+        model.steps[0].boundary_conditions[2].region = Region::Nodes(vec![1, 2]);
+        let findings = check(&model, &mesh);
+        assert!(findings.iter().any(|f| f.problem == Problem::Mechanism
+            && f.detail == "Step-1: 1 Stabknoten nicht gehalten, z. B. Knoten 3 frei in Y"));
+        // Tied nodes count as one node, as they are written.
+        let (mesh, model) = truss_triangle(1, true);
+        assert_eq!(check(&model, &mesh), []);
     }
 
     #[test]
