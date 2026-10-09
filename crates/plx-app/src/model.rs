@@ -8,7 +8,7 @@ use plx_io::inp::{InpImport, read_inp};
 use plx_mesh::{ElementId, FeMesh, NodeId, PartSkin, extract_part_skin};
 use plx_model::FeModel;
 use plx_render::contour::normalize;
-use plx_render::{RenderMesh, part_color, part_render_mesh, wireframe_edges};
+use plx_render::{RenderMesh, Vertex, part_color, part_render_mesh, wireframe_edges};
 
 use crate::results::ResultsView;
 
@@ -63,6 +63,8 @@ pub struct Model {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Highlight {
     pub parts: HashSet<usize>,
+    /// Parts drawn with a red outline only, as PrePoMax shows a selected part.
+    pub outlines: HashSet<usize>,
     /// Element faces as (element, CalculiX face number).
     pub faces: HashSet<(ElementId, u8)>,
     /// Nodes, drawn as points over the scene.
@@ -73,7 +75,7 @@ impl Highlight {
     /// A whole part, such as one selected in the tree or clicked in the 3D view.
     pub fn part(index: usize) -> Self {
         Self {
-            parts: HashSet::from([index]),
+            outlines: HashSet::from([index]),
             ..Self::default()
         }
     }
@@ -247,17 +249,18 @@ impl Model {
 
     /// Recolours the vertices of highlighted faces; vertices are laid out face by face.
     fn highlight_faces(&self, part: usize, skin: &PartSkin, mesh: &mut RenderMesh) {
+        if self.highlight.outlines.contains(&part) {
+            mesh.wide_edges = (mesh.feature_edges.iter())
+                .map(|&vertex| Vertex {
+                    color: HIGHLIGHT_COLOR,
+                    ..vertex
+                })
+                .collect();
+        }
         if self.highlight.faces.is_empty() && !self.highlight.parts.contains(&part) {
             return;
         }
         let whole = self.highlight.parts.contains(&part);
-        if whole {
-            // The outline too, which stays visible over the colours of a result, as in
-            // PrePoMax.
-            for vertex in &mut mesh.feature_edges {
-                vertex.color = HIGHLIGHT_COLOR;
-            }
-        }
         let elements = self.mesh.elements();
         let mut start = 0;
         for face in &skin.faces {

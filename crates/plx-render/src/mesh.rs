@@ -23,6 +23,9 @@ pub struct RenderMesh {
     pub mesh_edges: Vec<Vertex>,
     /// Outline of the undeformed shape, drawn behind deformed results.
     pub wireframe_edges: Vec<Vertex>,
+    /// Lines drawn [`WIDE_EDGE_PX`](crate::renderer::WIDE_EDGE_PX) wide over everything
+    /// else, such as the outline of a selected part.
+    pub wide_edges: Vec<Vertex>,
 }
 
 impl RenderMesh {
