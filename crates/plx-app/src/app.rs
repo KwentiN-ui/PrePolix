@@ -381,10 +381,10 @@ impl eframe::App for PrepolixApp {
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
         egui::Panel::top("tools").show(ui, |ui| {
             self.tool_bar(ui);
-            if self.workbench.tree_view == TreeView::Results && !self.workbench.results.is_empty() {
-                ui.separator();
-                self.workbench.results_tool_bar(ui);
-            }
+            // Like PrePoMax, the results row stays in place and is greyed out outside the
+            // Results tab, so the 3D view does not jump when switching tabs.
+            ui.separator();
+            self.workbench.results_tool_bar(ui);
         });
         self.workbench.animate(&ctx);
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
@@ -773,6 +773,11 @@ impl Workbench {
     /// The results row of the tool bar: PrePoMax's Result box with all opened results
     /// files, then the controls of the shown result.
     fn results_tool_bar(&mut self, ui: &mut egui::Ui) {
+        let enabled = self.tree_view == TreeView::Results && !self.results.is_empty();
+        ui.add_enabled_ui(enabled, |ui| self.results_tool_bar_row(ui, enabled));
+    }
+
+    fn results_tool_bar_row(&mut self, ui: &mut egui::Ui, enabled: bool) {
         ui.horizontal(|ui| {
             ui.label("Ergebnis");
             let mut selected = self.current_result;
@@ -793,9 +798,14 @@ impl Workbench {
                 .on_hover_text(current.unwrap_or_default());
             self.select_result(selected);
             ui.separator();
-            if let Some(view) = self.shown_results_mut()
-                && results_tool_bar(ui, view)
-            {
+            // Greyed out, the row shows the current results file, or empty controls.
+            let mut placeholder = None;
+            let view = match self.results.get_mut(self.current_result) {
+                Some(model) => model.results.as_mut(),
+                None => None,
+            }
+            .unwrap_or_else(|| placeholder.insert(ResultsView::new(Vec::new(), None)));
+            if results_tool_bar(ui, view) && enabled {
                 self.results_changed = true;
             }
         });
