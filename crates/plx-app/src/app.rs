@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -89,7 +90,8 @@ struct Workbench {
     /// Open dialog creating or editing an item of the FE model.
     editor: Option<Editor>,
     /// Item asked to be deleted, waiting for the user's confirmation.
-    confirm_delete: Option<(TreeView, TreeItem)>,
+    /// Items to delete once the user agrees: several parts, or one item.
+    confirm_delete: Option<(TreeView, Vec<TreeItem>)>,
     /// Open CalculiX keyword editor.
     keyword_editor: Option<KeywordEditor>,
     /// Open search for contact pairs.
@@ -104,7 +106,7 @@ struct Workbench {
     history_table: Option<HistoryTable>,
     /// The tree selection whose region is highlighted.
     /// `None` until it is computed, so a dialog's highlight is cleared once it closes.
-    highlighted: Option<Option<(TreeView, TreeItem)>>,
+    highlighted: Option<TreeSelection>,
     analysis: Option<Analysis>,
     /// Problems CalculiX reported when the last analysis failed, shown in the tree.
     solver_findings: Vec<plx_model::Finding>,
@@ -690,6 +692,17 @@ fn load_geometry_in_background(
     ctx.request_repaint();
 }
 
+/// The selected tree item and the parts selected along with it.
+type TreeSelection = (Option<(TreeView, TreeItem)>, BTreeSet<usize>);
+
+/// The output line after deleting parts.
+fn deleted_message(names: &[String]) -> String {
+    match names {
+        [name] => format!("Part {name} gelöscht"),
+        names => format!("Parts {} gelöscht", names.join(", ")),
+    }
+}
+
 /// How many regions of the FE model consist of node or element numbers that a new mesh no
 /// longer has. Regions picked on the geometry are found on the new mesh again.
 fn lost_selections(fe: &plx_model::FeModel, mesh: &plx_mesh::FeMesh) -> usize {
@@ -1238,7 +1251,15 @@ impl Workbench {
             self.create(kind);
         }
         if let Some(item) = response.delete {
-            self.confirm_delete = Some((view, item));
+            // A part among several selected ones deletes them all.
+            let parts = self.tree.selected_parts(view);
+            let items = match item {
+                TreeItem::Part(index) if parts.contains(&index) => {
+                    parts.into_iter().map(TreeItem::Part).collect()
+                }
+                item => vec![item],
+            };
+            self.confirm_delete = Some((view, items));
         }
         if let (Some(item), Some(model)) = (response.toggle_active, self.model.as_mut()) {
             crate::setup::toggle_active(&mut model.fe, &item);
@@ -2445,8 +2466,14 @@ impl Workbench {
         }
         if !self.picking() {
             let hit = self.shown().and_then(|model| model.pick_click(&click));
+            let view = self.tree_view;
             match hit {
+                // Ctrl adds a part or takes it out again, Shift adds it.
+                Some(hit) if click.ctrl => self.tree.toggle_part(view, hit.part),
+                Some(hit) if click.shift => self.tree.add_parts(view, [hit.part]),
                 Some(hit) => self.select_part(hit.part),
+                // A click beside the model with Ctrl or Shift keeps the selection.
+                None if click.ctrl || click.shift => {}
                 // On the Results tab the tree shows the current field, which stays.
                 None if self.tree_view != TreeView::Results => self.tree.selected = None,
                 None if matches!(self.tree.selected, Some((_, TreeItem::Part(_)))) => {
@@ -2496,7 +2523,7 @@ impl Workbench {
     /// Selects a part clicked in the 3D view in the tree shown.
     fn select_part(&mut self, index: usize) {
         let view = self.tree_view;
-        self.tree.selected = Some((view, TreeItem::Part(index)));
+        self.tree.select_part(view, index);
         self.tree.reveal = true;
     }
 
@@ -2510,7 +2537,10 @@ impl Workbench {
                     .and_then(|model| model.pick_click(&click))
                     .map(|hit| hit.part);
             }
-            if let Some(part) = self.menu_part {
+            // A right click on one of several selected parts keeps them, as in the tree.
+            if let Some(part) = self.menu_part
+                && !self.tree.selected_parts(self.tree_view).contains(&part)
+            {
                 self.select_part(part);
             }
         }
@@ -2518,10 +2548,12 @@ impl Workbench {
             .and_then(|index| Some((index, self.shown()?.parts.get(index)?.visible)));
         let mut tree_response = TreeResponse::default();
         let mut command = None;
+        let selected = self.tree.selected_parts(self.tree_view);
         response.context_menu(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             if let Some((index, visible)) = part {
-                tree::part_menu(ui, index, visible, self.tree_view, &mut tree_response);
+                let view = self.tree_view;
+                tree::part_menu(ui, index, visible, view, &selected, &mut tree_response);
                 ui.separator();
             }
             command = crate::viewport::view_menu(ui);
@@ -2861,20 +2893,23 @@ impl Workbench {
 
     /// PrePoMax's question before deleting, for the context menu and the Delete key alike.
     fn confirm_delete_window(&mut self, ctx: &egui::Context) {
-        let Some((view, item)) = self.confirm_delete.clone() else {
+        let Some((view, items)) = self.confirm_delete.clone() else {
             return;
         };
         let mut answer = None;
-        // Like PrePoMax, a part is named in the question.
-        let part = match item {
-            TreeItem::Part(index) => (self.tree_model(view))
-                .and_then(|m| m.parts.get(index))
-                .map(|p| p.name.clone()),
-            _ => None,
-        };
-        let question = match &part {
-            Some(name) => format!("Ausgewähltes Part löschen?\n{name}"),
-            None => "Ausgewähltes Element löschen?".into(),
+        // Like PrePoMax, the parts are named in the question.
+        let parts: Vec<String> = (items.iter())
+            .filter_map(|item| match item {
+                TreeItem::Part(index) => (self.tree_model(view))
+                    .and_then(|m| m.parts.get(*index))
+                    .map(|p| p.name.clone()),
+                _ => None,
+            })
+            .collect();
+        let question = match parts.as_slice() {
+            [] => "Ausgewähltes Element löschen?".into(),
+            [name] => format!("Ausgewähltes Part löschen?\n{name}"),
+            names => format!("Ausgewählte Parts löschen?\n{}", names.join(", ")),
         };
         egui::Modal::new(egui::Id::new("confirm delete")).show(ctx, |ui| {
             ui.label(question);
@@ -2900,8 +2935,19 @@ impl Workbench {
             Some(true) => {
                 self.confirm_delete = None;
                 // The tree may have changed meanwhile, e.g. by another tab's selection.
-                if self.tree.selected.as_ref() == Some(&(view, item.clone())) {
-                    self.delete_item(view, item);
+                let selected = self.tree.selected_parts(view);
+                let parts: Vec<usize> = (items.iter())
+                    .filter_map(|item| match item {
+                        TreeItem::Part(index) => Some(*index),
+                        _ => None,
+                    })
+                    .collect();
+                if !parts.is_empty() && parts.iter().all(|p| selected.contains(p)) {
+                    self.delete_parts(view, &parts);
+                } else if let [item] = items.as_slice()
+                    && self.tree.selected.as_ref() == Some(&(view, item.clone()))
+                {
+                    self.delete_item(view, item.clone());
                 }
             }
             Some(false) => self.confirm_delete = None,
@@ -2918,13 +2964,17 @@ impl Workbench {
         }
     }
 
+    fn delete_parts(&mut self, view: TreeView, parts: &[usize]) {
+        match view {
+            TreeView::Geometry => self.delete_geometry_parts(parts),
+            TreeView::FeModel => self.delete_mesh_parts(parts),
+            TreeView::Results => {}
+        }
+    }
+
     fn delete_item(&mut self, view: TreeView, item: TreeItem) {
         if let TreeItem::Part(index) = item {
-            match view {
-                TreeView::Geometry => self.delete_geometry_part(index),
-                TreeView::FeModel => self.delete_mesh_part(index),
-                TreeView::Results => {}
-            }
+            self.delete_parts(view, &[index]);
         } else if let TreeItem::ResultFieldOutput(field) = item {
             self.delete_field_output(field);
         } else if let TreeItem::HistorySet(set) = item {
@@ -3040,19 +3090,29 @@ impl Workbench {
         self.view_command = Some(ViewCommand::Fit);
     }
 
-    /// PrePoMax's Delete of a geometry part: the geometry loses the solid or face; a mesh
-    /// already generated from it stays, as a part of the FE model.
-    fn delete_geometry_part(&mut self, index: usize) {
-        let name = (self.geometry.as_ref())
-            .and_then(|g| g.parts.get(index))
-            .map(|p| p.name.clone());
-        let (Some(name), Some(model)) = (name, self.model.as_mut()) else {
+    /// PrePoMax's Delete of geometry parts: the geometry loses the solids or faces; a mesh
+    /// already generated from them stays, as parts of the FE model.
+    fn delete_geometry_parts(&mut self, indices: &[usize]) {
+        let names: Vec<String> = (self.geometry.as_ref())
+            .map(|g| {
+                (indices.iter())
+                    .filter_map(|&i| g.parts.get(i))
+                    .map(|p| p.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Some(model) = self.model.as_mut() else {
             return;
         };
         let Some(geometry) = &model.geometry else {
             return;
         };
-        let smaller = match plx_mesher::delete_part_renumbered(geometry, &name) {
+        if names.is_empty() {
+            return;
+        }
+        let name = names.join(", ");
+        // All in one go, so that Gmsh numbers the faces, edges and vertices anew once.
+        let smaller = match plx_mesher::delete_parts_renumbered(geometry, &names) {
             Ok((smaller, tags)) => {
                 // Gmsh numbers the faces, edges and vertices anew; the mesh and the
                 // selections on the geometry follow.
@@ -3082,21 +3142,29 @@ impl Workbench {
             None => None,
         };
         model.geometry = smaller;
-        self.output.push(format!("Part {name} gelöscht"));
+        self.output.push(deleted_message(&names));
         self.after_parts_changed();
     }
 
-    /// PrePoMax's Delete of a mesh part: its elements go, with the nodes no other part has.
-    fn delete_mesh_part(&mut self, index: usize) {
+    /// PrePoMax's Delete of mesh parts: their elements go, with the nodes no other part has.
+    fn delete_mesh_parts(&mut self, indices: &[usize]) {
         let Some(model) = self.model.as_mut() else {
             return;
         };
-        let Some(name) = model.parts.get(index).map(|p| p.name.clone()) else {
+        let names: Vec<String> = (indices.iter())
+            .filter_map(|&i| model.parts.get(i))
+            .map(|p| p.name.clone())
+            .collect();
+        if names.is_empty() {
             return;
-        };
-        let smaller = plx_mesher::delete_mesh_part(&model.mesh, &name);
-        model.set_mesh(smaller);
-        self.output.push(format!("Part {name} gelöscht"));
+        }
+        // By name, which stays while the others go.
+        let mut mesh = model.mesh.clone();
+        for name in &names {
+            mesh = plx_mesher::delete_mesh_part(&mesh, name);
+        }
+        model.set_mesh(mesh);
+        self.output.push(deleted_message(&names));
         self.after_parts_changed();
     }
 
@@ -3158,8 +3226,8 @@ impl Workbench {
                     .unwrap_or_default(),
                 _ if hot_spot.is_some() => hot_spot.map(|d| d.highlight(model)).unwrap_or_default(),
                 (Some(dialog), _) => dialog.highlight(model),
-                (None, Some((TreeView::Results, TreeItem::Part(part)))) if index == current => {
-                    Highlight::part(*part)
+                (None, Some((TreeView::Results, TreeItem::Part(_)))) if index == current => {
+                    Highlight::parts(self.tree.selected_parts(TreeView::Results))
                 }
                 _ => Highlight::default(),
             };
@@ -3186,12 +3254,14 @@ impl Workbench {
             self.highlighted = None;
             editor.highlight(model)
         } else {
-            if self.highlighted.as_ref() == Some(&self.tree.selected) {
+            let parts = self.tree.selected_parts(TreeView::FeModel);
+            let selection = (self.tree.selected.clone(), parts.clone());
+            if self.highlighted.as_ref() == Some(&selection) {
                 return;
             }
-            self.highlighted = Some(self.tree.selected.clone());
+            self.highlighted = Some(selection);
             match &self.tree.selected {
-                Some((TreeView::FeModel, TreeItem::Part(part))) => Highlight::part(*part),
+                Some((TreeView::FeModel, TreeItem::Part(_))) => Highlight::parts(parts),
                 Some((TreeView::FeModel, item)) => crate::setup::item_highlight(model, item),
                 _ => Default::default(),
             }
@@ -3213,7 +3283,9 @@ impl Workbench {
             .map_or(&[][..], |g| g.mesh_items.as_slice());
         let highlight = match (&self.mesh_item_editor, &self.tree.selected) {
             (Some(editor), _) => editor.highlight(view),
-            (None, Some((TreeView::Geometry, TreeItem::Part(part)))) => Highlight::part(*part),
+            (None, Some((TreeView::Geometry, TreeItem::Part(_)))) => {
+                Highlight::parts(self.tree.selected_parts(TreeView::Geometry))
+            }
             (None, Some((TreeView::Geometry, TreeItem::MeshItem(index)))) => items
                 .get(*index)
                 .map(|item| crate::meshing::item_highlight(view, &item.kind))
