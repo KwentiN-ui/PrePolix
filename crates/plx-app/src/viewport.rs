@@ -367,7 +367,10 @@ impl Viewport {
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
             Color32::WHITE,
         );
-        overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels);
+        if let Some(axis) = overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels) {
+            self.camera.set_axis_view(axis);
+            ui.ctx().request_repaint();
+        }
         if let Some(gizmo) = &self.gizmo {
             self.gizmo_state.draw(&painter, gizmo, &self.camera, rect);
         }
