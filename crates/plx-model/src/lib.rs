@@ -8,11 +8,13 @@
 mod checks;
 mod constraint;
 mod contact;
+pub mod convert;
 mod geometry;
 mod hot_spot;
 pub mod library;
 mod properties;
 mod region;
+pub mod units;
 mod validity;
 
 pub use checks::{Finding, MeshCheck, Problem, Severity, diagnose_solver_output};
@@ -26,10 +28,9 @@ pub use geometry::{
 };
 pub use hot_spot::{Extrapolation, HotSpot, HotSpotComponent, extrapolation_weights};
 pub use library::MaterialLibrary;
-pub use properties::{
-    BASE_QUANTITIES, DERIVED_QUANTITIES, ModelProperties, ModelSpace, UnitSystem,
-};
+pub use properties::{ModelProperties, ModelSpace};
 pub use region::Region;
+pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, Quantity, UnitSystem};
 pub use validity::{Invalid, ModelItem};
 
 use serde::{Deserialize, Serialize};

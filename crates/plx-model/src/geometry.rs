@@ -18,6 +18,11 @@ pub struct Geometry {
     /// PrePoMax's mesh setup items.
     #[serde(default)]
     pub mesh_items: Vec<MeshSetupItem>,
+    /// Names of the parts, the solids and then the faces outside them, once a part was
+    /// deleted: Gmsh numbers the parts that stay anew, while their names must stay. Empty
+    /// while the names Gmsh gives are the parts' names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub part_names: Vec<String>,
 }
 
 impl Geometry {
@@ -222,6 +227,7 @@ mod tests {
                     },
                 },
             ],
+            part_names: Vec::new(),
         };
         assert_eq!(geometry.parameters("solid-1"), fine);
         assert_eq!(geometry.parameters("SOLID-2").max_size, 5.0);
