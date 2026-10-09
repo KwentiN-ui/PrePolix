@@ -12,8 +12,8 @@ use plx_model::{
     Amplitude, BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, BoundaryKind,
     Constraint, ContactPair, Elastic, EquationSolver, FeModel, FieldOutput, FrequencyStep,
     HeatTransferStep, Incrementation, InitialCondition, InitialConditionKind, Load, LoadKind,
-    Material, ModelSpace, OutputKind, Quantity, Region, Section, SectionKind, StaticStep, Step,
-    StepKind, SurfaceInteraction, UnitSystem, next_name,
+    Material, ModelSpace, NodeTie, OutputKind, Quantity, Region, Section, SectionKind, StaticStep,
+    Step, StepKind, SurfaceInteraction, UnitSystem, next_name,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row};
@@ -38,6 +38,8 @@ pub enum NewItem {
     Constraint,
     SurfaceInteraction,
     ContactPair,
+    /// Nodes tied to each other, the ends of beams; listed with the contact pairs.
+    NodeTie,
     /// A time curve for boundary conditions and loads.
     Amplitude,
     /// A field output derived from results, created in the Results tree.
@@ -600,6 +602,7 @@ enum Draft {
     Constraint(ConstraintDraft),
     SurfaceInteraction(SurfaceInteraction, contacts::InteractionView),
     ContactPair(ContactPair, MasterSlave),
+    NodeTie(NodeTie, RegionDraft),
     Amplitude(Amplitude, AmplitudeView),
 }
 
@@ -609,7 +612,8 @@ fn draft_region(draft: &Draft) -> Option<&RegionDraft> {
         Draft::Section(_, r)
         | Draft::BoundaryCondition(_, _, r)
         | Draft::Load(_, _, r)
-        | Draft::InitialCondition(_, r) => Some(r),
+        | Draft::InitialCondition(_, r)
+        | Draft::NodeTie(_, r) => Some(r),
         Draft::ContactPair(_, regions) => Some(regions.current()),
         Draft::Constraint(c) => Some(c.region()),
         _ => None,
@@ -621,7 +625,8 @@ fn draft_region_mut(draft: &mut Draft) -> Option<&mut RegionDraft> {
         Draft::Section(_, r)
         | Draft::BoundaryCondition(_, _, r)
         | Draft::Load(_, _, r)
-        | Draft::InitialCondition(_, r) => Some(r),
+        | Draft::InitialCondition(_, r)
+        | Draft::NodeTie(_, r) => Some(r),
         Draft::ContactPair(_, regions) => Some(regions.current_mut()),
         Draft::Constraint(c) => Some(c.region_mut()),
         _ => None,
@@ -867,6 +872,13 @@ impl Editor {
                     MasterSlave::new(face_target(fe)),
                 )
             }
+            NewItem::NodeTie => {
+                let name = next_name("Node_Tie", names(&fe.node_ties, |t| &t.name));
+                Draft::NodeTie(
+                    NodeTie::new(name),
+                    RegionDraft::new(NODE_SOURCES, Target::Nodes),
+                )
+            }
             NewItem::Amplitude => {
                 let name = next_name("Amplitude", names(&fe.amplitudes, |a| &a.name));
                 Draft::Amplitude(Amplitude::new(name), AmplitudeView::default())
@@ -941,6 +953,12 @@ impl Editor {
                     MasterSlave::from_regions(&pair.master, &pair.slave, face_target(fe), mesh);
                 (Draft::ContactPair(pair, regions), i)
             }
+            TreeItem::NodeTie(i) => {
+                let tie = fe.node_ties.get(i)?.clone();
+                let region =
+                    RegionDraft::from_region(&tie.region, NODE_SOURCES, Target::Nodes, mesh);
+                (Draft::NodeTie(tie, region), i)
+            }
             TreeItem::Amplitude(i) => {
                 let amplitude = fe.amplitudes.get(i)?.clone();
                 (Draft::Amplitude(amplitude, AmplitudeView::default()), i)
@@ -967,6 +985,7 @@ impl Editor {
             Draft::Constraint(c) => ("Constraint", c.name()),
             Draft::SurfaceInteraction(s, _) => ("Surface Interaction", &s.name),
             Draft::ContactPair(c, _) => ("Contact Pair", &c.name),
+            Draft::NodeTie(t, _) => ("Node Tie", &t.name),
             Draft::Amplitude(a, _) => ("Amplitude", &a.name),
         };
         let action = if self.index.is_some() {
@@ -1352,6 +1371,27 @@ impl Editor {
                 ui.weak("Temperatur vor dem ersten Step, z. B. für Wärmedehnung.");
                 ui.end_row();
             }
+            Draft::NodeTie(tie, region) => {
+                name_row(ui, &mut tie.name);
+                region.ui(ui, model);
+                ui.label("Rotationen");
+                ui.checkbox(&mut tie.rotations, "biegesteif");
+                ui.end_row();
+                ui.label("");
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(
+                            "Alle Knoten der Region folgen dem ersten. Verbindet die Enden \
+                             von Balken oder Stäben verschiedener Parts; die Kontaktsuche \
+                             findet sie. Biegesteif koppelt auch die Rotationen, sonst ist \
+                             die Verbindung ein Gelenk; Stäbe haben keine Rotationen.",
+                        )
+                        .weak(),
+                    )
+                    .wrap(),
+                );
+                ui.end_row();
+            }
             Draft::FieldOutput(_, output) => {
                 name_row(ui, &mut output.name);
                 let choices: &[&str] = match output.kind {
@@ -1401,6 +1441,7 @@ impl Editor {
             Draft::Constraint(_) => fe.constraints.iter().map(Constraint::name).collect(),
             Draft::SurfaceInteraction(..) => names(&fe.surface_interactions, |s| &s.name),
             Draft::ContactPair(..) => names(&fe.contact_pairs, |c| &c.name),
+            Draft::NodeTie(..) => names(&fe.node_ties, |t| &t.name),
             Draft::Amplitude(..) => names(&fe.amplitudes, |a| &a.name),
         };
         if let Some(index) = self.index.filter(|&i| i < siblings.len()) {
@@ -1421,6 +1462,7 @@ impl Editor {
             Draft::Constraint(c) => c.name(),
             Draft::SurfaceInteraction(s, _) => &s.name,
             Draft::ContactPair(c, _) => &c.name,
+            Draft::NodeTie(t, _) => &t.name,
             Draft::Amplitude(a, _) => &a.name,
         };
         if name.trim().is_empty() {
@@ -1500,6 +1542,7 @@ impl Editor {
                 Some(TreeItem::SurfaceInteraction(fe.surface_interactions.len()))
             }
             Draft::ContactPair(..) => Some(TreeItem::ContactPair(fe.contact_pairs.len())),
+            Draft::NodeTie(..) => Some(TreeItem::NodeTie(fe.node_ties.len())),
             Draft::Amplitude(..) => Some(TreeItem::Amplitude(fe.amplitudes.len())),
             _ => None,
         }
@@ -1571,6 +1614,13 @@ impl Editor {
                 put(&mut fe.initial_conditions, index, condition);
             }
             Draft::FieldOutput(s, output) => put(&mut fe.steps[s].field_outputs, index, output),
+            Draft::NodeTie(mut tie, region) => {
+                tie.region = region.region();
+                if let Some(existing) = index.and_then(|i| fe.node_ties.get(i)) {
+                    tie.active = existing.active;
+                }
+                put(&mut fe.node_ties, index, tie);
+            }
             Draft::Constraint(draft) => {
                 let mut constraint = draft.finish();
                 if let Some(existing) = index.and_then(|i| fe.constraints.get(i)) {
@@ -1632,6 +1682,7 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::Constraint(i) => remove(&mut fe.constraints, i),
         TreeItem::SurfaceInteraction(i) => remove(&mut fe.surface_interactions, i),
         TreeItem::ContactPair(i) => remove(&mut fe.contact_pairs, i),
+        TreeItem::NodeTie(i) => remove(&mut fe.node_ties, i),
         TreeItem::Amplitude(i) => remove(&mut fe.amplitudes, i),
         _ => false,
     }
@@ -1650,6 +1701,7 @@ pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
             .map(|l| &mut l.active),
         TreeItem::Constraint(i) => fe.constraints.get_mut(i).map(Constraint::active_mut),
         TreeItem::ContactPair(i) => fe.contact_pairs.get_mut(i).map(|c| &mut c.active),
+        TreeItem::NodeTie(i) => fe.node_ties.get_mut(i).map(|t| &mut t.active),
         TreeItem::InitialCondition(i) => fe.initial_conditions.get_mut(i).map(|c| &mut c.active),
         _ => None,
     };
@@ -1727,6 +1779,7 @@ pub fn item_region<'a>(fe: &'a FeModel, item: &TreeItem) -> Option<&'a Region> {
         TreeItem::Load(s, i) => fe.steps.get(s)?.loads.get(i).map(|l| &l.region),
         TreeItem::InitialCondition(i) => fe.initial_conditions.get(i).map(|c| &c.region),
         TreeItem::Constraint(i) => fe.constraints.get(i)?.regions().first().copied(),
+        TreeItem::NodeTie(i) => fe.node_ties.get(i).map(|t| &t.region),
         _ => None,
     }
 }

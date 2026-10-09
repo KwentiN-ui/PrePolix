@@ -788,6 +788,11 @@ impl FeModel {
                 }
             }
         }
+        for tie in self.node_ties.iter().filter(|t| t.active) {
+            let tied = pieces(&tie.region);
+            join(&mut ties, &tied, &[]);
+            join(&mut contacts, &tied, &[]);
+        }
         for pair in self.contact_pairs.iter().filter(|c| c.active) {
             join(&mut contacts, &pieces(&pair.master), &pieces(&pair.slave));
         }

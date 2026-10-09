@@ -4,7 +4,7 @@
 use egui::Ui;
 use plx_mesh::FeMesh;
 use plx_model::{
-    CompressionOnly, Constraint, FeModel, NodeTie, PointSpring, Quantity, Region, SurfaceSpring,
+    CompressionOnly, Constraint, FeModel, PointSpring, Quantity, Region, SurfaceSpring,
     SurfaceToSurfaceSpring, Tie, UnitSystem, next_name,
 };
 
@@ -16,7 +16,7 @@ use crate::setup::{FACE_SOURCES, NODE_SOURCES, RegionDraft, face_target};
 
 /// PrePoMax's list of constraint types, with prepolix's spring connection added; `None` for
 /// those prepolix does not have yet.
-const TYPES: [(&str, Option<Type>); 7] = [
+const TYPES: [(&str, Option<Type>); 6] = [
     ("Point Spring", Some(Type::PointSpring)),
     ("Surface Spring", Some(Type::SurfaceSpring)),
     ("Compression Only", Some(Type::CompressionOnly)),
@@ -26,7 +26,6 @@ const TYPES: [(&str, Option<Type>); 7] = [
         "Surface To Surface Spring",
         Some(Type::SurfaceToSurfaceSpring),
     ),
-    ("Node Tie", Some(Type::NodeTie)),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,7 +35,6 @@ enum Type {
     CompressionOnly,
     Tie,
     SurfaceToSurfaceSpring,
-    NodeTie,
 }
 
 impl Type {
@@ -47,7 +45,8 @@ impl Type {
             Constraint::CompressionOnly(_) => Type::CompressionOnly,
             Constraint::Tie(_) => Type::Tie,
             Constraint::SurfaceToSurfaceSpring(_) => Type::SurfaceToSurfaceSpring,
-            Constraint::NodeTie(_) => Type::NodeTie,
+            // Moved to the node ties when the project was read; never edited here.
+            Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
         }
     }
 
@@ -59,14 +58,13 @@ impl Type {
             Type::CompressionOnly => "Compression_Only",
             Type::Tie => "Tie",
             Type::SurfaceToSurfaceSpring => "Surface_To_Surface_Spring",
-            Type::NodeTie => "Node_Tie",
         }
     }
 
     /// Point springs and node ties sit on nodes, all other single-region constraints on
     /// faces.
     fn on_nodes(self) -> bool {
-        matches!(self, Type::PointSpring | Type::NodeTie)
+        matches!(self, Type::PointSpring)
     }
 
     fn has_master_slave(self) -> bool {
@@ -101,7 +99,6 @@ impl Type {
                 nonlinear: false,
             }),
             Type::Tie => Constraint::Tie(Tie::new(name)),
-            Type::NodeTie => Constraint::NodeTie(NodeTie::new(name)),
             Type::SurfaceToSurfaceSpring => {
                 Constraint::SurfaceToSurfaceSpring(SurfaceToSurfaceSpring {
                     name,
@@ -115,8 +112,8 @@ impl Type {
         }
     }
 
-    /// Point springs and node ties sit on nodes, all other single-region constraints on
-    /// `faces`, the element faces or, in 2D models, the element edges.
+    /// Point springs sit on nodes, all other single-region constraints on `faces`, the
+    /// element faces or, in 2D models, the element edges.
     fn region_draft(self, faces: Target) -> RegionDraft {
         if self.on_nodes() {
             RegionDraft::new(NODE_SOURCES, Target::Nodes)
@@ -288,19 +285,7 @@ impl ConstraintDraft {
                 compression_only_rows(ui, support, units);
             }
             Constraint::Tie(tie) => contacts::tie_form(ui, model, tie, &mut self.pair),
-            Constraint::NodeTie(tie) => {
-                self.region.ui(ui, model);
-                ui.label("Rotationen");
-                ui.checkbox(&mut tie.rotations, "biegesteif");
-                ui.end_row();
-                hint(
-                    ui,
-                    "Alle Knoten der Region folgen dem ersten, beim Export als Gleichungen. \
-                     Verbindet die Enden von Balken oder Stäben verschiedener Parts; die \
-                     Kontaktsuche findet sie. Biegesteif koppelt auch die Rotationen, sonst \
-                     ist die Verbindung ein Gelenk; Stäbe haben keine Rotationen.",
-                );
-            }
+            Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
             Constraint::SurfaceToSurfaceSpring(spring) => {
                 self.pair.ui(ui, model);
                 per_area_row(ui, &mut spring.per_area);
@@ -345,7 +330,7 @@ fn name_row(ui: &mut Ui, constraint: &mut Constraint) {
         Constraint::CompressionOnly(c) => &mut c.name,
         Constraint::Tie(c) => &mut c.name,
         Constraint::SurfaceToSurfaceSpring(c) => &mut c.name,
-        Constraint::NodeTie(c) => &mut c.name,
+        Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
     };
     ui.label("Name");
     ui.add(egui::TextEdit::singleline(name).desired_width(200.0));

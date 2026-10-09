@@ -113,8 +113,8 @@ pub struct ContactSearchDialog {
 
 pub enum SearchResult {
     Open,
-    /// Create these ties and contact pairs.
-    Ok(Vec<Constraint>, Vec<ContactPair>),
+    /// Create these ties, contact pairs and node ties.
+    Ok(Vec<Constraint>, Vec<ContactPair>, Vec<NodeTie>),
     Cancel,
 }
 
@@ -266,7 +266,9 @@ impl ContactSearchDialog {
                     }
                     if ui.button("OK").clicked() {
                         match self.create(model) {
-                            Ok((ties, pairs)) => result = SearchResult::Ok(ties, pairs),
+                            Ok((ties, pairs, joints)) => {
+                                result = SearchResult::Ok(ties, pairs, joints)
+                            }
                             Err(error) => self.error = Some(error),
                         }
                     }
@@ -695,11 +697,17 @@ impl ContactSearchDialog {
         }
     }
 
-    /// Ties and contact pairs of the rows, with names not yet taken in the model.
-    fn create(&self, model: &Model) -> Result<(Vec<Constraint>, Vec<ContactPair>), String> {
+    /// Ties, contact pairs and node ties of the rows, with names not yet taken in the model.
+    #[allow(clippy::type_complexity)]
+    fn create(
+        &self,
+        model: &Model,
+    ) -> Result<(Vec<Constraint>, Vec<ContactPair>, Vec<NodeTie>), String> {
         let fe = &model.fe;
         let mut ties = Vec::new();
         let mut pairs = Vec::new();
+        let mut joints = Vec::new();
+        let mut joint_names: Vec<String> = fe.node_ties.iter().map(|t| t.name.clone()).collect();
         let mut tie_names: Vec<String> = fe
             .constraints
             .iter()
@@ -717,11 +725,11 @@ impl ContactSearchDialog {
         };
         for row in self.rows.iter().filter(|r| r.checked) {
             if let Some(joint) = &row.joint {
-                ties.push(Constraint::NodeTie(NodeTie {
+                joints.push(NodeTie {
                     region: joint_region(model, joint),
                     rotations: row.rotations,
-                    ..NodeTie::new(unique(&row.name, &mut tie_names))
-                }));
+                    ..NodeTie::new(unique(&row.name, &mut joint_names))
+                });
                 continue;
             }
             // Surfaces of whole CAD faces are kept by geometry, so that they survive
@@ -761,7 +769,7 @@ impl ContactSearchDialog {
                 }
             }
         }
-        Ok((ties, pairs))
+        Ok((ties, pairs, joints))
     }
 }
 

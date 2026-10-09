@@ -50,7 +50,7 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
         path: path.to_owned(),
         source,
     })?;
-    let project: Project = ron::from_str(&text).map_err(|e| ProjectError::Format {
+    let mut project: Project = ron::from_str(&text).map_err(|e| ProjectError::Format {
         path: path.to_owned(),
         message: e.to_string(),
     })?;
@@ -60,6 +60,7 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
             format: project.format,
         });
     }
+    project.model.migrate();
     Ok(project)
 }
 
@@ -126,6 +127,11 @@ mod tests {
                 slave: Region::Surface("TOP".into()),
                 ..Tie::new("Tie-1")
             })],
+            node_ties: vec![plx_model::NodeTie {
+                region: Region::Nodes(vec![1, 2]),
+                rotations: false,
+                ..plx_model::NodeTie::new("Node_Tie-1")
+            }],
             surface_interactions: vec![SurfaceInteraction {
                 name: "Surface_Interaction-1".into(),
                 properties: vec![
@@ -209,6 +215,24 @@ mod tests {
         assert!(text.contains("active:false,"), "{text}");
         let older: Step = ron::from_str(&text.replace("active:false,", "")).unwrap();
         assert!(older.active);
+    }
+
+    #[test]
+    fn node_ties_of_older_projects_move_to_the_contact_pairs() {
+        // Node ties were constraints for a day; a project saved then still opens with them.
+        let mut tie = plx_model::NodeTie::new("Node_Tie-1");
+        tie.region = Region::Nodes(vec![3, 7]);
+        let older = FeModel {
+            constraints: vec![
+                Constraint::Tie(Tie::new("Tie-1")),
+                Constraint::NodeTie(tie.clone()),
+            ],
+            ..FeModel::default()
+        };
+        let mut model: FeModel = ron::from_str(&ron::to_string(&older).unwrap()).unwrap();
+        model.migrate();
+        assert_eq!(model.constraints, [Constraint::Tie(Tie::new("Tie-1"))]);
+        assert_eq!(model.node_ties, [tie]);
     }
 
     #[test]

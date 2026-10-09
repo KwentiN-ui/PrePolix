@@ -12,6 +12,7 @@ pub enum ModelItem {
     Section(usize),
     Constraint(usize),
     ContactPair(usize),
+    NodeTie(usize),
     /// Boundary condition by step and index.
     BoundaryCondition(usize, usize),
     /// Load by step and index.
@@ -78,6 +79,14 @@ impl FeModel {
             if let Some(reason) = reason {
                 invalid.push(Invalid {
                     item: ModelItem::ContactPair(i),
+                    reason,
+                });
+            }
+        }
+        for (i, tie) in self.node_ties.iter().enumerate() {
+            if let Some(reason) = tie.region.missing_reference(mesh) {
+                invalid.push(Invalid {
+                    item: ModelItem::NodeTie(i),
                     reason,
                 });
             }

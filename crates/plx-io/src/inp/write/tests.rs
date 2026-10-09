@@ -1675,10 +1675,10 @@ fn tied_chains(n: u32, quadratic: bool, kind: SectionKind, load: LoadKind) -> (F
     let mut model = line_model(&mesh, kind, load);
     model.sections[0].region = Region::Parts(vec!["BEAM".into(), "BEAM2".into()]);
     let middle = n * if quadratic { 2 } else { 1 } + 1;
-    model.constraints.push(Constraint::NodeTie(NodeTie {
+    model.node_ties.push(NodeTie {
         region: Region::Nodes(vec![middle, 101]),
         ..NodeTie::new("Node_Tie-1")
-    }));
+    });
     (mesh, model)
 }
 
@@ -1710,10 +1710,7 @@ fn node_ties_merge_the_nodes_or_hinge_beams_with_equations() {
     assert!(!text.contains("*Node\n101,") && !text.contains("\n101, 50, 0, 0\n"));
     assert!(!text.contains("*Equation"));
     // A hinge between beams keeps the nodes and ties their translations.
-    let Constraint::NodeTie(tie) = &mut model.constraints[0] else {
-        unreachable!()
-    };
-    tie.rotations = false;
+    model.node_ties[0].rotations = false;
     let text = write_inp(&mesh, &model, "").unwrap();
     let expected: String = (1..=3)
         .map(|dof| format!("*Equation\n2\n101, {dof}, 1, 3, {dof}, -1\n"))
@@ -1729,14 +1726,14 @@ fn node_ties_merge_the_nodes_or_hinge_beams_with_equations() {
     assert!(text.contains("*Element, Type=T3D2, Elset=BEAM2\n101, 3, 102\n"));
     assert!(!text.contains("*Equation"));
     // A deactivated tie is a comment, an empty one an error.
-    model.constraints[0] = Constraint::NodeTie(NodeTie {
+    model.node_ties[0] = NodeTie {
         active: false,
         ..NodeTie::new("Node_Tie-1")
-    });
+    };
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("** Name: Node_Tie-1: Deactivated\n"));
     assert!(text.contains("*Element, Type=T3D2, Elset=BEAM2\n101, 101, 102\n"));
-    model.constraints[0] = Constraint::NodeTie(NodeTie::new("Node_Tie-1"));
+    model.node_ties[0] = NodeTie::new("Node_Tie-1");
     assert!(matches!(
         write_inp(&mesh, &model, ""),
         Err(WriteError::EmptyRegion { .. })
@@ -1774,10 +1771,7 @@ fn calculix_hinges_two_beams_at_a_node() {
             rect_beam(BeamOrientation::Automatic),
             LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
         );
-        let Constraint::NodeTie(tie) = &mut model.constraints[0] else {
-            unreachable!()
-        };
-        tie.rotations = rotations;
+        model.node_ties[0].rotations = rotations;
         let step = &mut model.steps[0];
         step.boundary_conditions[0].region = Region::Nodes(vec![1, 106]);
         step.loads[0].region = Region::Nodes(vec![3]);
