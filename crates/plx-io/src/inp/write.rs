@@ -11,8 +11,9 @@ use std::fmt::Write as _;
 
 use plx_mesh::{ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
-    BoundaryKind, FeModel, FieldOutput, FrequencyStep, Incrementation, LoadKind, OutputKind,
-    Region, StaticStep, Step, StepKind, UserKeyword,
+    BoundaryKind, Constraint, ContactMethod, ContactPair, FeModel, FieldOutput, FrequencyStep,
+    GapConductance, Incrementation, InteractionProperty, LoadKind, OutputKind, Region, StaticStep,
+    Step, StepKind, SurfaceBehavior, SurfaceInteraction, UserKeyword,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -21,6 +22,10 @@ pub enum WriteError {
     EmptyRegion { item: String, what: &'static str },
     #[error("{item}: Material {material} existiert nicht")]
     UnknownMaterial { item: String, material: String },
+    #[error("{item}: Surface Interaction {interaction} existiert nicht")]
+    UnknownInteraction { item: String, interaction: String },
+    #[error("{item}: Surface {surface} existiert nicht")]
+    UnknownSurface { item: String, surface: String },
 }
 
 /// One entry of the keyword tree of an input file, the structure PrePoMax's keyword editor
@@ -210,17 +215,30 @@ pub fn model_keywords(
     let mut sets = Sets::new(mesh);
     // Regions are resolved first: their sets must precede the materials and steps.
     let materials = materials(model);
-    let sections = sections(&mut sets, model)?;
+    let mut sections = sections(&mut sets, model)?;
+    let generated = constraints::springs(&mut sets, model)?;
+    let mut constraints = constraints(&mut sets, model)?;
+    constraints.extend(generated.equations);
+    sections.extend(generated.sections);
+    let mut materials = materials;
+    materials.extend(generated.material);
+    let interactions = model.surface_interactions.iter().map(interaction).collect();
+    let contact_pairs = contact_pairs(&mut sets, model)?;
     let steps = model
         .steps
         .iter()
-        .map(|step| write_step(&mut sets, step))
+        .map(|step| write_step(&mut sets, step, generated.boundary.as_ref()))
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut nodes = String::from("*Node\n");
     for (id, &[x, y, z]) in mesh.node_ids().iter().zip(mesh.coords()) {
         let _ = writeln!(nodes, "{id}, {:.8E}, {:.8E}, {:.8E}", x, y, z);
     }
+    for (id, [x, y, z]) in &generated.nodes {
+        let _ = writeln!(nodes, "{id}, {:.8E}, {:.8E}, {:.8E}", x, y, z);
+    }
+    let mut element_blocks = elements(mesh);
+    element_blocks.extend(generated.elements);
     let node_sets = sets
         .node_sets
         .iter()
@@ -258,7 +276,7 @@ pub fn model_keywords(
     Ok(vec![
         Keyword::title("Heading", vec![Keyword::generated(heading)]),
         Keyword::title("Nodes", vec![Keyword::generated(nodes)]),
-        Keyword::title("Elements", elements(mesh)),
+        Keyword::title("Elements", element_blocks),
         Keyword::title("Node sets", node_sets),
         Keyword::title("Element sets", element_sets),
         Keyword::title("Surfaces", surfaces),
@@ -267,9 +285,9 @@ pub fn model_keywords(
         Keyword::title("Materials", materials),
         Keyword::title("Sections", sections),
         empty("Pre-tension sections"),
-        empty("Constraints"),
-        empty("Surface interactions"),
-        empty("Contact pairs"),
+        Keyword::title("Constraints", constraints),
+        Keyword::title("Surface interactions", interactions),
+        Keyword::title("Contact pairs", contact_pairs),
         empty("Amplitudes"),
         empty("Initial conditions"),
         Keyword::title("Steps", steps),
@@ -405,6 +423,17 @@ impl<'a> Sets<'a> {
         sets
     }
 
+    /// `name` itself if it is free, otherwise the next free `<name>-<n>`.
+    fn unique(&mut self, name: &str) -> String {
+        if self.used.insert(name.to_ascii_uppercase()) {
+            return name.to_owned();
+        }
+        (2..)
+            .map(|n| format!("{name}-{n}"))
+            .find(|name| self.used.insert(name.to_ascii_uppercase()))
+            .expect("unbounded range")
+    }
+
     /// Next free name `<prefix>-<n>_<postfix>`, like PrePoMax's `GetNextNumberedKey`.
     fn free_name(&mut self, prefix: &str, postfix: &str) -> String {
         (1..)
@@ -474,6 +503,27 @@ impl<'a> Sets<'a> {
         Ok(set)
     }
 
+    /// Surface of a contact or tie side: a surface of the input file, or one built from
+    /// picked faces and named like PrePoMax's `Internal_Selection-1_Tie-1_Master`.
+    fn surface(&mut self, item: &str, side: &str, region: &Region) -> Result<String, WriteError> {
+        match region {
+            Region::Surface(surface) if self.mesh.surfaces.contains_key(surface) => {
+                Ok(surface.clone())
+            }
+            Region::Surface(surface) => Err(WriteError::UnknownSurface {
+                item: item.to_owned(),
+                surface: surface.clone(),
+            }),
+            Region::Faces(faces) if !faces.is_empty() => {
+                let postfix = format!("{}_{side}", name(item));
+                let surface = self.free_name("Internal_Selection", &postfix);
+                self.add_face_surface(&surface, faces);
+                Ok(surface)
+            }
+            _ => Err(empty(item, "Elementflächen")),
+        }
+    }
+
     /// Element sets and face numbers of a face region, for pressure loads.
     fn face_sets(&mut self, item: &str, region: &Region) -> Result<Vec<(String, u8)>, WriteError> {
         match region {
@@ -536,12 +586,153 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError
     Ok(keywords)
 }
 
+/// Tie constraints as PrePoMax's `CalTie` writes them: slave surface first. Springs and
+/// supports are written as elements, see [`constraints::springs`].
+fn constraints(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+    let mut keywords = Vec::new();
+    for constraint in &model.constraints {
+        if !constraint.active() {
+            keywords.push(deactivated(constraint.name()));
+            continue;
+        }
+        match constraint {
+            Constraint::PointSpring(_)
+            | Constraint::SurfaceSpring(_)
+            | Constraint::CompressionOnly(_)
+            | Constraint::SurfaceToSurfaceSpring(_) => {}
+            Constraint::Tie(tie) => {
+                let master = sets.surface(&tie.name, "Master", &tie.master)?;
+                let slave = sets.surface(&tie.name, "Slave", &tie.slave)?;
+                let mut out = format!("*Tie, Name={}", name(&tie.name));
+                if let Some(tolerance) = tie.position_tolerance {
+                    let _ = write!(out, ", Position tolerance={}", number(tolerance));
+                }
+                if !tie.adjust {
+                    out.push_str(", Adjust=No");
+                }
+                let _ = writeln!(out, "\n{slave}, {master}");
+                keywords.push(Keyword::generated(out));
+            }
+        }
+    }
+    Ok(keywords)
+}
+
+/// A surface interaction with its models as children, like PrePoMax's
+/// `CalSurfaceInteraction`.
+fn interaction(interaction: &SurfaceInteraction) -> Keyword {
+    let properties = (interaction.properties.iter())
+        .map(|property| {
+            let mut out = String::new();
+            match property {
+                InteractionProperty::SurfaceBehavior(behavior) => {
+                    let kind = behavior.keyword();
+                    let _ = writeln!(out, "*Surface behavior, Pressure-overclosure={kind}");
+                    match behavior {
+                        SurfaceBehavior::Hard => {}
+                        SurfaceBehavior::Linear { k, sigma_inf, c0 } => {
+                            let _ = write!(out, "{}, {}", number(*k), number(*sigma_inf));
+                            if let Some(c0) = c0 {
+                                let _ = write!(out, ", {}", number(*c0));
+                            }
+                            out.push('\n');
+                        }
+                        SurfaceBehavior::Exponential { c0, p0 } => {
+                            let _ = writeln!(out, "{}, {}", number(*c0), number(*p0));
+                        }
+                        SurfaceBehavior::Tabular(rows) => {
+                            for [pressure, overclosure] in rows {
+                                let _ = writeln!(
+                                    out,
+                                    "{}, {}",
+                                    number(*pressure),
+                                    number(*overclosure)
+                                );
+                            }
+                        }
+                        SurfaceBehavior::Tied { k } => {
+                            let _ = writeln!(out, "{}", number(*k));
+                        }
+                    }
+                }
+                InteractionProperty::Friction(friction) => {
+                    let _ = write!(out, "*Friction\n{}", number(friction.coefficient));
+                    if let Some(slope) = friction.stick_slope {
+                        let _ = write!(out, ", {}", number(slope));
+                    }
+                    out.push('\n');
+                }
+                InteractionProperty::GapConductance(conductance) => {
+                    out.push_str("*Gap conductance\n");
+                    match conductance {
+                        GapConductance::Constant(value) => {
+                            let _ = writeln!(out, "{}", number(*value));
+                        }
+                        GapConductance::Tabular(rows) => {
+                            for row in rows {
+                                let row: Vec<String> = row.iter().map(|&v| number(v)).collect();
+                                let _ = writeln!(out, "{}", row.join(", "));
+                            }
+                        }
+                    }
+                }
+            }
+            Keyword::generated(out)
+        })
+        .collect();
+    let header = format!("*Surface interaction, Name={}\n", name(&interaction.name));
+    Keyword::parent(header, properties)
+}
+
+/// Contact pairs as PrePoMax's `CalContactPair` writes them: slave surface first.
+fn contact_pairs(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+    let mut keywords = Vec::new();
+    for pair in &model.contact_pairs {
+        if !pair.active {
+            keywords.push(deactivated(&pair.name));
+            continue;
+        }
+        if !(model.surface_interactions.iter()).any(|s| s.name == pair.interaction) {
+            return Err(WriteError::UnknownInteraction {
+                item: pair.name.clone(),
+                interaction: pair.interaction.clone(),
+            });
+        }
+        let master = sets.surface(&pair.name, "Master", &pair.master)?;
+        let slave = sets.surface(&pair.name, "Slave", &pair.slave)?;
+        keywords.push(Keyword::generated(contact_pair(pair, &master, &slave)));
+    }
+    Ok(keywords)
+}
+
+fn contact_pair(pair: &ContactPair, master: &str, slave: &str) -> String {
+    let mut out = format!(
+        "** Name: {}\n*Contact pair, Interaction={}, Type={}",
+        pair.name,
+        name(&pair.interaction),
+        pair.method.name()
+    );
+    if pair.method == ContactMethod::NodeToSurface && pair.small_sliding {
+        out.push_str(", Small sliding");
+    }
+    if pair.adjust {
+        let size = pair.adjustment_size.unwrap_or(0.0);
+        let _ = write!(out, ", Adjust={}", number(size));
+    }
+    let _ = writeln!(out, "\n{slave}, {master}");
+    out
+}
+
 /// A step as PrePoMax structures it: the step title holds `*Step`, which holds the procedure
 /// and a title for each kind of item, down to the one holding `*End step`.
 ///
 /// Like PrePoMax, a deactivated step or item keeps its place in the file as a comment
 /// (`** Name: Fixed-1: Deactivated`), and nothing of it is written, not even its sets.
-fn write_step(sets: &mut Sets, step: &Step) -> Result<Keyword, WriteError> {
+fn write_step(
+    sets: &mut Sets,
+    step: &Step,
+    extra_boundary: Option<&Keyword>,
+) -> Result<Keyword, WriteError> {
     if !step.active {
         return Ok(deactivated_step(step));
     }
@@ -571,6 +762,8 @@ fn write_step(sets: &mut Sets, step: &Step) -> Result<Keyword, WriteError> {
         }
         boundaries.push(Keyword::generated(out));
     }
+    // Boundary conditions that constraints need, PrePoMax's additional boundary conditions.
+    boundaries.extend(extra_boundary.cloned());
     let mut loads = Vec::new();
     // Like PrePoMax, a step that takes no loads gets none written, not even the reset.
     let step_loads: &[_] = if step.kind.supports_loads() {
@@ -693,52 +886,13 @@ fn traction_forces(
     faces: &[(ElementId, u8)],
     force: [f64; 3],
 ) -> BTreeMap<NodeId, [f64; 3]> {
-    let mut weighted: Vec<(NodeId, f64)> = Vec::new();
-    let mut total_area = 0.0;
-    for &(element, face) in faces {
-        let Some(element) = mesh.element(element) else {
-            continue;
-        };
-        let Some(topology) = (face as usize)
-            .checked_sub(1)
-            .and_then(|f| element.shape.faces().get(f))
-        else {
-            continue;
-        };
-        let node = |local: usize| element.nodes.get(local).copied();
-        let point = |local: usize| node(local).and_then(|id| mesh.node(id));
-        let corners: Vec<[f64; 3]> = topology.corners.iter().filter_map(|&l| point(l)).collect();
-        if corners.len() != topology.corners.len() {
-            continue;
-        }
-        let area = polygon_area(&corners);
-        total_area += area;
-        let quadratic = element.shape.is_quadratic() && !topology.mids.is_empty();
-        let (corner_weight, mid_weight) = match (corners.len(), quadratic) {
-            (3, true) => (0.0, 1.0 / 3.0),
-            (4, true) => (-1.0 / 12.0, 1.0 / 3.0),
-            (n, _) => (1.0 / n as f64, 0.0),
-        };
-        for &local in topology.corners {
-            weighted.extend(node(local).map(|id| (id, area * corner_weight)));
-        }
-        if quadratic {
-            for &local in topology.mids {
-                weighted.extend(node(local).map(|id| (id, area * mid_weight)));
-            }
-        }
-    }
-    let mut nodal: BTreeMap<NodeId, [f64; 3]> = BTreeMap::new();
+    let (weights, total_area) = constraints::node_areas(mesh, faces);
     if total_area <= 0.0 {
-        return nodal;
+        return BTreeMap::new();
     }
-    for (node, weight) in weighted {
-        let share = nodal.entry(node).or_default();
-        for k in 0..3 {
-            share[k] += force[k] * weight / total_area;
-        }
-    }
-    nodal
+    (weights.into_iter())
+        .map(|(node, weight)| (node, force.map(|f| f * weight / total_area)))
+        .collect()
 }
 
 /// Area of a (possibly slightly warped) polygon from its vector area.
@@ -880,5 +1034,6 @@ fn empty(item: &str, what: &'static str) -> WriteError {
     }
 }
 
+mod constraints;
 #[cfg(test)]
 mod tests;

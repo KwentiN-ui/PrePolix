@@ -314,6 +314,7 @@ fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
         steps: vec![step],
         user_keywords: Vec::new(),
         hot_spots: Vec::new(),
+        ..FeModel::default()
     }
 }
 

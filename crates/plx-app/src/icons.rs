@@ -44,6 +44,10 @@ pub enum Icon {
     SectionView,
     /// Three blocks of a stack pulled apart, for the exploded view.
     ExplodedView,
+    /// A shape and its mirror image at a dashed plane: PrePoMax's result transformations.
+    Transformation,
+    /// Cross of a remove button.
+    Remove,
 }
 
 /// Flat toolbar button in the Windows style: frame only while hovered or checked.
@@ -370,6 +374,29 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
                     .collect();
                 line(shapes, &arc, 1.3, ACCENT);
             }
+        }
+        Icon::Transformation => {
+            // The original filled, its mirror image as an outline.
+            let shape = |s: f32| {
+                vec![
+                    p(8.0 - s * 1.5, 3.0),
+                    p(8.0 - s * 6.5, 6.0),
+                    p(8.0 - s * 6.5, 13.0),
+                    p(8.0 - s * 1.5, 13.0),
+                ]
+            };
+            polygon(shapes, shape(1.0), ACCENT, OUTLINE);
+            // Reversed, so that the mirror image keeps the winding egui expects.
+            let mirrored = shape(-1.0).into_iter().rev().collect();
+            polygon(shapes, mirrored, FACE, OUTLINE);
+            for y in [1.0f32, 4.5, 8.0, 11.5] {
+                line(shapes, &[p(8.0, y), p(8.0, y + 2.0)], 1.2, OUTLINE);
+            }
+        }
+        Icon::Remove => {
+            let color = Color32::from_rgb(50, 50, 50);
+            line(shapes, &[p(3.5, 3.5), p(12.5, 12.5)], 2.2, color);
+            line(shapes, &[p(12.5, 3.5), p(3.5, 12.5)], 2.2, color);
         }
         Icon::First | Icon::Previous | Icon::Next | Icon::Last => {
             let forward = matches!(icon, Icon::Next | Icon::Last);

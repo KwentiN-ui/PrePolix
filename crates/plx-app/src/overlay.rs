@@ -40,6 +40,8 @@ pub struct Overlay {
     pub nodes: Vec<Vec3>,
     /// Hot spot paths in render coordinates: the toe, then the read-out points.
     pub paths: Vec<Vec<Vec3>>,
+    /// Highlighted polylines in render coordinates, e.g. the axis of a pattern.
+    pub lines: Vec<Vec<Vec3>>,
 }
 
 /// Annotated point of the model, e.g. the node with the largest result value.
@@ -100,6 +102,13 @@ pub fn draw(
             0.0,
             Color32::RED,
         );
+    }
+    for line in &overlay.lines {
+        let points: Vec<Pos2> = line.iter().map(|&p| project(camera, rect, p)).collect();
+        painter.add(egui::Shape::line(
+            points,
+            egui::Stroke::new(2.0, Color32::RED),
+        ));
     }
     for path in &overlay.paths {
         let points: Vec<Pos2> = path.iter().map(|&p| project(camera, rect, p)).collect();

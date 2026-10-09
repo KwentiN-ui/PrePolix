@@ -391,11 +391,12 @@ impl SectionDialog {
                     ui.label("Grundebene");
                     ui.horizontal(|ui| {
                         for candidate in PrincipalPlane::ALL {
-                            if ui
-                                .selectable_label(*plane == candidate, candidate.label())
-                                .clicked()
-                                && *plane != candidate
-                            {
+                            // Framed also when inactive, so hovering does not widen a button
+                            // and push its neighbours.
+                            let button =
+                                egui::Button::selectable(*plane == candidate, candidate.label())
+                                    .frame_when_inactive(true);
+                            if ui.add(button).clicked() && *plane != candidate {
                                 *plane = candidate;
                                 *offset = self.center[candidate.axis()];
                             }

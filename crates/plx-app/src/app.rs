@@ -5,6 +5,7 @@ use plx_render::StandardView;
 
 use crate::analysis::{Analysis, MonitorEvent};
 use crate::animation::{AnimationKind, ColorLimits, Playback};
+use crate::contact_search::{ContactSearchDialog, SearchResult};
 use crate::exploded::{ExplodedDialog, ExplodedResult};
 use crate::field_output_dialog::{DialogAction, FieldOutputDialog};
 use crate::history_output_dialog::HistoryOutputDialog;
@@ -27,6 +28,7 @@ use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::setup::{Editor, EditorResult, NewItem};
 use crate::sound::{self, ModeSound};
 use crate::symbols;
+use crate::transformation_dialog::{TransformationAction, TransformationDialog};
 use crate::tree::{self, AnalysisAction, TreeItem, TreeResponse, TreeState, TreeView};
 use crate::viewport::{Axis, BoxSelect, Click, ViewCommand, Viewport};
 use plx_render::RenderMesh;
@@ -77,6 +79,8 @@ struct Workbench {
     editor: Option<Editor>,
     /// Open CalculiX keyword editor.
     keyword_editor: Option<KeywordEditor>,
+    /// Open search for contact pairs.
+    contact_search: Option<ContactSearchDialog>,
     /// Open material library editor.
     material_library: Option<MaterialLibraryEditor>,
     /// Open dialog creating or editing a field output derived from the shown results.
@@ -86,7 +90,8 @@ struct Workbench {
     /// Open table of a history output component.
     history_table: Option<HistoryTable>,
     /// The tree selection whose region is highlighted.
-    highlighted: Option<(TreeView, TreeItem)>,
+    /// `None` until it is computed, so a dialog's highlight is cleared once it closes.
+    highlighted: Option<Option<(TreeView, TreeItem)>>,
     analysis: Option<Analysis>,
     /// Results file the user asked to open; read by the app on a worker thread.
     open_results: Option<PathBuf>,
@@ -100,6 +105,8 @@ struct Workbench {
     /// The section view, while it is on; it cuts whatever the 3D view shows.
     section: Option<SectionView>,
     section_dialog: Option<SectionDialog>,
+    /// Open dialog of the transformations of the current results.
+    transformation_dialog: Option<TransformationDialog>,
     /// The section view shown in the scene of the given version, to rebuild it on changes.
     section_shown: Option<(u64, SectionView)>,
     /// The boundary conditions and loads, with the shown parts and the exploded view, whose
@@ -169,6 +176,7 @@ impl PrepolixApp {
                 frame_cache: Default::default(),
                 editor: None,
                 keyword_editor: None,
+                contact_search: None,
                 material_library: None,
                 field_output_dialog: None,
                 history_dialog: None,
@@ -182,6 +190,7 @@ impl PrepolixApp {
                 audio: None,
                 section: None,
                 section_dialog: None,
+                transformation_dialog: None,
                 section_shown: None,
                 symbols_shown: None,
                 exploded_dialog: None,
@@ -370,6 +379,7 @@ impl PrepolixApp {
             });
             ui.menu_button("Netz", |ui| self.workbench.mesh_menu(ui));
             ui.menu_button("Modell", |ui| self.workbench.model_menu(ui));
+            ui.menu_button("Interaktion", |ui| self.workbench.interaction_menu(ui));
             ui.menu_button("Analyse", |ui| self.workbench.analysis_menu(ui));
             ui.menu_button("Ergebnisse", |ui| self.workbench.results_menu(ui));
             ui.menu_button("Werkzeuge", |ui| {
@@ -629,12 +639,22 @@ impl eframe::App for PrepolixApp {
             .size_range(160.0..=700.0)
             .frame(egui::Frame::new().fill(crate::style::CONTROL))
             .show(ui, |ui| {
-                self.workbench.tree_tabs(ui);
+                let selected_tab = self.workbench.tree_tabs(ui);
+                // Tabs sit flush on the pane: their bottom border is the pane's top border.
+                ui.add_space(-ui.spacing().item_spacing.y - 1.0);
                 pane.inner_margin(4).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
                     let view = self.workbench.tree_view;
                     self.workbench.model_tree(ui, view);
                 });
+                // The selected tab opens into the pane like a Windows tab control.
+                if let Some(tab) = selected_tab {
+                    ui.painter().hline(
+                        tab.x_range().shrink(1.0),
+                        tab.bottom() - 0.5,
+                        egui::Stroke::new(1.0, crate::style::WINDOW),
+                    );
+                }
             });
         egui::Panel::bottom("output")
             .resizable(true)
@@ -643,8 +663,9 @@ impl eframe::App for PrepolixApp {
             .frame(pane.inner_margin(4))
             .show(ui, |ui| self.workbench.output(ui));
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            self.workbench.viewport.selecting =
-                self.workbench.picking() || self.workbench.section_picks();
+            self.workbench.viewport.selecting = self.workbench.picking()
+                || self.workbench.section_picks()
+                || self.workbench.transformation_picks();
             self.workbench.viewport.gizmo =
                 match (&self.workbench.section_dialog, self.workbench.shown()) {
                     (Some(dialog), Some(model)) => Some(dialog.gizmo(model)),
@@ -679,6 +700,7 @@ impl eframe::App for PrepolixApp {
             .update(&ctx, view, &mut workbench.output);
         self.workbench.properties_window(&ctx);
         self.workbench.editor_window(&ctx);
+        self.workbench.contact_search_window(&ctx);
         self.workbench.section_window(&ctx);
         self.workbench.exploded_window(&ctx);
         self.workbench.keyword_editor_window(&ctx);
@@ -689,6 +711,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.field_output_window(&ctx);
         self.workbench.history_output_window(&ctx);
         self.workbench.history_table_window(&ctx);
+        self.workbench.transformation_window(&ctx);
         self.workbench.run_analysis(&ctx);
         if let Some(path) = self.workbench.open_results.take() {
             self.open_path(path, &ctx);
@@ -824,7 +847,9 @@ impl Workbench {
     }
 
     /// Tab strip above the tree, like PrePoMax's Windows tab control.
-    fn tree_tabs(&mut self, ui: &mut egui::Ui) {
+    /// Returns the rect of the selected tab.
+    fn tree_tabs(&mut self, ui: &mut egui::Ui) -> Option<egui::Rect> {
+        let mut selected_rect = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.add_space(2.0);
@@ -845,6 +870,7 @@ impl Workbench {
                     crate::style::CONTROL
                 };
                 let rect = if selected {
+                    selected_rect = Some(rect);
                     rect
                 } else {
                     rect.shrink2(egui::vec2(0.0, 1.0))
@@ -867,6 +893,7 @@ impl Workbench {
                 }
             }
         });
+        selected_rect
     }
 
     fn output(&self, ui: &mut egui::Ui) {
@@ -998,6 +1025,9 @@ impl Workbench {
         }
         if response.evaluate_hot_spots {
             self.evaluate_hot_spots(false);
+        }
+        if response.search_contacts {
+            self.open_contact_search();
         }
     }
 
@@ -1211,6 +1241,7 @@ impl Workbench {
             }
             self.dialog = None;
             self.field_output_dialog = None;
+            self.transformation_dialog = None;
             self.close_history_windows();
             self.viewport.labels = Default::default();
             self.results_changed = true;
@@ -1234,6 +1265,7 @@ impl Workbench {
             .current_result
             .min(self.results.len().saturating_sub(1));
         self.field_output_dialog = None;
+        self.transformation_dialog = None;
         self.close_history_windows();
         if self.tree_view == TreeView::Results {
             self.dialog = None;
@@ -1315,10 +1347,77 @@ impl Workbench {
                 None => None,
             }
             .unwrap_or_else(|| placeholder.insert(ResultsView::new(Vec::new(), None)));
-            if results_tool_bar(ui, view) && enabled {
+            let transformed = !view.transformations.is_empty();
+            let response = results_tool_bar(ui, view, transformed);
+            if response.changed && enabled {
                 self.results_changed = true;
             }
+            if response.transformations && enabled {
+                self.open_transformation_dialog();
+            }
         });
+    }
+
+    fn open_transformation_dialog(&mut self) {
+        let index = self.current_result;
+        if let Some(model) = self.results.get(index)
+            && let Some(view) = &model.results
+        {
+            let dialog = TransformationDialog::new(index, &view.transformations, model);
+            self.transformation_dialog = Some(dialog);
+            self.update_contour();
+        }
+    }
+
+    fn transformation_picks(&self) -> bool {
+        (self.transformation_dialog.as_ref())
+            .is_some_and(|d| d.picks() && self.tree_view == TreeView::Results)
+    }
+
+    fn transformation_window(&mut self, ctx: &egui::Context) {
+        if self.tree_view != TreeView::Results {
+            self.transformation_dialog = None;
+        }
+        let Some(dialog) = &mut self.transformation_dialog else {
+            return;
+        };
+        let Some(model) = self.results.get_mut(dialog.result) else {
+            self.transformation_dialog = None;
+            return;
+        };
+        let shown = (dialog.lines(model), dialog.points(model));
+        let action = dialog.show(ctx, model);
+        // The overlay shows the points and axis of the selected item.
+        let moved = shown != (dialog.lines(model), dialog.points(model));
+        let (transformations, close) = match action {
+            TransformationAction::Open => {
+                if moved {
+                    self.update_contour();
+                }
+                return;
+            }
+            TransformationAction::Cancel => {
+                self.transformation_dialog = None;
+                self.viewport.preview = Default::default();
+                self.update_contour();
+                return;
+            }
+            TransformationAction::Apply {
+                transformations,
+                close,
+            } => (transformations, close),
+        };
+        if let Some(view) = &mut model.results {
+            view.transformations = transformations;
+            self.results_changed = true;
+            // The copies extend the scene; show all of it.
+            self.view_command = Some(ViewCommand::Fit);
+        }
+        if close {
+            self.transformation_dialog = None;
+            self.viewport.preview = Default::default();
+        }
+        self.update_contour();
     }
 
     fn create(&mut self, kind: NewItem) {
@@ -1507,6 +1606,34 @@ impl Workbench {
     }
 
     /// PrePoMax's Model menu: create items of the FE model.
+    /// PrePoMax's Interaction menu: constraints, contacts and the search for contact pairs.
+    fn interaction_menu(&mut self, ui: &mut egui::Ui) {
+        if self.setup_model().is_none() {
+            ui.label("Zuerst eine .inp-Datei öffnen");
+            return;
+        }
+        let mut kind = None;
+        for (item, label) in [
+            (NewItem::Constraint, "Constraint erstellen …"),
+            (
+                NewItem::SurfaceInteraction,
+                "Surface Interaction erstellen …",
+            ),
+            (NewItem::ContactPair, "Kontaktpaar erstellen …"),
+        ] {
+            if ui.button(label).clicked() {
+                kind = Some(item);
+            }
+        }
+        if let Some(kind) = kind {
+            self.create(kind);
+        }
+        ui.separator();
+        if ui.button("Kontaktpaare suchen …").clicked() {
+            self.open_contact_search();
+        }
+    }
+
     fn model_menu(&mut self, ui: &mut egui::Ui) {
         if self.setup_model().is_none() {
             ui.label("Zuerst eine .inp-Datei öffnen");
@@ -1805,6 +1932,19 @@ impl Workbench {
     /// selects it in the tree, as in PrePoMax, and a click into empty space clears the tree
     /// selection and with it the highlighted region.
     fn click(&mut self, click: Click) {
+        if self.transformation_picks()
+            && let (Some(dialog), Some(model)) = (
+                &mut self.transformation_dialog,
+                self.results.get(self.current_result),
+            )
+        {
+            let hit = model.pick(click.origin, click.direction);
+            dialog.click(
+                model,
+                hit.as_ref().map(|h| (h, click.precision_at(h.point))),
+            );
+            return;
+        }
         if let Some(dialog) = &mut self.section_dialog
             && dialog.picks()
         {
@@ -1939,6 +2079,20 @@ impl Workbench {
 
     /// Shows what a click would select where the mouse rests.
     fn hover(&mut self, hover: Option<Click>) {
+        if self.transformation_picks()
+            && let (Some(dialog), Some(model)) = (
+                &self.transformation_dialog,
+                self.results.get(self.current_result),
+            )
+        {
+            self.viewport.preview = hover
+                .and_then(|click| {
+                    let hit = model.pick(click.origin, click.direction)?;
+                    Some(dialog.preview(model, &hit, click.precision_at(hit.point)))
+                })
+                .unwrap_or_default();
+            return;
+        }
         if let (Some(dialog), Some(model)) = (&self.section_dialog, self.shown())
             && dialog.picks()
         {
@@ -2156,6 +2310,40 @@ impl Workbench {
         }
     }
 
+    /// PrePoMax's Search Contact Pairs; it replaces an open item dialog.
+    fn open_contact_search(&mut self) {
+        if let Some(model) = self.setup_model() {
+            self.contact_search = Some(ContactSearchDialog::new(&model.fe));
+            self.editor = None;
+            self.set_tree_view(TreeView::FeModel);
+        }
+    }
+
+    fn contact_search_window(&mut self, ctx: &egui::Context) {
+        let (Some(dialog), Some(model)) = (&mut self.contact_search, &mut self.model) else {
+            return;
+        };
+        match dialog.show(ctx, model) {
+            SearchResult::Open => {}
+            SearchResult::Ok(ties, pairs) => {
+                let created = format!(
+                    "Kontaktsuche: {} Ties und {} Kontaktpaare erstellt",
+                    ties.len(),
+                    pairs.len()
+                );
+                model.fe.constraints.extend(ties);
+                model.fe.contact_pairs.extend(pairs);
+                self.output.push(created);
+                self.contact_search = None;
+                self.highlighted = None;
+            }
+            SearchResult::Cancel => {
+                self.contact_search = None;
+                self.highlighted = None;
+            }
+        }
+    }
+
     fn editor_window(&mut self, ctx: &egui::Context) {
         let (Some(editor), Some(model)) = (&mut self.editor, &mut self.model) else {
             return;
@@ -2184,7 +2372,12 @@ impl Workbench {
         let current = self.current_result;
         for (index, model) in self.results.iter_mut().enumerate() {
             let dialog = (self.history_dialog.as_ref()).filter(|_| on_results && index == current);
+            let transformation = (self.transformation_dialog.as_ref())
+                .filter(|d| on_results && d.result == index && index == current);
             let highlight = match (dialog, &self.tree.selected) {
+                _ if transformation.is_some() => transformation
+                    .map(TransformationDialog::highlight)
+                    .unwrap_or_default(),
                 (Some(dialog), _) => dialog.highlight(model),
                 (None, Some((TreeView::Results, TreeItem::Part(part)))) if index == current => {
                     Highlight::part(*part)
@@ -2203,18 +2396,20 @@ impl Workbench {
         let highlight = if let Some(dialog) = &self.section_dialog {
             self.highlighted = None;
             dialog.highlight()
+        } else if let Some(dialog) = &self.contact_search {
+            self.highlighted = None;
+            dialog.highlight(model)
         } else if let Some(editor) = &self.editor {
+            self.highlighted = None;
             editor.highlight(model)
         } else {
-            if self.highlighted == self.tree.selected {
+            if self.highlighted.as_ref() == Some(&self.tree.selected) {
                 return;
             }
-            self.highlighted = self.tree.selected.clone();
+            self.highlighted = Some(self.tree.selected.clone());
             match &self.tree.selected {
                 Some((TreeView::FeModel, TreeItem::Part(part))) => Highlight::part(*part),
-                Some((TreeView::FeModel, item)) => crate::setup::item_region(&model.fe, item)
-                    .map(|region| crate::setup::region_highlight(model, region))
-                    .unwrap_or_default(),
+                Some((TreeView::FeModel, item)) => crate::setup::item_highlight(model, item),
                 _ => Default::default(),
             }
         };
@@ -2888,10 +3083,13 @@ impl Workbench {
         self.viewport.options.contour_levels =
             view.filter(|v| v.current().is_some()).map(|v| v.levels);
         let (graphics, post) = (&self.settings.graphics, &self.settings.post);
-        let marker = |label: &str, extreme: Option<(usize, f32)>| {
-            let (index, value) = extreme?;
+        // The open transformation dialog shows the points and axis of the selected item.
+        let transformation = (self.transformation_dialog.as_ref())
+            .filter(|d| self.tree_view == TreeView::Results && d.result == self.current_result);
+        let marker = |label: &str, extreme: Option<(usize, f32, usize)>| {
+            let (index, value, item) = extreme?;
             Some(Marker {
-                position: model.node_position(index)?,
+                position: model.node_position_on(index, item)?,
                 text: format!(
                     "{label}: {}\nNode id: {}",
                     format_legend_value(value),
@@ -2915,16 +3113,31 @@ impl Workbench {
             show_view_triad: graphics.view_triad,
             nodes: (model.highlight.nodes.iter())
                 .filter_map(|&id| model.node_position(model.mesh.node_index(id)?))
+                .chain(transformation.iter().flat_map(|d| d.points(model)))
                 .collect(),
             paths: self.overlay_paths(),
+            lines: transformation.map_or_else(Vec::new, |d| d.lines(model)),
         };
     }
 }
 
-/// PrePoMax's results tool bar: deformation, colour bands and the increment with its
-/// navigation buttons. Returns true when anything that affects the scene changed.
-fn results_tool_bar(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
+/// What the results tool bar asks for.
+struct ToolBarResponse {
+    /// Anything that affects the scene changed.
+    changed: bool,
+    /// The transformations button was clicked.
+    transformations: bool,
+}
+
+/// PrePoMax's results tool bar: deformation, colour bands, transformations and the increment
+/// with its navigation buttons.
+fn results_tool_bar(
+    ui: &mut egui::Ui,
+    view: &mut ResultsView,
+    transformed: bool,
+) -> ToolBarResponse {
     let mut changed = false;
+    let mut transformations = false;
     ui.horizontal(|ui| {
         ui.label("Verformung");
         let before = view.deformation;
@@ -2956,6 +3169,9 @@ fn results_tool_bar(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
         changed |= ui
             .add(numeric::drag_value(&mut view.levels).range(2..=plx_render::contour::MAX_LEVELS))
             .changed();
+        ui.separator();
+        let tip = "Transformationen: Symmetrien und Muster";
+        transformations = icons::button(ui, Icon::Transformation, tip, true, transformed).clicked();
         ui.separator();
 
         ui.label("Schritt, Inkrement");
@@ -3017,7 +3233,10 @@ fn results_tool_bar(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
             };
         }
     });
-    changed
+    ToolBarResponse {
+        changed,
+        transformations,
+    }
 }
 
 enum WindowEvent {
