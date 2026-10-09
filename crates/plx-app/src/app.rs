@@ -14,7 +14,7 @@ use crate::selection::Operation;
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::setup::{Editor, EditorResult, NewItem};
 use crate::tree::{self, TreeItem, TreeState, TreeView};
-use crate::viewport::{Click, ViewCommand, Viewport};
+use crate::viewport::{BoxSelect, Click, ViewCommand, Viewport};
 use plx_render::RenderMesh;
 
 enum LoadEvent {
@@ -388,12 +388,21 @@ impl eframe::App for PrepolixApp {
             .frame(pane.inner_margin(4))
             .show(ui, |ui| self.workbench.output(ui));
         egui::CentralPanel::no_frame().show(ui, |ui| {
+            self.workbench.viewport.selecting =
+                self.workbench.editor.as_ref().is_some_and(Editor::picks);
             let response = self.workbench.viewport.ui(ui);
             if let Some(command) = response.command {
                 self.workbench.view_command = Some(command);
             }
             if let Some(click) = response.click {
                 self.workbench.click(click);
+            }
+            if let Some(area) = response.box_select {
+                self.workbench.box_select(&area);
+            }
+            if let Some(hover) = response.hover {
+                self.workbench.hover(hover);
+                ui.ctx().request_repaint();
             }
         });
         self.workbench.properties_window(&ctx);
@@ -830,6 +839,28 @@ impl Workbench {
             pick,
             Operation::from_modifiers(click.shift, click.ctrl),
         );
+    }
+
+    fn box_select(&mut self, area: &BoxSelect) {
+        if let (Some(editor), Some(model)) = (&mut self.editor, &self.model) {
+            editor.box_select(
+                model,
+                area,
+                Operation::from_modifiers(area.shift, area.ctrl),
+            );
+        }
+    }
+
+    /// Shows what a click would select where the mouse rests.
+    fn hover(&mut self, hover: Option<Click>) {
+        let preview = match (hover, &self.editor, &self.model) {
+            (Some(click), Some(editor), Some(model)) => model
+                .pick(click.origin, click.direction)
+                .map(|hit| editor.preview(model, &hit, click.precision_at(hit.point)))
+                .unwrap_or_default(),
+            _ => Default::default(),
+        };
+        self.viewport.preview = preview;
     }
 
     fn editor_window(&mut self, ctx: &egui::Context) {

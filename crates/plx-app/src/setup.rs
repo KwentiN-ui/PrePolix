@@ -16,6 +16,7 @@ use plx_model::{
 use crate::model::{Highlight, Hit, Model};
 use crate::selection::{History, Items, Operation, Picker, PickerAction, Target};
 use crate::tree::TreeItem;
+use crate::viewport::{BoxSelect, Preview};
 
 /// Kinds of items the tree can create.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,10 +160,9 @@ impl RegionDraft {
                 }
             }
             Source::Selection => match pick {
-                Some((hit, precision)) => match picker.pick(model, hit, self.target, precision) {
-                    Items::Nodes(nodes) => self.nodes.push(operation, nodes),
-                    Items::Faces(faces) => self.faces.push(operation, faces),
-                },
+                Some((hit, precision)) => {
+                    self.take(picker.pick(model, hit, self.target, precision), operation);
+                }
                 // PrePoMax clears the selection on a plain click into empty space.
                 None if operation == Operation::Replace => self.clear(),
                 None => {}
@@ -174,6 +174,13 @@ impl RegionDraft {
     fn clear(&mut self) {
         self.nodes.clear();
         self.faces.clear();
+    }
+
+    fn take(&mut self, items: Items, operation: Operation) {
+        match items {
+            Items::Nodes(nodes) => self.nodes.push(operation, nodes),
+            Items::Faces(faces) => self.faces.push(operation, faces),
+        }
     }
 
     fn can_undo(&self) -> bool {
@@ -539,6 +546,27 @@ impl Editor {
             &mut self.draft
         {
             r.click(model, &self.picker, pick, operation);
+        }
+    }
+
+    /// A selection box dragged in the 3D view.
+    pub fn box_select(&mut self, model: &Model, area: &BoxSelect, operation: Operation) {
+        if let Draft::Section(_, r) | Draft::BoundaryCondition(_, _, r) | Draft::Load(_, _, r) =
+            &mut self.draft
+            && r.source == Source::Selection
+        {
+            r.take(self.picker.pick_box(model, area, r.target), operation);
+        }
+    }
+
+    /// What a click at the hit would select, for the hover preview.
+    pub fn preview(&self, model: &Model, hit: &Hit, precision: f32) -> Preview {
+        match self.region() {
+            Some(region) if region.source == Source::Selection => {
+                let items = self.picker.pick(model, hit, region.target, precision);
+                crate::selection::preview(model, &items)
+            }
+            _ => Preview::default(),
         }
     }
 
