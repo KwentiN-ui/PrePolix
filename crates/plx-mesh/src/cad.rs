@@ -131,9 +131,17 @@ impl CadMap {
 
 impl FeMesh {
     /// The CAD faces that element faces make up, if they are whole CAD faces and nothing
-    /// else, so that a region of them can be kept by geometry.
+    /// else, so that a region of them can be kept by geometry. The faces of 2D elements are
+    /// their edges, which make up CAD edges.
     pub fn whole_cad_faces(&self, faces: &[(ElementId, u8)]) -> Option<Vec<CadEntity>> {
         if faces.is_empty() || self.cad.is_empty() {
+            return None;
+        }
+        let plane = |&(e, _): &(ElementId, u8)| self.element(e).is_some_and(|e| e.is_plane());
+        if faces.iter().all(plane) {
+            return self.whole_cad_edges(faces);
+        }
+        if faces.iter().any(plane) {
             return None;
         }
         let face_of = self.cad.face_of();
@@ -145,6 +153,29 @@ impl FeMesh {
             .flat_map(|t| self.cad.faces[t].iter().copied())
             .collect();
         (covered == given).then(|| tags.into_iter().map(CadEntity::Face).collect())
+    }
+
+    /// The CAD edges that edges of 2D elements make up, if they are whole CAD edges and
+    /// nothing else.
+    fn whole_cad_edges(&self, faces: &[(ElementId, u8)]) -> Option<Vec<CadEntity>> {
+        let sorted = |[a, b]: [NodeId; 2]| [a.min(b), a.max(b)];
+        let edge_of: BTreeMap<[NodeId; 2], i32> = (self.cad.segments.iter())
+            .flat_map(|(&tag, segments)| segments.iter().map(move |&s| (sorted(s), tag)))
+            .collect();
+        let mut given = BTreeSet::new();
+        for &(element, face) in faces {
+            let element = self.element(element)?;
+            let edge = *element.faces().get(usize::from(face).checked_sub(1)?)?;
+            let ends = [edge.corners.first()?, edge.corners.get(1)?];
+            given.insert(sorted(ends.map(|&i| element.nodes[i])));
+        }
+        let tags: BTreeSet<i32> = (given.iter())
+            .map(|s| edge_of.get(s).copied())
+            .collect::<Option<_>>()?;
+        let covered: BTreeSet<[NodeId; 2]> = (tags.iter())
+            .flat_map(|t| self.cad.segments[t].iter().map(|&s| sorted(s)))
+            .collect();
+        (covered == given).then(|| tags.into_iter().map(CadEntity::Edge).collect())
     }
 
     /// Nodes of CAD entities, in ascending order.
@@ -205,6 +236,11 @@ mod tests {
     /// Two plane stress quadrilaterals side by side, 1-2-5-4 and 2-3-6-5, meshed from CAD
     /// face 1 with the bottom edge 7 (nodes 1, 2, 3).
     fn strip() -> FeMesh {
+        strip_of("CPS4")
+    }
+
+    /// The strip with elements of the type, e.g. shells.
+    fn strip_of(type_name: &str) -> FeMesh {
         let mut mesh = FeMesh::default();
         for (id, x, y) in [
             (1, 0., 0.),
@@ -219,7 +255,7 @@ mod tests {
         for (id, nodes) in [(1, vec![1, 2, 5, 4]), (2, vec![2, 3, 6, 5])] {
             mesh.add_element(Element {
                 id,
-                type_name: "CPS4".into(),
+                type_name: type_name.into(),
                 shape: ElementShape::Quad4,
                 nodes,
             })
@@ -280,7 +316,8 @@ mod tests {
 
     #[test]
     fn whole_cad_faces_are_recognised() {
-        let mut mesh = strip();
+        // Shells, whose face 1 is the element itself.
+        let mut mesh = strip_of("S4");
         mesh.cad.faces.insert(2, vec![(5, 3)]);
         assert_eq!(
             mesh.whole_cad_faces(&[(2, 1), (1, 1)]),
@@ -293,5 +330,27 @@ mod tests {
         );
         assert_eq!(mesh.whole_cad_faces(&[(1, 2)]), None, "not on the geometry");
         assert_eq!(mesh.whole_cad_faces(&[]), None);
+    }
+
+    #[test]
+    fn whole_cad_edges_of_2d_elements_are_recognised() {
+        let mut mesh = strip();
+        // Edge 1 of the quadrilaterals is the bottom; as faces of the plane elements they
+        // must not be taken for the elements on CAD face 1.
+        assert_eq!(
+            mesh.whole_cad_faces(&[(1, 1), (2, 1)]),
+            Some(vec![CadEntity::Edge(7)])
+        );
+        assert_eq!(
+            mesh.whole_cad_faces(&[(1, 1)]),
+            None,
+            "only part of the edge"
+        );
+        assert_eq!(mesh.whole_cad_faces(&[(1, 3)]), None, "not on the geometry");
+        mesh.flip_surface_elements(|_| true);
+        assert_eq!(
+            mesh.whole_cad_faces(&[(1, 4), (2, 4)]),
+            Some(vec![CadEntity::Edge(7)])
+        );
     }
 }

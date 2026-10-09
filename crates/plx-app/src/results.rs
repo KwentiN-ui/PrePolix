@@ -119,7 +119,9 @@ impl ResultsView {
             increment: 0,
             field: 0,
             component: 0,
-            deformation: Deformation::Automatic(1.0),
+            // An exaggerated deformation makes parts in contact appear to penetrate each other,
+            // which confuses new users; PrePoMax's automatic scale stays one click away.
+            deformation: Deformation::TrueScale,
             user_scale: 10.0,
             levels: DEFAULT_LEVELS,
             show_undeformed: true,
@@ -792,7 +794,7 @@ mod tests {
     #[test]
     fn automatic_scale_follows_prepomax() {
         // Cube of size 10, largest displacement 0.1 in z: ALL and U3 both reach 0.1.
-        let view = ResultsView::new(
+        let mut view = ResultsView::new(
             vec![increment(
                 1,
                 1,
@@ -801,6 +803,8 @@ mod tests {
             )],
             Some(([0.0; 3], [10.0; 3])),
         );
+        assert_eq!(view.deformation, Deformation::TrueScale);
+        view.deformation = Deformation::Automatic(1.0);
         let max = (2.0f32 * 0.01).sqrt();
         let expected = round_significant(0.25 * 10.0 / max as f64, 2) as f32;
         assert_eq!(view.scale(), expected);

@@ -297,7 +297,9 @@ pub fn tessellate(geometry: &Geometry) -> Result<GeometryDisplay, GmshError> {
     })
 }
 
-/// Meshes every part of the geometry, one after the other as PrePoMax does.
+/// Meshes every part of the geometry, one after the other as PrePoMax does. Parts share no
+/// nodes, line parts meeting at a point included: the contact search finds such ends and
+/// ties them.
 pub fn generate_mesh(geometry: &Geometry) -> Result<GeneratedMesh, GmshError> {
     let mut mesh = FeMesh::default();
     let mut warnings = Vec::new();
@@ -744,10 +746,34 @@ fn line_part_mesh(
         return Err(GmshError::Other("Gmsh hat keine Elemente erzeugt".into()));
     }
     mesh.parts.push(part_elements);
+    mesh.cad = line_cad_map(gmsh, &mesh, edge)?;
     Ok(GeneratedMesh {
         mesh,
         warnings: gmsh.warnings()?,
     })
+}
+
+/// Where a CAD edge meshed as a line part and its vertices lie in the mesh: the edge's nodes
+/// and segments, and the node at each end vertex.
+fn line_cad_map(gmsh: &Gmsh, mesh: &FeMesh, edge: i32) -> Result<CadMap, GmshError> {
+    let mut map = CadMap::default();
+    let mut nodes = BTreeSet::new();
+    let mut segments = Vec::new();
+    for element in mesh.elements() {
+        nodes.extend(element.nodes.iter().copied());
+        segments.push([element.nodes[0], element.nodes[element.nodes.len() - 1]]);
+    }
+    map.nodes
+        .insert(CadEntity::Edge(edge), nodes.into_iter().collect());
+    map.segments.insert(edge, segments);
+    for vertex in gmsh.adjacencies(1, edge)?.1 {
+        let (_, tags) = gmsh.elements(POINT, vertex)?;
+        let nodes: Vec<NodeId> = tags.iter().map(|&t| node_id(t)).collect::<Result<_, _>>()?;
+        if !nodes.is_empty() {
+            map.nodes.insert(CadEntity::Vertex(vertex), nodes);
+        }
+    }
+    Ok(map)
 }
 
 /// The local mesh sizes on the given faces and their edges as Gmsh size fields; Gmsh takes
