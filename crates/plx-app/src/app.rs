@@ -2542,6 +2542,12 @@ impl Workbench {
             }
             return;
         }
+        if self.tree_view == TreeView::Geometry {
+            if let (Some(editor), Some(view)) = (&mut self.mesh_item_editor, &self.geometry) {
+                editor.box_select(view, area, operation);
+            }
+            return;
+        }
         if let (Some(editor), Some(model)) = (&mut self.editor, &self.model) {
             editor.box_select(
                 model,
