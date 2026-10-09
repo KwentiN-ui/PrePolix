@@ -566,7 +566,8 @@ impl Workbench {
             ui.weak("Kein Modell geladen.\nDatei > Öffnen (Strg+O) oder eine .plx-, .inp- oder .frd-Datei ins Fenster ziehen.");
             ui.separator();
         }
-        let response = tree::show(ui, view, self.model.as_mut(), &mut self.tree);
+        let job = self.analysis.as_ref().map(Analysis::status);
+        let response = tree::show(ui, view, self.model.as_mut(), job, &mut self.tree);
         for (index, visible) in response.visibility {
             self.viewport.set_part_visible(index, visible);
         }

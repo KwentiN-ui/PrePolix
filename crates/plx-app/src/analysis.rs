@@ -18,6 +18,7 @@ pub struct Analysis {
     output: Vec<String>,
     started: Instant,
     finished: Option<f32>,
+    status: JobStatus,
     pub monitor: bool,
 }
 
@@ -56,6 +57,7 @@ impl Analysis {
             job,
             started: Instant::now(),
             finished: None,
+            status: JobStatus::Running,
             monitor: true,
         })
     }
@@ -79,7 +81,12 @@ impl Analysis {
         }
         self.output.extend(self.job.new_output());
         self.finished = Some(self.started.elapsed().as_secs_f32());
+        self.status = status;
         Some(status)
+    }
+
+    pub fn status(&self) -> JobStatus {
+        self.status
     }
 
     pub fn kill(&mut self) {
