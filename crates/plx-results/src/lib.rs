@@ -9,10 +9,12 @@ pub mod equation;
 pub mod field_output;
 pub mod history_output;
 pub mod hot_spot;
+pub mod transformation;
 
 pub use derived::{add_derived_components, principal_values};
 pub use equation::Equation;
 pub use field_output::{FieldOutput, FieldOutputKind, LimitBasis};
+pub use transformation::{Transformation, TransformationKind};
 
 /// Kind of analysis an increment belongs to, as CalculiX reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

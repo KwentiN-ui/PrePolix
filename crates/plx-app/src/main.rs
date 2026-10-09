@@ -26,6 +26,7 @@ mod solver_check;
 mod sound;
 mod style;
 mod symbols;
+mod transformation_dialog;
 mod tree;
 mod tree_icons;
 mod viewport;
