@@ -54,6 +54,12 @@ pub enum TreeItem {
     FieldOutputs,
     /// Field of the current increment, by index.
     Field(usize),
+    /// Field of the current increment computed from a derived field output, by index.
+    ResultFieldOutput(usize),
+    /// A computed history output, by index of its data.
+    HistorySet(usize),
+    HistoryField(usize, usize),
+    HistoryComponent(usize, usize, usize),
     Component(usize, usize),
 }
 
@@ -172,6 +178,8 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::Group("Steps") => Some(NewItem::Step),
         TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
         TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
+        TreeItem::FieldOutputs => Some(NewItem::ResultFieldOutput),
+        TreeItem::Group("History Outputs") => Some(NewItem::ResultHistoryOutput),
         _ => None,
     }
 }
@@ -181,7 +189,11 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
 fn has_properties(item: &TreeItem) -> bool {
     !matches!(
         item,
-        TreeItem::Group(_) | TreeItem::Mesh | TreeItem::StepGroup(..) | TreeItem::FieldOutputs
+        TreeItem::Group(_)
+            | TreeItem::Mesh
+            | TreeItem::StepGroup(..)
+            | TreeItem::FieldOutputs
+            | TreeItem::HistoryField(..)
     )
 }
 
@@ -350,7 +362,11 @@ impl Tree<'_> {
                 None => {}
             }
         }
-        let editable = is_fe_item(&item);
+        let editable = is_fe_item(&item)
+            || matches!(
+                item,
+                TreeItem::ResultFieldOutput(_) | TreeItem::HistorySet(_)
+            );
         if creates.is_some() || editable || item == TreeItem::Analysis {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -813,11 +829,26 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
 /// Name of the analysis job, PrePoMax's first default.
 pub const ANALYSIS_NAME: &str = "Analysis-1";
 
+/// A name with the names of its children, e.g. a field with its components.
+type NamedList = (String, Vec<String>);
+
 fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
     let model = model.filter(|m| m.results.is_some());
     let mut fields = Vec::new();
     let mut active = None;
+    let mut history: Vec<(String, Vec<NamedList>)> = Vec::new();
     if let Some(view) = model.as_ref().and_then(|m| m.results.as_ref()) {
+        history = (view.history.iter())
+            .map(|set| {
+                let fields = (set.fields.iter())
+                    .map(|f| {
+                        let components = f.components.iter().map(|c| c.name.clone()).collect();
+                        (f.name.clone(), components)
+                    })
+                    .collect();
+                (set.name.clone(), fields)
+            })
+            .collect();
         if let Some(increment) = view.current_increment() {
             fields = increment
                 .fields
@@ -825,7 +856,8 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                 .map(|f| {
                     let components: Vec<String> =
                         f.components.iter().map(|c| c.name.clone()).collect();
-                    (f.name.clone(), components)
+                    let derived = view.field_outputs.iter().any(|o| o.name == f.name);
+                    (f.name.clone(), components, derived)
                 })
                 .collect();
         }
@@ -846,9 +878,14 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                 tree.leaf(ui, TreeItem::FieldOutputs, text);
             } else {
                 tree.branch(ui, TreeItem::FieldOutputs, text, true, |tree, ui| {
-                    for (f, (name, components)) in fields.into_iter().enumerate() {
+                    for (f, (name, components, derived)) in fields.into_iter().enumerate() {
+                        let item = if derived {
+                            TreeItem::ResultFieldOutput(f)
+                        } else {
+                            TreeItem::Field(f)
+                        };
                         // PrePoMax opens the first two fields.
-                        tree.branch(ui, TreeItem::Field(f), name, f < 2, |tree, ui| {
+                        tree.branch(ui, item, name, f < 2, |tree, ui| {
                             for (c, component) in components.into_iter().enumerate() {
                                 let item = TreeItem::Component(f, c);
                                 if tree.leaf(ui, item, component).clicked()
@@ -861,7 +898,26 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                     }
                 });
             }
-            tree.leaf(ui, TreeItem::Group("History Outputs"), "History Outputs");
+            let group = TreeItem::Group("History Outputs");
+            if history.is_empty() {
+                tree.leaf(ui, group, "History Outputs");
+                return;
+            }
+            let text = counted("History Outputs", history.len());
+            tree.branch(ui, group, text, true, |tree, ui| {
+                for (s, (name, fields)) in history.into_iter().enumerate() {
+                    tree.branch(ui, TreeItem::HistorySet(s), name, true, |tree, ui| {
+                        for (f, (name, components)) in fields.into_iter().enumerate() {
+                            let item = TreeItem::HistoryField(s, f);
+                            tree.branch(ui, item, name, true, |tree, ui| {
+                                for (c, component) in components.into_iter().enumerate() {
+                                    tree.leaf(ui, TreeItem::HistoryComponent(s, f, c), component);
+                                }
+                            });
+                        }
+                    });
+                }
+            });
         },
     );
 }

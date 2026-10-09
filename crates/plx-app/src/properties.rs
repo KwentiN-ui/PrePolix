@@ -17,7 +17,7 @@ pub fn title(model: Option<&Model>, item: &TreeItem) -> String {
             .get(*index)
             .map_or_else(String::new, |p| p.name.clone()),
         (TreeItem::NodeSet(n) | TreeItem::ElementSet(n) | TreeItem::Surface(n), _) => n.clone(),
-        (TreeItem::Field(f), Some(model)) => field_name(model, *f),
+        (TreeItem::Field(f) | TreeItem::ResultFieldOutput(f), Some(model)) => field_name(model, *f),
         (TreeItem::Component(f, c), Some(model)) => {
             let field = model
                 .results
@@ -93,6 +93,9 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
         | TreeItem::BoundaryCondition(..)
         | TreeItem::Load(..)
         | TreeItem::FieldOutput(..)
+        | TreeItem::HistorySet(_)
+        | TreeItem::HistoryField(..)
+        | TreeItem::HistoryComponent(..)
         | TreeItem::Analysis => {}
         TreeItem::Model => {
             rows.push(("Datei", model.path.display().to_string()));
@@ -155,7 +158,7 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
                 None => {}
             }
         }
-        TreeItem::Field(f) => {
+        TreeItem::Field(f) | TreeItem::ResultFieldOutput(f) => {
             let Some(view) = &model.results else { return };
             let Some(field) = view.current_increment().and_then(|i| i.fields.get(*f)) else {
                 return;

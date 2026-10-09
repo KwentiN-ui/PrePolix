@@ -211,27 +211,37 @@ impl Model {
         self.results.is_some()
     }
 
+    /// Node coordinates as drawn: with the shown deformation of results.
+    pub fn shown_coords(&self) -> std::borrow::Cow<'_, [[f64; 3]]> {
+        let coords = self.mesh.coords();
+        let Some(view) = &self.results else {
+            return std::borrow::Cow::Borrowed(coords);
+        };
+        let scale = (view.scale() * view.amplitude()) as f64;
+        match view.current_increment().and_then(|i| i.displacements()) {
+            Some(displacements) if scale != 0.0 => std::borrow::Cow::Owned(
+                coords
+                    .iter()
+                    .zip(&displacements)
+                    .map(|(p, d)| [0, 1, 2].map(|k| p[k] + scale * d[k] as f64))
+                    .collect(),
+            ),
+            _ => std::borrow::Cow::Borrowed(coords),
+        }
+    }
+
     /// Node coordinates as drawn and the normalized contour values, if a result is shown;
     /// the flag tells whether the shape is deformed and the undeformed outline is wanted.
     fn shown_state(&self) -> ShownState<'_> {
-        let mut coords = std::borrow::Cow::Borrowed(self.mesh.coords());
+        let coords = self.shown_coords();
         let mut scalars = None;
         let mut deformed = false;
         if let Some(view) = &self.results {
-            let scale = (view.scale() * view.amplitude()) as f64;
-            let displacements = view.current_increment().and_then(|i| i.displacements());
-            if let (Some(displacements), true) = (displacements, scale != 0.0) {
-                coords = std::borrow::Cow::Owned(
-                    coords
-                        .iter()
-                        .zip(&displacements)
-                        .map(|(p, d)| [0, 1, 2].map(|k| p[k] + scale * d[k] as f64))
-                        .collect(),
-                );
+            if matches!(coords, std::borrow::Cow::Owned(_)) {
                 deformed = view.show_undeformed;
             }
             if let (Some((_, component)), Some(legend)) = (view.current(), view.legend()) {
-                let amplitude = view.amplitude();
+                let amplitude = view.value_amplitude();
                 let values: Vec<f32> = component.values.iter().map(|v| v * amplitude).collect();
                 scalars = Some(normalize(&values, legend.min, legend.max));
             }
@@ -364,9 +374,9 @@ impl Model {
         &self.skins[part]
     }
 
-    /// Undeformed position of a node relative to the model origin, where picking happens.
+    /// Position of a node relative to the model origin as drawn, where picking happens.
     pub fn render_position(&self, index: usize) -> Vec3 {
-        (DVec3::from(self.mesh.coords()[index]) - self.origin).as_vec3()
+        self.node_position(index).unwrap_or(Vec3::ZERO)
     }
 
     /// All nodes of the visible parts.
@@ -426,7 +436,7 @@ impl Model {
 
     /// The nearest visible face hit by a ray, both relative to the model origin.
     pub fn pick(&self, origin: Vec3, direction: Vec3) -> Option<Hit> {
-        let coords = self.mesh.coords();
+        let coords = self.shown_coords();
         let position = |node: usize| (DVec3::from(coords[node]) - self.origin).as_vec3();
         let mut best: Option<(f32, Hit)> = None;
         for (part, skin) in self.skins.iter().enumerate() {
@@ -463,7 +473,7 @@ impl Model {
     /// The node of the hit face nearest to the hit point.
     pub fn hit_node(&self, hit: &Hit) -> NodeId {
         let face = &self.skins[hit.part].faces[hit.face];
-        let coords = self.mesh.coords();
+        let coords = self.shown_coords();
         let distance = |node: usize| {
             ((DVec3::from(coords[node]) - self.origin).as_vec3() - hit.point).length_squared()
         };
