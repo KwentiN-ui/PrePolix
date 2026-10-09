@@ -829,6 +829,11 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
         for name in ["Distributions", "Amplitudes", "Initial Conditions"] {
             tree.leaf(ui, TreeItem::Group(name), name);
         }
+        // Not in PrePoMax: hot spot stresses, evaluated on the results of the analysis.
+        let hot_spots = (fe.hot_spots.iter().enumerate())
+            .map(|(i, h)| (TreeItem::HotSpot(i), h.name.as_str()))
+            .collect();
+        tree.container(ui, HOT_SPOTS, hot_spots);
         let steps = TreeItem::Group("Steps");
         if fe.steps.is_empty() {
             tree.leaf(ui, steps, "Steps");
@@ -868,13 +873,6 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
         );
     } else {
         tree.leaf(ui, TreeItem::Group("Analyses"), "Analyses");
-    }
-    // Not in PrePoMax: hot spot stresses, evaluated on the results of the analysis.
-    if has_model {
-        let hot_spots = (fe.hot_spots.iter().enumerate())
-            .map(|(i, h)| (TreeItem::HotSpot(i), h.name.as_str()))
-            .collect();
-        tree.container(ui, HOT_SPOTS, hot_spots);
     }
 }
 
