@@ -5,6 +5,7 @@
 //! input file; node and element sets that CalculiX needs for them are derived when the input
 //! file is written, so the user never has to define sets by hand.
 
+mod amplitude;
 mod constraint;
 mod contact;
 pub mod convert;
@@ -17,6 +18,7 @@ mod section;
 pub mod units;
 mod validity;
 
+pub use amplitude::{Amplitude, AmplitudeTime};
 pub use constraint::{CompressionOnly, PointSpring, SurfaceSpring, SurfaceToSurfaceSpring};
 pub use contact::{
     Constraint, ContactMethod, ContactPair, DEFAULT_SURFACE_COLOR, Friction, GapConductance,
@@ -72,6 +74,9 @@ pub struct FeModel {
     pub surface_interactions: Vec<SurfaceInteraction>,
     #[serde(default)]
     pub contact_pairs: Vec<ContactPair>,
+    /// Time curves boundary conditions and loads refer to by name.
+    #[serde(default)]
+    pub amplitudes: Vec<Amplitude>,
     /// State of the model before the first step, such as its initial temperature.
     #[serde(default)]
     pub initial_conditions: Vec<InitialCondition>,
@@ -145,6 +150,28 @@ impl FeModel {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
             }))
+    }
+
+    /// Follows a renamed amplitude: boundary conditions and loads keep referring to it.
+    pub fn rename_amplitude(&mut self, old: &str, new: &str) {
+        for step in &mut self.steps {
+            let references = (step.boundary_conditions.iter_mut())
+                .map(|b| &mut b.amplitude)
+                .chain(
+                    (step.loads.iter_mut())
+                        .flat_map(|l| [&mut l.amplitude, &mut l.factor_amplitude]),
+                );
+            for reference in references {
+                if reference.as_deref() == Some(old) {
+                    *reference = Some(new.to_string());
+                }
+            }
+        }
+    }
+
+    /// The amplitude of the name, if the model has it.
+    pub fn amplitude(&self, name: &str) -> Option<&Amplitude> {
+        self.amplitudes.iter().find(|a| a.name == name)
     }
 
     /// Follows a renamed part: regions on the part, or on the element set an input file
@@ -509,6 +536,9 @@ pub struct BoundaryCondition {
     pub active: bool,
     pub region: Region,
     pub kind: BoundaryKind,
+    /// Amplitude the values follow over time; `None` is CalculiX's default ramp or step.
+    #[serde(default)]
+    pub amplitude: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -522,6 +552,11 @@ pub enum BoundaryKind {
 }
 
 impl BoundaryKind {
+    /// Whether an amplitude can scale the boundary condition; fixed supports stay zero.
+    pub fn takes_amplitude(&self) -> bool {
+        !matches!(self, BoundaryKind::Fixed)
+    }
+
     pub fn is_thermal(&self) -> bool {
         matches!(self, BoundaryKind::Temperature(_))
     }
@@ -535,6 +570,14 @@ pub struct Load {
     pub active: bool,
     pub region: Region,
     pub kind: LoadKind,
+    /// Amplitude the value follows over time, of a film or radiation its sink temperature;
+    /// `None` is CalculiX's default ramp or step.
+    #[serde(default)]
+    pub amplitude: Option<String>,
+    /// Amplitude of the film coefficient or the emissivity (`FILM AMPLITUDE`,
+    /// `RADIATION AMPLITUDE`); other loads have none.
+    #[serde(default)]
+    pub factor_amplitude: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -560,6 +603,15 @@ pub enum LoadKind {
 }
 
 impl LoadKind {
+    /// What the second amplitude of a film or radiation scales, if the load has one.
+    pub fn factor_amplitude_label(&self) -> Option<&'static str> {
+        match self {
+            LoadKind::Film { .. } => Some("Wärmeübergangskoeffizient"),
+            LoadKind::Radiation { .. } => Some("Emissionsgrad"),
+            _ => None,
+        }
+    }
+
     /// Whether the load is a heat flow rather than a force.
     pub fn is_thermal(&self) -> bool {
         !matches!(
@@ -679,12 +731,15 @@ mod tests {
             active: true,
             region: Region::ElementSet("A".into()),
             kind: BoundaryKind::Fixed,
+            amplitude: None,
         });
         step.loads.push(Load {
             name: "Pressure-1".into(),
             active: true,
             region: Region::Surface("A".into()),
             kind: LoadKind::Pressure(1.0),
+            amplitude: None,
+            factor_amplitude: None,
         });
         model.steps.push(step);
         model.rename_part("A", "C");

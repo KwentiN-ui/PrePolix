@@ -1383,12 +1383,14 @@ mod tests {
             active: true,
             region: Region::Nodes(fixed),
             kind: BoundaryKind::Fixed,
+            amplitude: None,
         });
         step.boundary_conditions.push(BoundaryCondition {
             name: "Pull".into(),
             active: true,
             region: Region::Nodes(pulled),
             kind: BoundaryKind::Displacement([Some(0.1), None, None, None, None, None]),
+            amplitude: None,
         });
         model.fe = FeModel {
             properties: Default::default(),

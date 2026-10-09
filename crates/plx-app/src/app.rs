@@ -1965,6 +1965,7 @@ impl Workbench {
                 "Anfangsbedingung erstellen …",
                 true,
             ),
+            (NewItem::Amplitude, "Amplitude erstellen …", true),
             (NewItem::Step, "Step erstellen …", true),
             (
                 NewItem::BoundaryCondition(last_step.unwrap_or(0)),

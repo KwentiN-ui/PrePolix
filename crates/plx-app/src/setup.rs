@@ -9,13 +9,14 @@ use std::collections::BTreeSet;
 use egui::Ui;
 use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
-    BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, BoundaryKind, Constraint,
-    ContactPair, Elastic, EquationSolver, FeModel, FieldOutput, FrequencyStep, HeatTransferStep,
-    Incrementation, InitialCondition, InitialConditionKind, Load, LoadKind, Material, ModelSpace,
-    OutputKind, Quantity, Region, Section, SectionKind, StaticStep, Step, StepKind,
-    SurfaceInteraction, UnitSystem, next_name,
+    Amplitude, BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, BoundaryKind,
+    Constraint, ContactPair, Elastic, EquationSolver, FeModel, FieldOutput, FrequencyStep,
+    HeatTransferStep, Incrementation, InitialCondition, InitialConditionKind, Load, LoadKind,
+    Material, ModelSpace, OutputKind, Quantity, Region, Section, SectionKind, StaticStep, Step,
+    StepKind, SurfaceInteraction, UnitSystem, next_name,
 };
 
+use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row};
 use crate::constraint_dialog::ConstraintDraft;
 use crate::contacts::{self, MasterSlave};
 use crate::model::{Highlight, Hit, Model};
@@ -37,6 +38,8 @@ pub enum NewItem {
     Constraint,
     SurfaceInteraction,
     ContactPair,
+    /// A time curve for boundary conditions and loads.
+    Amplitude,
     /// A field output derived from results, created in the Results tree.
     ResultFieldOutput,
     /// A history output derived from results, created in the Results tree.
@@ -552,6 +555,7 @@ enum Draft {
     Constraint(ConstraintDraft),
     SurfaceInteraction(SurfaceInteraction, contacts::InteractionView),
     ContactPair(ContactPair, MasterSlave),
+    Amplitude(Amplitude, AmplitudeView),
 }
 
 /// The region clicks in the 3D view pick for, if the dialog has one.
@@ -773,6 +777,7 @@ impl Editor {
                         active: true,
                         region: Region::Nodes(Vec::new()),
                         kind,
+                        amplitude: None,
                     },
                     RegionDraft::new(NODE_SOURCES, Target::Nodes),
                 )
@@ -791,6 +796,8 @@ impl Editor {
                         active: true,
                         region: Region::Nodes(Vec::new()),
                         kind,
+                        amplitude: None,
+                        factor_amplitude: None,
                     },
                     load_region(&kind, None, fe, &FeMesh::default()),
                 )
@@ -814,6 +821,10 @@ impl Editor {
                     ContactPair::new(next_name("Contact_Pair", existing), interaction),
                     MasterSlave::new(),
                 )
+            }
+            NewItem::Amplitude => {
+                let name = next_name("Amplitude", names(&fe.amplitudes, |a| &a.name));
+                Draft::Amplitude(Amplitude::new(name), AmplitudeView::default())
             }
             NewItem::ResultFieldOutput
             | NewItem::ResultHistoryOutput
@@ -880,6 +891,10 @@ impl Editor {
                 let regions = MasterSlave::from_regions(&pair.master, &pair.slave, mesh);
                 (Draft::ContactPair(pair, regions), i)
             }
+            TreeItem::Amplitude(i) => {
+                let amplitude = fe.amplitudes.get(i)?.clone();
+                (Draft::Amplitude(amplitude, AmplitudeView::default()), i)
+            }
             _ => return None,
         };
         Some(Self {
@@ -902,6 +917,7 @@ impl Editor {
             Draft::Constraint(c) => ("Constraint", c.name()),
             Draft::SurfaceInteraction(s, _) => ("Surface Interaction", &s.name),
             Draft::ContactPair(c, _) => ("Contact Pair", &c.name),
+            Draft::Amplitude(a, _) => ("Amplitude", &a.name),
         };
         let action = if self.index.is_some() {
             "bearbeiten"
@@ -994,6 +1010,9 @@ impl Editor {
             .show(ctx, |ui| {
                 if let Draft::SurfaceInteraction(interaction, view) = &mut self.draft {
                     contacts::interaction_dialog(ui, interaction, view, model.fe.properties.units);
+                } else if let Draft::Amplitude(amplitude, view) = &mut self.draft {
+                    let units = model.fe.properties.units;
+                    amplitude_dialog::amplitude_form(ui, amplitude, view, units);
                 } else {
                     egui::Grid::new("item form")
                         .num_columns(2)
@@ -1148,6 +1167,15 @@ impl Editor {
                         ui.end_row();
                     }
                 }
+                if bc.kind.takes_amplitude() {
+                    amplitude_row(
+                        ui,
+                        "Amplitude",
+                        "bc amplitude",
+                        &mut bc.amplitude,
+                        &model.fe,
+                    );
+                }
                 region.ui(ui, model);
             }
             Draft::Load(step, load, region) => {
@@ -1264,6 +1292,19 @@ impl Editor {
                         }
                     }
                 }
+                // Of a film or radiation the first amplitude scales the sink temperature.
+                let factor = load.kind.factor_amplitude_label();
+                let label = if factor.is_some() {
+                    "Amplitude Umgebungstemperatur"
+                } else {
+                    "Amplitude"
+                };
+                amplitude_row(ui, label, "load amplitude", &mut load.amplitude, &model.fe);
+                if let Some(factor) = factor {
+                    let label = format!("Amplitude {factor}");
+                    let reference = &mut load.factor_amplitude;
+                    amplitude_row(ui, &label, "load factor amplitude", reference, &model.fe);
+                }
                 region.ui(ui, model);
             }
             Draft::InitialCondition(condition, region) => {
@@ -1305,8 +1346,8 @@ impl Editor {
                 ui.end_row();
             }
             Draft::Constraint(c) => c.form(ui, model, &taken, self.index.is_none()),
-            // Laid out by its own dialog, see show.
-            Draft::SurfaceInteraction(..) => {}
+            // Laid out by their own dialogs, see show.
+            Draft::SurfaceInteraction(..) | Draft::Amplitude(..) => {}
             Draft::ContactPair(pair, regions) => {
                 name_row(ui, &mut pair.name);
                 contacts::contact_pair_form(ui, model, pair, regions);
@@ -1329,6 +1370,7 @@ impl Editor {
             Draft::Constraint(_) => fe.constraints.iter().map(Constraint::name).collect(),
             Draft::SurfaceInteraction(..) => names(&fe.surface_interactions, |s| &s.name),
             Draft::ContactPair(..) => names(&fe.contact_pairs, |c| &c.name),
+            Draft::Amplitude(..) => names(&fe.amplitudes, |a| &a.name),
         };
         if let Some(index) = self.index.filter(|&i| i < siblings.len()) {
             siblings.remove(index);
@@ -1348,6 +1390,7 @@ impl Editor {
             Draft::Constraint(c) => c.name(),
             Draft::SurfaceInteraction(s, _) => &s.name,
             Draft::ContactPair(c, _) => &c.name,
+            Draft::Amplitude(a, _) => &a.name,
         };
         if name.trim().is_empty() {
             return Err("Bitte einen Namen eingeben.".into());
@@ -1394,6 +1437,7 @@ impl Editor {
             Draft::SurfaceInteraction(interaction, _) => {
                 contacts::validate_interaction(interaction)?;
             }
+            Draft::Amplitude(amplitude, _) => amplitude_dialog::validate(amplitude)?,
             _ => {
                 if self.region().is_some_and(RegionDraft::is_empty) {
                     return Err("Die Region ist leer.".into());
@@ -1425,6 +1469,7 @@ impl Editor {
                 Some(TreeItem::SurfaceInteraction(fe.surface_interactions.len()))
             }
             Draft::ContactPair(..) => Some(TreeItem::ContactPair(fe.contact_pairs.len())),
+            Draft::Amplitude(..) => Some(TreeItem::Amplitude(fe.amplitudes.len())),
             _ => None,
         }
     }
@@ -1467,6 +1512,9 @@ impl Editor {
             // Switching an item on or off while its dialog is open is kept.
             Draft::BoundaryCondition(s, mut bc, region) => {
                 bc.region = region.region();
+                if !bc.kind.takes_amplitude() {
+                    bc.amplitude = None;
+                }
                 let list = &mut fe.steps[s].boundary_conditions;
                 if let Some(existing) = index.and_then(|i| list.get(i)) {
                     bc.active = existing.active;
@@ -1475,6 +1523,9 @@ impl Editor {
             }
             Draft::Load(s, mut load, region) => {
                 load.region = region.region();
+                if load.kind.factor_amplitude_label().is_none() {
+                    load.factor_amplitude = None;
+                }
                 let list = &mut fe.steps[s].loads;
                 if let Some(existing) = index.and_then(|i| list.get(i)) {
                     load.active = existing.active;
@@ -1513,6 +1564,14 @@ impl Editor {
                 }
                 put(&mut fe.contact_pairs, index, pair);
             }
+            Draft::Amplitude(amplitude, _) => {
+                // Boundary conditions and loads follow a renamed amplitude.
+                if let Some(old) = index.and_then(|i| fe.amplitudes.get(i)) {
+                    let old = old.name.clone();
+                    fe.rename_amplitude(&old, &amplitude.name);
+                }
+                put(&mut fe.amplitudes, index, amplitude);
+            }
         }
     }
 }
@@ -1542,6 +1601,7 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::Constraint(i) => remove(&mut fe.constraints, i),
         TreeItem::SurfaceInteraction(i) => remove(&mut fe.surface_interactions, i),
         TreeItem::ContactPair(i) => remove(&mut fe.contact_pairs, i),
+        TreeItem::Amplitude(i) => remove(&mut fe.amplitudes, i),
         _ => false,
     }
 }
@@ -2079,6 +2139,7 @@ mod tests {
             active: true,
             region: Region::Nodes(Vec::new()),
             kind: BoundaryKind::Displacement([Some(0.0), None, None, None, None, None]),
+            amplitude: None,
         });
         fe.steps.push(step);
         let mut editor = Editor::create(NewItem::BoundaryCondition(0), &fe).unwrap();
@@ -2146,12 +2207,15 @@ mod tests {
             active: true,
             region: Region::NodeSet("FIX".into()),
             kind: BoundaryKind::Fixed,
+            amplitude: None,
         });
         fe.steps[0].loads.push(Load {
             name: "Pressure-1".into(),
             active: true,
             region: Region::Surface("TOP".into()),
             kind: LoadKind::Pressure(1.0),
+            amplitude: None,
+            factor_amplitude: None,
         });
         let mut editor = Editor::create(NewItem::Step, &fe).unwrap();
         if let Draft::Step(step) = &mut editor.draft {
@@ -2213,12 +2277,14 @@ mod tests {
                 active: true,
                 region: Region::NodeSet("FIX".into()),
                 kind: BoundaryKind::Fixed,
+                amplitude: None,
             },
             BoundaryCondition {
                 name: "Temperature-1".into(),
                 active: true,
                 region: Region::NodeSet("HOT".into()),
                 kind: BoundaryKind::Temperature(100.0),
+                amplitude: None,
             },
         ];
         step.loads = vec![
@@ -2227,6 +2293,8 @@ mod tests {
                 active: true,
                 region: Region::Surface("TOP".into()),
                 kind: LoadKind::Pressure(1.0),
+                amplitude: None,
+                factor_amplitude: None,
             },
             Load {
                 name: "Convective_Film-1".into(),
@@ -2236,6 +2304,8 @@ mod tests {
                     sink: 20.0,
                     coefficient: 0.01,
                 },
+                amplitude: None,
+                factor_amplitude: None,
             },
         ];
         // A heat transfer step after it keeps the temperature and the film only.
@@ -2304,6 +2374,7 @@ mod tests {
             active: true,
             region: Region::NodeSet("FIX".into()),
             kind: BoundaryKind::Fixed,
+            amplitude: None,
         });
         let bc = TreeItem::BoundaryCondition(0, 0);
         let editor = Editor::edit(&bc, &fe, &FeMesh::default()).unwrap();
@@ -2324,5 +2395,47 @@ mod tests {
         assert!(fe.steps[0].boundary_conditions[0].active);
         assert!(!toggle_active(&mut fe, &TreeItem::Load(0, 0)));
         assert!(!toggle_active(&mut fe, &TreeItem::Material(0)));
+    }
+
+    #[test]
+    fn loads_follow_a_renamed_amplitude_and_drop_it_when_they_cannot_use_it() {
+        let mut fe = FeModel::default();
+        for kind in [NewItem::Amplitude, NewItem::Step] {
+            Editor::create(kind, &fe).unwrap().apply(&mut fe);
+        }
+        assert_eq!(fe.amplitudes[0].name, "Amplitude-1");
+        let mut film = Load {
+            name: "Film-1".into(),
+            active: true,
+            region: Region::Nodes(vec![1]),
+            kind: LoadKind::Film {
+                sink: 20.0,
+                coefficient: 1.0,
+            },
+            amplitude: Some("Amplitude-1".into()),
+            factor_amplitude: Some("Amplitude-1".into()),
+        };
+        fe.steps[0].loads.push(film.clone());
+        let mut editor = Editor::edit(&TreeItem::Amplitude(0), &fe, &FeMesh::default()).unwrap();
+        if let Draft::Amplitude(amplitude, _) = &mut editor.draft {
+            amplitude.name = "Ramp".into();
+        }
+        editor.apply(&mut fe);
+        let load = &fe.steps[0].loads[0];
+        assert_eq!(load.amplitude.as_deref(), Some("Ramp"));
+        assert_eq!(load.factor_amplitude.as_deref(), Some("Ramp"));
+        // A pressure has no film coefficient to scale.
+        film.kind = LoadKind::Pressure(1.0);
+        film.factor_amplitude = Some("Ramp".into());
+        Editor {
+            draft: Draft::Load(0, film, RegionDraft::new(FACE_SOURCES, Target::Faces)),
+            index: Some(0),
+            error: None,
+            picker: Picker::default(),
+        }
+        .apply(&mut fe);
+        assert_eq!(fe.steps[0].loads[0].factor_amplitude, None);
+        assert!(delete(&mut fe, &TreeItem::Amplitude(0)));
+        assert!(fe.amplitudes.is_empty());
     }
 }

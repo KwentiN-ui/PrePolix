@@ -50,6 +50,7 @@ pub enum TreeItem {
     Constraint(usize),
     SurfaceInteraction(usize),
     ContactPair(usize),
+    Amplitude(usize),
     InitialCondition(usize),
     Step(usize),
     /// A container inside a step, such as "BCs".
@@ -248,6 +249,10 @@ fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
         ),
         ModelItem::BoundaryCondition(s, i) => (TreeItem::BoundaryCondition(s, i), step(s, "BCs")),
         ModelItem::Load(s, i) => (TreeItem::Load(s, i), step(s, "Loads")),
+        ModelItem::Amplitude(i) => (
+            TreeItem::Amplitude(i),
+            vec![TreeItem::Group("Amplitudes"), TreeItem::Model],
+        ),
         ModelItem::InitialCondition(i) => (
             TreeItem::InitialCondition(i),
             vec![TreeItem::Group("Initial Conditions"), TreeItem::Model],
@@ -264,6 +269,7 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::Group("Constraints") => Some(NewItem::Constraint),
         TreeItem::Group("Surface Interactions") => Some(NewItem::SurfaceInteraction),
         TreeItem::Group("Contact Pairs") => Some(NewItem::ContactPair),
+        TreeItem::Group("Amplitudes") => Some(NewItem::Amplitude),
         TreeItem::Group("Initial Conditions") => Some(NewItem::InitialCondition),
         TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
         TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
@@ -316,6 +322,7 @@ fn is_fe_item(item: &TreeItem) -> bool {
             | TreeItem::Constraint(_)
             | TreeItem::SurfaceInteraction(_)
             | TreeItem::ContactPair(_)
+            | TreeItem::Amplitude(_)
             | TreeItem::InitialCondition(_)
             | TreeItem::Step(_)
             | TreeItem::BoundaryCondition(..)
@@ -371,6 +378,7 @@ fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
         Model => !matches!(item, Model),
         Mesh | Group("Parts") => matches!(item, Part(_)),
         Group("Constraints") => matches!(item, Constraint(_)),
+        Group("Amplitudes") => matches!(item, Amplitude(_)),
         Group("Contacts") => matches!(
             item,
             SurfaceInteraction(_)
@@ -1107,9 +1115,11 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                 .collect();
             tree.container(ui, "Contact Pairs", pairs);
         });
-        for name in ["Distributions", "Amplitudes"] {
-            tree.leaf(ui, TreeItem::Group(name), name);
-        }
+        tree.leaf(ui, TreeItem::Group("Distributions"), "Distributions");
+        let amplitudes = (fe.amplitudes.iter().enumerate())
+            .map(|(i, a)| (TreeItem::Amplitude(i), a.name.as_str()))
+            .collect();
+        tree.container(ui, "Amplitudes", amplitudes);
         for (i, _) in (fe.initial_conditions.iter().enumerate()).filter(|(_, c)| !c.active) {
             tree.inactive.insert(TreeItem::InitialCondition(i));
         }

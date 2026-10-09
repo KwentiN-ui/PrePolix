@@ -290,12 +290,15 @@ fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
         active: true,
         region: Region::Nodes(nodes_where(mesh, |p| p[0] == 0.0)),
         kind: BoundaryKind::Fixed,
+        amplitude: None,
     });
     step.loads.push(Load {
         name: "Load-1".into(),
         active: true,
         region,
         kind: load,
+        amplitude: None,
+        factor_amplitude: None,
     });
     FeModel {
         properties: Default::default(),
