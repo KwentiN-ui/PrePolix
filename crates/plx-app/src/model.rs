@@ -150,10 +150,10 @@ pub struct Highlight {
 }
 
 impl Highlight {
-    /// A whole part, such as one selected in the tree or clicked in the 3D view.
-    pub fn part(index: usize) -> Self {
+    /// Whole parts, such as those selected in the tree or clicked in the 3D view.
+    pub fn parts(parts: impl IntoIterator<Item = usize>) -> Self {
         Self {
-            outlines: HashSet::from([index]),
+            outlines: parts.into_iter().collect(),
             ..Self::default()
         }
     }

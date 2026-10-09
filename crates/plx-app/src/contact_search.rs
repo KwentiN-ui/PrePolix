@@ -3,12 +3,12 @@
 //! selected there are shown in the 3D view, master in the primary and slave in the secondary
 //! highlight colour, and can be edited together, swapped or merged before OK creates them.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use egui::Ui;
 use plx_mesh::{
-    CadEntity, GroupBy, LineJoint, MasterSlaveItem, SearchParameters, find_contact_pairs,
-    find_line_joints, surface_faces,
+    CadEntity, ElementId, GroupBy, LineJoint, MasterSlaveItem, SearchParameters,
+    find_contact_pairs, find_line_joints, surface_faces,
 };
 use plx_model::{
     Constraint, ContactMethod, ContactPair, FeModel, NodeTie, Quantity, Region, Tie, UnitSystem,
@@ -65,13 +65,11 @@ impl Row {
     /// What touches, as in PrePoMax's table: solids, the edges of a 2D model, or line ends.
     fn geometry(&self, plane: bool) -> &'static str {
         if self.joint.is_some() {
-            return "Line end-Line end";
-        }
-        match (plane, self.item.unresolved) {
-            (false, true) => "Solid",
-            (false, false) => "Solid-Solid",
-            (true, true) => "Shell edge",
-            (true, false) => "Shell edge-Shell edge",
+            "Line end-Line end"
+        } else if plane {
+            "Shell edge-Shell edge"
+        } else {
+            "Solid-Solid"
         }
     }
 
@@ -79,8 +77,6 @@ impl Row {
     fn type_label(&self) -> &'static str {
         if self.joint.is_some() {
             "Node tie"
-        } else if self.item.unresolved {
-            "Unresolved"
         } else {
             self.kind.label()
         }
@@ -149,9 +145,7 @@ impl ContactSearchDialog {
                 continue;
             }
             master.extend(row.item.master.iter().copied());
-            if !row.item.unresolved {
-                slave.extend(row.item.slave.iter().copied());
-            }
+            slave.extend(row.item.slave.iter().copied());
         }
         let master = surface_faces(&model.mesh, model.skins(), &master);
         let slave = surface_faces(&model.mesh, model.skins(), &slave);
@@ -178,8 +172,7 @@ impl ContactSearchDialog {
             distance: self.distance,
             angle_deg: self.angle,
             group_by: self.group_by,
-            // Like PrePoMax, only ties are checked for surfaces being a slave twice.
-            resolve: self.kind == PairType::Tie,
+            stiffness: part_stiffness(model),
         };
         let searched: Vec<bool> = (model.parts.iter())
             .map(|p| p.visible || !self.ignore_hidden)
@@ -188,7 +181,7 @@ impl ContactSearchDialog {
         self.rows = items
             .into_iter()
             .map(|item| Row {
-                checked: !item.unresolved,
+                checked: true,
                 name: item.name(),
                 item,
                 joint: None,
@@ -216,7 +209,6 @@ impl ContactSearchDialog {
                         slave_name: String::new(),
                         master: BTreeSet::new(),
                         slave: BTreeSet::new(),
-                        unresolved: false,
                     },
                     joint: Some(joint),
                     rotations: true,
@@ -401,9 +393,8 @@ impl ContactSearchDialog {
             })
             .show(ui, |ui| {
                 // The header's checkbox checks or unchecks all pairs.
-                let resolved = || self.rows.iter().filter(|r| !r.item.unresolved);
-                let mut all = resolved().count() > 0 && resolved().all(|r| r.checked);
-                let any = resolved().any(|r| r.checked);
+                let mut all = !self.rows.is_empty() && self.rows.iter().all(|r| r.checked);
+                let any = self.rows.iter().any(|r| r.checked);
                 let partial = any && !all;
                 let header = egui::Checkbox::new(&mut all, "").indeterminate(partial);
                 if ui
@@ -411,7 +402,7 @@ impl ContactSearchDialog {
                     .on_hover_text("Alle Kontaktpaare an- oder abwählen")
                     .changed()
                 {
-                    for row in self.rows.iter_mut().filter(|r| !r.item.unresolved) {
+                    for row in &mut self.rows {
                         row.checked = all;
                     }
                 }
@@ -433,10 +424,7 @@ impl ContactSearchDialog {
                 for (i, row) in self.rows.iter().enumerate() {
                     let mut checked = row.checked;
                     let checkbox = ui
-                        .add_enabled(
-                            !row.item.unresolved,
-                            egui::Checkbox::without_text(&mut checked),
-                        )
+                        .add(egui::Checkbox::without_text(&mut checked))
                         .on_hover_text("Beim OK erstellen");
                     if checkbox.changed() {
                         toggled = Some((i, checked));
@@ -537,9 +525,7 @@ impl ContactSearchDialog {
     }
 
     fn swap(&mut self) {
-        for row in
-            (self.rows.iter_mut()).filter(|r| r.selected && !r.item.unresolved && r.joint.is_none())
-        {
+        for row in (self.rows.iter_mut()).filter(|r| r.selected && r.joint.is_none()) {
             row.item.swap();
             row.name = row.item.name();
         }
@@ -548,7 +534,7 @@ impl ContactSearchDialog {
     /// PrePoMax's "Merge by Master/Slave": the selected pairs become one.
     fn merge(&mut self) {
         let selected: Vec<usize> = (self.rows.iter().enumerate())
-            .filter(|(_, r)| r.selected && !r.item.unresolved && r.joint.is_none())
+            .filter(|(_, r)| r.selected && r.joint.is_none())
             .map(|(i, _)| i)
             .collect();
         let Some((&first, rest)) = selected.split_first() else {
@@ -712,7 +698,7 @@ impl ContactSearchDialog {
             taken.push(name.clone());
             name
         };
-        for row in (self.rows.iter()).filter(|r| r.checked && !r.item.unresolved) {
+        for row in self.rows.iter().filter(|r| r.checked) {
             if let Some(joint) = &row.joint {
                 ties.push(Constraint::NodeTie(NodeTie {
                     region: joint_region(model, joint),
@@ -848,4 +834,31 @@ fn yes_no(ui: &mut Ui, id: &str, value: &mut bool) {
             ui.selectable_value(value, true, "Ja");
             ui.selectable_value(value, false, "Nein");
         });
+}
+
+/// Young's modulus of each part, the largest of the materials of its sections, if any.
+fn part_stiffness(model: &Model) -> Vec<Option<f64>> {
+    let (fe, mesh) = (&model.fe, &model.mesh);
+    let young = |name: &str| {
+        (fe.materials.iter())
+            .find(|m| m.name == name)
+            .and_then(|m| m.elastic)
+            .map(|e| e.young)
+    };
+    let assigned: Vec<(HashSet<ElementId>, f64)> = (fe.sections.iter())
+        .filter_map(|s| {
+            Some((
+                s.region.elements(mesh).into_iter().collect(),
+                young(&s.material)?,
+            ))
+        })
+        .collect();
+    (mesh.parts.iter())
+        .map(|part| {
+            (assigned.iter())
+                .filter(|(elements, _)| part.elements.iter().any(|e| elements.contains(e)))
+                .map(|&(_, young)| young)
+                .reduce(f64::max)
+        })
+        .collect()
 }

@@ -2,7 +2,7 @@
 //! node names. Nodes for features prepolix does not support yet are shown as empty
 //! placeholders, so that the structure is already the familiar one.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use egui::collapsing_header::CollapsingState;
 use egui::epaint::Mesh;
@@ -89,6 +89,93 @@ pub struct TreeState {
     expand: Option<(TreeView, TreeItem, bool)>,
     /// The selection was made in the 3D view: open its branches and scroll it into view.
     pub reveal: bool,
+    /// Parts selected along with the selected part, by Ctrl or Shift click, as in PrePoMax;
+    /// they count only while a part of the same view is selected.
+    more_parts: BTreeSet<usize>,
+    /// Where the range of a Shift click starts: the part last clicked without Shift.
+    anchor: Option<usize>,
+}
+
+impl TreeState {
+    /// The parts selected in `view`, in ascending order; none unless a part is selected
+    /// there.
+    pub fn selected_parts(&self, view: TreeView) -> BTreeSet<usize> {
+        match &self.selected {
+            Some((selected, TreeItem::Part(index))) if *selected == view => {
+                let mut parts = self.more_parts.clone();
+                parts.insert(*index);
+                parts
+            }
+            _ => BTreeSet::new(),
+        }
+    }
+
+    /// Selects one part alone, by a plain click.
+    pub fn select_part(&mut self, view: TreeView, index: usize) {
+        self.select_parts(view, BTreeSet::from([index]), index);
+        self.anchor = Some(index);
+    }
+
+    /// Ctrl click: adds a part to the selection, or takes it out when it is selected.
+    pub fn toggle_part(&mut self, view: TreeView, index: usize) {
+        let mut parts = self.selected_parts(view);
+        if !parts.remove(&index) {
+            parts.insert(index);
+        }
+        self.select_parts(view, parts, index);
+        self.anchor = Some(index);
+    }
+
+    /// Adds parts to the selection; the last becomes the selected one.
+    pub fn add_parts(&mut self, view: TreeView, added: impl IntoIterator<Item = usize>) {
+        let mut parts = self.selected_parts(view);
+        let mut lead = None;
+        for index in added {
+            parts.insert(index);
+            lead = Some(index);
+        }
+        if let Some(lead) = lead {
+            self.select_parts(view, parts, lead);
+        }
+    }
+
+    /// Shift click in the tree: the parts from the anchor to `index`, added to the selection
+    /// with Ctrl.
+    pub fn select_range(&mut self, view: TreeView, index: usize, add: bool) {
+        let anchor = (self.anchor)
+            .filter(|_| !self.selected_parts(view).is_empty())
+            .unwrap_or(index);
+        let range = anchor.min(index)..=anchor.max(index);
+        let mut parts = if add {
+            self.selected_parts(view)
+        } else {
+            BTreeSet::new()
+        };
+        parts.extend(range);
+        self.select_parts(view, parts, index);
+        self.anchor = Some(anchor);
+    }
+
+    /// Selects `parts` with `lead` as the selected item, or the last part when `lead` is not
+    /// among them; nothing when no part is left.
+    fn select_parts(&mut self, view: TreeView, mut parts: BTreeSet<usize>, lead: usize) {
+        let lead = if parts.contains(&lead) {
+            Some(lead)
+        } else {
+            parts.last().copied()
+        };
+        match lead {
+            Some(lead) => {
+                parts.remove(&lead);
+                self.selected = Some((view, TreeItem::Part(lead)));
+                self.more_parts = parts;
+            }
+            None => {
+                self.selected = None;
+                self.more_parts.clear();
+            }
+        }
+    }
 }
 
 /// What the user did in the tree this frame.
@@ -105,6 +192,8 @@ pub struct TreeResponse {
     pub delete: Option<TreeItem>,
     /// Activate a deactivated step, boundary condition or load, or deactivate an active one.
     pub toggle_active: Option<TreeItem>,
+    /// Swap master and slave of a tie, spring connection or contact pair.
+    pub swap_master_slave: Option<TreeItem>,
     /// An entry of the analysis' context menu, or the monitor by double click.
     pub analysis: Option<AnalysisAction>,
     /// Open the material library.
@@ -456,12 +545,14 @@ fn part_icon(part: &PartInfo) -> TreeIcon {
 }
 
 /// Context menu of a part, the same in the tree and in the 3D view. A part of the geometry
-/// is meshed from here, as in PrePoMax.
+/// is meshed from here, as in PrePoMax. On one of several selected parts, hiding and
+/// deleting take them all.
 pub fn part_menu(
     ui: &mut Ui,
     index: usize,
     visible: bool,
     view: TreeView,
+    selected: &BTreeSet<usize>,
     response: &mut TreeResponse,
 ) {
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -476,7 +567,11 @@ pub fn part_menu(
     }
     let label = if visible { "Ausblenden" } else { "Einblenden" };
     if ui.button(label).clicked() {
-        response.visibility.push((index, !visible));
+        if selected.contains(&index) {
+            (response.visibility).extend(selected.iter().map(|&i| (i, !visible)));
+        } else {
+            response.visibility.push((index, !visible));
+        }
     }
     if deletable(view, &TreeItem::Part(index)) {
         ui.separator();
@@ -513,14 +608,17 @@ struct Tree<'a> {
     closed: HashMap<TreeItem, &'static str>,
     /// Deactivated items, shown gray with PrePoMax's no-entry sign.
     inactive: HashSet<TreeItem>,
+    /// Items with a master and a slave, whose menu offers to swap them.
+    master_slave: HashSet<TreeItem>,
 }
 
 impl Tree<'_> {
     fn is_selected(&self, item: &TreeItem) -> bool {
-        self.state
-            .selected
-            .as_ref()
-            .is_some_and(|(view, selected)| *view == self.view && selected == item)
+        match item {
+            TreeItem::Part(index) => self.state.selected_parts(self.view).contains(index),
+            _ => (self.state.selected.as_ref())
+                .is_some_and(|(view, selected)| *view == self.view && selected == item),
+        }
     }
 
     /// Selectable label of an item: a click selects it, a double click opens its properties.
@@ -546,11 +644,26 @@ impl Tree<'_> {
             }
             response = response.on_hover_text(hover);
         }
-        // Like PrePoMax, a right click selects the item its context menu belongs to.
+        // Like PrePoMax, a right click selects the item its context menu belongs to; on a
+        // part of several selected ones it keeps them, so that the menu deletes them all.
         if response.clicked() || response.double_clicked() || response.secondary_clicked() {
-            self.state.selected = Some((self.view, item.clone()));
+            let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+            match item {
+                TreeItem::Part(_) if response.secondary_clicked() && self.is_selected(&item) => {}
+                // Several parts are selected with Ctrl and Shift, as in a Windows tree.
+                TreeItem::Part(index) if response.clicked() && shift => {
+                    self.state.select_range(self.view, index, ctrl);
+                }
+                TreeItem::Part(index) if response.clicked() && ctrl => {
+                    self.state.toggle_part(self.view, index);
+                }
+                TreeItem::Part(index) => self.state.select_part(self.view, index),
+                _ => self.state.selected = Some((self.view, item.clone())),
+            }
         }
-        if self.state.reveal && self.is_selected(&item) {
+        let lead =
+            (self.state.selected.as_ref()).is_some_and(|(v, s)| *v == self.view && *s == item);
+        if self.state.reveal && lead {
             response.scroll_to_me(None);
         }
         let closed = self.closed.get(&item).copied();
@@ -649,6 +762,12 @@ impl Tree<'_> {
                         };
                         if ui.button(label).clicked() {
                             self.response.toggle_active = Some(item.clone());
+                        }
+                        ui.separator();
+                    }
+                    if self.master_slave.contains(&item) {
+                        if ui.button("Master und Slave tauschen").clicked() {
+                            self.response.swap_master_slave = Some(item.clone());
                         }
                         ui.separator();
                     }
@@ -890,8 +1009,9 @@ impl Tree<'_> {
                     tree.response.visibility.push((index, part.visible));
                 }
                 let view = tree.view;
+                let selected = tree.state.selected_parts(view);
                 response.context_menu(|ui| {
-                    part_menu(ui, index, part.visible, view, &mut tree.response);
+                    part_menu(ui, index, part.visible, view, &selected, &mut tree.response);
                 });
             }
         });
@@ -1038,6 +1158,7 @@ pub fn show(
         holds_invalid: HashSet::new(),
         closed: HashMap::new(),
         inactive: HashSet::new(),
+        master_slave: HashSet::new(),
     };
     let expanding = tree.state.expand.clone();
     egui::ScrollArea::both()
@@ -1128,9 +1249,15 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             if !constraint.active() {
                 tree.inactive.insert(TreeItem::Constraint(i));
             }
+            if constraint.master_slave().is_some() {
+                tree.master_slave.insert(TreeItem::Constraint(i));
+            }
         }
-        for (i, _) in (fe.contact_pairs.iter().enumerate()).filter(|(_, c)| !c.active) {
-            tree.inactive.insert(TreeItem::ContactPair(i));
+        for (i, pair) in fe.contact_pairs.iter().enumerate() {
+            if !pair.active {
+                tree.inactive.insert(TreeItem::ContactPair(i));
+            }
+            tree.master_slave.insert(TreeItem::ContactPair(i));
         }
         let constraints = (fe.constraints.iter().enumerate())
             .map(|(i, c)| (TreeItem::Constraint(i), c.name()))
@@ -1382,6 +1509,54 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parts(state: &TreeState, view: TreeView) -> Vec<usize> {
+        state.selected_parts(view).into_iter().collect()
+    }
+
+    #[test]
+    fn ctrl_and_shift_select_several_parts() {
+        let view = TreeView::Geometry;
+        let mut state = TreeState::default();
+        state.select_part(view, 1);
+        state.toggle_part(view, 4);
+        assert_eq!(parts(&state, view), [1, 4]);
+        assert_eq!(state.selected, Some((view, TreeItem::Part(4))));
+        // Shift selects from the part last clicked, Ctrl+Shift adds the range.
+        state.select_range(view, 2, false);
+        assert_eq!(parts(&state, view), [2, 3, 4]);
+        state.select_part(view, 0);
+        state.select_range(view, 1, true);
+        assert_eq!(parts(&state, view), [0, 1]);
+        state.toggle_part(view, 5);
+        state.select_range(view, 7, true);
+        assert_eq!(parts(&state, view), [0, 1, 5, 6, 7]);
+        // Ctrl takes a part out again; the last one leaves nothing selected.
+        state.toggle_part(view, 7);
+        assert_eq!(parts(&state, view), [0, 1, 5, 6]);
+        assert!(matches!(state.selected, Some((_, TreeItem::Part(_)))));
+        state.select_part(view, 3);
+        state.toggle_part(view, 3);
+        assert_eq!(state.selected, None);
+        assert!(parts(&state, view).is_empty());
+    }
+
+    #[test]
+    fn other_selections_drop_the_parts() {
+        let mut state = TreeState::default();
+        state.select_part(TreeView::FeModel, 0);
+        state.toggle_part(TreeView::FeModel, 2);
+        assert!(parts(&state, TreeView::Geometry).is_empty());
+        state.selected = Some((TreeView::FeModel, TreeItem::Material(0)));
+        assert!(parts(&state, TreeView::FeModel).is_empty());
+        // A part selected anew comes alone.
+        state.toggle_part(TreeView::FeModel, 1);
+        assert_eq!(parts(&state, TreeView::FeModel), [1]);
+        // Shift without a part selected starts at the clicked one.
+        state.selected = None;
+        state.select_range(TreeView::FeModel, 3, false);
+        assert_eq!(parts(&state, TreeView::FeModel), [3]);
+    }
 
     #[test]
     fn revealed_items_open_their_branches() {
