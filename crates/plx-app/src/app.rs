@@ -15,7 +15,7 @@ use crate::selection::Operation;
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::setup::{Editor, EditorResult, NewItem};
 use crate::tree::{self, TreeItem, TreeState, TreeView};
-use crate::viewport::{BoxSelect, Click, ViewCommand, Viewport};
+use crate::viewport::{Axis, BoxSelect, Click, ViewCommand, Viewport};
 use plx_render::RenderMesh;
 
 enum LoadEvent {
@@ -215,6 +215,16 @@ impl PrepolixApp {
                         self.workbench.view_command = Some(ViewCommand::View(view));
                     }
                 }
+                if ui.button("Vertikal").clicked() {
+                    self.workbench.view_command = Some(ViewCommand::Vertical);
+                }
+                ui.menu_button("Achse senkrecht", |ui| {
+                    for axis in Axis::ALL {
+                        if ui.button(axis.label()).clicked() {
+                            self.workbench.view_command = Some(ViewCommand::VerticalAxis(axis));
+                        }
+                    }
+                });
                 ui.separator();
                 ui.checkbox(
                     &mut self.workbench.viewport.options.mesh_edges,
@@ -261,6 +271,9 @@ impl PrepolixApp {
                 if icons::button(ui, Icon::View(view), label, true, false).clicked() {
                     self.workbench.view_command = Some(ViewCommand::View(view));
                 }
+            }
+            if icons::button(ui, Icon::Vertical, "Vertikal", true, false).clicked() {
+                self.workbench.view_command = Some(ViewCommand::Vertical);
             }
             ui.separator();
             let options = &mut self.workbench.viewport.options;
