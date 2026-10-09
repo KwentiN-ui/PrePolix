@@ -11,7 +11,7 @@ use crate::history_table::HistoryTable;
 use crate::icons::{self, Icon};
 use crate::keywords::KeywordEditor;
 use crate::material_library::{LibraryResult, MaterialLibraryEditor};
-use crate::model::{self, LoadedModel, Model};
+use crate::model::{self, Highlight, LoadedModel, Model};
 use crate::numeric;
 use crate::overlay::{Marker, Overlay};
 use crate::properties;
@@ -21,7 +21,7 @@ use crate::section::{SectionDialog, SectionResult, SectionView};
 use crate::selection::Operation;
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::setup::{Editor, EditorResult, NewItem};
-use crate::tree::{self, TreeItem, TreeState, TreeView};
+use crate::tree::{self, TreeItem, TreeResponse, TreeState, TreeView};
 use crate::viewport::{Axis, BoxSelect, Click, ViewCommand, Viewport};
 use plx_render::RenderMesh;
 
@@ -46,6 +46,10 @@ struct Workbench {
     tree: TreeState,
     /// Item whose properties window is open.
     dialog: Option<TreeItem>,
+    /// Name typed in the properties window of a part, with why it cannot be taken.
+    part_name: (String, Option<String>),
+    /// Part the open context menu of the 3D view belongs to.
+    menu_part: Option<usize>,
     /// Which of the three trees is shown.
     tree_view: TreeView,
     output: Vec<String>,
@@ -117,6 +121,8 @@ impl PrepolixApp {
                 parked_camera: None,
                 tree: TreeState::default(),
                 dialog: None,
+                part_name: Default::default(),
+                menu_part: None,
                 tree_view: TreeView::FeModel,
                 output,
                 view_command: None,
@@ -482,6 +488,9 @@ impl eframe::App for PrepolixApp {
             if let Some(click) = response.click {
                 self.workbench.click(click);
             }
+            if let Some(view) = &response.response {
+                self.workbench.viewport_menu(view, response.secondary_click);
+            }
             if let Some(area) = response.box_select {
                 self.workbench.box_select(&area);
             }
@@ -685,7 +694,15 @@ impl Workbench {
         };
         let job = self.analysis.as_ref().map(Analysis::status);
         let response = tree::show(ui, view, shown, job, &mut self.tree);
+        self.tree_response(view, response);
+    }
+
+    /// Acts on what the user picked in the tree or in a part's context menu in the 3D view.
+    fn tree_response(&mut self, view: TreeView, response: TreeResponse) {
         for (index, visible) in response.visibility {
+            if let Some(part) = self.shown_mut().and_then(|m| m.parts.get_mut(index)) {
+                part.visible = visible;
+            }
             self.viewport.set_part_visible(index, visible);
         }
         if let (Some((field, component)), Some(results)) =
@@ -695,7 +712,11 @@ impl Workbench {
             results.component = component;
             self.results_changed = true;
         }
-        if let Some(TreeItem::ResultFieldOutput(field)) = response.open {
+        if let Some(TreeItem::Part(index)) = response.open {
+            let name = self.shown().and_then(|m| m.parts.get(index));
+            self.part_name = (name.map(|p| p.name.clone()).unwrap_or_default(), None);
+            self.dialog = Some(TreeItem::Part(index));
+        } else if let Some(TreeItem::ResultFieldOutput(field)) = response.open {
             self.edit_field_output(field);
         } else if let Some(TreeItem::HistorySet(set)) = response.open {
             self.edit_history_output(set);
@@ -1182,8 +1203,9 @@ impl Workbench {
         }
     }
 
-    /// A click in the 3D view picks for the open dialog; without one, a click into empty
-    /// space clears the tree selection and with it the highlighted region.
+    /// A click in the 3D view picks for the open dialog. Without one, a click on a part
+    /// selects it in the tree, as in PrePoMax, and a click into empty space clears the tree
+    /// selection and with it the highlighted region.
     fn click(&mut self, click: Click) {
         if let Some(dialog) = &mut self.section_dialog
             && dialog.picks()
@@ -1202,11 +1224,17 @@ impl Workbench {
             return;
         }
         if !self.picking() {
-            let empty = self
+            let hit = self
                 .shown()
-                .is_none_or(|model| model.pick(click.origin, click.direction).is_none());
-            if empty && self.tree_view != TreeView::Results {
-                self.tree.selected = None;
+                .and_then(|model| model.pick(click.origin, click.direction));
+            match hit {
+                Some(hit) => self.select_part(hit.part),
+                // On the Results tab the tree shows the current field, which stays.
+                None if self.tree_view != TreeView::Results => self.tree.selected = None,
+                None if matches!(self.tree.selected, Some((_, TreeItem::Part(_)))) => {
+                    self.tree.selected = None;
+                }
+                None => {}
             }
             return;
         }
@@ -1232,6 +1260,50 @@ impl Workbench {
             pick,
             Operation::from_modifiers(click.shift, click.ctrl),
         );
+    }
+
+    /// Selects a part clicked in the 3D view in the tree shown, the FE model's on the
+    /// Geometry tab, which has no mesh parts.
+    fn select_part(&mut self, index: usize) {
+        let view = match self.tree_view {
+            TreeView::Results => TreeView::Results,
+            _ => TreeView::FeModel,
+        };
+        self.tree.selected = Some((view, TreeItem::Part(index)));
+        self.tree.reveal = true;
+    }
+
+    /// The context menu of the 3D view: on a part it starts with the part's menu from the
+    /// tree, so it makes no difference where the part is right-clicked.
+    fn viewport_menu(&mut self, response: &egui::Response, right_click: Option<Click>) {
+        if let Some(click) = right_click {
+            self.menu_part = None;
+            if !self.picking() {
+                self.menu_part = (self.shown())
+                    .and_then(|model| model.pick(click.origin, click.direction))
+                    .map(|hit| hit.part);
+            }
+            if let Some(part) = self.menu_part {
+                self.select_part(part);
+            }
+        }
+        let part = (self.menu_part)
+            .and_then(|index| Some((index, self.shown()?.parts.get(index)?.visible)));
+        let mut tree_response = TreeResponse::default();
+        let mut command = None;
+        response.context_menu(|ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            if let Some((index, visible)) = part {
+                tree::part_menu(ui, index, visible, &mut tree_response);
+                ui.separator();
+            }
+            command = crate::viewport::view_menu(ui);
+        });
+        if command.is_some() {
+            self.view_command = command;
+        }
+        let view = self.tree_view;
+        self.tree_response(view, tree_response);
     }
 
     fn box_select(&mut self, area: &BoxSelect) {
@@ -1484,17 +1556,25 @@ impl Workbench {
         }
     }
 
-    /// Highlights the region of the open dialog, or of the item selected in the tree.
+    /// Highlights the region of the open dialog, or of the item selected in the tree; a
+    /// selected part is outlined in the FE model and in the results alike.
     fn update_highlight(&mut self) {
-        // The results show the region of an open history output dialog only.
-        if let Some(model) = self.results.get_mut(self.current_result) {
-            let highlight = (self.history_dialog.as_ref())
-                .filter(|_| self.tree_view == TreeView::Results)
-                .map(|d| d.highlight(model))
-                .unwrap_or_default();
+        let on_results = self.tree_view == TreeView::Results;
+        // The current results show the region of an open history output dialog, else the
+        // part selected in the Results tree.
+        let current = self.current_result;
+        for (index, model) in self.results.iter_mut().enumerate() {
+            let dialog = (self.history_dialog.as_ref()).filter(|_| on_results && index == current);
+            let highlight = match (dialog, &self.tree.selected) {
+                (Some(dialog), _) => dialog.highlight(model),
+                (None, Some((TreeView::Results, TreeItem::Part(part)))) if index == current => {
+                    Highlight::part(*part)
+                }
+                _ => Highlight::default(),
+            };
             if highlight != model.highlight {
                 model.highlight = highlight;
-                self.results_changed = true;
+                self.results_changed |= on_results && index == current;
             }
         }
         let Some(model) = &mut self.model else {
@@ -1511,6 +1591,7 @@ impl Workbench {
             }
             self.highlighted = self.tree.selected.clone();
             match &self.tree.selected {
+                Some((TreeView::FeModel, TreeItem::Part(part))) => Highlight::part(*part),
                 Some((TreeView::FeModel, item)) => crate::setup::item_region(&model.fe, item)
                     .map(|region| crate::setup::region_highlight(model, region))
                     .unwrap_or_default(),
@@ -1519,7 +1600,7 @@ impl Workbench {
         };
         if highlight != model.highlight {
             model.highlight = highlight;
-            self.results_changed = true;
+            self.results_changed |= !on_results;
         }
     }
 
@@ -1626,7 +1707,17 @@ impl Workbench {
         };
         let mut open = true;
         let mut close = false;
-        egui::Window::new(properties::title(self.shown(), &item))
+        let mut accept = false;
+        let part = match item {
+            TreeItem::Part(index) => Some(index),
+            _ => None,
+        };
+        // The model by its fields, so the window can edit the typed name alongside.
+        let shown = match self.tree_view {
+            TreeView::Results => self.results.get(self.current_result),
+            _ => self.model.as_ref(),
+        };
+        egui::Window::new(properties::title(shown, &item))
             .id(egui::Id::new("properties window"))
             .open(&mut open)
             .collapsible(false)
@@ -1634,12 +1725,35 @@ impl Workbench {
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
-                properties::show(ui, self.shown(), &item);
+                let (name, error) = &mut self.part_name;
+                let name = part.map(|_| name);
+                properties::show(ui, shown, &item, name);
+                if let Some(error) = error.as_ref().filter(|_| part.is_some()) {
+                    ui.add_space(4.0);
+                    ui.colored_label(egui::Color32::from_rgb(200, 0, 0), error);
+                }
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    close = ui.button("Schließen").clicked();
+                    if part.is_some() {
+                        close = ui.button("Abbrechen").clicked();
+                        accept = ui.button("OK").clicked();
+                    } else {
+                        close = ui.button("Schließen").clicked();
+                    }
                 });
             });
+        accept |= part.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Enter));
+        if let (true, Some(index)) = (accept, part) {
+            let name = self.part_name.0.clone();
+            let renamed = match self.shown_mut() {
+                Some(model) => model.rename_part(index, &name),
+                None => Ok(()),
+            };
+            match renamed {
+                Ok(()) => close = true,
+                Err(error) => self.part_name.1 = Some(error),
+            }
+        }
         if !open || close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.dialog = None;
         }

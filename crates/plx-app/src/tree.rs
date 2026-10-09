@@ -69,6 +69,8 @@ pub struct TreeState {
     pub selected: Option<(TreeView, TreeItem)>,
     /// Expand (true) or collapse an item with all its descendants in the next frame.
     expand: Option<(TreeView, TreeItem, bool)>,
+    /// The selection was made in the 3D view: open its branches and scroll it into view.
+    pub reveal: bool,
 }
 
 /// What the user did in the tree this frame.
@@ -291,6 +293,18 @@ fn part_icon(part: &PartInfo) -> TreeIcon {
     }
 }
 
+/// Context menu of a part, the same in the tree and in the 3D view.
+pub fn part_menu(ui: &mut Ui, index: usize, visible: bool, response: &mut TreeResponse) {
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+    if ui.button("Eigenschaften …").clicked() {
+        response.open = Some(TreeItem::Part(index));
+    }
+    let label = if visible { "Ausblenden" } else { "Einblenden" };
+    if ui.button(label).clicked() {
+        response.visibility.push((index, !visible));
+    }
+}
+
 /// A row of a branch: the height of its connector line and the left edge of the row.
 #[derive(Clone, Copy)]
 struct Row {
@@ -331,8 +345,12 @@ impl Tree<'_> {
             warning_sign(ui).on_hover_text(&reason);
             response = response.on_hover_text(reason);
         }
-        if response.clicked() || response.double_clicked() {
+        // Like PrePoMax, a right click selects the item its context menu belongs to.
+        if response.clicked() || response.double_clicked() || response.secondary_clicked() {
             self.state.selected = Some((self.view, item.clone()));
+        }
+        if self.state.reveal && self.is_selected(&item) {
+            response.scroll_to_me(None);
         }
         let creates = creates(&item);
         if response.double_clicked() {
@@ -505,6 +523,16 @@ impl Tree<'_> {
         {
             self.forced_open = Some(*open);
         }
+        let revealing_part = self.state.reveal
+            && matches!(&self.state.selected, Some((view, TreeItem::Part(_))) if *view == self.view);
+        if revealing_part
+            && matches!(
+                item,
+                TreeItem::Model | TreeItem::Mesh | TreeItem::Group("Parts")
+            )
+        {
+            state.set_open(true);
+        }
         if let Some(open) = self.forced_open {
             // While a branch closes, egui still draws its body for the animation, so the
             // descendants are collapsed as well.
@@ -581,11 +609,14 @@ impl Tree<'_> {
                 for (index, part) in model.parts.iter_mut().enumerate() {
                     let icon = part_icon(part);
                     let item = TreeItem::Part(index);
-                    let (_, _, changed) =
+                    let (_, response, changed) =
                         tree.row(ui, None, Some(&mut part.visible), icon, item, &part.name);
                     if changed {
                         tree.response.visibility.push((index, part.visible));
                     }
+                    response.context_menu(|ui| {
+                        part_menu(ui, index, part.visible, &mut tree.response);
+                    });
                 }
             });
             let mesh = &model.mesh;
@@ -716,6 +747,7 @@ pub fn show(
     if tree.state.expand == expanding {
         tree.state.expand = None;
     }
+    tree.state.reveal = false;
     tree.response
 }
 
