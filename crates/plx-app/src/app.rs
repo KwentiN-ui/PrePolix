@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+use plx_model::UnitSystem;
 use plx_render::StandardView;
 
 use crate::analysis::{Analysis, MonitorEvent};
@@ -17,7 +18,7 @@ use crate::meshing::{
     MeshItemEditor, MeshItemResult, MeshSetupResult, MeshSetupWindow, MeshingJob,
 };
 use crate::model::{self, Highlight, LoadedModel, Model};
-use crate::model_properties::{DialogResult, ModelPropertiesDialog};
+use crate::model_properties::{DialogResult, ModelPropertiesDialog, geometry_check};
 use crate::numeric;
 use crate::overlay::{Marker, Overlay};
 use crate::properties;
@@ -82,6 +83,8 @@ struct Workbench {
     frame_cache: std::collections::HashMap<usize, Vec<RenderMesh>>,
     /// Open dialog creating or editing an item of the FE model.
     editor: Option<Editor>,
+    /// Item asked to be deleted, waiting for the user's confirmation.
+    confirm_delete: Option<(TreeView, TreeItem)>,
     /// Open CalculiX keyword editor.
     keyword_editor: Option<KeywordEditor>,
     /// Open search for contact pairs.
@@ -182,6 +185,7 @@ impl PrepolixApp {
                 frame_changed: false,
                 frame_cache: Default::default(),
                 editor: None,
+                confirm_delete: None,
                 keyword_editor: None,
                 contact_search: None,
                 material_library: None,
@@ -211,9 +215,10 @@ impl PrepolixApp {
         let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
         if !paths.is_empty() {
             let (sender, ctx) = (app.load_events.0.clone(), cc.egui_ctx.clone());
+            let units = app.workbench.import_units();
             std::thread::spawn(move || {
                 for path in paths {
-                    load_in_background(path, sender.clone(), ctx.clone());
+                    load_in_background(path, units, sender.clone(), ctx.clone());
                 }
             });
         }
@@ -226,6 +231,7 @@ impl PrepolixApp {
         }
         let sender = self.load_events.0.clone();
         let ctx = ctx.clone();
+        let units = self.workbench.import_units();
         std::thread::spawn(move || {
             let picked = rfd::FileDialog::new()
                 .set_title("Modell öffnen")
@@ -242,7 +248,7 @@ impl PrepolixApp {
                 .add_filter(GEOMETRY_FILTER.0, GEOMETRY_FILTER.1)
                 .pick_file();
             if let Some(path) = picked {
-                load_in_background(path, sender, ctx);
+                load_in_background(path, units, sender, ctx);
             }
         });
     }
@@ -264,13 +270,14 @@ impl PrepolixApp {
         }
         let sender = self.load_events.0.clone();
         let ctx = ctx.clone();
+        let units = self.workbench.import_units();
         std::thread::spawn(move || {
             let picked = rfd::FileDialog::new()
                 .set_title("Geometrie importieren")
                 .add_filter(GEOMETRY_FILTER.0, GEOMETRY_FILTER.1)
                 .pick_file();
             if let Some(path) = picked {
-                load_in_background(path, sender, ctx);
+                load_in_background(path, units, sender, ctx);
             }
         });
     }
@@ -278,7 +285,8 @@ impl PrepolixApp {
     fn open_path(&mut self, path: PathBuf, ctx: &egui::Context) {
         if self.loading.is_none() {
             let (sender, ctx) = (self.load_events.0.clone(), ctx.clone());
-            std::thread::spawn(move || load_in_background(path, sender, ctx));
+            let units = self.workbench.import_units();
+            std::thread::spawn(move || load_in_background(path, units, sender, ctx));
         }
     }
 
@@ -584,10 +592,16 @@ fn preview_explosion(model: &mut Model, dialog: &mut ExplodedDialog, animate: bo
     model.explosion.show(offsets, animate);
 }
 
-fn load_in_background(path: PathBuf, sender: Sender<LoadEvent>, ctx: egui::Context) {
+/// Loads a file on this thread; CAD geometry in the length unit of `units`.
+fn load_in_background(
+    path: PathBuf,
+    units: UnitSystem,
+    sender: Sender<LoadEvent>,
+    ctx: egui::Context,
+) {
     let _ = sender.send(LoadEvent::Started(path.clone()));
     ctx.request_repaint();
-    let result = model::load(&path).map(Box::new);
+    let result = model::load(&path, units).map(Box::new);
     let _ = sender.send(LoadEvent::Finished(path, result));
     ctx.request_repaint();
 }
@@ -733,6 +747,7 @@ impl eframe::App for PrepolixApp {
             .update(&ctx, view, &mut workbench.output);
         self.workbench.properties_window(&ctx);
         self.workbench.editor_window(&ctx);
+        self.workbench.confirm_delete_window(&ctx);
         self.workbench.contact_search_window(&ctx);
         self.workbench.section_window(&ctx);
         self.workbench.exploded_window(&ctx);
@@ -778,6 +793,26 @@ impl Workbench {
                     render_meshes,
                     geometry_view,
                 } = *loaded;
+                // Geometry imported into a model that has nothing yet, such as one just
+                // created with File > New, has to fit its model space.
+                let into_empty = (self.model.as_ref()).filter(|old| {
+                    plx_mesher::is_cad_file(&path)
+                        && old.mesh.element_count() == 0
+                        && old.geometry.is_none()
+                });
+                let mut turned_faces = Vec::new();
+                if let (Some(old), Some(view)) = (into_empty, &geometry_view) {
+                    match geometry_check(old.fe.properties.space, view) {
+                        Ok(faces) => turned_faces = faces,
+                        Err(error) => {
+                            self.output.push(format!(
+                                "Fehler beim Import von {}: {error}",
+                                path.display()
+                            ));
+                            return;
+                        }
+                    }
+                }
                 // The scene built on the worker thread is reused unless the settings change it.
                 let mut rebuild = false;
                 if let Some(view) = &mut model.results {
@@ -816,6 +851,14 @@ impl Workbench {
                 for warning in &model.warnings {
                     self.output.push(format!("Warnung: {warning}"));
                 }
+                if !turned_faces.is_empty() {
+                    let faces: Vec<String> = turned_faces.iter().map(i32::to_string).collect();
+                    self.output.push(format!(
+                        "Hinweis: Normale von Fläche {} zeigt in -z; die Elemente werden beim \
+                         Vernetzen umgedreht.",
+                        faces.join(", ")
+                    ));
+                }
                 if !model.skipped_keywords.is_empty() {
                     let keywords: Vec<String> = model
                         .skipped_keywords
@@ -835,6 +878,15 @@ impl Workbench {
                 self.field_output_dialog = None;
                 self.close_history_windows();
                 self.viewport.labels = Default::default();
+                let mut model = model;
+                if let Some(view) = &mut model.results {
+                    // Results are in the unit system of the open FE model, as those of its
+                    // analyses are; without one in that of new models.
+                    view.units = self
+                        .model
+                        .as_ref()
+                        .map_or(self.settings.new_model.units, |m| m.fe.properties.units);
+                }
                 if let Some(view) = &model.results {
                     // A results file joins the results collection and leaves the FE model
                     // alone; opening the same file again replaces it.
@@ -1035,8 +1087,9 @@ impl Workbench {
         } else if let (Some(TreeItem::Model), TreeView::FeModel) = (&response.open, view) {
             self.edit_model_properties();
         } else if let Some(TreeItem::MeshItem(index)) = response.open {
-            let geometry = self.model.as_ref().and_then(|m| m.geometry.as_ref());
-            self.mesh_item_editor = geometry.and_then(|g| MeshItemEditor::edit(g, index));
+            self.mesh_item_editor = self.model.as_ref().and_then(|m| {
+                MeshItemEditor::edit(m.geometry.as_ref()?, index, m.fe.properties.units)
+            });
         } else if let Some(item) = response.open {
             let model = self.model.as_ref().filter(|_| view != TreeView::Results);
             match model.and_then(|m| Editor::edit(&item, &m.fe, &m.mesh)) {
@@ -1047,23 +1100,8 @@ impl Workbench {
         if let Some(kind) = response.create {
             self.create(kind);
         }
-        if let Some(TreeItem::ResultFieldOutput(field)) = response.delete {
-            self.delete_field_output(field);
-        } else if let Some(TreeItem::HistorySet(set)) = response.delete {
-            self.delete_history_output(set);
-        } else if let Some(TreeItem::MeshItem(index)) = response.delete {
-            if let Some(geometry) = self.model.as_mut().and_then(|m| m.geometry.as_mut())
-                && index < geometry.mesh_items.len()
-            {
-                geometry.mesh_items.remove(index);
-                self.tree.selected = None;
-                self.mesh_item_editor = None;
-            }
-        } else if let (Some(item), Some(model)) = (response.delete, self.model.as_mut())
-            && crate::setup::delete(&mut model.fe, &item)
-        {
-            self.tree.selected = None;
-            self.editor = None;
+        if let Some(item) = response.delete {
+            self.confirm_delete = Some((view, item));
         }
         if let (Some(item), Some(model)) = (response.toggle_active, self.model.as_mut()) {
             crate::setup::toggle_active(&mut model.fe, &item);
@@ -1511,8 +1549,11 @@ impl Workbench {
             return;
         }
         if kind == NewItem::MeshSetupItem {
-            if let Some(geometry) = self.model.as_ref().and_then(|m| m.geometry.as_ref()) {
-                self.mesh_item_editor = Some(MeshItemEditor::create(geometry));
+            if let Some(model) = &self.model
+                && let Some(geometry) = &model.geometry
+            {
+                let units = model.fe.properties.units;
+                self.mesh_item_editor = Some(MeshItemEditor::create(geometry, units));
                 self.set_tree_view(TreeView::Geometry);
             }
             return;
@@ -1552,8 +1593,11 @@ impl Workbench {
     }
 
     fn open_mesh_setup(&mut self) {
-        if let Some(geometry) = self.model.as_ref().and_then(|m| m.geometry.as_ref()) {
-            self.mesh_setup = Some(MeshSetupWindow::new(&geometry.meshing));
+        if let Some(model) = &self.model
+            && let Some(geometry) = &model.geometry
+        {
+            let units = model.fe.properties.units;
+            self.mesh_setup = Some(MeshSetupWindow::new(&geometry.meshing, units));
         }
     }
 
@@ -1786,7 +1830,10 @@ impl Workbench {
     /// PrePoMax's Material Library Editor, from the context menu of Materials.
     fn open_material_library(&mut self) {
         if let Some(model) = self.setup_model() {
-            self.material_library = Some(MaterialLibraryEditor::new(&model.fe.materials));
+            self.material_library = Some(MaterialLibraryEditor::new(
+                &model.fe.materials,
+                model.fe.properties.units,
+            ));
         }
     }
 
@@ -2132,8 +2179,7 @@ impl Workbench {
         response.context_menu(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             if let Some((index, visible)) = part {
-                let geometry = self.tree_view == TreeView::Geometry;
-                tree::part_menu(ui, index, visible, geometry, &mut tree_response);
+                tree::part_menu(ui, index, visible, self.tree_view, &mut tree_response);
                 ui.separator();
             }
             command = crate::viewport::view_menu(ui);
@@ -2422,6 +2468,16 @@ impl Workbench {
                     ties.len(),
                     pairs.len()
                 );
+                // The first new item shows in the tree, even in a collapsed branch.
+                let first = if pairs.is_empty() {
+                    (!ties.is_empty()).then_some(TreeItem::Constraint(model.fe.constraints.len()))
+                } else {
+                    Some(TreeItem::ContactPair(model.fe.contact_pairs.len()))
+                };
+                if let Some(item) = first {
+                    self.tree.selected = Some((TreeView::FeModel, item));
+                    self.tree.reveal = true;
+                }
                 model.fe.constraints.extend(ties);
                 model.fe.contact_pairs.extend(pairs);
                 self.output.push(created);
@@ -2435,6 +2491,163 @@ impl Workbench {
         }
     }
 
+    /// PrePoMax's question before deleting, for the context menu and the Delete key alike.
+    fn confirm_delete_window(&mut self, ctx: &egui::Context) {
+        let Some((view, item)) = self.confirm_delete.clone() else {
+            return;
+        };
+        let mut answer = None;
+        // Like PrePoMax, a part is named in the question.
+        let part = match item {
+            TreeItem::Part(index) => (self.tree_model(view))
+                .and_then(|m| m.parts.get(index))
+                .map(|p| p.name.clone()),
+            _ => None,
+        };
+        let question = match &part {
+            Some(name) => format!("Ausgewähltes Part löschen?\n{name}"),
+            None => "Ausgewähltes Element löschen?".into(),
+        };
+        egui::Modal::new(egui::Id::new("confirm delete")).show(ctx, |ui| {
+            ui.label(question);
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("OK").clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Abbrechen").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        // Enter confirms and Escape cancels, as with the default buttons of a message box.
+        ctx.input(|i| {
+            if i.key_pressed(egui::Key::Enter) {
+                answer = Some(true);
+            } else if i.key_pressed(egui::Key::Escape) {
+                answer = Some(false);
+            }
+        });
+        match answer {
+            Some(true) => {
+                self.confirm_delete = None;
+                // The tree may have changed meanwhile, e.g. by another tab's selection.
+                if self.tree.selected.as_ref() == Some(&(view, item.clone())) {
+                    self.delete_item(view, item);
+                }
+            }
+            Some(false) => self.confirm_delete = None,
+            None => {}
+        }
+    }
+
+    /// The model a tree shows.
+    fn tree_model(&self, view: TreeView) -> Option<&Model> {
+        match view {
+            TreeView::Results => self.results.get(self.current_result),
+            TreeView::Geometry => self.geometry.as_ref(),
+            TreeView::FeModel => self.model.as_ref(),
+        }
+    }
+
+    fn delete_item(&mut self, view: TreeView, item: TreeItem) {
+        if let TreeItem::Part(index) = item {
+            match view {
+                TreeView::Geometry => self.delete_geometry_part(index),
+                TreeView::FeModel => self.delete_mesh_part(index),
+                TreeView::Results => {}
+            }
+        } else if let TreeItem::ResultFieldOutput(field) = item {
+            self.delete_field_output(field);
+        } else if let TreeItem::HistorySet(set) = item {
+            self.delete_history_output(set);
+        } else if let TreeItem::MeshItem(index) = item {
+            if let Some(geometry) = self.model.as_mut().and_then(|m| m.geometry.as_mut())
+                && index < geometry.mesh_items.len()
+            {
+                geometry.mesh_items.remove(index);
+                self.tree.selected = None;
+                self.mesh_item_editor = None;
+            }
+        } else if let Some(model) = self.model.as_mut()
+            && crate::setup::delete(&mut model.fe, &item)
+        {
+            self.tree.selected = None;
+            self.editor = None;
+        }
+    }
+
+    /// PrePoMax's Delete of a geometry part: the geometry loses the solid or face; a mesh
+    /// already generated from it stays, as a part of the FE model.
+    fn delete_geometry_part(&mut self, index: usize) {
+        let name = (self.geometry.as_ref())
+            .and_then(|g| g.parts.get(index))
+            .map(|p| p.name.clone());
+        let (Some(name), Some(model)) = (name, self.model.as_mut()) else {
+            return;
+        };
+        let Some(geometry) = &model.geometry else {
+            return;
+        };
+        let smaller = match plx_mesher::delete_part_renumbered(geometry, &name) {
+            Ok((smaller, tags)) => {
+                // Gmsh numbers the faces, edges and vertices anew; the mesh and the
+                // selections on the geometry follow.
+                if model.has_cad() {
+                    let mut mesh = model.mesh.clone();
+                    mesh.cad = mesh.cad.renumbered(&tags);
+                    model.fe.renumber_cad(&tags);
+                    model.set_mesh(mesh);
+                }
+                smaller
+            }
+            Err(error) => {
+                self.output
+                    .push(format!("{name} kann nicht gelöscht werden: {error}"));
+                return;
+            }
+        };
+        self.geometry = match &smaller {
+            Some(geometry) => match plx_mesher::tessellate(geometry) {
+                Ok(display) => Some(Model::geometry_view(&model.path, display)),
+                Err(error) => {
+                    self.output
+                        .push(format!("Geometrie kann nicht angezeigt werden: {error}"));
+                    None
+                }
+            },
+            None => None,
+        };
+        model.geometry = smaller;
+        self.output.push(format!("Part {name} gelöscht"));
+        self.after_part_deleted();
+    }
+
+    /// PrePoMax's Delete of a mesh part: its elements go, with the nodes no other part has.
+    fn delete_mesh_part(&mut self, index: usize) {
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        let Some(name) = model.parts.get(index).map(|p| p.name.clone()) else {
+            return;
+        };
+        let smaller = plx_mesher::delete_mesh_part(&model.mesh, &name);
+        model.set_mesh(smaller);
+        self.output.push(format!("Part {name} gelöscht"));
+        self.after_part_deleted();
+    }
+
+    fn after_part_deleted(&mut self) {
+        self.tree.selected = None;
+        self.menu_part = None;
+        self.dialog = None;
+        self.mesh_item_editor = None;
+        self.highlighted = None;
+        self.symbols_shown = None;
+        self.frame_cache.clear();
+        self.results_changed = true;
+    }
+
     fn editor_window(&mut self, ctx: &egui::Context) {
         let (Some(editor), Some(model)) = (&mut self.editor, &mut self.model) else {
             return;
@@ -2443,7 +2656,13 @@ impl Workbench {
             EditorResult::Open => {}
             EditorResult::Ok => {
                 if let Some(editor) = self.editor.take() {
+                    let created = editor.new_interaction_item(&model.fe);
                     editor.apply(&mut model.fe);
+                    // The new item shows in the tree, even in a collapsed branch.
+                    if let Some(item) = created {
+                        self.tree.selected = Some((TreeView::FeModel, item));
+                        self.tree.reveal = true;
+                    }
                 }
                 self.highlighted = None;
             }
@@ -2926,6 +3145,17 @@ impl Workbench {
         }
     }
 
+    /// The unit system CAD geometry is read in: that of an empty model it goes into, such as
+    /// one just created with File > New, else that of new models.
+    fn import_units(&self) -> UnitSystem {
+        match &self.model {
+            Some(model) if model.mesh.element_count() == 0 && model.geometry.is_none() => {
+                model.fe.properties.units
+            }
+            _ => self.settings.new_model.units,
+        }
+    }
+
     /// PrePoMax's File > New: asks for the model space and unit system of the new model,
     /// with the last choice proposed. `then_import` opens the geometry import afterwards.
     fn new_model(&mut self, then_import: bool) {
@@ -2948,12 +3178,15 @@ impl Workbench {
         let mesh = (self.model.as_ref())
             .filter(|_| dialog.editing)
             .map(|m| &m.mesh);
-        let result = dialog.show(ctx, mesh);
-        let (editing, then_import) = (dialog.editing, dialog.then_import);
+        let geometry = self.geometry.as_ref().filter(|_| dialog.editing);
+        let result = dialog.show(ctx, mesh, geometry);
+        let (editing, then_import, convert) = (dialog.editing, dialog.then_import, dialog.convert);
         match result {
             DialogResult::Open => return,
             DialogResult::Cancel => {}
-            DialogResult::Ok(properties) if editing => self.set_model_properties(properties),
+            DialogResult::Ok(properties) if editing => {
+                self.set_model_properties(properties, convert)
+            }
             DialogResult::Ok(properties) => {
                 self.settings.new_model = properties;
                 self.create_model(properties);
@@ -2984,12 +3217,19 @@ impl Workbench {
     }
 
     /// Takes over changed model properties; a new model space retypes the mesh's surface
-    /// elements, as PrePoMax does.
-    fn set_model_properties(&mut self, properties: plx_model::ModelProperties) {
+    /// elements, as PrePoMax does. A new unit system converts the model with `convert`.
+    fn set_model_properties(&mut self, properties: plx_model::ModelProperties, convert: bool) {
         let Some(model) = &mut self.model else {
             return;
         };
-        let old = std::mem::replace(&mut model.fe.properties, properties);
+        let old = model.fe.properties;
+        if convert && old.units != properties.units {
+            self.convert_units(properties.units);
+        }
+        let Some(model) = &mut self.model else {
+            return;
+        };
+        model.fe.properties = properties;
         if old.space != properties.space {
             let mut mesh = model.mesh.clone();
             if properties.space.convert_mesh(&mut mesh) {
@@ -3005,6 +3245,51 @@ impl Workbench {
                 .push(format!("Einheitensystem: {}", properties.units.label()));
         }
         self.results_changed = true;
+    }
+
+    /// Converts the open model into another unit system: its values, its mesh and its
+    /// geometry, which are scaled for the new length unit.
+    fn convert_units(&mut self, units: UnitSystem) {
+        let Some(model) = &mut self.model else {
+            return;
+        };
+        let conversion = plx_model::convert::Conversion::new(model.fe.properties.units, units);
+        let notes = model.fe.convert_units(units);
+        let factor = conversion.length_factor();
+        if factor != 1.0 {
+            if model.mesh.node_count() > 0 {
+                let mut mesh = model.mesh.clone();
+                mesh.scale(factor);
+                model.set_mesh(mesh);
+                self.highlighted = None;
+            }
+            if let Some(geometry) = &mut model.geometry {
+                geometry.convert_sizes(&conversion);
+                match plx_mesher::scale_geometry(geometry, factor) {
+                    Ok(scaled) => {
+                        *geometry = scaled;
+                        match plx_mesher::tessellate(geometry) {
+                            Ok(display) => {
+                                self.geometry = Some(Model::geometry_view(&model.path, display))
+                            }
+                            Err(error) => self
+                                .output
+                                .push(format!("Geometrie kann nicht angezeigt werden: {error}")),
+                        }
+                    }
+                    Err(error) => self.output.push(format!(
+                        "Geometrie konnte nicht umgerechnet werden: {error}"
+                    )),
+                }
+            }
+            self.frame_cache.clear();
+            self.view_command = Some(ViewCommand::Fit);
+        }
+        self.output.extend(notes);
+        self.output.push(format!(
+            "Modell in {} umgerechnet (Längen × {factor})",
+            units.label()
+        ));
     }
 
     /// Removes the model and all results, like PrePoMax's File > New.
@@ -3252,6 +3537,14 @@ impl Workbench {
             return;
         };
         let view = model.results.as_ref();
+        // Results have their own unit system; the geometry is in that of the FE model.
+        let units = match view {
+            Some(view) => view.units,
+            None => self
+                .model
+                .as_ref()
+                .map_or(model.fe.properties.units, |m| m.fe.properties.units),
+        };
         let axis = self.axis_line(model);
         self.viewport.options.contour_levels =
             view.filter(|v| v.current().is_some()).map(|v| v.levels);
@@ -3283,6 +3576,7 @@ impl Workbench {
                 .and_then(|v| marker("Min", v.minimum())),
             global_origin: graphics.global_axes.then(|| model.global_origin()),
             show_scale_bar: graphics.scale_bar,
+            length_unit: units.unit(plx_model::Quantity::Length),
             show_view_triad: graphics.view_triad,
             nodes: (model.highlight.nodes.iter())
                 .filter_map(|&id| model.node_position(model.mesh.node_index(id)?))

@@ -297,7 +297,12 @@ mod tests {
         if !gmsh_available() {
             return;
         }
-        let mut model = load(&testdata("platte_mit_loch.step")).unwrap().model;
+        let mut model = load(
+            &testdata("platte_mit_loch.step"),
+            plx_model::UnitSystem::MmTonSC,
+        )
+        .unwrap()
+        .model;
         let mut geometry = model.geometry.clone().unwrap();
         geometry.meshing.max_size = 10.0;
         model.set_mesh(plx_mesher::generate_mesh(&geometry).unwrap().mesh);

@@ -7,11 +7,13 @@
 
 mod constraint;
 mod contact;
+pub mod convert;
 mod geometry;
 mod hot_spot;
 pub mod library;
 mod properties;
 mod region;
+pub mod units;
 mod validity;
 
 pub use constraint::{CompressionOnly, PointSpring, SurfaceSpring, SurfaceToSurfaceSpring};
@@ -24,12 +26,12 @@ pub use geometry::{
 };
 pub use hot_spot::{Extrapolation, HotSpot, HotSpotComponent, extrapolation_weights};
 pub use library::MaterialLibrary;
-pub use properties::{
-    BASE_QUANTITIES, DERIVED_QUANTITIES, ModelProperties, ModelSpace, UnitSystem,
-};
+pub use properties::{ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
+pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, Quantity, UnitSystem};
 pub use validity::{Invalid, ModelItem};
 
+use plx_mesh::CadEntity;
 use serde::{Deserialize, Serialize};
 
 /// Version of the project file format written by this build.
@@ -96,6 +98,35 @@ impl FeModel {
                     .chain(step.loads.iter().map(|l| &l.region))
             }))
             .chain(self.hot_spots.iter().map(|h| &h.toe))
+    }
+
+    /// Follows Gmsh's new numbers of the CAD entities after a geometry part was deleted:
+    /// `tags` gives the new entity by the old one. Entities without a new one are dropped
+    /// from the regions picked on the geometry.
+    pub fn renumber_cad(&mut self, tags: &std::collections::BTreeMap<CadEntity, CadEntity>) {
+        for region in self.regions_mut() {
+            if let Region::Geometry(entities) = region {
+                *entities = entities
+                    .iter()
+                    .filter_map(|e| tags.get(e).copied())
+                    .collect();
+            }
+        }
+    }
+
+    fn regions_mut(&mut self) -> impl Iterator<Item = &mut Region> {
+        (self.sections.iter_mut().map(|s| &mut s.region))
+            .chain(
+                self.constraints
+                    .iter_mut()
+                    .flat_map(Constraint::regions_mut),
+            )
+            .chain((self.contact_pairs.iter_mut()).flat_map(|c| [&mut c.master, &mut c.slave]))
+            .chain(self.steps.iter_mut().flat_map(|step| {
+                (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
+                    .chain(step.loads.iter_mut().map(|l| &mut l.region))
+            }))
+            .chain(self.hot_spots.iter_mut().map(|h| &mut h.toe))
     }
 
     /// Follows a renamed part: regions on the part, or on the element set an input file

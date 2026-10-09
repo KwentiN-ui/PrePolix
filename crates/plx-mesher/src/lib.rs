@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 pub use plx_mesh::CadEntity;
 use plx_mesh::{CadMap, Element, ElementId, ElementShape, FeMesh, NodeId, Part, SurfaceDefinition};
-use plx_model::{Algorithm2d, Algorithm3d, Geometry, MeshingParameters};
+use plx_model::{Algorithm2d, Algorithm3d, Geometry, MeshingParameters, UnitSystem};
 
 use gmsh::{Gmsh, with_gmsh};
 pub use gmsh::{GmshError, LibraryInfo, loaded_library, set_library_path};
@@ -78,12 +78,21 @@ pub struct GeneratedMesh {
     pub warnings: Vec<String>,
 }
 
-/// Reads a STEP, IGES or BREP file. The mesh setup starts with PrePoMax's sizes for the
-/// geometry's extent.
-pub fn import_cad(path: &Path) -> Result<CadImport, GmshError> {
+/// Reads a STEP, IGES or BREP file. STEP and IGES files are converted to the length unit of
+/// the model's unit system, millimetres without one; BREP files have no unit. The mesh setup
+/// starts with PrePoMax's sizes for the geometry's extent.
+pub fn import_cad(path: &Path, units: UnitSystem) -> Result<CadImport, GmshError> {
     let brep_file = TempFile::new("brep");
     let (diagonal, warnings) = with_gmsh(|gmsh| {
-        let shapes = gmsh.import_shapes(path)?;
+        let unit = match units {
+            UnitSystem::MKgSC | UnitSystem::MTonSC => "M",
+            UnitSystem::InLbSF => "INCH",
+            UnitSystem::MmTonSC | UnitSystem::Unitless => "MM",
+        };
+        gmsh.set_string("Geometry.OCCTargetUnit", unit)?;
+        let shapes = gmsh.import_shapes(path);
+        gmsh.set_string("Geometry.OCCTargetUnit", "MM")?;
+        let shapes = shapes?;
         if shapes.is_empty() {
             return Err(GmshError::Other(format!(
                 "{} enthält keine Geometrie",
@@ -108,12 +117,33 @@ pub fn import_cad(path: &Path) -> Result<CadImport, GmshError> {
         brep,
         meshing: MeshingParameters::for_diagonal(diagonal),
         mesh_items: Vec::new(),
+        part_names: Vec::new(),
     };
     let display = tessellate(&geometry)?;
     Ok(CadImport {
         geometry,
         display,
         warnings,
+    })
+}
+
+/// The geometry enlarged by `factor` about the origin, for a model whose length unit
+/// changes. Faces and edges keep their tags.
+pub fn scale_geometry(geometry: &Geometry, factor: f64) -> Result<Geometry, GmshError> {
+    let file = TempFile::with_contents("brep", &geometry.brep)?;
+    let scaled = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        gmsh.set_number("Geometry.OCCScaling", factor)?;
+        let imported = gmsh.import_shapes(&file.0);
+        gmsh.set_number("Geometry.OCCScaling", 1.0)?;
+        imported?;
+        gmsh.write(&scaled.0)
+    })?;
+    let brep = std::fs::read_to_string(&scaled.0)
+        .map_err(|e| GmshError::Other(format!("{}: {e}", scaled.0.display())))?;
+    Ok(Geometry {
+        brep,
+        ..geometry.clone()
     })
 }
 
@@ -142,7 +172,7 @@ pub fn tessellate(geometry: &Geometry) -> Result<GeometryDisplay, GmshError> {
         if let Err(error) = gmsh.generate(2) {
             log::warn!("Darstellung der Geometrie unvollständig: {error}");
         }
-        display_mesh(gmsh)
+        display_mesh(gmsh, geometry)
     })
 }
 
@@ -164,10 +194,120 @@ pub fn part_names(geometry: &Geometry) -> Result<Vec<String>, GmshError> {
     let file = TempFile::with_contents("brep", &geometry.brep)?;
     with_gmsh(|gmsh| {
         gmsh.import_shapes(&file.0)?;
-        let mut names = solid_names(gmsh, &gmsh.entities(3)?)?;
-        names.extend(shell_names(gmsh, &free_faces(gmsh)?)?);
-        Ok(names)
+        Ok(parts(gmsh, geometry)?.into_iter().map(|(_, n)| n).collect())
     })
+}
+
+/// The parts of the geometry Gmsh read, as (dimension, tag) with the name: the solids, then
+/// the faces outside them. Names the geometry keeps since a part was deleted take
+/// precedence over those Gmsh gives.
+fn parts(gmsh: &Gmsh, geometry: &Geometry) -> Result<Vec<(Entity, String)>, GmshError> {
+    let volumes = gmsh.entities(3)?;
+    let faces = free_faces(gmsh)?;
+    let mut names = solid_names(gmsh, &volumes)?;
+    names.extend(shell_names(gmsh, &faces)?);
+    if geometry.part_names.len() == names.len() {
+        names.clone_from(&geometry.part_names);
+    }
+    let entities = (volumes.iter().map(|&v| (3, v))).chain(faces.iter().map(|&f| (2, f)));
+    Ok(entities.zip(names).collect())
+}
+
+/// Deletes a part of the geometry, PrePoMax's Delete of a geometry part; `None` once no
+/// part is left. The other parts keep their names. Gmsh numbers the faces and edges anew
+/// when it reads the smaller geometry, so the local mesh sizes are renumbered after where
+/// the faces and edges lie; those of the deleted part are dropped.
+pub fn delete_part(geometry: &Geometry, part: &str) -> Result<Option<Geometry>, GmshError> {
+    delete_part_renumbered(geometry, part).map(|(geometry, _)| geometry)
+}
+
+/// [`delete_part`] with the new tag of every face, edge and vertex that stays, by its old
+/// one, for the mesh and the selections on it.
+pub fn delete_part_renumbered(
+    geometry: &Geometry,
+    part: &str,
+) -> Result<(Option<Geometry>, BTreeMap<CadEntity, CadEntity>), GmshError> {
+    let file = TempFile::with_contents("brep", &geometry.brep)?;
+    let smaller = TempFile::new("brep");
+    let (names, old_boxes) = with_gmsh(|gmsh| {
+        gmsh.import_shapes(&file.0)?;
+        let mut parts = parts(gmsh, geometry)?;
+        let index = (parts.iter().position(|(_, n)| n == part))
+            .ok_or_else(|| GmshError::Other(format!("Die Geometrie hat kein Part {part}")))?;
+        let boxes = entity_boxes(gmsh)?;
+        let (entity, _) = parts.remove(index);
+        gmsh.remove(&[entity])?;
+        gmsh.write(&smaller.0)?;
+        Ok((parts.into_iter().map(|(_, n)| n).collect::<Vec<_>>(), boxes))
+    })?;
+    if names.is_empty() {
+        return Ok((None, BTreeMap::new()));
+    }
+    let brep = std::fs::read_to_string(&smaller.0)
+        .map_err(|e| GmshError::Other(format!("{}: {e}", smaller.0.display())))?;
+    let new_boxes = with_gmsh(|gmsh| {
+        gmsh.import_shapes(&smaller.0)?;
+        entity_boxes(gmsh)
+    })?;
+    let renumber = |dim: i32, tags: &mut Vec<i32>| {
+        *tags = (tags.iter())
+            .filter_map(|tag| {
+                let (_, old) = old_boxes.iter().find(|(e, _)| *e == (dim, *tag))?;
+                (new_boxes.iter())
+                    .find(|((d, _), new)| *d == dim && same_box(old, new))
+                    .map(|((_, t), _)| *t)
+            })
+            .collect();
+    };
+    let mut mesh_items = geometry.mesh_items.clone();
+    for item in &mut mesh_items {
+        if let plx_model::MeshSetupKind::LocalMeshSize { faces, edges, .. } = &mut item.kind {
+            renumber(2, faces);
+            renumber(1, edges);
+        }
+    }
+    let entity = |(dim, tag): Entity| match dim {
+        0 => CadEntity::Vertex(tag),
+        1 => CadEntity::Edge(tag),
+        _ => CadEntity::Face(tag),
+    };
+    let renumbered = (old_boxes.iter())
+        .filter_map(|&((dim, tag), ref old)| {
+            let (new, _) =
+                (new_boxes.iter()).find(|((d, _), new)| *d == dim && same_box(old, new))?;
+            Some((entity((dim, tag)), entity(*new)))
+        })
+        .collect();
+    let smaller = Geometry {
+        brep,
+        mesh_items,
+        part_names: names,
+        ..geometry.clone()
+    };
+    Ok((Some(smaller), renumbered))
+}
+
+/// A Gmsh entity as (dimension, tag).
+type Entity = (i32, i32);
+
+type BoundingBox = ([f64; 3], [f64; 3]);
+
+/// Bounding box of every face, edge and vertex, by (dimension, tag).
+fn entity_boxes(gmsh: &Gmsh) -> Result<Vec<(Entity, BoundingBox)>, GmshError> {
+    let mut boxes = Vec::new();
+    for dim in [0, 1, 2] {
+        for tag in gmsh.entities(dim)? {
+            boxes.push(((dim, tag), gmsh.entity_bounding_box(dim, tag)?));
+        }
+    }
+    Ok(boxes)
+}
+
+/// Whether two bounding boxes are those of the same entity, read twice.
+fn same_box(a: &BoundingBox, b: &BoundingBox) -> bool {
+    let size = (0..3).map(|k| a.1[k] - a.0[k]).fold(0.0, f64::max);
+    let tolerance = 1e-6 * size.max(1.0);
+    (0..3).all(|k| (a.0[k] - b.0[k]).abs() <= tolerance && (a.1[k] - b.1[k]).abs() <= tolerance)
 }
 
 /// Faces that bound no solid, the shell parts of a geometry such as a 2D cross-section.
@@ -194,11 +334,12 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
     with_gmsh(|gmsh| {
         gmsh.import_shapes(&file.0)?;
         let volumes = gmsh.entities(3)?;
-        let names = solid_names(gmsh, &volumes)?;
-        let Some(index) = names.iter().position(|n| n == part) else {
+        let Some(volume) = (parts(gmsh, geometry)?.into_iter())
+            .find(|((dim, _), n)| *dim == 3 && n == part)
+            .map(|((_, tag), _)| tag)
+        else {
             return shell_part_mesh(gmsh, geometry, part);
         };
-        let volume = volumes[index];
         // The other solids go, so that only this one is meshed.
         let others: Vec<(i32, i32)> = (volumes.iter())
             .filter(|&&v| v != volume)
@@ -230,10 +371,10 @@ fn shell_part_mesh(
     part: &str,
 ) -> Result<GeneratedMesh, GmshError> {
     let faces = free_faces(gmsh)?;
-    let names = shell_names(gmsh, &faces)?;
-    let index = (names.iter().position(|n| n == part))
+    let face = (parts(gmsh, geometry)?.into_iter())
+        .find(|((dim, _), n)| *dim == 2 && n == part)
+        .map(|((_, tag), _)| tag)
         .ok_or_else(|| GmshError::Other(format!("Die Geometrie hat kein Part {part}")))?;
-    let face = faces[index];
     // Only the face stays, so that only it is meshed.
     let others: Vec<(i32, i32)> = (gmsh.entities(3)?.into_iter().map(|v| (3, v)))
         .chain(faces.iter().filter(|&&f| f != face).map(|&f| (2, f)))
@@ -440,6 +581,20 @@ pub fn merge_part(mesh: &FeMesh, part_mesh: FeMesh) -> FeMesh {
         .cad
         .extend(part_mesh.cad.offset(node_offset, element_offset));
     merged
+}
+
+/// Deletes a part of a mesh with its elements and the nodes no other part uses, PrePoMax's
+/// Delete of a mesh part. Sets and surfaces lose them too; the other parts keep their
+/// numbers.
+pub fn delete_mesh_part(mesh: &FeMesh, part: &str) -> FeMesh {
+    let mut empty = FeMesh::default();
+    empty.parts.push(Part {
+        name: part.to_string(),
+        elements: Vec::new(),
+    });
+    let mut smaller = merge_part(mesh, empty);
+    smaller.parts.retain(|p| !p.name.eq_ignore_ascii_case(part));
+    smaller
 }
 
 /// Loads Gmsh and meshes a cube, for the self test in the settings.
@@ -781,26 +936,18 @@ fn calculix_name(label: &str) -> Option<String> {
 
 /// Builds the display mesh from Gmsh's surface mesh: per solid its faces as triangles and its
 /// edges as lines. Faces outside any solid form one more part.
-fn display_mesh(gmsh: &Gmsh) -> Result<GeometryDisplay, GmshError> {
+fn display_mesh(gmsh: &Gmsh, geometry: &Geometry) -> Result<GeometryDisplay, GmshError> {
     let coords = node_coords(gmsh)?;
-    let volumes = gmsh.entities(3)?;
     let surfaces = gmsh.entities(2)?;
     let curves = gmsh.entities(1)?;
     let mut groups: Vec<(String, Vec<i32>)> = Vec::new();
-    let mut in_solid = BTreeSet::new();
-    for (&volume, name) in volumes.iter().zip(solid_names(gmsh, &volumes)?) {
-        let (_, faces) = gmsh.adjacencies(3, volume)?;
-        in_solid.extend(faces.iter().copied());
-        groups.push((name, faces));
-    }
     // Every face outside the solids is a shell part of its own, as for 2D models.
-    let free: Vec<i32> = surfaces
-        .iter()
-        .copied()
-        .filter(|s| !in_solid.contains(s))
-        .collect();
-    for (face, name) in free.iter().zip(shell_names(gmsh, &free)?) {
-        groups.push((name, vec![*face]));
+    for ((dim, tag), name) in parts(gmsh, geometry)? {
+        let faces = match dim {
+            3 => gmsh.adjacencies(3, tag)?.1,
+            _ => vec![tag],
+        };
+        groups.push((name, faces));
     }
 
     // Triangles and edge segments of each entity, fetched once.
@@ -870,7 +1017,7 @@ fn display_mesh(gmsh: &Gmsh) -> Result<GeometryDisplay, GmshError> {
     Ok(GeometryDisplay {
         mesh,
         entities,
-        solids: volumes.len(),
+        solids: gmsh.entities(3)?.len(),
         faces: surfaces.len(),
         edges: curves.len(),
     })

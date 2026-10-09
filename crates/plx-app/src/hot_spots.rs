@@ -88,7 +88,7 @@ pub fn evaluate(fe: &Model, results: &Model) -> Result<Vec<HotSpotReport>, Strin
         }
         definitions.push(HotSpot {
             toe: Region::Nodes(nodes),
-            ..hot_spot.clone()
+            ..hot_spot.in_units(fe.fe.properties.units)
         });
     }
     let faces = surface_faces(results);
@@ -222,7 +222,7 @@ pub fn short(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use plx_model::{Extrapolation, HotSpotComponent};
+    use plx_model::{Extrapolation, HotSpotComponent, UnitSystem};
 
     use super::*;
     use crate::model::load;
@@ -246,7 +246,9 @@ mod tests {
         // Cantilever 100 x 10 x 10, 100 N across at its end, solved by CalculiX 2.21 with
         // C3D20R. On top the bending stress rises linearly towards the support:
         // S11 = F (100 - x) (h / 2) / I = 0.6 (100 - x), so 30 at x = 50.
-        let mut fe = load(&testdata("kragbalken_c3d20r.inp")).unwrap().model;
+        let mut fe = load(&testdata("kragbalken_c3d20r.inp"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         let toe = [40.0, 50.0, 60.0].map(|x| node_at(&fe, [x, 5.0, 10.0]));
         for (i, extrapolation) in Extrapolation::IIW[..3].iter().enumerate() {
             fe.fe.hot_spots.push(HotSpot {
@@ -258,7 +260,9 @@ mod tests {
                 ..HotSpot::new(format!("Hot_Spot-{}", i + 1))
             });
         }
-        let results = load(&testdata("kragbalken_c3d20r.frd")).unwrap().model;
+        let results = load(&testdata("kragbalken_c3d20r.frd"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         let reports = evaluate(&fe, &results).unwrap();
         assert_eq!(reports.len(), 3);
         for report in &reports {
@@ -277,13 +281,17 @@ mod tests {
 
     #[test]
     fn results_of_another_mesh_are_refused() {
-        let mut fe = load(&testdata("kragbalken_c3d8.inp")).unwrap().model;
+        let mut fe = load(&testdata("kragbalken_c3d8.inp"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         fe.fe.hot_spots.push(HotSpot {
             toe: Region::Nodes(vec![1, 3]),
             ..HotSpot::new("Hot_Spot-1")
         });
         // Node 1 is at the origin in both meshes, node 3 is not.
-        let results = load(&testdata("block_c3d20r.frd")).unwrap().model;
+        let results = load(&testdata("block_c3d20r.frd"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         let error = evaluate(&fe, &results).unwrap_err();
         assert!(error.contains("Knoten 3"), "{error}");
     }

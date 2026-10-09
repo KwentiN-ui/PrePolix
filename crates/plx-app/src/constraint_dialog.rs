@@ -4,8 +4,8 @@
 use egui::Ui;
 use plx_mesh::FeMesh;
 use plx_model::{
-    CompressionOnly, Constraint, FeModel, PointSpring, Region, SurfaceSpring,
-    SurfaceToSurfaceSpring, Tie, next_name,
+    CompressionOnly, Constraint, FeModel, PointSpring, Quantity, Region, SurfaceSpring,
+    SurfaceToSurfaceSpring, Tie, UnitSystem, next_name,
 };
 
 use crate::contacts::{self, MasterSlave};
@@ -243,10 +243,11 @@ impl ConstraintDraft {
         });
         ui.end_row();
         name_row(ui, &mut self.constraint);
+        let units = model.fe.properties.units;
         match &mut self.constraint {
             Constraint::PointSpring(spring) => {
                 self.region.ui(ui, model);
-                stiffness_rows(ui, &mut spring.stiffness, "N/mm");
+                stiffness_rows(ui, &mut spring.stiffness, units, stiffness(false));
                 hint(
                     ui,
                     "Jeder Knoten der Region erhält diese Federn gegen die Umgebung.",
@@ -255,7 +256,7 @@ impl ConstraintDraft {
             Constraint::SurfaceSpring(spring) => {
                 self.region.ui(ui, model);
                 per_area_row(ui, &mut spring.per_area);
-                stiffness_rows(ui, &mut spring.stiffness, unit(spring.per_area));
+                stiffness_rows(ui, &mut spring.stiffness, units, stiffness(spring.per_area));
                 hint(
                     ui,
                     "Federn gegen die Umgebung, beim Export flächengewichtet auf die Knoten \
@@ -264,13 +265,13 @@ impl ConstraintDraft {
             }
             Constraint::CompressionOnly(support) => {
                 self.region.ui(ui, model);
-                compression_only_rows(ui, support);
+                compression_only_rows(ui, support, units);
             }
             Constraint::Tie(tie) => contacts::tie_form(ui, model, tie, &mut self.pair),
             Constraint::SurfaceToSurfaceSpring(spring) => {
                 self.pair.ui(ui, model);
                 per_area_row(ui, &mut spring.per_area);
-                stiffness_rows(ui, &mut spring.stiffness, unit(spring.per_area));
+                stiffness_rows(ui, &mut spring.stiffness, units, stiffness(spring.per_area));
                 hint(
                     ui,
                     "Jeder Knoten der Slave-Fläche wird über Federn in den globalen Richtungen \
@@ -317,8 +318,13 @@ fn name_row(ui: &mut Ui, constraint: &mut Constraint) {
     ui.end_row();
 }
 
-fn unit(per_area: bool) -> &'static str {
-    if per_area { "N/mm³" } else { "N/mm" }
+/// Springs have a stiffness per length, or per length and area.
+fn stiffness(per_area: bool) -> Quantity {
+    if per_area {
+        Quantity::ForcePerVolume
+    } else {
+        Quantity::ForcePerLength
+    }
 }
 
 fn per_area_row(ui: &mut Ui, per_area: &mut bool) {
@@ -330,34 +336,35 @@ fn per_area_row(ui: &mut Ui, per_area: &mut bool) {
     ui.end_row();
 }
 
-fn stiffness_rows(ui: &mut Ui, stiffness: &mut [f64; 3], unit: &str) {
+fn stiffness_rows(ui: &mut Ui, stiffness: &mut [f64; 3], units: UnitSystem, of: Quantity) {
     for (value, label) in stiffness.iter_mut().zip(["K1", "K2", "K3"]) {
         ui.label(label);
-        ui.horizontal(|ui| {
-            ui.add(numeric::drag_value(value).speed(1.0).range(0.0..=f64::MAX));
-            ui.label(unit);
-        });
+        ui.add(
+            numeric::quantity(value, units, of)
+                .speed(1.0)
+                .range(0.0..=f64::MAX),
+        );
         ui.end_row();
     }
 }
 
-fn compression_only_rows(ui: &mut Ui, support: &mut CompressionOnly) {
-    length_row(ui, "Spaltmaß", &mut support.clearance);
+fn compression_only_rows(ui: &mut Ui, support: &mut CompressionOnly, units: UnitSystem) {
+    length_row(ui, "Spaltmaß", &mut support.clearance, units);
     optional_row(
         ui,
         "Federsteifigkeit",
         &mut support.spring_stiffness,
         CompressionOnly::DEFAULT_STIFFNESS,
-        "N/mm",
+        (units, Quantity::ForcePerLength),
     );
     optional_row(
         ui,
         "Zugkraft",
         &mut support.tensile_force,
         CompressionOnly::DEFAULT_TENSILE_FORCE,
-        "N",
+        (units, Quantity::Force),
     );
-    length_row(ui, "Versatz", &mut support.offset);
+    length_row(ui, "Versatz", &mut support.offset, units);
     ui.label("Nichtlinear");
     ui.checkbox(&mut support.nonlinear, "")
         .on_hover_text("Sonst wird die Stützung in einem linearen Step linearisiert.");
@@ -369,24 +376,28 @@ fn compression_only_rows(ui: &mut Ui, support: &mut CompressionOnly) {
     );
 }
 
-fn length_row(ui: &mut Ui, label: &str, value: &mut f64) {
+fn length_row(ui: &mut Ui, label: &str, value: &mut f64, units: UnitSystem) {
     ui.label(label);
-    ui.horizontal(|ui| {
-        ui.add(numeric::drag_value(value).speed(0.01));
-        ui.label("mm");
-    });
+    ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.01));
     ui.end_row();
 }
 
 /// A value PrePoMax leaves at its default until the user enters one.
-fn optional_row(ui: &mut Ui, label: &str, value: &mut Option<f64>, default: f64, unit: &str) {
+fn optional_row(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut Option<f64>,
+    default: f64,
+    (units, quantity): (UnitSystem, Quantity),
+) {
     let mut set = value.is_some();
     ui.checkbox(&mut set, label);
     ui.horizontal(|ui| {
         let mut number = value.unwrap_or(default);
+        let unit = units.unit(quantity);
         ui.add_enabled(
             set,
-            numeric::drag_value(&mut number)
+            numeric::without_unit(&mut number, units, quantity)
                 .speed(0.0)
                 .custom_formatter(|v, _| format!("{v:e}")),
         );

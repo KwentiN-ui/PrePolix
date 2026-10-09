@@ -1,35 +1,48 @@
 //! Number input shared by all numeric fields of the GUI.
 
 use egui::emath::Numeric;
+use plx_model::{Quantity, UnitSystem};
 
-/// Parses a number typed by the user.
-///
-/// Both `.` and `,` are accepted as decimal separator, as is e-notation
-/// (`2,1e5`, `2.1E-3`). There are no thousands separators, so `1.000,5` and
-/// `1 000` are rejected. Non-finite values are rejected as well.
-pub fn parse_number(text: &str) -> Option<f64> {
-    let text: String = text
-        .trim()
-        .chars()
-        .map(|c| match c {
-            ',' => '.',
-            // Typographic minus, as egui's own parser accepts it.
-            '\u{2212}' => '-',
-            c => c,
-        })
-        .collect();
-    if !text
-        .chars()
-        .all(|c| c.is_ascii_digit() || "+-.eE".contains(c))
-    {
-        return None;
-    }
-    text.parse::<f64>().ok().filter(|v| v.is_finite())
-}
+pub use plx_model::units::parse_number;
 
 /// A [`egui::DragValue`] that parses typed input with [`parse_number`].
 pub fn drag_value<Num: Numeric>(value: &mut Num) -> egui::DragValue<'_> {
     egui::DragValue::new(value).custom_parser(parse_number)
+}
+
+/// A field for a value of a physical quantity in the model's units, PrePoMax's typed
+/// converters: the unit stands after the number, and a value typed with another unit is
+/// converted, so "3 cm" becomes "30 mm" in a millimetre model.
+pub fn quantity(value: &mut f64, units: UnitSystem, quantity: Quantity) -> egui::DragValue<'_> {
+    let unit = units.unit(quantity);
+    let field = without_unit(value, units, quantity);
+    if unit.is_empty() {
+        field
+    } else {
+        field.suffix(format!(" {unit}"))
+    }
+}
+
+/// A [`quantity`] field that does not show the unit, e.g. because a column title does.
+pub fn without_unit(value: &mut f64, units: UnitSystem, quantity: Quantity) -> egui::DragValue<'_> {
+    egui::DragValue::new(value).custom_parser(move |text| units.parse_value(text, quantity).ok())
+}
+
+/// A [`quantity`] field for values that may be very small or large, such as a density of
+/// 7.85e-9: shown in e-notation then, and not changed by dragging.
+pub fn physical(value: &mut f64, units: UnitSystem, of: Quantity) -> egui::DragValue<'_> {
+    quantity(value, units, of)
+        .speed(0.0)
+        .custom_formatter(|v, _| format_physical(v))
+}
+
+/// Very small or large numbers in e-notation, others as they are.
+pub fn format_physical(value: f64) -> String {
+    if value != 0.0 && !(1e-3..1e7).contains(&value.abs()) {
+        format!("{value:e}")
+    } else {
+        format!("{value}")
+    }
 }
 
 #[cfg(test)]

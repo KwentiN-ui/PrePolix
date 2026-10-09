@@ -96,6 +96,31 @@ impl CadMap {
         }
     }
 
+    /// The map after Gmsh numbered the CAD entities anew, `tags` giving the new entity by
+    /// the old one; entities without a new one are dropped.
+    pub fn renumbered(&self, tags: &BTreeMap<CadEntity, CadEntity>) -> Self {
+        let mut map = Self::default();
+        for (entity, nodes) in &self.nodes {
+            if let Some(&new) = tags.get(entity) {
+                map.extend(Self {
+                    nodes: BTreeMap::from([(new, nodes.clone())]),
+                    ..Self::default()
+                });
+            }
+        }
+        for (&face, faces) in &self.faces {
+            if let Some(&CadEntity::Face(new)) = tags.get(&CadEntity::Face(face)) {
+                map.faces.entry(new).or_default().extend(faces);
+            }
+        }
+        for (&edge, segments) in &self.segments {
+            if let Some(&CadEntity::Edge(new)) = tags.get(&CadEntity::Edge(edge)) {
+                map.segments.entry(new).or_default().extend(segments);
+            }
+        }
+        map
+    }
+
     /// The CAD face of each element face, the reverse of [`Self::faces`].
     pub fn face_of(&self) -> BTreeMap<(ElementId, u8), i32> {
         (self.faces.iter())
@@ -238,6 +263,15 @@ mod tests {
             .cad
             .without(&BTreeSet::from([1, 2]), &BTreeSet::from([1, 2, 3, 4, 5, 6]));
         assert!(gone.is_empty() && gone.faces.is_empty());
+        let tags = BTreeMap::from([
+            (CadEntity::Face(1), CadEntity::Face(4)),
+            (CadEntity::Edge(7), CadEntity::Edge(2)),
+        ]);
+        let renumbered = mesh.cad.renumbered(&tags);
+        assert_eq!(renumbered.faces[&4], mesh.cad.faces[&1]);
+        assert_eq!(renumbered.segments[&2], mesh.cad.segments[&7]);
+        assert_eq!(renumbered.nodes.len(), 2);
+        assert!(mesh.cad.renumbered(&BTreeMap::new()).is_empty());
         let mut both = kept.clone();
         both.extend(moved);
         assert!(both.contains(CadEntity::Face(1)));
