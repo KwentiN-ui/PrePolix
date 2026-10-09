@@ -69,7 +69,7 @@ pub struct Solver {
     pub executable: String,
     /// Threads for the solver (`OMP_NUM_THREADS`).
     pub threads: u32,
-    /// Where analyses run; empty for a `prepolix` folder in the temporary directory.
+    /// Where analyses run; empty for the default, see [`default_work_dir`].
     pub work_dir: String,
 }
 
@@ -86,7 +86,7 @@ impl Default for Solver {
 impl Solver {
     pub fn work_dir(&self) -> std::path::PathBuf {
         if self.work_dir.trim().is_empty() {
-            std::env::temp_dir().join("prepolix")
+            default_work_dir()
         } else {
             std::path::PathBuf::from(self.work_dir.trim())
         }
@@ -98,6 +98,25 @@ impl Solver {
             threads: self.threads.max(1),
         }
     }
+}
+
+/// PrePoMax's default work directory: a `Temp` folder next to the program. Where that is
+/// not writable, e.g. for a binary installed to `/usr/bin`, a `prepolix` folder in the
+/// system's temporary directory.
+pub fn default_work_dir() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join("Temp")))
+        .filter(|dir| is_writable(dir))
+        .unwrap_or_else(|| std::env::temp_dir().join("prepolix"))
+}
+
+/// Creates the directory if needed and checks that files can be written into it.
+fn is_writable(dir: &std::path::Path) -> bool {
+    let probe = dir.join(".prepolix-schreibtest");
+    let writable = std::fs::create_dir_all(dir).is_ok() && std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(probe);
+    writable
 }
 
 /// Pages of the settings window.
@@ -142,7 +161,7 @@ impl SettingsWindow {
         Self {
             page: Page::PostProcessing,
             draft: settings.clone(),
-            default_work_dir: Solver::default().work_dir().display().to_string(),
+            default_work_dir: default_work_dir().display().to_string(),
         }
     }
 
@@ -266,5 +285,18 @@ mod tests {
         assert!(settings.post.min_label);
         assert!(settings.post.max_label);
         assert!(settings.graphics.global_axes);
+    }
+
+    #[test]
+    fn default_work_dir_is_next_to_the_binary_if_writable() {
+        let dir = default_work_dir();
+        let next_to_binary = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("Temp");
+        assert_eq!(dir, next_to_binary, "the test binary's folder is writable");
+        assert!(!is_writable(std::path::Path::new(
+        )));
     }
 }
