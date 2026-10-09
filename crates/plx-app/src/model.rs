@@ -52,6 +52,8 @@ pub struct Model {
     pub results: Option<ResultsView>,
     /// The analysis set up on this mesh.
     pub fe: FeModel,
+    /// Hot spot values of a results file, evaluated with the hot spots of the FE model.
+    pub hot_spots: Option<crate::hot_spots::Evaluation>,
     /// Faces and parts drawn in the highlight colour.
     pub highlight: Highlight,
     /// Centre of the mesh; render positions are relative to it.
@@ -166,6 +168,7 @@ pub fn load(path: &Path) -> Result<LoadedModel, String> {
         load_time: Duration::ZERO,
         results,
         fe,
+        hot_spots: None,
         highlight: Highlight::default(),
         origin,
         skins,
@@ -378,6 +381,11 @@ impl Model {
             }
         }
         Some((p - self.origin).as_vec3())
+    }
+
+    /// A point given in model coordinates, in render coordinates.
+    pub fn to_render(&self, point: [f64; 3]) -> Vec3 {
+        (DVec3::from(point) - self.origin).as_vec3()
     }
 
     /// The global origin in render coordinates.

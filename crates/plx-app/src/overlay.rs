@@ -37,6 +37,8 @@ pub struct Overlay {
     pub show_view_triad: bool,
     /// Selected nodes in render coordinates, drawn as highlighted points.
     pub nodes: Vec<Vec3>,
+    /// Hot spot paths in render coordinates: the toe, then the read-out points.
+    pub paths: Vec<Vec<Vec3>>,
 }
 
 /// Annotated point of the model, e.g. the node with the largest result value.
@@ -90,6 +92,10 @@ pub fn draw(ui: &Ui, rect: Rect, camera: &Camera, overlay: &Overlay, offsets: &m
             Color32::RED,
         );
     }
+    for path in &overlay.paths {
+        let points: Vec<Pos2> = path.iter().map(|&p| project(camera, rect, p)).collect();
+        draw_path(&painter, &points);
+    }
     if overlay.show_scale_bar {
         draw_scale_bar(ui, &painter, rect, camera, &mut offsets.scale_bar);
     }
@@ -111,6 +117,22 @@ pub fn draw(ui: &Ui, rect: Rect, camera: &Camera, overlay: &Overlay, offsets: &m
     }
     if !overlay.status.is_empty() {
         draw_status(ui, &painter, rect, &overlay.status, &mut offsets.status);
+    }
+}
+
+/// A hot spot path: a line from the toe, a square on the toe and rings on the read-out
+/// points.
+fn draw_path(painter: &egui::Painter, points: &[Pos2]) {
+    const COLOR: Color32 = Color32::from_rgb(0, 70, 200);
+    let Some((&toe, readouts)) = points.split_first() else {
+        return;
+    };
+    if let Some(&last) = readouts.last() {
+        painter.line_segment([toe, last], egui::Stroke::new(1.5, COLOR));
+    }
+    painter.rect_filled(Rect::from_center_size(toe, vec2(6.0, 6.0)), 0.0, COLOR);
+    for &point in readouts {
+        painter.circle(point, 3.5, Color32::WHITE, egui::Stroke::new(1.5, COLOR));
     }
 }
 

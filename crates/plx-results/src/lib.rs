@@ -5,6 +5,7 @@
 //! `NaN`.
 
 mod derived;
+pub mod hot_spot;
 
 pub use derived::{add_derived_components, principal_values};
 

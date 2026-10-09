@@ -3,6 +3,7 @@
 mod analysis;
 mod animation;
 mod app;
+mod hot_spots;
 mod icons;
 mod keywords;
 mod material_library;
