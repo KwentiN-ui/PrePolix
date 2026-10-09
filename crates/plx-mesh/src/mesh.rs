@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cad::CadMap;
 use crate::element::{ElementShape, FaceTopology};
 use crate::fast_map::FastMap;
 
@@ -80,6 +81,8 @@ pub struct FeMesh {
     pub element_sets: BTreeMap<String, Vec<ElementId>>,
     pub surfaces: BTreeMap<String, SurfaceDefinition>,
     pub parts: Vec<Part>,
+    /// Where the CAD entities lie, for a mesh generated from geometry.
+    pub cad: CadMap,
 }
 
 impl FeMesh {
@@ -243,6 +246,8 @@ struct MeshFile {
     surfaces: BTreeMap<String, SurfaceDefinition>,
     #[serde(default)]
     parts: Vec<Part>,
+    #[serde(default, skip_serializing_if = "CadMap::is_empty")]
+    cad: CadMap,
 }
 
 impl From<FeMesh> for MeshFile {
@@ -257,6 +262,7 @@ impl From<FeMesh> for MeshFile {
             element_sets: mesh.element_sets,
             surfaces: mesh.surfaces,
             parts: mesh.parts,
+            cad: mesh.cad,
         }
     }
 }
@@ -287,6 +293,7 @@ impl TryFrom<MeshFile> for FeMesh {
         mesh.element_sets = file.element_sets;
         mesh.surfaces = file.surfaces;
         mesh.parts = file.parts;
+        mesh.cad = file.cad;
         Ok(mesh)
     }
 }
@@ -308,12 +315,17 @@ mod tests {
         });
         mesh.surfaces
             .insert("TOP".into(), SurfaceDefinition::ElementFaces(vec![(7, 2)]));
+        mesh.cad
+            .nodes
+            .insert(crate::CadEntity::Face(3), vec![1, 2, 3]);
+        mesh.cad.faces.insert(3, vec![(7, 1)]);
         let text = ron::to_string(&mesh).unwrap();
         let read: FeMesh = ron::from_str(&text).unwrap();
         assert_eq!(read.node_ids(), mesh.node_ids());
         assert_eq!(read.coords(), mesh.coords());
         assert_eq!(read.elements(), mesh.elements());
         assert_eq!(read.element_index(7), Some(0));
+        assert_eq!(read.cad, mesh.cad);
         assert_eq!((read.parts, read.surfaces), (mesh.parts, mesh.surfaces));
         let broken = text.replace("C3D4", "XYZ");
         assert!(ron::from_str::<FeMesh>(&broken).is_err());

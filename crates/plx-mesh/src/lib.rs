@@ -1,5 +1,6 @@
 //! FE-Netz: Knoten, Elemente, Sets, Surfaces, Geometrie-Topologie.
 
+mod cad;
 mod contact_search;
 mod element;
 mod fast_map;
@@ -7,6 +8,7 @@ mod jacobian;
 mod mesh;
 mod skin;
 
+pub use cad::{CadEntity, CadMap};
 pub use contact_search::{
     GroupBy, MasterSlaveItem, SearchParameters, SurfaceId, find_contact_pairs, surface_faces,
 };

@@ -9,11 +9,13 @@ mod checks;
 mod constraint;
 mod contact;
 pub mod convert;
+mod features;
 mod geometry;
 mod hot_spot;
 pub mod library;
 mod properties;
 mod region;
+mod section;
 pub mod units;
 mod validity;
 
@@ -23,16 +25,24 @@ pub use contact::{
     Constraint, ContactMethod, ContactPair, DEFAULT_SURFACE_COLOR, Friction, GapConductance,
     InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
 };
+pub use features::{
+    CoordinatePlane, CoordinateSystem, CoordinateSystemKind, GLOBAL, Plane, PlaneSource, PointRef,
+    ReferencePoint, ResultPath, ResultPlane,
+};
 pub use geometry::{
     Algorithm2d, Algorithm3d, Geometry, MeshSetupItem, MeshSetupKind, MeshingParameters,
 };
 pub use hot_spot::{Extrapolation, HotSpot, HotSpotComponent, extrapolation_weights};
 pub use library::MaterialLibrary;
 pub use properties::{ModelProperties, ModelSpace};
-pub use region::Region;
+pub use region::{Region, describe_entities};
+pub use section::{
+    BeamOrientation, BeamProfile, BeamSection, Section, SectionKind, line_tangent, unit_thickness,
+};
 pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, Quantity, UnitSystem};
 pub use validity::{Invalid, ModelItem};
 
+use plx_mesh::CadEntity;
 use serde::{Deserialize, Serialize};
 
 /// Version of the project file format written by this build.
@@ -66,6 +76,9 @@ pub struct FeModel {
     pub surface_interactions: Vec<SurfaceInteraction>,
     #[serde(default)]
     pub contact_pairs: Vec<ContactPair>,
+    /// State of the model before the first step, such as its initial temperature.
+    #[serde(default)]
+    pub initial_conditions: Vec<InitialCondition>,
     pub steps: Vec<Step>,
     /// CalculiX keywords the user added to the input file in the keyword editor, in the order
     /// they appear in it. They cover what the model cannot express yet.
@@ -74,6 +87,19 @@ pub struct FeModel {
     /// Hot spot stress evaluations, done on the results; not part of the input file.
     #[serde(default)]
     pub hot_spots: Vec<HotSpot>,
+    /// PrePoMax's features: points and coordinate systems other items refer to by name.
+    #[serde(default)]
+    pub reference_points: Vec<ReferencePoint>,
+    #[serde(default)]
+    pub coordinate_systems: Vec<CoordinateSystem>,
+    #[serde(default)]
+    pub planes: Vec<Plane>,
+    /// Results on planes; not part of the input file.
+    #[serde(default)]
+    pub result_planes: Vec<ResultPlane>,
+    /// Straight paths results are read on; not part of the input file.
+    #[serde(default)]
+    pub result_paths: Vec<ResultPath>,
 }
 
 impl FeModel {
@@ -88,6 +114,48 @@ impl FeModel {
         }
     }
 
+    /// Every region of the model: of sections, constraints, contact pairs, boundary
+    /// conditions, loads and hot spots.
+    pub fn regions(&self) -> impl Iterator<Item = &Region> {
+        (self.sections.iter().map(|s| &s.region))
+            .chain(self.constraints.iter().flat_map(Constraint::regions))
+            .chain((self.contact_pairs.iter()).flat_map(|c| [&c.master, &c.slave]))
+            .chain(self.steps.iter().flat_map(|step| {
+                (step.boundary_conditions.iter().map(|b| &b.region))
+                    .chain(step.loads.iter().map(|l| &l.region))
+            }))
+            .chain(self.hot_spots.iter().map(|h| &h.toe))
+    }
+
+    /// Follows Gmsh's new numbers of the CAD entities after a geometry part was deleted:
+    /// `tags` gives the new entity by the old one. Entities without a new one are dropped
+    /// from the regions picked on the geometry.
+    pub fn renumber_cad(&mut self, tags: &std::collections::BTreeMap<CadEntity, CadEntity>) {
+        for region in self.regions_mut() {
+            if let Region::Geometry(entities) = region {
+                *entities = entities
+                    .iter()
+                    .filter_map(|e| tags.get(e).copied())
+                    .collect();
+            }
+        }
+    }
+
+    fn regions_mut(&mut self) -> impl Iterator<Item = &mut Region> {
+        (self.sections.iter_mut().map(|s| &mut s.region))
+            .chain(
+                self.constraints
+                    .iter_mut()
+                    .flat_map(Constraint::regions_mut),
+            )
+            .chain((self.contact_pairs.iter_mut()).flat_map(|c| [&mut c.master, &mut c.slave]))
+            .chain(self.steps.iter_mut().flat_map(|step| {
+                (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
+                    .chain(step.loads.iter_mut().map(|l| &mut l.region))
+            }))
+            .chain(self.hot_spots.iter_mut().map(|h| &mut h.toe))
+    }
+
     /// Follows a renamed part: regions on the part, or on the element set an input file
     /// defines for it, keep pointing at it.
     pub fn rename_part(&mut self, old: &str, new: &str) {
@@ -98,6 +166,7 @@ impl FeModel {
                     .flat_map(Constraint::regions_mut),
             )
             .chain((self.contact_pairs.iter_mut()).flat_map(|c| [&mut c.master, &mut c.slave]))
+            .chain(self.initial_conditions.iter_mut().map(|i| &mut i.region))
             .chain(self.steps.iter_mut().flat_map(|step| {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
@@ -129,11 +198,37 @@ pub struct UserKeyword {
     pub active: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Material {
     pub name: String,
     pub density: Option<f64>,
     pub elastic: Option<Elastic>,
+    /// Thermal conductivity (`*CONDUCTIVITY`), for heat transfer.
+    #[serde(default)]
+    pub conductivity: Option<f64>,
+    /// Specific heat (`*SPECIFIC HEAT`), for transient heat transfer.
+    #[serde(default)]
+    pub specific_heat: Option<f64>,
+    /// Thermal expansion (`*EXPANSION`), for thermal strains.
+    #[serde(default)]
+    pub expansion: Option<Expansion>,
+}
+
+/// Linear isotropic thermal expansion.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Expansion {
+    pub coefficient: f64,
+    /// Temperature at which the expansion is zero (`ZERO=`); PrePoMax's default is 20.
+    pub zero_temperature: f64,
+}
+
+impl Default for Expansion {
+    fn default() -> Self {
+        Self {
+            coefficient: 0.0,
+            zero_temperature: 20.0,
+        }
+    }
 }
 
 /// Linear isotropic elasticity.
@@ -141,22 +236,6 @@ pub struct Material {
 pub struct Elastic {
     pub young: f64,
     pub poisson: f64,
-}
-
-/// Assigns a material to the solid elements of a region, PrePoMax's solid section.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Section {
-    pub name: String,
-    pub material: String,
-    pub region: Region,
-    /// Thickness of plane stress and plane strain elements; other models ignore it.
-    #[serde(default = "unit_thickness")]
-    pub thickness: f64,
-}
-
-/// PrePoMax's default thickness of 2D sections.
-pub fn unit_thickness() -> f64 {
-    1.0
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -176,6 +255,11 @@ pub enum StepKind {
     Static(StaticStep),
     /// Eigenfrequencies and mode shapes (`*FREQUENCY`).
     Frequency(FrequencyStep),
+    /// Temperatures only (`*HEAT TRANSFER`).
+    HeatTransfer(HeatTransferStep),
+    /// Temperatures and displacements solved together
+    /// (`*COUPLED TEMPERATURE-DISPLACEMENT`).
+    CoupledTempDisp(HeatTransferStep),
 }
 
 impl StepKind {
@@ -183,13 +267,50 @@ impl StepKind {
         match self {
             StepKind::Static(settings) => &mut settings.solver,
             StepKind::Frequency(settings) => &mut settings.solver,
+            StepKind::HeatTransfer(settings) | StepKind::CoupledTempDisp(settings) => {
+                &mut settings.increments.solver
+            }
         }
     }
 
     /// Whether the step takes loads. A frequency step has none, as in PrePoMax; preloads
     /// come from the previous step with [`FrequencyStep::perturbation`].
     pub fn supports_loads(&self) -> bool {
-        matches!(self, StepKind::Static(_))
+        !matches!(self, StepKind::Frequency(_))
+    }
+
+    /// Whether the step solves for displacements.
+    pub fn is_mechanical(&self) -> bool {
+        !matches!(self, StepKind::HeatTransfer(_))
+    }
+
+    /// Whether the step solves for temperatures.
+    pub fn is_thermal(&self) -> bool {
+        matches!(
+            self,
+            StepKind::HeatTransfer(_) | StepKind::CoupledTempDisp(_)
+        )
+    }
+
+    /// Whether a boundary condition of this kind acts in the step, PrePoMax's
+    /// `IsBoundaryConditionSupported`: temperatures in thermal steps, displacements in
+    /// mechanical ones.
+    pub fn supports_boundary(&self, kind: &BoundaryKind) -> bool {
+        if kind.is_thermal() {
+            self.is_thermal()
+        } else {
+            self.is_mechanical()
+        }
+    }
+
+    /// Whether a load of this kind acts in the step, PrePoMax's `IsLoadTypeSupported`.
+    pub fn supports_load(&self, kind: &LoadKind) -> bool {
+        self.supports_loads()
+            && if kind.is_thermal() {
+                self.is_thermal()
+            } else {
+                self.is_mechanical()
+            }
     }
 }
 
@@ -283,6 +404,31 @@ impl Default for StaticStep {
     }
 }
 
+/// Settings of a `*HEAT TRANSFER` or `*COUPLED TEMPERATURE-DISPLACEMENT` step, with
+/// PrePoMax's defaults; like PrePoMax's `HeatTransferStep` it extends the static step.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HeatTransferStep {
+    /// Increments, time period and solver as in a static step. `nlgeom` only applies to a
+    /// coupled step.
+    pub increments: StaticStep,
+    /// Steady state (`STEADY STATE`): the temperatures the loads settle to, without heat
+    /// capacity; otherwise transient over the time period.
+    pub steady_state: bool,
+    /// Largest temperature change allowed in an increment of a transient analysis
+    /// (`DELTMX`); `None` leaves it open.
+    pub deltmx: Option<f64>,
+}
+
+impl Default for HeatTransferStep {
+    fn default() -> Self {
+        Self {
+            increments: StaticStep::default(),
+            steady_state: true,
+            deltmx: None,
+        }
+    }
+}
+
 /// Settings of a `*FREQUENCY` step, with PrePoMax's defaults.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FrequencyStep {
@@ -338,6 +484,30 @@ impl Step {
             field_outputs: FieldOutput::frequency_defaults(),
         }
     }
+
+    /// A heat transfer step with PrePoMax's default field outputs.
+    pub fn new_heat_transfer(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            active: true,
+            kind: StepKind::HeatTransfer(HeatTransferStep::default()),
+            boundary_conditions: Vec::new(),
+            loads: Vec::new(),
+            field_outputs: FieldOutput::heat_transfer_defaults(),
+        }
+    }
+
+    /// A coupled temperature-displacement step with PrePoMax's default field outputs.
+    pub fn new_coupled(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            active: true,
+            kind: StepKind::CoupledTempDisp(HeatTransferStep::default()),
+            boundary_conditions: Vec::new(),
+            loads: Vec::new(),
+            field_outputs: FieldOutput::coupled_defaults(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -356,6 +526,14 @@ pub enum BoundaryKind {
     Fixed,
     /// Prescribed displacements (U1..U3) and rotations (UR1..UR3); `None` leaves one free.
     Displacement([Option<f64>; 6]),
+    /// Prescribed temperature (degree of freedom 11), PrePoMax's `TemperatureBC`.
+    Temperature(f64),
+}
+
+impl BoundaryKind {
+    pub fn is_thermal(&self) -> bool {
+        matches!(self, BoundaryKind::Temperature(_))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -377,6 +555,43 @@ pub enum LoadKind {
     /// Total force on a surface region, spread over its nodes by area when the input file is
     /// written (PrePoMax's surface traction).
     SurfaceTraction([f64; 3]),
+    /// Heat flow into every node of the region (`*CFLUX`), PrePoMax's concentrated flux.
+    ConcentratedFlux(f64),
+    /// Heat flow per area into a surface (`*DFLUX`, `S`), PrePoMax's surface flux.
+    SurfaceFlux(f64),
+    /// Heat generated per volume in the elements of the region (`*DFLUX`, `BF`).
+    BodyFlux(f64),
+    /// Convection to the surroundings at the sink temperature (`*FILM`).
+    Film { sink: f64, coefficient: f64 },
+    /// Radiation to the surroundings at the sink temperature (`*RADIATE`); needs the
+    /// physical constants of the model.
+    Radiation { sink: f64, emissivity: f64 },
+}
+
+impl LoadKind {
+    /// Whether the load is a heat flow rather than a force.
+    pub fn is_thermal(&self) -> bool {
+        !matches!(
+            self,
+            LoadKind::ConcentratedForce(_) | LoadKind::Pressure(_) | LoadKind::SurfaceTraction(_)
+        )
+    }
+}
+
+/// A state of the model before the first step, PrePoMax's initial conditions.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InitialCondition {
+    pub name: String,
+    #[serde(default = "active")]
+    pub active: bool,
+    pub region: Region,
+    pub kind: InitialConditionKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum InitialConditionKind {
+    /// `*INITIAL CONDITIONS, TYPE=TEMPERATURE`
+    Temperature(f64),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -420,6 +635,23 @@ impl FieldOutput {
         outputs[0].variables = vec!["U".into()];
         outputs
     }
+
+    /// Field outputs PrePoMax adds to a new heat transfer step: temperatures, reaction heat
+    /// flows and heat fluxes.
+    pub fn heat_transfer_defaults() -> Vec<Self> {
+        let mut outputs = Self::defaults();
+        outputs[0].variables = vec!["NT".into(), "RFL".into()];
+        outputs[1].variables = vec!["HFL".into()];
+        outputs
+    }
+
+    /// Field outputs PrePoMax adds to a new coupled temperature-displacement step.
+    pub fn coupled_defaults() -> Vec<Self> {
+        let mut outputs = Self::defaults();
+        outputs[0].variables = ["RF", "U", "NT", "RFL"].map(String::from).to_vec();
+        outputs[1].variables = ["S", "E", "HFL"].map(String::from).to_vec();
+        outputs
+    }
 }
 
 /// Items of projects saved before they could be deactivated are active.
@@ -448,6 +680,7 @@ mod tests {
             material: "Steel".into(),
             region: Region::Parts(vec!["A".into(), "B".into()]),
             thickness: 1.0,
+            kind: SectionKind::Solid,
         });
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {

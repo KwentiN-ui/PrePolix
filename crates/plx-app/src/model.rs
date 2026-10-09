@@ -7,11 +7,13 @@ use plx_io::frd::{FrdImport, read_frd};
 use plx_io::inp::{InpImport, read_inp};
 use plx_mesh::{ElementId, FeMesh, NodeId, PartSkin, extract_part_skin};
 use plx_mesher::{CadEntity, GeometryDisplay};
+#[cfg(test)]
+use plx_model::SectionKind;
 use plx_model::{FeModel, Finding, Geometry, MeshCheck, UnitSystem};
 use plx_render::contour::normalize;
 use plx_render::{
-    ClipPlane, RenderMesh, SectionCells, Vertex, lighten, part_color, part_render_mesh,
-    section_mesh, wireframe_edges,
+    ClipPlane, RenderMesh, SectionCells, SectionValues, Vertex, lighten, part_color,
+    part_render_mesh, section_mesh, section_values, wireframe_edges,
 };
 
 use crate::exploded::{Assembly, Explosion, Parameters, PartShape};
@@ -85,6 +87,9 @@ pub struct Model {
     pub explosion: Explosion,
     /// Node indices of each part and the part of each node, built when first needed.
     part_nodes: std::sync::OnceLock<PartNodes>,
+    /// Lookups to the CAD entities of a mesh generated from geometry, built when first
+    /// needed.
+    cad_index: std::sync::OnceLock<crate::cad_selection::CadIndex>,
     /// The model checks of the last FE model checked, see [`Model::findings`].
     checks: std::sync::Mutex<Option<Checks>>,
 }
@@ -152,14 +157,16 @@ impl Highlight {
     }
 }
 
-/// A visible face under the mouse.
+/// A visible face or line under the mouse.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hit {
     pub part: usize,
-    /// Index into the part's skin faces.
+    /// Index into the part's skin faces, or into its skin lines when `line` is set.
     pub face: usize,
     /// Hit point relative to the model origin.
     pub point: Vec3,
+    /// A segment of a line element (beam, truss, CAD edge) was hit instead of a face.
+    pub line: bool,
 }
 
 /// Node coordinates as drawn, normalized contour values and whether the shape is deformed.
@@ -174,25 +181,33 @@ pub struct LoadedModel {
     pub geometry_view: Option<Model>,
 }
 
+/// Imports one or several CAD files into one geometry, in the length unit of `units`. The
+/// model takes the path of the first file.
+pub fn load_geometry(paths: &[PathBuf], units: UnitSystem) -> Result<LoadedModel, String> {
+    let start = Instant::now();
+    let path = paths.first().ok_or("Keine Datei gewählt")?;
+    let import = plx_mesher::import_cad_files(paths, units).map_err(|e| e.to_string())?;
+    let mut model = Model::new(path, FeMesh::default());
+    model.fe.properties.units = units;
+    model.geometry = Some(import.geometry);
+    model.warnings = import.warnings;
+    let view = Model::geometry_view(path, import.display);
+    let render_meshes = view.render_meshes();
+    model.load_time = start.elapsed();
+    Ok(LoadedModel {
+        model,
+        render_meshes,
+        geometry_view: Some(view),
+    })
+}
+
 /// Loads a project, input, results or CAD file. CAD geometry is read in the length unit of
 /// `units`, the unit system of the model it goes into.
 pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     let start = Instant::now();
     let extension = |e: &str| path.extension().is_some_and(|x| x.eq_ignore_ascii_case(e));
     if plx_mesher::is_cad_file(path) {
-        let import = plx_mesher::import_cad(path, units).map_err(|e| e.to_string())?;
-        let mut model = Model::new(path, FeMesh::default());
-        model.fe.properties.units = units;
-        model.geometry = Some(import.geometry);
-        model.warnings = import.warnings;
-        let view = Model::geometry_view(path, import.display);
-        let render_meshes = view.render_meshes();
-        model.load_time = start.elapsed();
-        return Ok(LoadedModel {
-            model,
-            render_meshes,
-            geometry_view: Some(view),
-        });
+        return load_geometry(&[path.to_path_buf()], units);
     }
     let mut fe = FeModel::default();
     let mut geometry = None;
@@ -334,6 +349,7 @@ impl Model {
             explosion: Explosion::default(),
             part_nodes: Default::default(),
             checks: Default::default(),
+            cad_index: Default::default(),
         };
         let meshes = model.render_meshes();
         for (part, render) in model.parts.iter_mut().zip(&meshes) {
@@ -383,6 +399,7 @@ impl Model {
         self.section_cells = Default::default();
         self.part_nodes = Default::default();
         self.checks = Default::default();
+        self.cad_index = Default::default();
         // The exploded view stays on and is laid out anew for the new mesh.
         self.explosion.clear_layout();
         if let Some(parameters) = self.explosion.applied.clone() {
@@ -416,6 +433,15 @@ impl Model {
             findings: findings.clone(),
         });
         findings
+    }
+
+    pub fn cad_index(&self) -> &crate::cad_selection::CadIndex {
+        (self.cad_index).get_or_init(|| crate::cad_selection::CadIndex::new(&self.mesh))
+    }
+
+    /// Whether the mesh was generated from CAD geometry and knows where its entities lie.
+    pub fn has_cad(&self) -> bool {
+        !self.mesh.cad.is_empty()
     }
 
     fn part_nodes(&self) -> &PartNodes {
@@ -673,6 +699,36 @@ impl Model {
         meshes
     }
 
+    /// The shown result values where a plane in model coordinates cuts the visible parts:
+    /// of the parts as shown, or of the undeformed mesh, for values at true positions.
+    pub fn section_values(
+        &self,
+        point: DVec3,
+        normal: DVec3,
+        shown: bool,
+    ) -> Option<SectionValues> {
+        let values = self.results.as_ref()?.shown_values()?;
+        let cells = self.section_cells.get_or_init(|| {
+            self.mesh
+                .parts
+                .iter()
+                .map(|part| SectionCells::new(&self.mesh, part))
+                .collect()
+        });
+        let coords = if shown {
+            self.deformed_coords().0
+        } else {
+            std::borrow::Cow::Borrowed(self.mesh.coords())
+        };
+        (cells.iter().zip(&self.parts))
+            .filter(|(_, info)| info.visible)
+            .map(|(cells, _)| section_values(cells, &coords, point, normal, &values))
+            .reduce(|mut all, part| {
+                all.merge(part);
+                all
+            })
+    }
+
     /// The model origin in global coordinates; render positions are relative to it.
     pub fn origin(&self) -> DVec3 {
         self.origin
@@ -870,6 +926,7 @@ impl Model {
                                 part,
                                 face: index,
                                 point,
+                                line: false,
                             },
                         ));
                     }
@@ -879,20 +936,87 @@ impl Model {
         best.map(|(_, hit)| hit)
     }
 
-    /// The node of the hit face nearest to the hit point.
+    /// The nearest visible line segment within the pick tolerance of a ray; `tolerance`
+    /// gives the tolerance at a point of the ray. Returns the distance along the ray too.
+    pub fn pick_line(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        tolerance: impl Fn(Vec3) -> f32,
+    ) -> Option<(f32, Hit)> {
+        let coords = self.shown_coords();
+        let position = |node: usize| (DVec3::from(coords[node]) - self.origin).as_vec3();
+        let u = direction.normalize_or_zero();
+        let mut best: Option<(f32, Hit)> = None;
+        for (part, skin) in self.skins.iter().enumerate() {
+            if !self.parts[part].visible {
+                continue;
+            }
+            for (index, &[a, b]) in skin.lines.iter().enumerate() {
+                let (a, b) = (position(a), position(b));
+                let Some((t, s)) = ray_segment(origin, u, a, b) else {
+                    continue;
+                };
+                let on_ray = origin + u * t;
+                let on_line = a + (b - a) * s;
+                if on_ray.distance(on_line) > tolerance(on_ray)
+                    || self.clip.is_some_and(|clip| clip.distance(on_line) < 0.0)
+                {
+                    continue;
+                }
+                if best.is_none_or(|(nearest, _)| t < nearest) {
+                    best = Some((
+                        t,
+                        Hit {
+                            part,
+                            face: index,
+                            point: on_line,
+                            line: true,
+                        },
+                    ));
+                }
+            }
+        }
+        best
+    }
+
+    /// What a click hits: the nearest face, or a line in front of it or where no face is.
+    pub fn pick_click(&self, click: &crate::viewport::Click) -> Option<Hit> {
+        let face = self.pick(click.origin, click.direction);
+        let line = self.pick_line(click.origin, click.direction, |p| click.precision_at(p));
+        match (face, line) {
+            (Some(face), Some((t, line))) => {
+                let face_t = (face.point - click.origin).dot(click.direction.normalize_or_zero());
+                // A line on a face, such as a CAD edge, wins by the pick tolerance.
+                Some(if t <= face_t + click.precision_at(line.point) {
+                    line
+                } else {
+                    face
+                })
+            }
+            (face, line) => face.or(line.map(|(_, hit)| hit)),
+        }
+    }
+
+    /// The node of the hit face or line segment nearest to the hit point.
     pub fn hit_node(&self, hit: &Hit) -> NodeId {
-        let face = &self.skins[hit.part].faces[hit.face];
         let coords = self.shown_coords();
         let distance = |node: usize| {
             ((DVec3::from(coords[node]) - self.origin).as_vec3() - hit.point).length_squared()
         };
-        let nearest = face
-            .corners
-            .iter()
-            .chain(&face.mids)
-            .copied()
-            .min_by(|&a, &b| distance(a).total_cmp(&distance(b)))
-            .unwrap_or(face.corners[0]);
+        let skin = &self.skins[hit.part];
+        let nearest = if hit.line {
+            let [a, b] = skin.lines[hit.face];
+            if distance(a) <= distance(b) { a } else { b }
+        } else {
+            let face = &skin.faces[hit.face];
+            face.corners
+                .iter()
+                .chain(&face.mids)
+                .copied()
+                .min_by(|&a, &b| distance(a).total_cmp(&distance(b)))
+                .unwrap_or(face.corners[0])
+        };
         self.mesh.node_ids()[nearest]
     }
 
@@ -961,6 +1085,24 @@ fn transform_coords(coords: &[[f64; 3]], instance: &DAffine3) -> Vec<[f64; 3]> {
         .collect()
 }
 
+/// Closest approach of a ray (unit direction `u`, `t >= 0`) and a segment `a`-`b`: the
+/// distance `t` along the ray and the parameter `s` in 0..=1 along the segment. `None` when
+/// the closest point of the segment lies behind the ray's origin.
+fn ray_segment(origin: Vec3, u: Vec3, a: Vec3, b: Vec3) -> Option<(f32, f32)> {
+    let v = b - a;
+    let w = origin - a;
+    let (uv, vv, uw, vw) = (u.dot(v), v.dot(v), u.dot(w), v.dot(w));
+    let denominator = vv - uv * uv;
+    let s = if denominator <= f32::EPSILON * vv.max(f32::MIN_POSITIVE) {
+        // Parallel: the segment's start is as close as any point of it.
+        0.0
+    } else {
+        ((vw - uv * uw) / denominator).clamp(0.0, 1.0)
+    };
+    let t = (a + v * s - origin).dot(u);
+    (t >= 0.0).then_some((t, s))
+}
+
 /// Distance along the ray to a triangle (Möller-Trumbore), seen from either side.
 fn ray_triangle(origin: Vec3, direction: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
     let (ab, ac) = (b - a, c - a);
@@ -1012,6 +1154,7 @@ mod tests {
             material: "Steel".into(),
             region: plx_model::Region::Parts(vec![first.clone()]),
             thickness: 1.0,
+            kind: SectionKind::Solid,
         });
         assert!(model.rename_part(0, "").is_err());
         assert!(model.rename_part(0, "zwei wörter").is_err());
@@ -1144,6 +1287,47 @@ mod tests {
         assert!(model.pick(origin, Vec3::Z).is_none());
     }
 
+    #[test]
+    fn picking_finds_lines_within_the_tolerance() {
+        use plx_mesh::{Element, ElementShape, Part};
+        // A beam of two quadratic lines along x from 0 to 100 at y = z = 0.
+        let mut mesh = FeMesh::default();
+        for i in 0..5u32 {
+            mesh.set_node(i + 1, [25.0 * f64::from(i), 0.0, 0.0]);
+        }
+        for (id, nodes) in [(1, vec![1, 2, 3]), (2, vec![3, 4, 5])] {
+            mesh.add_element(Element {
+                id,
+                type_name: "B32".into(),
+                shape: ElementShape::Line3,
+                nodes,
+            })
+            .unwrap();
+        }
+        mesh.parts.push(Part {
+            name: "BEAM".into(),
+            elements: vec![1, 2],
+        });
+        let model = Model::new(Path::new("balken.inp"), mesh);
+        assert!(
+            model.pick(Vec3::ZERO, Vec3::NEG_Z).is_none(),
+            "lines have no faces"
+        );
+        // Looking down 2 units beside the beam at x = 60: within a tolerance of 3, not 1.
+        let origin = Vec3::new(60.0, 2.0, 50.0) - model.origin.as_vec3();
+        let (t, hit) = model
+            .pick_line(origin, Vec3::NEG_Z, |_| 3.0)
+            .expect("line within tolerance");
+        assert!(hit.line && hit.part == 0);
+        assert!((t - 50.0).abs() < 1e-4, "{t}");
+        assert!((hit.point.x + model.origin.x as f32 - 60.0).abs() < 1e-4);
+        // Node 3 at x = 50 is the nearest node of the hit segment (50..75).
+        assert_eq!(model.hit_node(&hit), 3);
+        assert!(model.pick_line(origin, Vec3::NEG_Z, |_| 1.0).is_none());
+        // Behind the origin nothing is hit.
+        assert!(model.pick_line(origin, Vec3::Z, |_| 3.0).is_none());
+    }
+
     /// Whether Gmsh can be used; tests that need it pass with a note otherwise, unless
     /// `PREPOLIX_REQUIRE_GMSH` is set.
     fn gmsh_available() -> bool {
@@ -1191,6 +1375,8 @@ mod tests {
         let reopened = load(&path, UnitSystem::MmTonSC).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(reopened.model.geometry, Some(geometry));
+        assert!(!model.mesh.cad.is_empty());
+        assert_eq!(reopened.model.mesh.cad, model.mesh.cad);
         assert_eq!(
             reopened.model.mesh.element_count(),
             model.mesh.element_count()
@@ -1249,12 +1435,14 @@ mod tests {
                     young: 210000.0,
                     poisson: 0.3,
                 }),
+                ..Default::default()
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
                 material: "Steel".into(),
                 region: Region::Parts(vec!["SOLID-1".into()]),
                 thickness: 1.0,
+                kind: SectionKind::Solid,
             }],
             steps: vec![step],
             user_keywords: Vec::new(),

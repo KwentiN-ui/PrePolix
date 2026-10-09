@@ -86,7 +86,7 @@ fn step_files_import_with_faces_and_edges() {
     let faces: BTreeSet<i32> = (display.entities.iter())
         .filter_map(|e| match e {
             CadEntity::Face(tag) => Some(*tag),
-            CadEntity::Edge(_) => None,
+            _ => None,
         })
         .collect();
     assert_eq!(faces.len(), display.faces);
@@ -108,6 +108,39 @@ fn step_files_import_with_faces_and_edges() {
 fn width(display: &GeometryDisplay) -> f64 {
     let (min, max) = display.mesh.bounds().unwrap();
     max[0] - min[0]
+}
+
+#[test]
+fn several_files_import_into_one_geometry() {
+    if !gmsh_available() {
+        return;
+    }
+    let single = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC).unwrap();
+    let blocks = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC).unwrap();
+    let paths = [
+        testdata("platte_mit_loch.step"),
+        testdata("zwei_bloecke.step"),
+    ];
+    let import = import_cad_files(&paths, UnitSystem::MmTonSC).unwrap();
+    let display = &import.display;
+    assert_eq!(
+        display.solids,
+        single.display.solids + blocks.display.solids
+    );
+    assert_eq!(display.faces, single.display.faces + blocks.display.faces);
+    assert_eq!(display.mesh.parts.len(), display.solids);
+    assert_eq!(
+        import.geometry.source,
+        "platte_mit_loch.step, zwei_bloecke.step"
+    );
+    // A file without geometry names itself in the error.
+    let empty = std::env::temp_dir().join("prepolix-leer.brep");
+    std::fs::write(&empty, "").unwrap();
+    let error = import_cad_files(&[paths[0].clone(), empty.clone()], UnitSystem::MmTonSC)
+        .unwrap_err()
+        .to_string();
+    let _ = std::fs::remove_file(&empty);
+    assert!(error.contains("prepolix-leer.brep"), "{error}");
 }
 
 #[test]
@@ -250,6 +283,78 @@ fn a_remeshed_part_replaces_its_old_mesh_and_leaves_the_others() {
         .collect();
     assert_eq!(used.len(), merged.node_count(), "no orphaned nodes");
     assert!(generate_part_mesh(&geometry, "SOLID-9").is_err());
+
+    // The CAD map follows: the second block's entities keep their numbers, the first
+    // block's point into its new mesh.
+    let face_of = |mesh: &FeMesh, part: usize| -> BTreeSet<i32> {
+        let elements: BTreeSet<ElementId> = mesh.parts[part].elements.iter().copied().collect();
+        (mesh.cad.faces.iter())
+            .filter(|(_, faces)| faces.iter().all(|(e, _)| elements.contains(e)))
+            .map(|(&tag, _)| tag)
+            .collect()
+    };
+    assert_eq!(face_of(&merged, 0), face_of(&whole, 0));
+    assert_eq!(face_of(&merged, 1), face_of(&whole, 1));
+    assert_eq!(merged.cad.faces.len(), 12);
+    for tag in face_of(&whole, 1) {
+        assert_eq!(merged.cad.faces[&tag], whole.cad.faces[&tag]);
+    }
+    for tag in face_of(&merged, 0) {
+        let faces = &merged.cad.faces[&tag];
+        assert!(faces.len() > whole.cad.faces[&tag].len());
+        assert!(faces.iter().all(|(e, _)| *e > old_max));
+    }
+    for nodes in merged.cad.nodes.values() {
+        assert!(nodes.iter().all(|&n| merged.node(n).is_some()));
+    }
+}
+
+#[test]
+fn meshes_record_where_the_cad_entities_lie() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
+    geometry.meshing.max_size = 8.0;
+    let mesh = generate_mesh(&geometry).unwrap().mesh;
+    let cad = &mesh.cad;
+    let display = tessellate(&geometry).unwrap();
+    assert_eq!(cad.faces.len(), display.faces);
+    assert_eq!(cad.segments.len(), display.edges);
+    assert!(cad.nodes.keys().any(|e| matches!(e, CadEntity::Vertex(_))));
+    // Every outer face of the tetrahedra lies on exactly one CAD face.
+    let mut count: HashMap<Vec<NodeId>, usize> = HashMap::new();
+    for element in mesh.elements() {
+        for face in element.faces() {
+            let mut corners: Vec<NodeId> = face.corners.iter().map(|&i| element.nodes[i]).collect();
+            corners.sort_unstable();
+            *count.entry(corners).or_default() += 1;
+        }
+    }
+    let outer = count.values().filter(|&&n| n == 1).count();
+    let on_cad: usize = cad.faces.values().map(Vec::len).sum();
+    assert_eq!(on_cad, outer);
+    // The faces' nodes, midside nodes included, are the CAD face's nodes.
+    for (&tag, faces) in &cad.faces {
+        let nodes: BTreeSet<NodeId> = (faces.iter())
+            .flat_map(|&(e, f)| {
+                let element = mesh.element(e).unwrap();
+                let face = &element.faces()[usize::from(f) - 1];
+                let local = face.corners.iter().chain(face.mids);
+                local.map(|&i| element.nodes[i]).collect::<Vec<_>>()
+            })
+            .collect();
+        let recorded: BTreeSet<NodeId> = cad.nodes[&CadEntity::Face(tag)].iter().copied().collect();
+        assert_eq!(nodes, recorded, "Fläche {tag}");
+    }
+    for (&tag, segments) in &cad.segments {
+        let nodes = &cad.nodes[&CadEntity::Edge(tag)];
+        // Quadratic segments have a midside node each; the hole's edge is closed.
+        let n = 2 * segments.len();
+        assert!(nodes.len() == n + 1 || nodes.len() == n, "Kante {tag}");
+    }
 }
 
 #[test]
@@ -269,7 +374,7 @@ fn local_mesh_sizes_refine_faces_and_edges() {
     let face = (import.display.entities.iter())
         .find_map(|e| match e {
             CadEntity::Face(tag) => Some(*tag),
-            CadEntity::Edge(_) => None,
+            _ => None,
         })
         .unwrap();
     let local = |faces: Vec<i32>, edges: Vec<i32>, size| MeshSetupItem {
@@ -282,7 +387,7 @@ fn local_mesh_sizes_refine_faces_and_edges() {
     let edge = (import.display.entities.iter())
         .find_map(|e| match e {
             CadEntity::Edge(tag) => Some(*tag),
-            CadEntity::Face(_) => None,
+            _ => None,
         })
         .unwrap();
     geometry.mesh_items = vec![local(vec![], vec![edge], 0.5)];
@@ -424,6 +529,16 @@ fn faces_outside_solids_are_meshed_as_shell_parts() {
     let exact = 200.0 - (4.0 - std::f64::consts::PI) * 4.0;
     assert!((area - exact).abs() / exact < 0.01, "Fläche {area}");
     assert!(mesh.coords().iter().all(|c| c[2].abs() < 1e-9));
+    // The face covers every element; the edges run around it.
+    let faces: Vec<(ElementId, u8)> = mesh.cad.faces.values().flatten().copied().collect();
+    assert_eq!(faces.len(), mesh.element_count());
+    assert!(faces.iter().all(|&(_, f)| f == 1));
+    assert_eq!(mesh.cad.segments.len(), 8, "4 Seiten, 4 Rundungen");
+    assert_eq!(
+        mesh.cad_nodes(&[CadEntity::Face(*mesh.cad.faces.keys().next().unwrap())])
+            .len(),
+        mesh.node_count()
+    );
 
     geometry.meshing.second_order = false;
     geometry.meshing.quad_dominated = true;
@@ -444,6 +559,95 @@ fn faces_outside_solids_are_meshed_as_shell_parts() {
     geometry.meshing.second_order = true;
     let quadratic = generate_mesh(&geometry).unwrap().mesh;
     assert!(quadratic.elements().iter().any(|e| e.type_name == "S8"));
+}
+
+/// A geometry of a box and, beside it, an L of two lines: one along x, one up along z.
+fn box_and_lines() -> Geometry {
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        gmsh.add_box([0.0; 3], [10.0; 3])?;
+        let a = gmsh.add_point([20.0, 0.0, 0.0])?;
+        let b = gmsh.add_point([50.0, 0.0, 0.0])?;
+        let c = gmsh.add_point([50.0, 0.0, 20.0])?;
+        gmsh.add_line(a, b)?;
+        gmsh.add_line(b, c)?;
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    Geometry {
+        source: "rahmen.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters {
+            max_size: 5.0,
+            ..MeshingParameters::default()
+        },
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+    }
+}
+
+#[test]
+fn edges_outside_faces_are_meshed_as_line_parts() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = box_and_lines();
+    assert_eq!(
+        part_names(&geometry).unwrap(),
+        ["SOLID-1", "LINE-1", "LINE-2"]
+    );
+    // The display shows the free edges as lines of their own parts, not of the box.
+    let display = tessellate(&geometry).unwrap();
+    let names: Vec<&str> = display.mesh.parts.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["SOLID-1", "LINE-1", "LINE-2"]);
+    let line_part = &display.mesh.parts[1];
+    assert!(line_part.elements.iter().all(|&id| {
+        let element = display.mesh.element(id).unwrap();
+        element.shape == ElementShape::Line2
+            && matches!(display.entity(id), Some(CadEntity::Edge(_)))
+    }));
+    assert_eq!(display.edges, 12 + 2);
+
+    // Quadratic lines of 5 units: the 30 long edge gets 6 B32 with the midside node in the
+    // middle, the 20 long one 4.
+    let mesh = generate_mesh(&geometry).unwrap().mesh;
+    assert_eq!(mesh.parts.len(), 3);
+    let lines: Vec<&Element> = (mesh.parts[1].elements.iter())
+        .map(|&id| mesh.element(id).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 6, "{lines:?}");
+    for element in &lines {
+        assert_eq!(element.type_name, "B32");
+        let p = |k: usize| mesh.node(element.nodes[k]).unwrap();
+        let (a, m, b) = (p(0), p(1), p(2));
+        assert!((m[0] - (a[0] + b[0]) / 2.0).abs() < 1e-9, "{element:?}");
+        assert!((b[0] - a[0]).abs() - 5.0 < 1e-6);
+    }
+    assert_eq!(mesh.parts[2].elements.len(), 4);
+    // The lines and the box share no nodes; the parts keep their own numbering.
+    assert!(
+        mesh.parts[0]
+            .elements
+            .iter()
+            .all(|&id| mesh.element(id).unwrap().type_name == "C3D10")
+    );
+
+    geometry.meshing.second_order = false;
+    let part = generate_part_mesh(&geometry, "LINE-2").unwrap().mesh;
+    assert_eq!(part.parts[0].name, "LINE-2");
+    assert_eq!(part.element_count(), 4);
+    assert!(part.elements().iter().all(|e| e.type_name == "B31"));
+    // A local mesh size on the edge refines it.
+    geometry.mesh_items.push(plx_model::MeshSetupItem {
+        name: "Local_Mesh_Size-1".into(),
+        kind: plx_model::MeshSetupKind::LocalMeshSize {
+            faces: vec![],
+            edges: vec![14],
+            size: 1.0,
+        },
+    });
+    let fine = generate_part_mesh(&geometry, "LINE-2").unwrap().mesh;
+    assert_eq!(fine.element_count(), 20);
 }
 
 #[test]
@@ -494,6 +698,19 @@ fn a_deleted_part_leaves_the_others_with_their_names_and_local_sizes() {
     })
     .unwrap();
     assert!(same_box(&moved, &second_box));
+
+    // The mesh of the block that stays follows the new numbers onto the same entities a
+    // fresh mesh of the smaller geometry has.
+    let (_, tags) = delete_part_renumbered(&geometry, "SOLID-1").unwrap();
+    let whole = generate_mesh(&geometry).unwrap().mesh;
+    let left = delete_mesh_part(&whole, "SOLID-1");
+    let renumbered = left.cad.renumbered(&tags);
+    let keys = |map: &CadMap| map.nodes.keys().copied().collect::<Vec<_>>();
+    assert_eq!(keys(&renumbered), keys(&mesh.cad));
+    assert_eq!(
+        renumbered.faces.keys().collect::<Vec<_>>(),
+        mesh.cad.faces.keys().collect::<Vec<_>>()
+    );
 
     assert!(delete_part(&smaller, "SOLID-1").is_err());
     assert_eq!(delete_part(&smaller, "SOLID-2").unwrap(), None);

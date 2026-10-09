@@ -665,6 +665,39 @@ fn material_models(
             ],
         ));
     }
+    if let Some(expansion) = material.expansion {
+        models.push((
+            "Wärmeausdehnung",
+            vec![
+                (
+                    "Ausdehnungskoeffizient",
+                    with_unit(expansion.coefficient, Quantity::ThermalExpansion),
+                ),
+                (
+                    "Referenztemperatur",
+                    with_unit(expansion.zero_temperature, Quantity::Temperature),
+                ),
+            ],
+        ));
+    }
+    if let Some(conductivity) = material.conductivity {
+        models.push((
+            "Wärmeleitung",
+            vec![(
+                "Wärmeleitfähigkeit",
+                with_unit(conductivity, Quantity::ThermalConductivity),
+            )],
+        ));
+    }
+    if let Some(specific_heat) = material.specific_heat {
+        models.push((
+            "Spezifische Wärme",
+            vec![(
+                "Spez. Wärmekapazität",
+                with_unit(specific_heat, Quantity::SpecificHeat),
+            )],
+        ));
+    }
     models
 }
 
@@ -795,6 +828,7 @@ mod tests {
             name: "Alu".into(),
             density: Some(2.7e-9),
             elastic: None,
+            ..Default::default()
         });
         editor.material_selected = Some(0);
         editor.select_library(Vec::new());

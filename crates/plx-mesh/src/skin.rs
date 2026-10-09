@@ -37,6 +37,8 @@ pub struct PartSkin {
     pub edges: Vec<SkinEdge>,
     /// Segments of line elements (beams, trusses) as node index pairs.
     pub lines: Vec<[usize; 2]>,
+    /// The element index of each segment of `lines`.
+    pub line_elements: Vec<usize>,
 }
 
 /// Extracts the visible surface of one part: faces of solid elements that no other solid
@@ -61,12 +63,11 @@ pub fn extract_part_skin(mesh: &FeMesh, part: &Part, feature_angle_deg: f64) -> 
         }
         let shape = element.shape;
         if shape.family() == ElementFamily::Line {
-            skin.lines.extend(
-                shape
-                    .line_segments()
-                    .iter()
-                    .map(|&[a, b]| [nodes[a], nodes[b]]),
-            );
+            let segments = shape.line_segments();
+            skin.lines
+                .extend(segments.iter().map(|&[a, b]| [nodes[a], nodes[b]]));
+            skin.line_elements
+                .extend(std::iter::repeat_n(element_index, segments.len()));
             continue;
         }
         for (face_index, topology) in shape.faces().iter().enumerate() {

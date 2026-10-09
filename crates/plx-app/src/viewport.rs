@@ -236,6 +236,11 @@ impl Viewport {
         }
     }
 
+    /// Draws only the section faces of the parts while the section view is on.
+    pub fn set_sections_only(&mut self, only: bool) {
+        self.renderer.set_sections_only(only);
+    }
+
     pub fn set_parts(&mut self, parts: &[RenderMesh]) {
         self.renderer.set_parts(&self.render_state.device, parts);
         self.scene_version += 1;

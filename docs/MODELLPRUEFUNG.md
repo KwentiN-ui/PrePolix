@@ -11,11 +11,13 @@ fehlgeschlagenen Lauf aus der Ausgabe von CalculiX erkennt. Nachgestellt mit Cal
 | Elemente ohne Section | `no material was assigned to element N` | Abbruch | Elemente je Part gegen Sections |
 | Material ohne Elastizität | `no elastic constants were assigned` | Abbruch | Materialien, die eine Section nutzt |
 | Frequency Step ohne Dichte | `no density was assigned` | Abbruch | wie oben |
+| Wärmeübertragung ohne Wärmeleitfähigkeit | nur `WARNING ... no conductivity constants`, dann Absturz beim Lösen | Abbruch | Materialien in thermischen Steps |
+| Instationäre Wärmeübertragung ohne Dichte, spezifische Wärme oder Anfangstemperatur | `no density was assigned`, `no specific heat was assigned`, `please define initial conditions for the temperature` | Abbruch | Materialien und Initial Conditions |
 | Querkontraktionszahl >= 0,5 | `Poisson coefficient should be less than 0.5` | Abbruch beim Einlesen | E > 0, -1 < nu < 0,5 |
 | Verzerrte/umgestülpte Elemente, 2D-Elemente im Uhrzeigersinn | `nonpositive jacobian determinant in element N` | Abbruch | Jacobi-Determinante an den Integrationspunkten (`plx-mesh/src/jacobian.rs`) |
 | Anfangsinkrement > Step-Dauer | `initial increment size exceeds step size` | Abbruch | Step-Einstellungen |
 | Gleiche Knoten in mehreren Randbedingungen mit verschiedenen Werten | keine | letzter Wert gilt | Warnung an der späteren Randbedingung |
-| Rotationen (DOF 4-6) an Volumenelementen | keine | ignoriert | Warnung |
+| Rotationen (DOF 4-6) an Volumenelementen | keine | ignoriert | Warnung; an Balken und Schalen zählen sie für die Lagerung |
 | Rotationen (DOF 4-6) in 2D-Modellen | `usermpc: mpc of type is unknown` | Abbruch (PR #59: auch Gleitkommafehler) | Writer schreibt nur DOF 1-2; Ausgabe wird erkannt |
 | Freiheitsgrad in Randbedingung und abhängig in Gleichung | `dependent side of a MPC and a SPC` | Abbruch | Ausgabe wird erkannt |
 | Randbedingung auf Tie-Slave-Knoten | `WARNING in gentiedmpc: DOF ... not active` | Tie dort aufgehoben, Lauf geht weiter | keine (meist harmlos) |

@@ -30,6 +30,9 @@ pub enum Problem {
     NoSection,
     NoElastic,
     NoDensity,
+    NoConductivity,
+    NoSpecificHeat,
+    NoInitialTemperature,
     InvalidElastic,
     DistortedElements,
     RigidBodyMotion,
@@ -67,6 +70,9 @@ impl Problem {
             Problem::NoSection => "Elemente ohne Material",
             Problem::NoElastic => "Material ohne Elastizität",
             Problem::NoDensity => "Material ohne Dichte",
+            Problem::NoConductivity => "Material ohne Wärmeleitfähigkeit",
+            Problem::NoSpecificHeat => "Material ohne Wärmekapazität",
+            Problem::NoInitialTemperature => "Keine Anfangstemperatur",
             Problem::InvalidElastic => "Ungültige Materialkonstanten",
             Problem::DistortedElements => "Verzerrte Elemente",
             Problem::RigidBodyMotion => "Starrkörperbewegung möglich",
@@ -102,8 +108,23 @@ impl Problem {
                  Steifigkeit; CalculiX bricht mit \"no elastic constants were assigned\" ab."
             }
             Problem::NoDensity => {
-                "Ein Frequency Step braucht die Masse des Modells. Ohne Dichte bricht \
-                 CalculiX mit \"no density was assigned\" ab."
+                "Ein Frequency Step und eine instationäre Wärmeübertragung brauchen die \
+                 Masse des Modells. Ohne Dichte bricht CalculiX mit \"no density was \
+                 assigned\" ab."
+            }
+            Problem::NoConductivity => {
+                "Eine Wärmeübertragung braucht die Wärmeleitfähigkeit jedes Materials. \
+                 CalculiX warnt nur (\"no conductivity constants were assigned\") und \
+                 stürzt danach beim Lösen ab."
+            }
+            Problem::NoSpecificHeat => {
+                "Eine instationäre Wärmeübertragung braucht die spezifische \
+                 Wärmekapazität. CalculiX bricht mit \"no specific heat was assigned\" ab."
+            }
+            Problem::NoInitialTemperature => {
+                "Eine instationäre Wärmeübertragung startet von einer Anfangstemperatur. \
+                 Ohne sie bricht CalculiX mit \"please define initial conditions for the \
+                 temperature\" ab."
             }
             Problem::InvalidElastic => {
                 "Der Elastizitätsmodul muss größer als 0 sein und die Querkontraktionszahl \
@@ -198,6 +219,17 @@ impl Problem {
                  eintragen, oder ein Material aus der Materialbibliothek nehmen."
             }
             Problem::NoDensity => "Das Material bearbeiten und eine Dichte eintragen.",
+            Problem::NoConductivity => {
+                "Das Material bearbeiten und eine Wärmeleitfähigkeit eintragen."
+            }
+            Problem::NoSpecificHeat => {
+                "Das Material bearbeiten und eine spezifische Wärmekapazität eintragen, \
+                 oder den Step stationär rechnen."
+            }
+            Problem::NoInitialTemperature => {
+                "Unter Initial Conditions eine Anfangstemperatur für das Modell erstellen, \
+                 oder den Step stationär rechnen."
+            }
             Problem::InvalidElastic => {
                 "Elastizitätsmodul größer als 0 und Querkontraktionszahl kleiner als 0,5 \
                  eintragen (Stahl: 210000 MPa, 0,3)."
@@ -294,28 +326,36 @@ pub struct MeshCheck {
     distorted: Vec<Vec<ElementId>>,
     /// Whether the mesh has beams or shells, the only elements with rotations.
     has_rotations: bool,
+    /// Whether each node, by node index, belongs to a beam or shell and so has rotations.
+    rotational: Vec<bool>,
 }
 
 impl MeshCheck {
     pub fn new(mesh: &FeMesh, space: ModelSpace) -> Self {
         let mut union = UnionFind::new(mesh.node_count());
         let mut used = vec![false; mesh.node_count()];
-        let mut has_rotations = false;
+        let mut rotational = vec![false; mesh.node_count()];
         for element in mesh.elements() {
+            // Beams (B31, B32) and shells (S3 to S8R) have rotations; trusses, plane and
+            // solid elements only displacements.
+            let rotations = match element.shape.family() {
+                ElementFamily::Line => element.type_name.to_ascii_uppercase().starts_with('B'),
+                ElementFamily::Surface => {
+                    !element.is_plane() && element.type_name.to_ascii_uppercase().starts_with('S')
+                }
+                ElementFamily::Solid => false,
+            };
             let mut first = None;
             for index in element.nodes.iter().filter_map(|&n| mesh.node_index(n)) {
                 used[index] = true;
+                rotational[index] |= rotations;
                 match first {
                     None => first = Some(index),
                     Some(first) => union.join(first, index),
                 }
             }
-            has_rotations |= match element.shape.family() {
-                ElementFamily::Line => true,
-                ElementFamily::Surface => !element.is_plane(),
-                ElementFamily::Solid => false,
-            };
         }
+        let has_rotations = rotational.iter().any(|&r| r);
         let mut label = vec![u32::MAX; mesh.node_count()];
         let mut pieces = 0;
         let piece: Vec<u32> = (0..mesh.node_count())
@@ -357,6 +397,7 @@ impl MeshCheck {
             piece_parts,
             distorted,
             has_rotations,
+            rotational,
         }
     }
 
@@ -402,8 +443,19 @@ impl FeModel {
                 ));
             }
         }
+        let initial_temperature = self.initial_conditions.iter().any(|c| c.active);
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             self.check_step(s, mesh, mesh_check, &mut findings);
+            if let StepKind::HeatTransfer(h) | StepKind::CoupledTempDisp(h) = &step.kind
+                && !h.steady_state
+                && !initial_temperature
+            {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::NoInitialTemperature,
+                    format!("{} ist instationär", step.name),
+                ));
+            }
             if let StepKind::Static(settings) = &step.kind
                 && settings.incrementation != crate::Incrementation::Default
                 && settings.initial_increment > settings.time_period
@@ -424,7 +476,12 @@ impl FeModel {
 
     fn check_materials(&self, findings: &mut Vec<Finding>) {
         let active = || self.steps.iter().filter(|s| s.active);
-        let any_step = active().next().is_some();
+        let mechanical = active().any(|s| s.kind.is_mechanical());
+        let thermal = active().any(|s| s.kind.is_thermal());
+        let transient = active().any(|s| match &s.kind {
+            StepKind::HeatTransfer(h) | StepKind::CoupledTempDisp(h) => !h.steady_state,
+            _ => false,
+        });
         let frequency = active().any(|s| matches!(s.kind, StepKind::Frequency(_)));
         for (i, material) in self.materials.iter().enumerate() {
             if !self.sections.iter().any(|s| s.material == material.name) {
@@ -432,7 +489,7 @@ impl FeModel {
             }
             let item = ModelItem::Material(i);
             match material.elastic {
-                None if any_step => findings.push(Finding::new(
+                None if mechanical => findings.push(Finding::new(
                     item,
                     Problem::NoElastic,
                     format!("{} hat keine Elastizität", material.name),
@@ -446,7 +503,21 @@ impl FeModel {
                 }
                 _ => {}
             }
-            if frequency && material.density.is_none_or(|d| d <= 0.0) {
+            if thermal && material.conductivity.is_none() {
+                findings.push(Finding::new(
+                    item,
+                    Problem::NoConductivity,
+                    format!("{} hat keine Wärmeleitfähigkeit", material.name),
+                ));
+            }
+            if transient && material.specific_heat.is_none() {
+                findings.push(Finding::new(
+                    item,
+                    Problem::NoSpecificHeat,
+                    format!("{} hat keine spezifische Wärmekapazität", material.name),
+                ));
+            }
+            if (frequency || transient) && material.density.is_none_or(|d| d <= 0.0) {
                 findings.push(Finding::new(
                     item,
                     Problem::NoDensity,
@@ -501,7 +572,11 @@ impl FeModel {
         // Value of each constrained node and degree of freedom, with the boundary condition.
         let mut fixed: HashMap<(NodeId, usize), (usize, f64)> = HashMap::new();
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
-            if !bc.active || bc.region.missing_reference(mesh).is_some() {
+            // A step leaves out what it cannot take, as the input file does.
+            if !bc.active
+                || !step.kind.supports_boundary(&bc.kind)
+                || bc.region.missing_reference(mesh).is_some()
+            {
                 continue;
             }
             let values: Vec<(usize, f64)> = match bc.kind {
@@ -509,6 +584,8 @@ impl FeModel {
                 BoundaryKind::Displacement(values) => (values.iter().enumerate())
                     .filter_map(|(d, v)| v.map(|v| (d, v)))
                     .collect(),
+                // Degree of freedom 11.
+                BoundaryKind::Temperature(t) => vec![(10, t)],
             };
             if let BoundaryKind::Displacement(values) = bc.kind
                 && values[3..].iter().any(Option::is_some)
@@ -546,7 +623,10 @@ impl FeModel {
         if step.kind.supports_loads() {
             let mut loaded = false;
             for (i, load) in step.loads.iter().enumerate() {
-                if !load.active || load.region.missing_reference(mesh).is_some() {
+                if !load.active
+                    || !step.kind.supports_load(&load.kind)
+                    || load.region.missing_reference(mesh).is_some()
+                {
                     continue;
                 }
                 loaded = true;
@@ -555,6 +635,8 @@ impl FeModel {
                         (0..3).filter(|&d| f[d] != 0.0 && d < dofs).collect()
                     }
                     LoadKind::Pressure(_) => (0..dofs.min(3)).collect(),
+                    // Heat flows go into temperatures, which nothing but a temperature holds.
+                    _ => Vec::new(),
                 };
                 let nodes = load.region.nodes(mesh);
                 let held = !nodes.is_empty()
@@ -595,7 +677,11 @@ impl FeModel {
                 .iter()
                 .any(|w| text.contains(w))
         });
-        if matches!(step.kind, StepKind::Static(_)) && !constrained_by_keywords {
+        let static_mechanical = matches!(
+            step.kind,
+            StepKind::Static(_) | StepKind::CoupledTempDisp(_)
+        );
+        if static_mechanical && !constrained_by_keywords {
             self.check_rigid_body(s, mesh, check, &fixed, findings);
         }
     }
@@ -622,12 +708,17 @@ impl FeModel {
             .max(1e-30);
         let space = self.properties.space;
         let mut grams = vec![[[0.0; 6]; 6]; check.pieces];
-        let mut support = |node: NodeId, direction: [f64; 3]| {
+        // A support holds its node in a direction, or a beam or shell node about an axis.
+        let mut support = |node: NodeId, direction: [f64; 3], rotation: bool| {
             let (Some(piece), Some(x)) = (check.piece_of(mesh, node), mesh.node(node)) else {
                 return;
             };
-            let r: [f64; 3] = std::array::from_fn(|i| (x[i] - center[i]) / size);
-            let row = rigid_row(space, r, direction);
+            let row = if rotation {
+                [0.0, 0.0, 0.0, direction[0], direction[1], direction[2]]
+            } else {
+                let r: [f64; 3] = std::array::from_fn(|i| (x[i] - center[i]) / size);
+                rigid_row(space, r, direction)
+            };
             let gram = &mut grams[piece as usize];
             for a in 0..6 {
                 for b in 0..6 {
@@ -638,7 +729,12 @@ impl FeModel {
         let axis = |d: usize| std::array::from_fn(|i| if i == d { 1.0 } else { 0.0 });
         for &(node, dof) in fixed.keys() {
             if dof < 3 {
-                support(node, axis(dof));
+                support(node, axis(dof), false);
+            } else if dof < 6
+                && space == ModelSpace::ThreeD
+                && (mesh.node_index(node)).is_some_and(|i| check.rotational[i])
+            {
+                support(node, axis(dof - 3), true);
             }
         }
         let mut ties = UnionFind::new(check.pieces);
@@ -662,20 +758,20 @@ impl FeModel {
                 Constraint::PointSpring(c) => {
                     for node in c.region.nodes(mesh) {
                         for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
-                            support(node, axis(d));
+                            support(node, axis(d), false);
                         }
                     }
                 }
                 Constraint::SurfaceSpring(c) => {
                     for node in c.region.nodes(mesh) {
                         for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
-                            support(node, axis(d));
+                            support(node, axis(d), false);
                         }
                     }
                 }
                 Constraint::CompressionOnly(c) => {
                     for (node, normal) in face_normals(mesh, &c.region) {
-                        support(node, normal);
+                        support(node, normal, false);
                     }
                 }
                 Constraint::Tie(_) | Constraint::SurfaceToSurfaceSpring(_) => {
@@ -997,9 +1093,15 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
             }
         }
     }
-    let known: [(Problem, &[&str]); 8] = [
+    let known: [(Problem, &[&str]); 11] = [
         (Problem::NoElastic, &["no elastic constants"]),
         (Problem::NoDensity, &["no density was assigned"]),
+        (Problem::NoConductivity, &["no conductivity constants"]),
+        (Problem::NoSpecificHeat, &["no specific heat was assigned"]),
+        (
+            Problem::NoInitialTemperature,
+            &["define initial conditions for the temperature"],
+        ),
         (
             Problem::InvalidElastic,
             &["poisson coefficient should be less than 0.5"],
@@ -1132,6 +1234,7 @@ mod tests {
                 young: 210000.0,
                 poisson: 0.3,
             }),
+            ..Material::default()
         }
     }
 
@@ -1158,6 +1261,7 @@ mod tests {
                 material: "Steel".into(),
                 region: Region::Parts(mesh.parts.iter().map(|p| p.name.clone()).collect()),
                 thickness: 1.0,
+                kind: Default::default(),
             }],
             steps: vec![step],
             ..FeModel::default()
@@ -1400,6 +1504,78 @@ mod tests {
         model.steps[0].boundary_conditions[0].kind =
             BoundaryKind::Displacement([None, Some(0.0), None, None, None, None]);
         assert_eq!(check(&model, &mesh), []);
+    }
+
+    #[test]
+    fn a_beam_fixed_at_one_end_is_held_by_its_rotations() {
+        let line = |type_name: &str| {
+            let mut mesh = FeMesh::default();
+            for (id, x) in [0.0, 1.0, 2.0].into_iter().enumerate() {
+                mesh.set_node(id as u32 + 1, [x, 0.0, 0.0]);
+            }
+            for (id, nodes) in [(1, vec![1, 2]), (2, vec![2, 3])] {
+                mesh.add_element(Element {
+                    id,
+                    type_name: type_name.into(),
+                    shape: ElementShape::Line2,
+                    nodes,
+                })
+                .unwrap();
+            }
+            mesh.parts.push(Part {
+                name: "BEAM".into(),
+                elements: vec![1, 2],
+            });
+            mesh
+        };
+        let mesh = line("B31");
+        let mut model = model(&mesh);
+        model.sections[0].kind = crate::SectionKind::Beam(crate::BeamSection::DEFAULT);
+        model.steps[0].boundary_conditions[0].region = Region::Nodes(vec![1]);
+        model.steps[0].loads[0].region = Region::Nodes(vec![3]);
+        assert_eq!(check(&model, &mesh), []);
+        // Trusses have no rotations: the same support leaves them free to turn.
+        let trusses = line("T3D2");
+        model.sections[0].kind = crate::SectionKind::Truss { area: 1.0 };
+        assert_eq!(check(&model, &trusses)[0].problem, Problem::RigidBodyMotion);
+    }
+
+    #[test]
+    fn heat_transfer_needs_thermal_constants() {
+        let mesh = cubes(1, false);
+        let mut model = model(&mesh);
+        let mut step = Step::new_heat_transfer("Step-1");
+        step.boundary_conditions.push(BoundaryCondition {
+            name: "Temperature-1".into(),
+            active: true,
+            region: Region::Nodes(vec![1]),
+            kind: BoundaryKind::Temperature(20.0),
+        });
+        step.loads.push(Load {
+            name: "Flux-1".into(),
+            active: true,
+            region: Region::Nodes(vec![7]),
+            kind: LoadKind::ConcentratedFlux(10.0),
+        });
+        model.steps = vec![step];
+        // Displacements are free in a heat transfer, and no elasticity is needed.
+        model.materials[0].elastic = None;
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Material(0), Problem::NoConductivity)]
+        );
+        model.materials[0].conductivity = Some(50.0);
+        assert_eq!(check(&model, &mesh), []);
+        if let StepKind::HeatTransfer(settings) = &mut model.steps[0].kind {
+            settings.steady_state = false;
+        }
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [
+                (ModelItem::Material(0), Problem::NoSpecificHeat),
+                (ModelItem::Step(0), Problem::NoInitialTemperature),
+            ]
+        );
     }
 
     #[test]

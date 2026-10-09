@@ -396,13 +396,13 @@ impl MeshItemEditor {
                 *faces = (picked.iter())
                     .filter_map(|e| match e {
                         CadEntity::Face(tag) => Some(*tag),
-                        CadEntity::Edge(_) => None,
+                        _ => None,
                     })
                     .collect();
                 *edges = (picked.iter())
                     .filter_map(|e| match e {
                         CadEntity::Edge(tag) => Some(*tag),
-                        CadEntity::Face(_) => None,
+                        _ => None,
                     })
                     .collect();
                 if picked.is_empty() {
@@ -506,6 +506,10 @@ fn algorithm_combo<T: Copy + PartialEq>(
 /// The CAD edge near the hit point, else the CAD face under it.
 pub fn cad_pick(view: &Model, hit: &Hit, precision: f32) -> Option<CadEntity> {
     let mesh = &view.mesh;
+    if hit.line {
+        let element = view.skin(hit.part).line_elements[hit.face];
+        return view.cad_entity(mesh.elements()[element].id);
+    }
     let position = |id: NodeId| mesh.node_index(id).map(|n| view.render_position(n));
     let mut nearest: Option<(f32, CadEntity)> = None;
     for &id in &mesh.parts.get(hit.part)?.elements {
@@ -582,6 +586,8 @@ fn entity_preview(view: &Model, entity: CadEntity) -> Preview {
                 points: Vec::new(),
             }
         }
+        // The display has no vertices to pick.
+        CadEntity::Vertex(_) => Preview::default(),
     }
 }
 
@@ -591,6 +597,7 @@ fn entities_highlight(view: &Model, entities: &BTreeSet<CadEntity>) -> Highlight
         match *entity {
             CadEntity::Face(tag) => faces.insert(tag),
             CadEntity::Edge(tag) => edges.insert(tag),
+            CadEntity::Vertex(_) => false,
         };
     }
     Highlight {

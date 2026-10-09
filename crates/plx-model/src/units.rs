@@ -70,6 +70,20 @@ pub enum Quantity {
     ForcePerVolume,
     /// Heat flow per area and temperature difference, the gap conductance.
     HeatTransferCoefficient,
+    /// A change of temperature, converted without the offset of the scale.
+    TemperatureDifference,
+    /// Heat flow per length and temperature difference.
+    ThermalConductivity,
+    /// Energy per mass and temperature difference.
+    SpecificHeat,
+    /// Strain per temperature difference.
+    ThermalExpansion,
+    /// Heat flow per area.
+    HeatFlux,
+    /// Heat generated per volume.
+    PowerPerVolume,
+    /// Radiated power per area and fourth power of the absolute temperature.
+    StefanBoltzmann,
 }
 
 impl Quantity {
@@ -96,6 +110,13 @@ impl Quantity {
             Quantity::Frequency => "Frequenz",
             Quantity::ForcePerVolume => "Kraft pro Volumen",
             Quantity::HeatTransferCoefficient => "Wärmeübergangskoeffizient",
+            Quantity::TemperatureDifference => "Temperaturdifferenz",
+            Quantity::ThermalConductivity => "Wärmeleitfähigkeit",
+            Quantity::SpecificHeat => "Spezifische Wärmekapazität",
+            Quantity::ThermalExpansion => "Wärmeausdehnungskoeffizient",
+            Quantity::HeatFlux => "Wärmestromdichte",
+            Quantity::PowerPerVolume => "Leistung pro Volumen",
+            Quantity::StefanBoltzmann => "Stefan-Boltzmann-Konstante",
         }
     }
 
@@ -121,6 +142,13 @@ impl Quantity {
             Quantity::Frequency => d(0, 0, -1, 0, 0),
             Quantity::ForcePerVolume => d(-2, 1, -2, 0, 0),
             Quantity::HeatTransferCoefficient => d(0, 1, -3, -1, 0),
+            Quantity::TemperatureDifference => d(0, 0, 0, 1, 0),
+            Quantity::ThermalConductivity => d(1, 1, -3, -1, 0),
+            Quantity::SpecificHeat => d(2, 0, -2, -1, 0),
+            Quantity::ThermalExpansion => d(0, 0, 0, -1, 0),
+            Quantity::HeatFlux => d(0, 1, -3, 0, 0),
+            Quantity::PowerPerVolume => d(-1, 1, -3, 0, 0),
+            Quantity::StefanBoltzmann => d(0, 1, -3, -4, 0),
         }
     }
 }
@@ -232,6 +260,18 @@ impl UnitSystem {
             Frequency => ["Hz"; 4],
             ForcePerVolume => ["N/m³", "N/mm³", "kN/m³", "lbf/in³"],
             HeatTransferCoefficient => ["W/(m²·°C)", "mW/(mm²·°C)", "kW/(m²·°C)", "lbf/(in·s·°F)"],
+            TemperatureDifference => ["°C", "°C", "°C", "°F"],
+            ThermalConductivity => ["W/(m·°C)", "mW/(mm·°C)", "kW/(m·°C)", "lbf/(s·°F)"],
+            SpecificHeat => ["J/(kg·°C)", "mJ/(t·°C)", "kJ/(t·°C)", "in²/(s²·°F)"],
+            ThermalExpansion => ["1/°C", "1/°C", "1/°C", "1/°F"],
+            HeatFlux => ["W/m²", "mW/mm²", "kW/m²", "lbf/(in·s)"],
+            PowerPerVolume => ["W/m³", "mW/mm³", "kW/m³", "lbf/(in²·s)"],
+            StefanBoltzmann => [
+                "W/(m²·K^4)",
+                "mW/(mm²·K^4)",
+                "kW/(m²·K^4)",
+                "lbf/(in·s·°F^4)",
+            ],
         };
         match self {
             UnitSystem::Unitless => "",
@@ -331,8 +371,14 @@ impl UnitSystem {
                 self.unit(quantity)
             ));
         }
-        // A temperature in °C or °F counts from its scale's zero; one in K is absolute.
-        let si = number * parsed.factor + parsed.zero.unwrap_or(0.0);
+        // A temperature in °C or °F counts from its scale's zero; one in K is absolute. Other
+        // quantities only measure differences ("1/°C").
+        let zero = if quantity == Quantity::Temperature {
+            parsed.zero.unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        let si = number * parsed.factor + zero;
         let value = if quantity == Quantity::Temperature {
             self.of_si(si, quantity)
         } else {
@@ -725,6 +771,37 @@ mod tests {
         parses(InLbSF, "100 °C", Temperature, 212.0);
     }
 
+    const THERMAL_QUANTITIES: [Quantity; 7] = [
+        TemperatureDifference,
+        ThermalConductivity,
+        SpecificHeat,
+        ThermalExpansion,
+        HeatFlux,
+        PowerPerVolume,
+        StefanBoltzmann,
+    ];
+
+    #[test]
+    fn thermal_units_are_converted() {
+        parses(MmTonSC, "50 W/(m·K)", ThermalConductivity, 50.0);
+        parses(MmTonSC, "460 J/(kg·K)", SpecificHeat, 4.6e8);
+        parses(MmTonSC, "1.2e-5 1/K", ThermalExpansion, 1.2e-5);
+        parses(MmTonSC, "1.2e-5 1/°C", ThermalExpansion, 1.2e-5);
+        parses(InLbSF, "1.8 1/°C", ThermalExpansion, 1.0);
+        parses(MmTonSC, "1 W/m²", HeatFlux, 1e-3);
+        parses(MmTonSC, "1 W/m³", PowerPerVolume, 1e-6);
+        parses(MmTonSC, "5.67e-8 W/(m²·K^4)", StefanBoltzmann, 5.67e-11);
+        assert!(close(
+            MKgSC.convert(1.0, ThermalExpansion, InLbSF),
+            5.0 / 9.0
+        ));
+        parses(MmTonSC, "5 K", TemperatureDifference, 5.0);
+        assert!(close(
+            MKgSC.convert(5.0, TemperatureDifference, InLbSF),
+            9.0
+        ));
+    }
+
     #[test]
     fn wrong_or_unknown_units_are_refused() {
         assert!(MmTonSC.parse_value("3 kg", Length).is_err());
@@ -772,6 +849,7 @@ mod tests {
                 .into_iter()
                 .chain(DERIVED_QUANTITIES)
                 .chain([ForcePerVolume, HeatTransferCoefficient])
+                .chain(THERMAL_QUANTITIES)
             {
                 let unit = units.unit(quantity);
                 let text = format!("1 {unit}");
