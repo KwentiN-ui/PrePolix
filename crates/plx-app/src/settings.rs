@@ -1,6 +1,7 @@
 //! User settings, grouped like PrePoMax's settings dialog and stored by eframe in the user's
 //! data directory (Linux `~/.local/share/prepolix`, Windows `%APPDATA%\prepolix\data`).
 
+use crate::numeric;
 use serde::{Deserialize, Serialize};
 
 /// Key of the settings in eframe's storage.
@@ -273,7 +274,7 @@ impl SettingsWindow {
                 ui.horizontal(|ui| {
                     ui.label("Farbstufen (neu geöffnete Ergebnisse)");
                     ui.add(
-                        egui::DragValue::new(&mut p.levels)
+                        numeric::drag_value(&mut p.levels)
                             .range(2..=plx_render::contour::MAX_LEVELS),
                     );
                 });
@@ -288,7 +289,7 @@ impl SettingsWindow {
                         ui.text_edit_singleline(&mut solver.executable);
                         ui.end_row();
                         ui.label("Threads");
-                        ui.add(egui::DragValue::new(&mut solver.threads).range(1..=256));
+                        ui.add(numeric::drag_value(&mut solver.threads).range(1..=256));
                         ui.end_row();
                         ui.label("Arbeitsverzeichnis");
                         ui.add(
