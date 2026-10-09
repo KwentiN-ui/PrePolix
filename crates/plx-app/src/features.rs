@@ -1,6 +1,7 @@
-//! Dialogs of PrePoMax's features, reference points and coordinate systems, and of result
-//! paths: the values of the shown result along a straight line through the model, as a plot
-//! and a table.
+//! Dialogs of PrePoMax's features, reference points, coordinate systems and planes, and of
+//! results on them: result paths with the values of the shown result along a straight line
+//! through the model, as a plot and a table, and plane results with the values where a plane
+//! cuts the model.
 //!
 //! Points are typed in or picked in the 3D view: one node is itself the point, an edge or a
 //! face gives its centre, e.g. that of a hole. The FE model and every results file have
@@ -12,9 +13,10 @@ use egui::{Color32, Pos2, Rect, RichText, Stroke, Ui, pos2, vec2};
 use glam::Vec3;
 use plx_mesh::NodeId;
 use plx_model::{
-    CoordinateSystem, CoordinateSystemKind, FeModel, PointRef, ReferencePoint, ResultPath,
-    next_name,
+    CoordinatePlane, CoordinateSystem, CoordinateSystemKind, FeModel, GLOBAL, Plane, PlaneSource,
+    PointRef, ReferencePoint, ResultPath, ResultPlane, next_name,
 };
+use plx_render::SectionValues;
 use plx_results::path::{self, PathPoint};
 
 use crate::model::{Highlight, Hit, Model};
@@ -29,7 +31,9 @@ use crate::viewport::Preview;
 pub enum FeatureKind {
     ReferencePoint,
     CoordinateSystem,
+    Plane,
     ResultPath,
+    ResultPlane,
 }
 
 /// A feature of a model, by kind and index.
@@ -48,12 +52,16 @@ enum Slot {
     PointXy,
     Start,
     End,
+    /// A point of a plane, by its place in the definition.
+    PlanePoint(usize),
 }
 
 enum Draft {
     ReferencePoint(ReferencePoint),
     CoordinateSystem(CoordinateSystem),
+    Plane(Plane),
     Path(ResultPath),
+    ResultPlane(ResultPlane),
 }
 
 pub enum FeatureResult {
@@ -116,6 +124,27 @@ impl FeatureDialog {
                 path.end = PointRef::Coordinates(end);
                 Draft::Path(path)
             }
+            FeatureKind::Plane => {
+                let mut plane = Plane::new(next_name("Plane", fe.planes.iter().map(|p| &*p.name)));
+                // The global XY plane through the middle of the model.
+                plane.source = PlaneSource::CoordinateSystem {
+                    system: GLOBAL.into(),
+                    plane: CoordinatePlane::Xy,
+                    offset: center[2],
+                };
+                Draft::Plane(plane)
+            }
+            FeatureKind::ResultPlane => {
+                let names = fe.result_planes.iter().map(|p| p.name.as_str());
+                Draft::ResultPlane(ResultPlane {
+                    name: next_name("Plane_Result", names),
+                    plane: fe
+                        .planes
+                        .first()
+                        .map(|p| p.name.clone())
+                        .unwrap_or_default(),
+                })
+            }
         };
         Self::new(draft, None, results, model)
     }
@@ -130,6 +159,10 @@ impl FeatureDialog {
                 Draft::CoordinateSystem(fe.coordinate_systems.get(item.index)?.clone())
             }
             FeatureKind::ResultPath => Draft::Path(fe.result_paths.get(item.index)?.clone()),
+            FeatureKind::Plane => Draft::Plane(fe.planes.get(item.index)?.clone()),
+            FeatureKind::ResultPlane => {
+                Draft::ResultPlane(fe.result_planes.get(item.index)?.clone())
+            }
         };
         Some(Self::new(draft, Some(item.index), results, model))
     }
@@ -156,6 +189,16 @@ impl FeatureDialog {
             Draft::ReferencePoint(_) => FeatureKind::ReferencePoint,
             Draft::CoordinateSystem(_) => FeatureKind::CoordinateSystem,
             Draft::Path(_) => FeatureKind::ResultPath,
+            Draft::Plane(_) => FeatureKind::Plane,
+            Draft::ResultPlane(_) => FeatureKind::ResultPlane,
+        }
+    }
+
+    /// The plane whose cut the edited plane result shows.
+    pub fn result_plane(&self) -> Option<&str> {
+        match &self.draft {
+            Draft::ResultPlane(result) => Some(&result.plane),
+            _ => None,
         }
     }
 
@@ -207,6 +250,14 @@ impl FeatureDialog {
             (Draft::CoordinateSystem(c), _) => c.point_xy = picked,
             (Draft::Path(p), Slot::Start) => p.start = PointRef::Coordinates(picked),
             (Draft::Path(p), _) => p.end = PointRef::Coordinates(picked),
+            (Draft::Plane(plane), Slot::PlanePoint(k)) => match &mut plane.source {
+                PlaneSource::PointNormal { point, .. } => *point = PointRef::Coordinates(picked),
+                PlaneSource::ThreePoints { points } => {
+                    points[k.min(2)] = PointRef::Coordinates(picked);
+                }
+                PlaneSource::CoordinateSystem { .. } => {}
+            },
+            (Draft::Plane(_) | Draft::ResultPlane(_), _) => {}
         }
         self.marked = nodes;
         self.picking = None;
@@ -230,6 +281,8 @@ impl FeatureDialog {
             Draft::ReferencePoint(r) => ("Reference Point", &r.name),
             Draft::CoordinateSystem(c) => ("Coordinate System", &c.name),
             Draft::Path(p) => ("Pfad", &p.name),
+            Draft::Plane(p) => ("Plane", &p.name),
+            Draft::ResultPlane(p) => ("Ergebnisse in der Ebene", &p.name),
         };
         let action = if self.index.is_some() {
             "bearbeiten"
@@ -239,10 +292,17 @@ impl FeatureDialog {
         format!("{kind} {action}: {name}")
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, model: &Model) -> FeatureResult {
+    /// `cut` holds the values on the plane of an edited plane result, on the undeformed mesh.
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        model: &Model,
+        cut: Option<&SectionValues>,
+    ) -> FeatureResult {
         let mut result = FeatureResult::Open;
         let mut open = true;
         let is_path = matches!(self.draft, Draft::Path(_));
+        let is_plane_result = matches!(self.draft, Draft::ResultPlane(_));
         let window = egui::Window::new(self.title())
             .id(egui::Id::new("feature dialog"))
             .open(&mut open)
@@ -258,6 +318,10 @@ impl FeatureDialog {
                 if is_path {
                     ui.separator();
                     self.path_results(ui, model);
+                }
+                if is_plane_result {
+                    ui.separator();
+                    self.plane_results(ui, model, cut);
                 }
                 if let Some(error) = &self.error {
                     ui.colored_label(Color32::from_rgb(200, 0, 0), error);
@@ -362,7 +426,136 @@ impl FeatureDialog {
                 ui.add(numeric::drag_value(&mut path.points).range(2..=10_000));
                 ui.end_row();
             }
+            Draft::Plane(plane) => {
+                name_row(ui, &mut plane.name);
+                plane_rows(ui, plane, fe, picking, speed);
+            }
+            Draft::ResultPlane(result) => {
+                name_row(ui, &mut result.name);
+                ui.label("Plane");
+                if fe.planes.is_empty() {
+                    ui.colored_label(
+                        Color32::from_rgb(200, 0, 0),
+                        "Zuerst unter Features eine Plane anlegen.",
+                    );
+                } else {
+                    egui::ComboBox::from_id_salt("result plane")
+                        .selected_text(result.plane.as_str())
+                        .width(200.0)
+                        .show_ui(ui, |ui| {
+                            for plane in &fe.planes {
+                                ui.selectable_value(
+                                    &mut result.plane,
+                                    plane.name.clone(),
+                                    &plane.name,
+                                );
+                            }
+                        });
+                }
+                ui.end_row();
+            }
         }
+    }
+
+    /// The values of the shown result where the plane cuts the visible parts.
+    fn plane_results(&mut self, ui: &mut Ui, model: &Model, cut: Option<&SectionValues>) {
+        let Draft::ResultPlane(result) = &self.draft else {
+            return;
+        };
+        let Some(view) = &model.results else {
+            ui.weak("Keine Ergebnisse geladen.");
+            return;
+        };
+        let Some((field, component)) = view.current() else {
+            ui.weak("Im Results-Baum eine Komponente wählen.");
+            return;
+        };
+        let plane = model.fe.plane(&result.plane);
+        if let Some(Err(error)) = plane.map(|p| p.resolve(&model.fe)) {
+            ui.colored_label(Color32::from_rgb(200, 0, 0), error);
+            return;
+        }
+        let header = format!("{} {}", field.name, component.name);
+        ui.horizontal(|ui| {
+            ui.strong(&header);
+            ui.label(format!(
+                "Inkrement {}",
+                crate::results::ResultsView::increment_label(
+                    view.current_increment().unwrap_or(&view.increments[0])
+                )
+            ));
+        });
+        let Some((cut, [min, max])) = cut.and_then(|c| Some((c, c.extremes?))) else {
+            ui.colored_label(
+                Color32::from_rgb(200, 0, 0),
+                "Die Ebene schneidet keinen sichtbaren Part.",
+            );
+            return;
+        };
+        let at = |p: glam::DVec3| {
+            format!(
+                "bei ({}, {}, {})",
+                format_value(p.x as f32),
+                format_value(p.y as f32),
+                format_value(p.z as f32)
+            )
+        };
+        egui::Grid::new("plane values")
+            .num_columns(3)
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Min");
+                ui.strong(format_value(min.1));
+                ui.weak(at(min.0));
+                ui.end_row();
+                ui.label("Max");
+                ui.strong(format_value(max.1));
+                ui.weak(at(max.0));
+                ui.end_row();
+                if let Some(mean) = cut.mean() {
+                    let (label, measure, name) = if cut.area > 0.0 {
+                        ("Mittelwert", cut.area, "Schnittfläche")
+                    } else {
+                        ("Mittelwert", cut.length, "Schnittlänge")
+                    };
+                    ui.label(label);
+                    ui.strong(format_value(mean as f32));
+                    ui.weak(if cut.area > 0.0 {
+                        "flächengewichtet"
+                    } else {
+                        "längengewichtet"
+                    });
+                    ui.end_row();
+                    ui.label(name);
+                    ui.label(format_value(measure as f32));
+                    ui.end_row();
+                }
+                ui.label("Schnittpunkte");
+                ui.label(cut.points.len().to_string());
+                ui.end_row();
+            });
+        ui.horizontal(|ui| {
+            if ui.button("In Zwischenablage kopieren").clicked() {
+                ui.ctx().copy_text(cut_csv(cut, &header, '\t'));
+            }
+            if ui.button("Als CSV speichern …").clicked() {
+                let name = format!("{}.csv", result.name);
+                if let Some(file) = rfd::FileDialog::new()
+                    .add_filter("CSV", &["csv"])
+                    .set_file_name(name)
+                    .save_file()
+                {
+                    let csv = cut_csv(cut, &header, ';');
+                    self.error = std::fs::write(&file, csv)
+                        .err()
+                        .map(|e| format!("{}: {e}", file.display()));
+                }
+            }
+        });
+        ui.weak(
+            "Werte am unverformten Netz. Der Haken im Results-Baum zeigt nur die \
+             Schnittfläche im 3D-Fenster.",
+        );
     }
 
     /// The plot and table of the shown result along the path.
@@ -485,6 +678,8 @@ impl FeatureDialog {
             Draft::ReferencePoint(r) => (&r.name, names(&fe.reference_points, |r| &r.name)),
             Draft::CoordinateSystem(c) => (&c.name, names(&fe.coordinate_systems, |c| &c.name)),
             Draft::Path(p) => (&p.name, names(&fe.result_paths, |p| &p.name)),
+            Draft::Plane(p) => (&p.name, names(&fe.planes, |p| &p.name)),
+            Draft::ResultPlane(p) => (&p.name, names(&fe.result_planes, |p| &p.name)),
         };
         if name.trim().is_empty() {
             return Err("Bitte einen Namen eingeben.".into());
@@ -500,6 +695,11 @@ impl FeatureDialog {
             }
             Draft::CoordinateSystem(c) => c.axes().map(|_| ()),
             Draft::Path(p) => p.samples(fe).map(|_| ()),
+            Draft::Plane(p) => p.resolve(fe).map(|_| ()),
+            Draft::ResultPlane(p) => match fe.plane(&p.plane) {
+                Some(plane) => plane.resolve(fe).map(|_| ()),
+                None => Err("Bitte eine Plane wählen.".into()),
+            },
             Draft::ReferencePoint(_) => Ok(()),
         }
     }
@@ -521,9 +721,21 @@ impl FeatureDialog {
                 put(&mut fe.reference_points, self.index, point);
             }
             Draft::CoordinateSystem(system) => {
+                if let Some(old) = self.index.and_then(|i| fe.coordinate_systems.get(i)) {
+                    let old = old.name.clone();
+                    fe.rename_coordinate_system(&old, &system.name);
+                }
                 put(&mut fe.coordinate_systems, self.index, system);
             }
+            Draft::Plane(plane) => {
+                if let Some(old) = self.index.and_then(|i| fe.planes.get(i)) {
+                    let old = old.name.clone();
+                    fe.rename_plane(&old, &plane.name);
+                }
+                put(&mut fe.planes, self.index, plane);
+            }
             Draft::Path(path) => put(&mut fe.result_paths, self.index, path),
+            Draft::ResultPlane(result) => put(&mut fe.result_planes, self.index, result),
         }
     }
 
@@ -532,7 +744,8 @@ impl FeatureDialog {
         match &self.draft {
             Draft::ReferencePoint(r) => Some(point_mark(model, r, true)),
             Draft::CoordinateSystem(c) => system_mark(model, c, true),
-            Draft::Path(_) => None,
+            Draft::Plane(p) => plane_mark(model, p, true),
+            Draft::Path(_) | Draft::ResultPlane(_) => None,
         }
     }
 
@@ -558,11 +771,13 @@ pub fn delete(fe: &mut FeModel, item: FeatureItem) -> bool {
         FeatureKind::ReferencePoint => remove(&mut fe.reference_points, item.index),
         FeatureKind::CoordinateSystem => remove(&mut fe.coordinate_systems, item.index),
         FeatureKind::ResultPath => remove(&mut fe.result_paths, item.index),
+        FeatureKind::Plane => remove(&mut fe.planes, item.index),
+        FeatureKind::ResultPlane => remove(&mut fe.result_planes, item.index),
     }
 }
 
-/// The reference points and coordinate systems of a model as drawn in the 3D view, with
-/// `selected` marked and `replaced` left out for the dialog to draw.
+/// The reference points, coordinate systems and planes of a model as drawn in the 3D view,
+/// with `selected` marked and `replaced` left out for the dialog to draw.
 pub fn marks(
     model: &Model,
     selected: Option<FeatureItem>,
@@ -577,7 +792,179 @@ pub fn marks(
         .filter_map(|(i, c)| {
             system_mark(model, c, selected == is(FeatureKind::CoordinateSystem, i))
         });
-    points.chain(systems).collect()
+    let planes = (model.fe.planes.iter().enumerate())
+        .filter(|(i, _)| replaced != is(FeatureKind::Plane, *i))
+        .filter_map(|(i, p)| plane_mark(model, p, selected == is(FeatureKind::Plane, i)));
+    points.chain(systems).chain(planes).collect()
+}
+
+/// A plane as the rectangle that covers the model's bounding box seen along the normal, a
+/// little larger, with its sides along global axes where the plane allows.
+fn plane_mark(model: &Model, plane: &Plane, selected: bool) -> Option<FeatureMark> {
+    use glam::DVec3;
+    let (point, normal) = plane.resolve(&model.fe).ok()?;
+    let (min, max) = model.mesh.bounds()?;
+    let (point, normal) = (DVec3::from(point), DVec3::from(normal));
+    let (min, max) = (DVec3::from(min), DVec3::from(max));
+    let center = (min + max) * 0.5;
+    let on_plane = center - normal * normal.dot(center - point);
+    // The global axis most in the plane gives the first side.
+    let axis = [DVec3::X, DVec3::Y, DVec3::Z]
+        .into_iter()
+        .min_by(|a, b| a.dot(normal).abs().total_cmp(&b.dot(normal).abs()))
+        .unwrap_or(DVec3::X);
+    let u = (axis - normal * axis.dot(normal)).normalize_or(normal.any_orthonormal_vector());
+    let v = normal.cross(u);
+    let (mut low, mut high) = (glam::DVec2::splat(f64::INFINITY), glam::DVec2::NEG_INFINITY);
+    for k in 0..8 {
+        let corner = DVec3::new(
+            if k & 1 == 0 { min.x } else { max.x },
+            if k & 2 == 0 { min.y } else { max.y },
+            if k & 4 == 0 { min.z } else { max.z },
+        );
+        let d = corner - on_plane;
+        let local = glam::DVec2::new(d.dot(u), d.dot(v));
+        (low, high) = (low.min(local), high.max(local));
+    }
+    let margin = (high - low).max_element().max(1e-9) * 0.08;
+    let (low, high) = (low - margin, high + margin);
+    let at = |a: f64, b: f64| model.to_render((on_plane + u * a + v * b).to_array());
+    let middle = (low + high) * 0.5;
+    Some(FeatureMark::Plane {
+        corners: [
+            at(high.x, high.y),
+            at(low.x, high.y),
+            at(low.x, low.y),
+            at(high.x, low.y),
+        ],
+        center: at(middle.x, middle.y),
+        normal: normal.as_vec3(),
+        name: plane.name.clone(),
+        selected,
+    })
+}
+
+/// The points where a plane cuts the model with their values, as a table.
+fn cut_csv(cut: &SectionValues, header: &str, separator: char) -> String {
+    let s = separator;
+    let mut csv = format!("X{s}Y{s}Z{s}{header}\n");
+    for (position, value) in &cut.points {
+        csv.push_str(&format!(
+            "{}{s}{}{s}{}{s}{}\n",
+            position.x, position.y, position.z, value
+        ));
+    }
+    csv
+}
+
+/// The definition of a plane: by a point and normal, three points, or a plane of a
+/// coordinate system.
+fn plane_rows(
+    ui: &mut Ui,
+    plane: &mut Plane,
+    fe: &FeModel,
+    picking: &mut Option<Slot>,
+    speed: f64,
+) {
+    let kind = match plane.source {
+        PlaneSource::CoordinateSystem { .. } => 0,
+        PlaneSource::ThreePoints { .. } => 1,
+        PlaneSource::PointNormal { .. } => 2,
+    };
+    ui.label("Typ");
+    let mut chosen = kind;
+    ui.horizontal(|ui| {
+        ui.radio_value(&mut chosen, 0, "Koordinatensystem");
+        ui.radio_value(&mut chosen, 1, "Drei Punkte");
+        ui.radio_value(&mut chosen, 2, "Punkt und Normale");
+    });
+    ui.end_row();
+    if chosen != kind {
+        // The new definition starts from the plane as it is now.
+        let (point, normal) = plane.resolve(fe).unwrap_or(([0.0; 3], [0.0, 0.0, 1.0]));
+        let at = PointRef::Coordinates;
+        plane.source = match chosen {
+            0 => PlaneSource::CoordinateSystem {
+                system: GLOBAL.into(),
+                plane: CoordinatePlane::Xy,
+                offset: point[2],
+            },
+            1 => {
+                let n = glam::DVec3::from(normal);
+                let (u, v) = n.any_orthonormal_pair();
+                let p = glam::DVec3::from(point);
+                PlaneSource::ThreePoints {
+                    points: [at(point), at((p + u).to_array()), at((p + v).to_array())],
+                }
+            }
+            _ => PlaneSource::PointNormal {
+                point: at(point),
+                normal,
+            },
+        };
+        *picking = None;
+    }
+    match &mut plane.source {
+        PlaneSource::CoordinateSystem {
+            system,
+            plane,
+            offset,
+        } => {
+            ui.label("Koordinatensystem");
+            egui::ComboBox::from_id_salt("plane system")
+                .selected_text(system.as_str())
+                .width(200.0)
+                .show_ui(ui, |ui| {
+                    let names = std::iter::once(GLOBAL)
+                        .chain(fe.coordinate_systems.iter().map(|c| c.name.as_str()));
+                    for name in names {
+                        ui.selectable_value(system, name.to_string(), name);
+                    }
+                });
+            ui.end_row();
+            ui.label("Ebene");
+            ui.horizontal(|ui| {
+                for candidate in CoordinatePlane::ALL {
+                    let button = egui::Button::selectable(*plane == candidate, candidate.label())
+                        .frame_when_inactive(true);
+                    if ui.add(button).clicked() {
+                        *plane = candidate;
+                    }
+                }
+            });
+            ui.end_row();
+            ui.label("Abstand");
+            ui.add(numeric::drag_value(offset).speed(speed).max_decimals(6));
+            ui.end_row();
+        }
+        PlaneSource::ThreePoints { points } => {
+            for (k, point) in points.iter_mut().enumerate() {
+                let label = ["Punkt 1", "Punkt 2", "Punkt 3"][k];
+                point_ref_rows(ui, label, Slot::PlanePoint(k), point, fe, picking, speed);
+            }
+            ui.label("");
+            ui.weak("Die Normale folgt der Rechte-Hand-Regel von 1 über 2 nach 3.");
+            ui.end_row();
+        }
+        PlaneSource::PointNormal { point, normal } => {
+            point_ref_rows(ui, "Punkt", Slot::PlanePoint(0), point, fe, picking, speed);
+            ui.label(RichText::new("Normale").strong());
+            ui.horizontal(|ui| {
+                for (axis, label) in ["X", "Y", "Z"].into_iter().enumerate() {
+                    if ui
+                        .button(label)
+                        .on_hover_text("Normale entlang der Achse")
+                        .clicked()
+                    {
+                        *normal = [0.0; 3];
+                        normal[axis] = 1.0;
+                    }
+                }
+            });
+            ui.end_row();
+            coordinate_rows(ui, normal, 0.01);
+        }
+    }
 }
 
 fn point_mark(model: &Model, point: &ReferencePoint, selected: bool) -> FeatureMark {

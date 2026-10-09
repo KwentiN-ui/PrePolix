@@ -25,7 +25,7 @@ use crate::overlay::{Marker, Overlay};
 use crate::properties;
 use crate::results::{Deformation, ResultsView, format_legend_value};
 use crate::screenshot::{self, Screenshot};
-use crate::section::{SectionDialog, SectionResult, SectionView};
+use crate::section::{PlaneDefinition, SectionDialog, SectionResult, SectionView};
 use crate::selection::Operation;
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::setup::{Editor, EditorResult, NewItem};
@@ -116,8 +116,9 @@ struct Workbench {
     section_dialog: Option<SectionDialog>,
     /// Open dialog of the transformations of the current results.
     transformation_dialog: Option<TransformationDialog>,
-    /// The section view shown in the scene of the given version, to rebuild it on changes.
-    section_shown: Option<(u64, SectionView)>,
+    /// The cut shown in the scene of the given version with the visible parts, and whether
+    /// it shows the section faces alone, to rebuild it on changes.
+    section_shown: Option<(u64, Vec<bool>, SectionView, bool)>,
     /// The boundary conditions and loads, with the shown parts and the exploded view, whose
     /// symbols are drawn.
     symbols_shown: Option<(Vec<symbols::Item>, Vec<bool>, u64)>,
@@ -127,11 +128,12 @@ struct Workbench {
     last_exploded: crate::exploded::Parameters,
     /// Version of the exploded view of the FE model the hot spot paths were drawn for.
     hot_spot_explosion: u64,
-    /// Open dialog of a reference point, coordinate system or result path.
+    /// Open dialog of a feature or of results on one.
     feature_dialog: Option<FeatureDialog>,
-    /// Where the shown values are smallest and largest on the section plane, `[min, max]`
-    /// in model coordinates, while only the section is shown.
-    section_extremes: Option<[(glam::DVec3, f32); 2]>,
+    /// The shown values on the plane of the shown plane result, in model coordinates: where
+    /// the plane cuts the parts as shown, and where it cuts the undeformed mesh.
+    section_values: Option<plx_render::SectionValues>,
+    plane_values: Option<plx_render::SectionValues>,
 }
 
 /// Which model the 3D view shows: the geometry, the FE model or one of the results.
@@ -209,7 +211,8 @@ impl PrepolixApp {
                 section_dialog: None,
                 transformation_dialog: None,
                 feature_dialog: None,
-                section_extremes: None,
+                section_values: None,
+                plane_values: None,
                 section_shown: None,
                 symbols_shown: None,
                 exploded_dialog: None,
@@ -927,6 +930,7 @@ impl Workbench {
                     if let Some(old) = previous.map(|i| &self.results[i].fe) {
                         model.fe.add_missing_features(old);
                         model.fe.result_paths = old.result_paths.clone();
+                        model.fe.result_planes = old.result_planes.clone();
                     }
                     if let Some(project) = &self.model {
                         model.fe.add_missing_features(&project.fe);
@@ -1096,6 +1100,9 @@ impl Workbench {
             results.field = field;
             results.component = component;
             self.results_changed = true;
+        }
+        if let (Some(shown), Some(results)) = (response.plane_result, self.shown_results_mut()) {
+            results.plane_result = shown;
         }
         if let Some(TreeItem::Part(index)) = response.open {
             let name = self.shown().and_then(|m| m.parts.get(index));
@@ -1576,8 +1583,9 @@ impl Workbench {
     fn create(&mut self, kind: NewItem) {
         if let NewItem::Feature(kind) = kind {
             // Paths read results; features belong to the tab they are created on.
-            let results = (kind == FeatureKind::ResultPath || self.tree_view == TreeView::Results)
-                .then_some(self.current_result);
+            let on_results = matches!(kind, FeatureKind::ResultPath | FeatureKind::ResultPlane);
+            let results =
+                (on_results || self.tree_view == TreeView::Results).then_some(self.current_result);
             if let Some(model) = self.feature_model(results) {
                 self.feature_dialog = Some(FeatureDialog::create(kind, results, model));
                 if results.is_some() {
@@ -2652,6 +2660,15 @@ impl Workbench {
             {
                 self.tree.selected = None;
                 self.feature_dialog = None;
+                if let Some(view) = &mut model.results
+                    && feature.kind == FeatureKind::ResultPlane
+                {
+                    view.plane_result = match view.plane_result {
+                        Some(i) if i == feature.index => None,
+                        Some(i) if i > feature.index => Some(i - 1),
+                        other => other,
+                    };
+                }
             }
         } else if let Some(model) = self.model.as_mut()
             && crate::setup::delete(&mut model.fe, &item)
@@ -3135,7 +3152,8 @@ impl Workbench {
         let Some(model) = model else {
             return;
         };
-        match dialog.show(ctx, model) {
+        let cut = self.plane_values.as_ref();
+        match dialog.show(ctx, model, cut) {
             FeatureResult::Open => self.feature_dialog = Some(dialog),
             FeatureResult::Ok => {
                 dialog.apply(&mut model.fe);
@@ -3190,10 +3208,29 @@ impl Workbench {
         self.viewport.overlay.result_path = result_path;
     }
 
-    /// Cuts the scene at the section plane being edited or shown, when it or the scene
-    /// changed.
+    /// The plane whose cut the shown results show alone: that of a plane result being
+    /// edited, or of the checked one; a point on it and its unit normal.
+    fn shown_plane_cut(&self) -> Option<(glam::DVec3, glam::DVec3)> {
+        if self.tree_view != TreeView::Results {
+            return None;
+        }
+        let model = self.results.get(self.current_result)?;
+        let view = model.results.as_ref()?;
+        let edited = (self.feature_dialog.as_ref())
+            .filter(|d| d.results == Some(self.current_result))
+            .and_then(FeatureDialog::result_plane);
+        let name = match edited {
+            Some(name) => name,
+            None => &model.fe.result_planes.get(view.plane_result?)?.plane,
+        };
+        let (point, normal) = model.fe.plane(name)?.resolve(&model.fe).ok()?;
+        Some((point.into(), normal.into()))
+    }
+
+    /// Cuts the scene at the section plane being edited or shown, or at the plane of shown
+    /// plane results, when it or the scene changed.
     fn update_section(&mut self) {
-        // Planes of coordinate systems follow them.
+        // Planes of features follow them.
         if let Some(fe) = self.shown().map(|m| m.fe.clone()) {
             if let Some(dialog) = &mut self.section_dialog {
                 dialog.draft.resolve(&fe);
@@ -3205,13 +3242,27 @@ impl Workbench {
         // As in PrePoMax, the section view rests while the exploded view is edited or moves.
         let exploding = self.exploded_dialog.is_some()
             || self.shown().is_some_and(|m| m.explosion.is_animating());
-        let wanted = self
-            .section_dialog
-            .as_ref()
+        // Plane results show the cut alone, in place of the section view.
+        let plane = self.shown_plane_cut().map(|(point, normal)| {
+            let definition = PlaneDefinition::PointNormal { point, normal };
+            let cut = SectionView {
+                definition,
+                flipped: false,
+                lighten: false,
+            };
+            (cut, true)
+        });
+        let section = (self.section_dialog.as_ref())
             .map(|d| &d.draft)
             .or(self.section.as_ref())
+            .map(|s| (s.clone(), false));
+        let visible = (self.shown())
+            .map(|m| m.parts.iter().map(|p| p.visible).collect())
+            .unwrap_or_default();
+        let wanted = plane
+            .or(section)
             .filter(|_| !exploding)
-            .map(|s| (self.viewport.scene_version(), s.clone()));
+            .map(|(cut, alone)| (self.viewport.scene_version(), visible, cut, alone));
         if wanted == self.section_shown {
             return;
         }
@@ -3225,10 +3276,9 @@ impl Workbench {
             TreeView::Geometry => self.geometry.as_mut(),
             TreeView::FeModel => self.model.as_mut(),
         };
-        let mut extremes = None;
-        let mut shown_range = None;
+        let (mut values, mut plane_values) = (None, None);
         match (shown, &wanted) {
-            (Some(model), Some((_, section))) => {
+            (Some(model), Some((_, _, section, alone))) => {
                 // The model origin is the centre of its bounds, where a principal plane's
                 // manipulator sits.
                 let anchor = section.anchor(model.origin());
@@ -3237,11 +3287,11 @@ impl Workbench {
                 let faces = model.section_meshes(anchor, normal, section.lighten);
                 model.clip = Some(clip);
                 self.viewport.set_section(Some((clip, &faces)));
-                let only = section.only_section && model.results.is_some();
-                self.viewport.set_sections_only(only);
-                if only {
-                    extremes = model.section_extremes(anchor, normal);
-                    shown_range = Some(extremes.map(|[min, max]| (min.1, max.1)));
+                let alone = *alone && model.results.is_some();
+                self.viewport.set_sections_only(alone);
+                if alone {
+                    values = model.section_values(anchor, normal, true);
+                    plane_values = model.section_values(anchor, normal, false);
                 }
             }
             _ => {
@@ -3250,6 +3300,9 @@ impl Workbench {
             }
         }
         // The legend of the shown results takes the range on the plane; the others their own.
+        let shown_range = values
+            .as_ref()
+            .map(|v| v.extremes.map(|[min, max]| (min.1, max.1)));
         let on_results = self.tree_view == TreeView::Results;
         for (index, model) in self.results.iter_mut().enumerate() {
             let range = match shown_range {
@@ -3263,7 +3316,8 @@ impl Workbench {
                 self.results_changed = true;
             }
         }
-        self.section_extremes = extremes;
+        self.section_values = values;
+        self.plane_values = plane_values;
         self.section_shown = wanted;
     }
 
@@ -3773,8 +3827,8 @@ impl Workbench {
             })
         };
         // On the section plane the extremes lie between nodes.
-        let section = self
-            .section_extremes
+        let section = (self.section_values.as_ref())
+            .and_then(|v| v.extremes)
             .filter(|_| view.is_some_and(|v| v.section_range.is_some()));
         let section_marker = |label: &str, (position, value): (glam::DVec3, f32)| {
             Some(Marker {

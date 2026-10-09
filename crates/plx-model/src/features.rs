@@ -1,6 +1,7 @@
-//! PrePoMax's features: reference points and coordinate systems. They describe places and
-//! directions in the model that other items refer to by name, e.g. a section plane spanned by
-//! two axes of a coordinate system or a result path between two reference points.
+//! PrePoMax's features: reference points and coordinate systems, and planes. They describe
+//! places and directions in the model that other items refer to by name, e.g. a plane spanned
+//! by two axes of a coordinate system, results on that plane, or a result path between two
+//! reference points.
 //!
 //! A coordinate system is defined like PrePoMax's and CalculiX's `*ORIENTATION`: by its
 //! origin, a point on its x axis and a point in its xy plane. Cylindrical systems use the same
@@ -166,6 +167,100 @@ impl PointRef {
     }
 }
 
+/// How a plane is defined. Points may be reference points, so the plane follows them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PlaneSource {
+    /// Through a point with a normal, which need not be a unit vector.
+    PointNormal { point: PointRef, normal: [f64; 3] },
+    /// Through three points; the normal follows the right-hand rule.
+    ThreePoints { points: [PointRef; 3] },
+    /// A plane of a coordinate system, or of the global one ([`GLOBAL`]), shifted along its
+    /// normal.
+    CoordinateSystem {
+        system: String,
+        plane: CoordinatePlane,
+        offset: f64,
+    },
+}
+
+/// Name of the global coordinate system, which planes refer to without it being a feature.
+pub const GLOBAL: &str = "Global";
+
+/// A plane of the model, e.g. for results on a cut through it. Nothing of it goes into the
+/// input file.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Plane {
+    pub name: String,
+    pub source: PlaneSource,
+}
+
+impl Plane {
+    /// The global XY plane.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            source: PlaneSource::CoordinateSystem {
+                system: GLOBAL.into(),
+                plane: CoordinatePlane::Xy,
+                offset: 0.0,
+            },
+        }
+    }
+
+    /// A point on the plane and its unit normal.
+    pub fn resolve(&self, model: &FeModel) -> Result<([f64; 3], [f64; 3]), String> {
+        match &self.source {
+            PlaneSource::PointNormal { point, normal } => {
+                let point = point.resolve(model)?;
+                let normal = normalize(*normal)
+                    .ok_or_else(|| format!("{}: Die Normale ist null.", self.name))?;
+                Ok((point, normal))
+            }
+            PlaneSource::ThreePoints { points } => {
+                let [a, b, c] = [&points[0], &points[1], &points[2]];
+                let [a, b, c] = [a.resolve(model)?, b.resolve(model)?, c.resolve(model)?];
+                let (u, v) = (sub(b, a), sub(c, a));
+                let n = cross(u, v);
+                let scale = norm(u).max(norm(v));
+                if norm(n) <= 1e-9 * scale * scale {
+                    return Err(format!(
+                        "{}: Die drei Punkte liegen auf einer Geraden.",
+                        self.name
+                    ));
+                }
+                Ok((a, normalize(n).unwrap_or([0.0, 0.0, 1.0])))
+            }
+            PlaneSource::CoordinateSystem {
+                system,
+                plane,
+                offset,
+            } => {
+                let system = model
+                    .coordinate_system_or_global(system)
+                    .ok_or_else(|| format!("Coordinate System {system} existiert nicht"))?;
+                system.plane(*plane, *offset)
+            }
+        }
+    }
+
+    fn point_refs_mut(&mut self) -> Vec<&mut PointRef> {
+        match &mut self.source {
+            PlaneSource::PointNormal { point, .. } => vec![point],
+            PlaneSource::ThreePoints { points } => points.iter_mut().collect(),
+            PlaneSource::CoordinateSystem { .. } => Vec::new(),
+        }
+    }
+}
+
+/// Results on a plane: the cut through the model, shown alone with the range of the values
+/// on it. Nothing of it goes into the input file.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResultPlane {
+    pub name: String,
+    /// Name of the plane feature.
+    pub plane: String,
+}
+
 /// A straight path through the model on which results are read, e.g. across a wall: values
 /// at `points` evenly spaced points from start to end, interpolated inside the elements.
 /// Nothing of it goes into the input file.
@@ -218,6 +313,18 @@ impl FeModel {
         self.coordinate_systems.iter().find(|c| c.name == name)
     }
 
+    /// A coordinate system of the features, or the global one by its name [`GLOBAL`].
+    pub fn coordinate_system_or_global(&self, name: &str) -> Option<CoordinateSystem> {
+        match self.coordinate_system(name) {
+            Some(system) => Some(system.clone()),
+            None => (name == GLOBAL).then(|| CoordinateSystem::new(GLOBAL)),
+        }
+    }
+
+    pub fn plane(&self, name: &str) -> Option<&Plane> {
+        self.planes.iter().find(|p| p.name == name)
+    }
+
     /// Copies the features of another model that this one lacks, e.g. those of the FE model
     /// into its results.
     pub fn add_missing_features(&mut self, other: &FeModel) {
@@ -231,15 +338,40 @@ impl FeModel {
                 self.coordinate_systems.push(system.clone());
             }
         }
+        for plane in &other.planes {
+            if self.plane(&plane.name).is_none() {
+                self.planes.push(plane.clone());
+            }
+        }
     }
 
     /// Points referring to a renamed reference point follow it.
     pub fn rename_reference_point(&mut self, old: &str, new: &str) {
-        for path in &mut self.result_paths {
-            for end in [&mut path.start, &mut path.end] {
-                if matches!(end, PointRef::ReferencePoint(n) if n == old) {
-                    *end = PointRef::ReferencePoint(new.to_string());
-                }
+        let paths = (self.result_paths.iter_mut()).flat_map(|p| [&mut p.start, &mut p.end]);
+        let planes = self.planes.iter_mut().flat_map(Plane::point_refs_mut);
+        for point in paths.chain(planes) {
+            if matches!(point, PointRef::ReferencePoint(n) if n == old) {
+                *point = PointRef::ReferencePoint(new.to_string());
+            }
+        }
+    }
+
+    /// Planes of a renamed coordinate system follow it.
+    pub fn rename_coordinate_system(&mut self, old: &str, new: &str) {
+        for plane in &mut self.planes {
+            if let PlaneSource::CoordinateSystem { system, .. } = &mut plane.source
+                && system == old
+            {
+                *system = new.to_string();
+            }
+        }
+    }
+
+    /// Results on a renamed plane follow it.
+    pub fn rename_plane(&mut self, old: &str, new: &str) {
+        for result in &mut self.result_planes {
+            if result.plane == old {
+                result.plane = new.to_string();
             }
         }
     }
@@ -347,5 +479,79 @@ mod tests {
             PointRef::ReferencePoint("Top".into())
         );
         assert!(model.result_paths[0].samples(&model).is_err());
+    }
+
+    #[test]
+    fn planes_resolve_their_definitions() {
+        let mut model = FeModel::default();
+        model.reference_points.push(ReferencePoint {
+            name: "RP-1".into(),
+            position: [0.0, 0.0, 2.0],
+        });
+        let mut plane = Plane::new("Plane-1");
+        let (point, normal) = plane.resolve(&model).unwrap();
+        assert!(close(point, [0.0; 3]) && close(normal, [0.0, 0.0, 1.0]));
+        plane.source = PlaneSource::ThreePoints {
+            points: [
+                PointRef::ReferencePoint("RP-1".into()),
+                PointRef::Coordinates([1.0, 0.0, 2.0]),
+                PointRef::Coordinates([0.0, 0.0, 3.0]),
+            ],
+        };
+        let (point, normal) = plane.resolve(&model).unwrap();
+        assert!(close(point, [0.0, 0.0, 2.0]) && close(normal, [0.0, -1.0, 0.0]));
+        plane.source = PlaneSource::PointNormal {
+            point: PointRef::Coordinates([1.0, 1.0, 1.0]),
+            normal: [0.0, 3.0, 4.0],
+        };
+        assert!(close(plane.resolve(&model).unwrap().1, [0.0, 0.6, 0.8]));
+        // A plane of a coordinate system follows it and its renames.
+        let mut cs = CoordinateSystem::new("CS");
+        cs.origin = [0.0, 0.0, 5.0];
+        cs.point_x = [0.0, 1.0, 5.0];
+        cs.point_xy = [-1.0, 0.0, 5.0];
+        model.coordinate_systems.push(cs);
+        plane.source = PlaneSource::CoordinateSystem {
+            system: "CS".into(),
+            plane: CoordinatePlane::Yz,
+            offset: 2.0,
+        };
+        let (point, normal) = plane.resolve(&model).unwrap();
+        assert!(close(point, [0.0, 2.0, 5.0]) && close(normal, [0.0, 1.0, 0.0]));
+        model.planes.push(plane);
+        model.result_planes.push(ResultPlane {
+            name: "Plane_Result-1".into(),
+            plane: "Plane-1".into(),
+        });
+        model.coordinate_systems[0].name = "Turned".into();
+        model.rename_coordinate_system("CS", "Turned");
+        model.rename_plane("Plane-1", "Cut");
+        assert!(model.planes[0].resolve(&model).is_ok());
+        assert_eq!(model.result_planes[0].plane, "Cut");
+    }
+
+    #[test]
+    fn degenerate_planes_are_reported() {
+        let model = FeModel::default();
+        let plane = Plane {
+            name: "P".into(),
+            source: PlaneSource::ThreePoints {
+                points: [
+                    PointRef::Coordinates([0.0; 3]),
+                    PointRef::Coordinates([1.0, 0.0, 0.0]),
+                    PointRef::Coordinates([2.0, 0.0, 0.0]),
+                ],
+            },
+        };
+        assert!(plane.resolve(&model).is_err());
+        let missing = Plane {
+            name: "P".into(),
+            source: PlaneSource::CoordinateSystem {
+                system: "CS".into(),
+                plane: CoordinatePlane::Xy,
+                offset: 0.0,
+            },
+        };
+        assert!(missing.resolve(&model).is_err());
     }
 }

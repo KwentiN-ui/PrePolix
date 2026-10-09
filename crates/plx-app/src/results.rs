@@ -77,6 +77,8 @@ pub struct ResultsView {
     /// Range of the shown values on the section plane, which replaces the model's range in
     /// the legend while only the section is shown.
     pub section_range: Option<(f32, f32)>,
+    /// The plane result shown alone, by index in the features of the results.
+    pub plane_result: Option<usize>,
     /// Unit system of the values, PrePoMax's results unit system: that of the FE model the
     /// results belong to; the legend shows units after it.
     pub units: UnitSystem,
@@ -129,6 +131,7 @@ impl ResultsView {
             transformations: Vec::new(),
             coordinate_systems: Vec::new(),
             section_range: None,
+            plane_result: None,
             units: UnitSystem::default(),
             model_size: bounds.map_or(1.0, model_size),
         };

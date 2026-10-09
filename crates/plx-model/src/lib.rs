@@ -23,7 +23,8 @@ pub use contact::{
     InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
 };
 pub use features::{
-    CoordinatePlane, CoordinateSystem, CoordinateSystemKind, PointRef, ReferencePoint, ResultPath,
+    CoordinatePlane, CoordinateSystem, CoordinateSystemKind, GLOBAL, Plane, PlaneSource, PointRef,
+    ReferencePoint, ResultPath, ResultPlane,
 };
 pub use geometry::{
     Algorithm2d, Algorithm3d, Geometry, MeshSetupItem, MeshSetupKind, MeshingParameters,
@@ -81,6 +82,11 @@ pub struct FeModel {
     pub reference_points: Vec<ReferencePoint>,
     #[serde(default)]
     pub coordinate_systems: Vec<CoordinateSystem>,
+    #[serde(default)]
+    pub planes: Vec<Plane>,
+    /// Results on planes; not part of the input file.
+    #[serde(default)]
+    pub result_planes: Vec<ResultPlane>,
     /// Straight paths results are read on; not part of the input file.
     #[serde(default)]
     pub result_paths: Vec<ResultPath>,

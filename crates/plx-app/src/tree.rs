@@ -61,8 +61,11 @@ pub enum TreeItem {
     /// Features of the FE model or of the shown results, by index.
     ReferencePoint(usize),
     CoordinateSystem(usize),
+    Plane(usize),
     /// A result path of the shown results, by index.
     ResultPath(usize),
+    /// Results on a plane of the shown results, by index.
+    ResultPlane(usize),
     FieldOutputs,
     /// Field of the current increment, by index.
     Field(usize),
@@ -113,6 +116,8 @@ pub struct TreeResponse {
     pub evaluate_hot_spots: bool,
     /// Open PrePoMax's Search Contact Pairs.
     pub search_contacts: bool,
+    /// Show the results on a plane, by index, or none.
+    pub plane_result: Option<Option<usize>>,
 }
 
 /// What the user asked of the analysis, PrePoMax's analysis context menu.
@@ -259,7 +264,9 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::Group(COORDINATE_SYSTEMS) => {
             Some(NewItem::Feature(FeatureKind::CoordinateSystem))
         }
+        TreeItem::Group(PLANES) => Some(NewItem::Feature(FeatureKind::Plane)),
         TreeItem::Group(PATHS) => Some(NewItem::Feature(FeatureKind::ResultPath)),
+        TreeItem::Group(PLANE_RESULTS) => Some(NewItem::Feature(FeatureKind::ResultPlane)),
         TreeItem::Group("Mesh Setup") => Some(NewItem::MeshSetupItem),
         TreeItem::FieldOutputs => Some(NewItem::ResultFieldOutput),
         TreeItem::Group("History Outputs") => Some(NewItem::ResultHistoryOutput),
@@ -933,9 +940,11 @@ impl Tree<'_> {
         });
     }
 
-    /// PrePoMax's features: reference points and coordinate systems.
+    /// PrePoMax's features: reference points and coordinate systems, and planes.
     fn features(&mut self, ui: &mut Ui, fe: &FeModel) {
-        let open = !fe.reference_points.is_empty() || !fe.coordinate_systems.is_empty();
+        let open = !fe.reference_points.is_empty()
+            || !fe.coordinate_systems.is_empty()
+            || !fe.planes.is_empty();
         self.branch(
             ui,
             TreeItem::Group("Features"),
@@ -950,6 +959,10 @@ impl Tree<'_> {
                     .map(|(i, c)| (TreeItem::CoordinateSystem(i), c.name.as_str()))
                     .collect();
                 tree.container(ui, COORDINATE_SYSTEMS, systems);
+                let planes = (fe.planes.iter().enumerate())
+                    .map(|(i, p)| (TreeItem::Plane(i), p.name.as_str()))
+                    .collect();
+                tree.container(ui, PLANES, planes);
             },
         );
     }
@@ -1154,15 +1167,20 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
 pub const HOT_SPOTS: &str = "Hot Spot Stresses";
 pub const REFERENCE_POINTS: &str = "Reference Points";
 pub const COORDINATE_SYSTEMS: &str = "Coordinate Systems";
+pub const PLANES: &str = "Planes";
 /// Container of the result paths in the Results tree.
 pub const PATHS: &str = "Paths";
+/// Container of the results on planes in the Results tree.
+pub const PLANE_RESULTS: &str = "Plane Results";
 
 /// The feature a tree item stands for.
 pub fn feature(item: &TreeItem) -> Option<FeatureItem> {
     let (kind, index) = match *item {
         TreeItem::ReferencePoint(i) => (FeatureKind::ReferencePoint, i),
         TreeItem::CoordinateSystem(i) => (FeatureKind::CoordinateSystem, i),
+        TreeItem::Plane(i) => (FeatureKind::Plane, i),
         TreeItem::ResultPath(i) => (FeatureKind::ResultPath, i),
+        TreeItem::ResultPlane(i) => (FeatureKind::ResultPlane, i),
         _ => return None,
     };
     Some(FeatureItem { kind, index })
@@ -1178,6 +1196,7 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
     let model = model.filter(|m| m.results.is_some());
     let mut fields = Vec::new();
     let mut active = None;
+    let mut shown_plane = None;
     let mut history: Vec<(String, Vec<NamedList>)> = Vec::new();
     if let Some(view) = model.as_ref().and_then(|m| m.results.as_ref()) {
         history = (view.history.iter())
@@ -1204,6 +1223,7 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                 .collect();
         }
         active = Some((view.field, view.component));
+        shown_plane = view.plane_result;
     }
     let fe = model.as_ref().map(|m| m.fe.clone()).unwrap_or_default();
     tree.branch(ui, TreeItem::Model, "Model", true, |tree, ui| {
@@ -1267,6 +1287,30 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                 .map(|(i, p)| (TreeItem::ResultPath(i), p.name.as_str()))
                 .collect();
             tree.container(ui, PATHS, paths);
+            // Not in PrePoMax either: the values where a plane cuts the model, shown alone
+            // while checked.
+            let group = TreeItem::Group(PLANE_RESULTS);
+            if fe.result_planes.is_empty() {
+                tree.leaf(ui, group, PLANE_RESULTS);
+            } else {
+                let text = counted(PLANE_RESULTS, fe.result_planes.len());
+                tree.branch(ui, group, text, true, |tree, ui| {
+                    for (i, result) in fe.result_planes.iter().enumerate() {
+                        let item = TreeItem::ResultPlane(i);
+                        let icon = tree.icon(&item, false);
+                        let mut shown = shown_plane == Some(i);
+                        let (_, response, changed) =
+                            tree.row(ui, None, Some(&mut shown), icon, item, &result.name);
+                        let _ = response.on_hover_text(
+                            "Angehakt zeigt das 3D-Fenster nur die Schnittfläche mit der \
+                             Legende der Werte darauf.",
+                        );
+                        if changed {
+                            tree.response.plane_result = Some(shown.then_some(i));
+                        }
+                    }
+                });
+            }
         },
     );
 }

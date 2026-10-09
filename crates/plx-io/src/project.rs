@@ -107,6 +107,20 @@ mod tests {
                 kind: plx_model::CoordinateSystemKind::Cylindrical,
                 ..plx_model::CoordinateSystem::new("Coordinate_System-1")
             }],
+            planes: vec![plx_model::Plane {
+                source: plx_model::PlaneSource::ThreePoints {
+                    points: [
+                        plx_model::PointRef::ReferencePoint("RP-1".into()),
+                        plx_model::PointRef::Coordinates([1.0, 0.0, 0.0]),
+                        plx_model::PointRef::Coordinates([0.0, 1.0, 0.0]),
+                    ],
+                },
+                ..plx_model::Plane::new("Plane-1")
+            }],
+            result_planes: vec![plx_model::ResultPlane {
+                name: "Plane_Result-1".into(),
+                plane: "Plane-1".into(),
+            }],
             result_paths: vec![plx_model::ResultPath {
                 start: plx_model::PointRef::ReferencePoint("RP-1".into()),
                 ..plx_model::ResultPath::new("Path-1")

@@ -49,7 +49,7 @@ pub struct Overlay {
     pub paths: Vec<Vec<Vec3>>,
     /// Highlighted polylines in render coordinates, e.g. the axis of a pattern.
     pub lines: Vec<Vec<Vec3>>,
-    /// Reference points and coordinate systems of the model.
+    /// Reference points, coordinate systems and planes of the model.
     pub features: Vec<FeatureMark>,
     /// A result path in render coordinates: start, end and its name.
     pub result_path: Option<([Vec3; 2], String)>,
@@ -66,6 +66,14 @@ pub enum FeatureMark {
     System {
         origin: Vec3,
         axes: [Vec3; 3],
+        name: String,
+        selected: bool,
+    },
+    /// A plane as a rectangle on it, with its centre and unit normal.
+    Plane {
+        corners: [Vec3; 4],
+        center: Vec3,
+        normal: Vec3,
         name: String,
         selected: bool,
     },
@@ -572,6 +580,35 @@ fn draw_feature(painter: &Painter, camera: &Camera, rect: Rect, feature: &Featur
             painter.text(
                 center + vec2(-6.0, 6.0),
                 Align2::RIGHT_TOP,
+                name,
+                font(),
+                color,
+            );
+        }
+        FeatureMark::Plane {
+            corners,
+            center,
+            normal,
+            name,
+            selected,
+        } => {
+            let color = if *selected {
+                SELECTED_FEATURE
+            } else {
+                FEATURE_COLOR
+            };
+            let corners: Vec<Pos2> = corners.iter().map(|&c| project(camera, rect, c)).collect();
+            let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24);
+            painter.add(egui::Shape::convex_polygon(
+                corners.clone(),
+                fill,
+                Stroke::new(if *selected { 2.0 } else { 1.0 }, color),
+            ));
+            let origin = project(camera, rect, *center);
+            arrows(painter, camera, origin, 30.0, &[(*normal, "n", color)]);
+            painter.text(
+                corners[0] + vec2(4.0, -4.0),
+                Align2::LEFT_BOTTOM,
                 name,
                 font(),
                 color,
