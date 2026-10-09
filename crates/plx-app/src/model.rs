@@ -226,11 +226,11 @@ impl Model {
             return std::borrow::Cow::Borrowed(coords);
         };
         let scale = (view.scale() * view.amplitude()) as f64;
-        match view.current_increment().and_then(|i| i.displacements()) {
+        match view.shown_displacements() {
             Some(displacements) if scale != 0.0 => std::borrow::Cow::Owned(
                 coords
                     .iter()
-                    .zip(&displacements)
+                    .zip(displacements.iter())
                     .map(|(p, d)| [0, 1, 2].map(|k| p[k] + scale * d[k] as f64))
                     .collect(),
             ),
@@ -248,9 +248,7 @@ impl Model {
             if matches!(coords, std::borrow::Cow::Owned(_)) {
                 deformed = view.show_undeformed;
             }
-            if let (Some((_, component)), Some(legend)) = (view.current(), view.legend()) {
-                let amplitude = view.value_amplitude();
-                let values: Vec<f32> = component.values.iter().map(|v| v * amplitude).collect();
+            if let (Some(values), Some(legend)) = (view.shown_values(), view.legend()) {
                 scalars = Some(normalize(&values, legend.min, legend.max));
             }
         }
@@ -500,12 +498,7 @@ impl Model {
         let mut p = DVec3::from(*self.mesh.coords().get(index)?);
         if let Some(view) = &self.results {
             let scale = (view.scale() * view.amplitude()) as f64;
-            let displacement = view
-                .current_increment()
-                .and_then(|i| i.field("DISP"))
-                .map(|f| {
-                    ["U1", "U2", "U3"].map(|n| f.component(n).map_or(0.0, |c| c.values[index]))
-                });
+            let displacement = view.shown_displacement(index);
             if let (Some(d), true) = (displacement, scale != 0.0) {
                 p += scale * DVec3::new(d[0] as f64, d[1] as f64, d[2] as f64);
             }
