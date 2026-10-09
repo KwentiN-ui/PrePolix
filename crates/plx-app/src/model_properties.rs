@@ -1,8 +1,11 @@
-//! PrePoMax's "Model Properties" dialog: the model space and the unit system, asked for a
-//! new model and editable later from the model's context.
+//! PrePoMax's "Model Properties" dialog: the model space, the unit system and the physical
+//! constants, asked for a new model and editable later from the model's context.
 
 use plx_mesh::{ElementFamily, FeMesh};
-use plx_model::{BASE_QUANTITIES, DERIVED_QUANTITIES, ModelProperties, ModelSpace, UnitSystem};
+use plx_model::convert::Conversion;
+use plx_model::{
+    BASE_QUANTITIES, DERIVED_QUANTITIES, ModelProperties, ModelSpace, Quantity, UnitSystem,
+};
 
 const ERROR: egui::Color32 = egui::Color32::from_rgb(200, 0, 0);
 
@@ -18,6 +21,8 @@ pub struct ModelPropertiesDialog {
     pub convert: bool,
     /// Open the geometry import once the new model is created.
     pub then_import: bool,
+    /// The units the draft's physical constants are given in.
+    constants_units: UnitSystem,
 }
 
 pub enum DialogResult {
@@ -34,6 +39,7 @@ impl ModelPropertiesDialog {
             original: properties,
             convert: true,
             then_import,
+            constants_units: properties.units,
         }
     }
 
@@ -44,6 +50,7 @@ impl ModelPropertiesDialog {
             original: properties,
             convert: true,
             then_import: false,
+            constants_units: properties.units,
         }
     }
 
@@ -92,6 +99,17 @@ impl ModelPropertiesDialog {
                         });
                 });
                 group(ui, "Einheiten", |ui| units_table(ui, draft.units));
+                // The constants follow a changed unit system when the model is converted
+                // or is new, so that they stay the same physically.
+                if self.constants_units != draft.units {
+                    if self.convert || !self.editing {
+                        let c = Conversion::new(self.constants_units, draft.units);
+                        c.option(&mut draft.absolute_zero, Quantity::Temperature);
+                        c.option(&mut draft.stefan_boltzmann, Quantity::StefanBoltzmann);
+                    }
+                    self.constants_units = draft.units;
+                }
+                group(ui, "Physikalische Konstanten", |ui| constants(ui, draft));
                 let (from, to) = (self.original.units, draft.units);
                 if self.editing && from != to {
                     if from.has_units() && to.has_units() {
@@ -155,6 +173,46 @@ fn group(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui)) {
             ui.set_min_width(ui.available_width());
             contents(ui);
         });
+}
+
+/// Absolute zero and the Stefan-Boltzmann constant, which radiation needs; undefined as in
+/// PrePoMax until the user sets them.
+fn constants(ui: &mut egui::Ui, draft: &mut ModelProperties) {
+    let units = draft.units;
+    egui::Grid::new("physical constants")
+        .num_columns(2)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            for (label, value, quantity) in [
+                (
+                    "Absoluter Nullpunkt",
+                    &mut draft.absolute_zero,
+                    Quantity::Temperature,
+                ),
+                (
+                    "Stefan-Boltzmann",
+                    &mut draft.stefan_boltzmann,
+                    Quantity::StefanBoltzmann,
+                ),
+            ] {
+                let mut set = value.is_some();
+                ui.checkbox(&mut set, label);
+                let mut number = value.unwrap_or(0.0);
+                ui.add_enabled(set, crate::numeric::physical(&mut number, units, quantity));
+                *value = set.then_some(number);
+                ui.end_row();
+            }
+        });
+    if let Some((zero, sigma)) = ModelProperties::standard_constants(units)
+        && ui
+            .button("Standardwerte")
+            .on_hover_text("Absoluter Nullpunkt und Stefan-Boltzmann-Konstante im Einheitensystem")
+            .clicked()
+    {
+        draft.absolute_zero = Some(zero);
+        draft.stefan_boltzmann = Some(sigma);
+    }
+    ui.add(egui::Label::new(egui::RichText::new("Nur für Wärmestrahlung nötig.").weak()).wrap());
 }
 
 /// The units of the system, PrePoMax's base and derived units.

@@ -1209,6 +1209,7 @@ mod tests {
                     young: 210000.0,
                     poisson: 0.3,
                 }),
+                ..Default::default()
             }],
             sections: vec![Section {
                 name: "Section-1".into(),

@@ -10,9 +10,10 @@ use egui::Ui;
 use plx_mesh::{ElementId, FeMesh, NodeId};
 use plx_model::{
     BoundaryCondition, BoundaryKind, Constraint, ContactPair, Elastic, EquationSolver,
-    Extrapolation, FeModel, FieldOutput, FrequencyStep, HotSpot, HotSpotComponent, Incrementation,
-    Load, LoadKind, Material, ModelSpace, OutputKind, Quantity, Region, Section, StaticStep, Step,
-    StepKind, SurfaceInteraction, UnitSystem, extrapolation_weights, next_name,
+    Extrapolation, FeModel, FieldOutput, FrequencyStep, HeatTransferStep, HotSpot,
+    HotSpotComponent, Incrementation, InitialCondition, InitialConditionKind, Load, LoadKind,
+    Material, ModelSpace, OutputKind, Quantity, Region, Section, StaticStep, Step, StepKind,
+    SurfaceInteraction, UnitSystem, extrapolation_weights, next_name,
 };
 
 use crate::constraint_dialog::ConstraintDraft;
@@ -28,6 +29,7 @@ use crate::viewport::{BoxSelect, Preview};
 pub enum NewItem {
     Material,
     Section,
+    InitialCondition,
     Step,
     BoundaryCondition(usize),
     Load(usize),
@@ -85,6 +87,13 @@ pub(crate) const FACE_SOURCES: &[Source] = &[Source::Selection, Source::Surface]
 /// Solid elements: whole parts, element sets or the elements of picked faces.
 pub(crate) const SOLID_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet, Source::Selection];
 pub(crate) const ELEMENT_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet];
+/// Nodes, also those of whole parts, e.g. for the initial temperature of the model.
+pub(crate) const NODE_PART_SOURCES: &[Source] = &[
+    Source::Selection,
+    Source::Parts,
+    Source::NodeSet,
+    Source::Surface,
+];
 
 impl RegionDraft {
     pub(crate) fn new(sources: &'static [Source], target: Target) -> Self {
@@ -469,6 +478,7 @@ enum Draft {
     Step(Step),
     BoundaryCondition(usize, BoundaryCondition, RegionDraft),
     Load(usize, Load, RegionDraft),
+    InitialCondition(InitialCondition, RegionDraft),
     FieldOutput(usize, FieldOutput),
     HotSpot(HotSpot, RegionDraft, HotSpotText),
     Constraint(ConstraintDraft),
@@ -483,6 +493,7 @@ fn draft_region(draft: &Draft) -> Option<&RegionDraft> {
         Draft::Section(_, r)
         | Draft::BoundaryCondition(_, _, r)
         | Draft::Load(_, _, r)
+        | Draft::InitialCondition(_, r)
         | Draft::HotSpot(_, r, _) => Some(r),
         Draft::ContactPair(_, regions) => Some(regions.current()),
         Draft::Constraint(c) => Some(c.region()),
@@ -495,6 +506,7 @@ fn draft_region_mut(draft: &mut Draft) -> Option<&mut RegionDraft> {
         Draft::Section(_, r)
         | Draft::BoundaryCondition(_, _, r)
         | Draft::Load(_, _, r)
+        | Draft::InitialCondition(_, r)
         | Draft::HotSpot(_, r, _) => Some(r),
         Draft::ContactPair(_, regions) => Some(regions.current_mut()),
         Draft::Constraint(c) => Some(c.region_mut()),
@@ -530,16 +542,71 @@ fn names<'a, T: 'a>(items: &'a [T], name: impl Fn(&T) -> &str + 'a) -> Vec<&'a s
 
 const FIXED: &str = "Fixed";
 const DISPLACEMENT: &str = "Displacement_Rotation";
+const TEMPERATURE: &str = "Temperature";
 const FORCE: &str = "Concentrated_Force";
 const PRESSURE: &str = "Pressure";
 const TRACTION: &str = "Surface_Traction";
+const CFLUX: &str = "Concentrated_Flux";
+const SURFACE_FLUX: &str = "Surface_Flux";
+const BODY_FLUX: &str = "Body_Flux";
+const FILM: &str = "Convective_Film";
+const RADIATION: &str = "Radiation";
 
-/// The load kinds of the dialog: label, default name and the kind with zero values.
-fn load_kinds() -> [(&'static str, &'static str, LoadKind); 3] {
+/// The boundary condition kinds of the dialog: label, default name and the kind.
+fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 3] {
+    [
+        ("Fest eingespannt", FIXED, BoundaryKind::Fixed),
+        (
+            "Verschiebung/Rotation",
+            DISPLACEMENT,
+            BoundaryKind::Displacement([Some(0.0), None, None, None, None, None]),
+        ),
+        ("Temperatur", TEMPERATURE, BoundaryKind::Temperature(0.0)),
+    ]
+}
+
+fn boundary_kind_name(kind: &BoundaryKind) -> &'static str {
+    match kind {
+        BoundaryKind::Fixed => FIXED,
+        BoundaryKind::Displacement(_) => DISPLACEMENT,
+        BoundaryKind::Temperature(_) => TEMPERATURE,
+    }
+}
+
+/// The load kinds of the dialog in PrePoMax's order: label, default name and the kind with
+/// zero values.
+fn load_kinds() -> [(&'static str, &'static str, LoadKind); 8] {
     [
         ("Einzelkraft", FORCE, LoadKind::ConcentratedForce([0.0; 3])),
         ("Druck", PRESSURE, LoadKind::Pressure(0.0)),
         ("Flächenlast", TRACTION, LoadKind::SurfaceTraction([0.0; 3])),
+        (
+            "Wärmestrom (Knoten)",
+            CFLUX,
+            LoadKind::ConcentratedFlux(0.0),
+        ),
+        (
+            "Wärmestromdichte (Fläche)",
+            SURFACE_FLUX,
+            LoadKind::SurfaceFlux(0.0),
+        ),
+        ("Wärmequelle (Volumen)", BODY_FLUX, LoadKind::BodyFlux(0.0)),
+        (
+            "Konvektion (Film)",
+            FILM,
+            LoadKind::Film {
+                sink: 20.0,
+                coefficient: 0.0,
+            },
+        ),
+        (
+            "Strahlung",
+            RADIATION,
+            LoadKind::Radiation {
+                sink: 20.0,
+                emissivity: 0.8,
+            },
+        ),
     ]
 }
 
@@ -548,6 +615,45 @@ fn load_kind_name(kind: &LoadKind) -> &'static str {
         LoadKind::ConcentratedForce(_) => FORCE,
         LoadKind::Pressure(_) => PRESSURE,
         LoadKind::SurfaceTraction(_) => TRACTION,
+        LoadKind::ConcentratedFlux(_) => CFLUX,
+        LoadKind::SurfaceFlux(_) => SURFACE_FLUX,
+        LoadKind::BodyFlux(_) => BODY_FLUX,
+        LoadKind::Film { .. } => FILM,
+        LoadKind::Radiation { .. } => RADIATION,
+    }
+}
+
+/// What a load acts on, which decides how its region is picked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoadTarget {
+    Nodes,
+    Faces,
+    Elements,
+}
+
+fn load_target(kind: &LoadKind) -> LoadTarget {
+    match kind {
+        LoadKind::ConcentratedForce(_) | LoadKind::ConcentratedFlux(_) => LoadTarget::Nodes,
+        LoadKind::BodyFlux(_) => LoadTarget::Elements,
+        _ => LoadTarget::Faces,
+    }
+}
+
+/// An empty region for a load of the kind, or the load's region.
+fn load_region(
+    kind: &LoadKind,
+    region: Option<&Region>,
+    fe: &FeModel,
+    mesh: &FeMesh,
+) -> RegionDraft {
+    let (sources, target) = match load_target(kind) {
+        LoadTarget::Nodes => (NODE_SOURCES, Target::Nodes),
+        LoadTarget::Faces => (FACE_SOURCES, face_target(fe)),
+        LoadTarget::Elements => (SOLID_SOURCES, face_target(fe)),
+    };
+    match region {
+        Some(region) => RegionDraft::from_region(region, sources, target, mesh),
+        None => RegionDraft::new(sources, target),
     }
 }
 
@@ -561,6 +667,7 @@ impl Editor {
                     young: 0.0,
                     poisson: 0.0,
                 }),
+                ..Material::default()
             }),
             NewItem::Section => Draft::Section(
                 Section {
@@ -575,20 +682,37 @@ impl Editor {
                 },
                 RegionDraft::new(ELEMENT_SOURCES, Target::Faces),
             ),
+            NewItem::InitialCondition => {
+                let existing = names(&fe.initial_conditions, |i| &i.name);
+                Draft::InitialCondition(
+                    InitialCondition {
+                        name: next_name(TEMPERATURE, existing),
+                        active: true,
+                        region: Region::Nodes(Vec::new()),
+                        kind: InitialConditionKind::Temperature(20.0),
+                    },
+                    RegionDraft::new(NODE_PART_SOURCES, Target::Nodes),
+                )
+            }
             NewItem::Step => {
                 let mut step = Step::new_static(next_name("Step", names(&fe.steps, |s| &s.name)));
                 step.kind = StepKind::Static(previous_static(fe));
                 Draft::Step(step)
             }
             NewItem::BoundaryCondition(step) => {
-                let existing = names(&fe.steps.get(step)?.boundary_conditions, |b| &b.name);
+                let target = fe.steps.get(step)?;
+                let existing = names(&target.boundary_conditions, |b| &b.name);
+                // The first kind the step takes: a heat transfer step only temperatures.
+                let (_, name, kind) = boundary_kinds()
+                    .into_iter()
+                    .find(|(_, _, kind)| target.kind.supports_boundary(kind))?;
                 Draft::BoundaryCondition(
                     step,
                     BoundaryCondition {
-                        name: next_name(FIXED, existing),
+                        name: next_name(name, existing),
                         active: true,
                         region: Region::Nodes(Vec::new()),
-                        kind: BoundaryKind::Fixed,
+                        kind,
                     },
                     RegionDraft::new(NODE_SOURCES, Target::Nodes),
                 )
@@ -597,16 +721,18 @@ impl Editor {
                 // A frequency step takes no loads, as in PrePoMax.
                 let target = fe.steps.get(step).filter(|s| s.kind.supports_loads())?;
                 let existing = names(&target.loads, |l| &l.name);
-                let region = RegionDraft::new(NODE_SOURCES, Target::Nodes);
+                let (_, name, kind) = load_kinds()
+                    .into_iter()
+                    .find(|(_, _, kind)| target.kind.supports_load(kind))?;
                 Draft::Load(
                     step,
                     Load {
-                        name: next_name(FORCE, existing),
+                        name: next_name(name, existing),
                         active: true,
                         region: Region::Nodes(Vec::new()),
-                        kind: LoadKind::ConcentratedForce([0.0; 3]),
+                        kind,
                     },
-                    region,
+                    load_region(&kind, None, fe, &FeMesh::default()),
                 )
             }
             NewItem::HotSpot => {
@@ -670,15 +796,18 @@ impl Editor {
             }
             TreeItem::Load(s, i) => {
                 let load = fe.steps.get(s)?.loads.get(i)?.clone();
-                let region = match load.kind {
-                    LoadKind::ConcentratedForce(_) => {
-                        RegionDraft::from_region(&load.region, NODE_SOURCES, Target::Nodes, mesh)
-                    }
-                    LoadKind::Pressure(_) | LoadKind::SurfaceTraction(_) => {
-                        RegionDraft::from_region(&load.region, FACE_SOURCES, face_target(fe), mesh)
-                    }
-                };
+                let region = load_region(&load.kind, Some(&load.region), fe, mesh);
                 (Draft::Load(s, load, region), i)
+            }
+            TreeItem::InitialCondition(i) => {
+                let condition = fe.initial_conditions.get(i)?.clone();
+                let region = RegionDraft::from_region(
+                    &condition.region,
+                    NODE_PART_SOURCES,
+                    Target::Nodes,
+                    mesh,
+                );
+                (Draft::InitialCondition(condition, region), i)
             }
             TreeItem::FieldOutput(s, i) => {
                 let output = fe.steps.get(s)?.field_outputs.get(i)?.clone();
@@ -727,6 +856,7 @@ impl Editor {
             Draft::Step(s) => ("Step", &s.name),
             Draft::BoundaryCondition(_, b, _) => ("Randbedingung", &b.name),
             Draft::Load(_, l, _) => ("Last", &l.name),
+            Draft::InitialCondition(c, _) => ("Anfangsbedingung", &c.name),
             Draft::FieldOutput(_, f) => ("Field Output", &f.name),
             Draft::HotSpot(h, ..) => ("Hot Spot", &h.name),
             Draft::Constraint(c) => ("Constraint", c.name()),
@@ -891,22 +1021,29 @@ impl Editor {
                 region.ui(ui, model);
             }
             Draft::Step(step) => step_form(ui, step, self.index.is_none(), &model.fe),
-            Draft::BoundaryCondition(_, bc, region) => {
+            Draft::BoundaryCondition(step, bc, region) => {
                 name_row(ui, &mut bc.name);
                 ui.label("Art");
+                let step_kind = model.fe.steps.get(*step).map(|s| &s.kind);
                 ui.horizontal(|ui| {
-                    let fixed = matches!(bc.kind, BoundaryKind::Fixed);
-                    if ui.radio(fixed, "Fest eingespannt").clicked() && !fixed {
-                        bc.kind = BoundaryKind::Fixed;
-                        rename_default(&mut bc.name, DISPLACEMENT, FIXED, &taken);
-                    }
-                    if ui.radio(!fixed, "Verschiebung/Rotation").clicked() && fixed {
-                        bc.kind =
-                            BoundaryKind::Displacement([Some(0.0), None, None, None, None, None]);
-                        rename_default(&mut bc.name, FIXED, DISPLACEMENT, &taken);
+                    let current = boundary_kind_name(&bc.kind);
+                    for (label, name, kind) in boundary_kinds() {
+                        // Only the kinds the step takes, as PrePoMax lists them.
+                        if step_kind.is_some_and(|s| !s.supports_boundary(&kind)) {
+                            continue;
+                        }
+                        if ui.radio(current == name, label).clicked() && current != name {
+                            bc.kind = kind;
+                            rename_default(&mut bc.name, current, name, &taken);
+                        }
                     }
                 });
                 ui.end_row();
+                if let BoundaryKind::Temperature(t) = &mut bc.kind {
+                    ui.label("Temperatur");
+                    ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0));
+                    ui.end_row();
+                }
                 if let BoundaryKind::Displacement(values) = &mut bc.kind {
                     // Nodes of 2D models only move in the x-y plane.
                     let dofs = if two_d { 2 } else { 6 };
@@ -933,25 +1070,35 @@ impl Editor {
                 }
                 region.ui(ui, model);
             }
-            Draft::Load(_, load, region) => {
+            Draft::Load(step, load, region) => {
                 name_row(ui, &mut load.name);
                 ui.label("Art");
-                ui.horizontal(|ui| {
-                    let current = load_kind_name(&load.kind);
-                    for (label, name, kind) in load_kinds() {
-                        if ui.radio(current == name, label).clicked() && current != name {
-                            let was_on_nodes = matches!(load.kind, LoadKind::ConcentratedForce(_));
-                            let on_nodes = matches!(kind, LoadKind::ConcentratedForce(_));
-                            load.kind = kind;
-                            rename_default(&mut load.name, current, name, &taken);
-                            if on_nodes {
-                                *region = RegionDraft::new(NODE_SOURCES, Target::Nodes);
-                            } else if was_on_nodes {
-                                *region = RegionDraft::new(FACE_SOURCES, face_target(&model.fe));
+                let step_kind = model.fe.steps.get(*step).map(|s| &s.kind);
+                let current = load_kind_name(&load.kind);
+                let label = (load_kinds().into_iter())
+                    .find(|(_, name, _)| *name == current)
+                    .map_or("", |(label, ..)| label);
+                egui::ComboBox::from_id_salt("load kind")
+                    .selected_text(label)
+                    .width(200.0)
+                    .show_ui(ui, |ui| {
+                        for (label, name, kind) in load_kinds() {
+                            // Only the kinds the step takes, as PrePoMax lists them.
+                            if step_kind.is_some_and(|s| !s.supports_load(&kind)) {
+                                continue;
+                            }
+                            if ui.selectable_label(current == name, label).clicked()
+                                && current != name
+                            {
+                                let moved = load_target(&kind) != load_target(&load.kind);
+                                load.kind = kind;
+                                rename_default(&mut load.name, current, name, &taken);
+                                if moved {
+                                    *region = load_region(&kind, None, &model.fe, &model.mesh);
+                                }
                             }
                         }
-                    }
-                });
+                    });
                 ui.end_row();
                 match &mut load.kind {
                     LoadKind::ConcentratedForce(force) => {
@@ -975,14 +1122,89 @@ impl Editor {
                         ui.end_row();
                         revolution_hint(ui, axisymmetric);
                     }
+                    LoadKind::ConcentratedFlux(flux) => {
+                        ui.label("Wärmestrom");
+                        ui.add(numeric::physical(flux, units, Quantity::Power));
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak("Der Wärmestrom fließt an jedem Knoten der Region zu.");
+                        ui.end_row();
+                    }
+                    LoadKind::SurfaceFlux(flux) => {
+                        ui.label("Wärmestromdichte");
+                        ui.add(numeric::physical(flux, units, Quantity::HeatFlux));
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak("Positiv: Wärme fließt in das Bauteil.");
+                        ui.end_row();
+                    }
+                    LoadKind::BodyFlux(flux) => {
+                        ui.label("Wärmequelle");
+                        ui.add(numeric::physical(flux, units, Quantity::PowerPerVolume));
+                        ui.end_row();
+                    }
+                    LoadKind::Film { sink, coefficient } => {
+                        ui.label("Umgebungstemperatur");
+                        ui.add(numeric::quantity(sink, units, Quantity::Temperature).speed(1.0));
+                        ui.end_row();
+                        ui.label("Wärmeübergangskoeffizient");
+                        ui.add(
+                            numeric::physical(
+                                coefficient,
+                                units,
+                                Quantity::HeatTransferCoefficient,
+                            )
+                            .range(0.0..=f64::MAX),
+                        );
+                        ui.end_row();
+                    }
+                    LoadKind::Radiation { sink, emissivity } => {
+                        ui.label("Umgebungstemperatur");
+                        ui.add(numeric::quantity(sink, units, Quantity::Temperature).speed(1.0));
+                        ui.end_row();
+                        ui.label("Emissionsgrad");
+                        ui.add(
+                            numeric::drag_value(emissivity)
+                                .range(0.0..=1.0)
+                                .speed(0.01)
+                                .max_decimals(4),
+                        );
+                        ui.end_row();
+                        let properties = &model.fe.properties;
+                        if properties.absolute_zero.is_none()
+                            || properties.stefan_boltzmann.is_none()
+                        {
+                            ui.label("");
+                            ui.colored_label(
+                                egui::Color32::from_rgb(200, 0, 0),
+                                "Strahlung braucht die physikalischen Konstanten\n\
+                                 (Modelleigenschaften).",
+                            );
+                            ui.end_row();
+                        }
+                    }
                 }
                 region.ui(ui, model);
+            }
+            Draft::InitialCondition(condition, region) => {
+                name_row(ui, &mut condition.name);
+                match &mut condition.kind {
+                    InitialConditionKind::Temperature(t) => {
+                        ui.label("Temperatur");
+                        ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0));
+                        ui.end_row();
+                    }
+                }
+                region.ui(ui, model);
+                ui.label("");
+                ui.weak("Temperatur vor dem ersten Step, z. B. für Wärmedehnung.");
+                ui.end_row();
             }
             Draft::FieldOutput(_, output) => {
                 name_row(ui, &mut output.name);
                 let choices: &[&str] = match output.kind {
-                    OutputKind::Node => &["RF", "U"],
-                    OutputKind::Element => &["S", "E", "ME", "PEEQ", "ENER"],
+                    OutputKind::Node => &["RF", "U", "NT", "RFL"],
+                    OutputKind::Element => &["S", "E", "ME", "PEEQ", "ENER", "HFL"],
                 };
                 ui.label("Variablen");
                 ui.horizontal(|ui| {
@@ -1038,6 +1260,7 @@ impl Editor {
                 names(&fe.steps[*step].boundary_conditions, |b| &b.name)
             }
             Draft::Load(step, ..) => names(&fe.steps[*step].loads, |l| &l.name),
+            Draft::InitialCondition(..) => names(&fe.initial_conditions, |i| &i.name),
             Draft::FieldOutput(step, _) => names(&fe.steps[*step].field_outputs, |f| &f.name),
             Draft::HotSpot(..) => names(&fe.hot_spots, |h| &h.name),
             Draft::Constraint(_) => fe.constraints.iter().map(Constraint::name).collect(),
@@ -1057,6 +1280,7 @@ impl Editor {
             Draft::Step(s) => &s.name,
             Draft::BoundaryCondition(_, b, _) => &b.name,
             Draft::Load(_, l, _) => &l.name,
+            Draft::InitialCondition(c, _) => &c.name,
             Draft::FieldOutput(_, f) => &f.name,
             Draft::HotSpot(h, ..) => &h.name,
             Draft::Constraint(c) => c.name(),
@@ -1093,12 +1317,14 @@ impl Editor {
                 }
             }
         }
-        if let Draft::Step(Step {
-            kind: StepKind::Frequency(settings),
-            ..
-        }) = &self.draft
-        {
-            validate_frequency_step(settings)?;
+        if let Draft::Step(step) = &self.draft {
+            match &step.kind {
+                StepKind::Frequency(settings) => validate_frequency_step(settings)?,
+                StepKind::HeatTransfer(settings) | StepKind::CoupledTempDisp(settings) => {
+                    validate_heat_transfer_step(settings)?
+                }
+                StepKind::Static(_) => {}
+            }
         }
         if let Some(hot_spot) = self.hot_spot() {
             validate_hot_spot(&hot_spot)?;
@@ -1159,6 +1385,13 @@ impl Editor {
                 }
                 put(list, index, load);
             }
+            Draft::InitialCondition(mut condition, region) => {
+                condition.region = region.region();
+                if let Some(existing) = index.and_then(|i| fe.initial_conditions.get(i)) {
+                    condition.active = existing.active;
+                }
+                put(&mut fe.initial_conditions, index, condition);
+            }
             Draft::FieldOutput(s, output) => put(&mut fe.steps[s].field_outputs, index, output),
             Draft::HotSpot(mut hot_spot, region, _) => {
                 hot_spot.toe = region.region();
@@ -1214,6 +1447,7 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
             .get_mut(s)
             .is_some_and(|st| remove(&mut st.field_outputs, i)),
         TreeItem::HotSpot(i) => remove(&mut fe.hot_spots, i),
+        TreeItem::InitialCondition(i) => remove(&mut fe.initial_conditions, i),
         TreeItem::Constraint(i) => remove(&mut fe.constraints, i),
         TreeItem::SurfaceInteraction(i) => remove(&mut fe.surface_interactions, i),
         TreeItem::ContactPair(i) => remove(&mut fe.contact_pairs, i),
@@ -1234,6 +1468,7 @@ pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
             .map(|l| &mut l.active),
         TreeItem::Constraint(i) => fe.constraints.get_mut(i).map(Constraint::active_mut),
         TreeItem::ContactPair(i) => fe.contact_pairs.get_mut(i).map(|c| &mut c.active),
+        TreeItem::InitialCondition(i) => fe.initial_conditions.get_mut(i).map(|c| &mut c.active),
         _ => None,
     };
     active.map(|a| *a = !*a).is_some()
@@ -1267,6 +1502,7 @@ pub fn item_region<'a>(fe: &'a FeModel, item: &TreeItem) -> Option<&'a Region> {
             .map(|b| &b.region),
         TreeItem::Load(s, i) => fe.steps.get(s)?.loads.get(i).map(|l| &l.region),
         TreeItem::HotSpot(i) => fe.hot_spots.get(i).map(|h| &h.toe),
+        TreeItem::InitialCondition(i) => fe.initial_conditions.get(i).map(|c| &c.region),
         TreeItem::Constraint(i) => fe.constraints.get(i)?.regions().first().copied(),
         _ => None,
     }
@@ -1322,6 +1558,50 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     );
     ui.end_row();
     material.elastic = elastic.then_some(values);
+    for (label, value, quantity) in [
+        (
+            "Wärmeleitfähigkeit",
+            &mut material.conductivity,
+            Quantity::ThermalConductivity,
+        ),
+        (
+            "Spez. Wärmekapazität",
+            &mut material.specific_heat,
+            Quantity::SpecificHeat,
+        ),
+    ] {
+        let mut set = value.is_some();
+        ui.checkbox(&mut set, label);
+        let mut number = value.unwrap_or(0.0);
+        ui.add_enabled(set, numeric::physical(&mut number, units, quantity));
+        *value = set.then_some(number);
+        ui.end_row();
+    }
+    let mut expands = material.expansion.is_some();
+    ui.checkbox(&mut expands, "Wärmeausdehnung");
+    ui.end_row();
+    let mut expansion = material.expansion.unwrap_or_default();
+    ui.label("    Ausdehnungskoeffizient");
+    ui.add_enabled(
+        expands,
+        numeric::physical(
+            &mut expansion.coefficient,
+            units,
+            Quantity::ThermalExpansion,
+        ),
+    );
+    ui.end_row();
+    ui.label("    Referenztemperatur");
+    ui.add_enabled(
+        expands,
+        numeric::quantity(
+            &mut expansion.zero_temperature,
+            units,
+            Quantity::Temperature,
+        ),
+    );
+    ui.end_row();
+    material.expansion = expands.then_some(expansion);
 }
 
 /// Solution settings for a new static step: PrePoMax carries those of the last static step
@@ -1336,24 +1616,61 @@ fn previous_static(fe: &FeModel) -> StaticStep {
 }
 
 /// A new step starts with the boundary conditions and loads of the last step, as in
-/// PrePoMax; loads only where the new step takes them.
+/// PrePoMax's `StepCollection.AddStep`: only those the new step takes, so a heat transfer
+/// step leaves the supports behind and a static step the temperatures.
 fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
     let Some(last) = fe.steps.last() else {
         return;
     };
-    step.boundary_conditions = last.boundary_conditions.clone();
-    if step.kind.supports_loads() {
-        step.loads = last.loads.clone();
-    }
+    step.boundary_conditions = (last.boundary_conditions.iter())
+        .filter(|bc| step.kind.supports_boundary(&bc.kind))
+        .cloned()
+        .collect();
+    step.loads = (last.loads.iter())
+        .filter(|load| step.kind.supports_load(&load.kind))
+        .cloned()
+        .collect();
+}
+
+/// The step kinds of the dialog: label, the kind with its settings and its default field
+/// outputs, in PrePoMax's order.
+fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 4] {
+    let heat = HeatTransferStep::default();
+    [
+        (
+            STATIC_LABEL,
+            StepKind::Static(previous_static(fe)),
+            FieldOutput::defaults(),
+        ),
+        (
+            FREQUENCY_LABEL,
+            StepKind::Frequency(FrequencyStep::default()),
+            FieldOutput::frequency_defaults(),
+        ),
+        (
+            HEAT_TRANSFER_LABEL,
+            StepKind::HeatTransfer(heat.clone()),
+            FieldOutput::heat_transfer_defaults(),
+        ),
+        (
+            COUPLED_LABEL,
+            StepKind::CoupledTempDisp(heat),
+            FieldOutput::coupled_defaults(),
+        ),
+    ]
 }
 
 const STATIC_LABEL: &str = "Statisch (Static)";
 const FREQUENCY_LABEL: &str = "Eigenfrequenzen (Frequency)";
+const HEAT_TRANSFER_LABEL: &str = "Wärmeübertragung (Heat Transfer)";
+const COUPLED_LABEL: &str = "Thermomechanisch gekoppelt (Coupled Temp-Disp)";
 
 fn step_kind_label(kind: &StepKind) -> &'static str {
     match kind {
         StepKind::Static(_) => STATIC_LABEL,
         StepKind::Frequency(_) => FREQUENCY_LABEL,
+        StepKind::HeatTransfer(_) => HEAT_TRANSFER_LABEL,
+        StepKind::CoupledTempDisp(_) => COUPLED_LABEL,
     }
 }
 
@@ -1363,28 +1680,68 @@ fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
     name_row(ui, &mut step.name);
     ui.label("Art");
     if creating {
-        let frequency = matches!(step.kind, StepKind::Frequency(_));
+        let current = step_kind_label(&step.kind);
         egui::ComboBox::from_id_salt("step kind")
-            .selected_text(step_kind_label(&step.kind))
-            .width(200.0)
+            .selected_text(current)
+            .width(280.0)
             .show_ui(ui, |ui| {
-                if ui.selectable_label(!frequency, STATIC_LABEL).clicked() && frequency {
-                    step.kind = StepKind::Static(previous_static(fe));
-                    step.field_outputs = FieldOutput::defaults();
-                }
-                if ui.selectable_label(frequency, FREQUENCY_LABEL).clicked() && !frequency {
-                    step.kind = StepKind::Frequency(FrequencyStep::default());
-                    step.field_outputs = FieldOutput::frequency_defaults();
+                for (label, kind, outputs) in step_kinds(fe) {
+                    if ui.selectable_label(current == label, label).clicked() && current != label {
+                        step.kind = kind;
+                        step.field_outputs = outputs;
+                    }
                 }
             });
     } else {
         ui.label(step_kind_label(&step.kind));
     }
     ui.end_row();
+    let units = fe.properties.units;
     match &mut step.kind {
-        StepKind::Static(settings) => static_form(ui, settings, fe.properties.units),
-        StepKind::Frequency(settings) => frequency_form(ui, settings, fe.properties.units),
+        StepKind::Static(settings) => static_form(ui, settings, units),
+        StepKind::Frequency(settings) => frequency_form(ui, settings, units),
+        StepKind::HeatTransfer(settings) => heat_transfer_form(ui, settings, units, false),
+        StepKind::CoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, true),
     }
+}
+
+/// Settings of a heat transfer or coupled step: steady state or transient, then the
+/// increments as in a static step.
+fn heat_transfer_form(
+    ui: &mut Ui,
+    settings: &mut HeatTransferStep,
+    units: UnitSystem,
+    coupled: bool,
+) {
+    ui.label("");
+    ui.checkbox(&mut settings.steady_state, "Stationär (Steady state)");
+    ui.end_row();
+    let mut limited = settings.deltmx.is_some();
+    ui.add_enabled_ui(!settings.steady_state, |ui| {
+        ui.checkbox(&mut limited, "Max. Temperaturänderung");
+    });
+    let mut deltmx = settings.deltmx.unwrap_or(10.0);
+    ui.add_enabled(
+        limited && !settings.steady_state,
+        numeric::quantity(&mut deltmx, units, Quantity::TemperatureDifference)
+            .range(0.0..=f64::MAX)
+            .speed(1.0),
+    );
+    settings.deltmx = limited.then_some(deltmx);
+    ui.end_row();
+    increments_form(ui, &mut settings.increments, units, coupled);
+    if !settings.steady_state {
+        ui.label("");
+        ui.weak("Instationär: Materialien brauchen Dichte und spezifische Wärmekapazität.");
+        ui.end_row();
+    }
+}
+
+fn validate_heat_transfer_step(settings: &HeatTransferStep) -> Result<(), String> {
+    if settings.deltmx.is_some_and(|d| d <= 0.0) && !settings.steady_state {
+        return Err("Die maximale Temperaturänderung muss größer als null sein.".into());
+    }
+    Ok(())
 }
 
 fn solver_row(ui: &mut Ui, solver: &mut EquationSolver, eigenvalues: bool) {
@@ -1453,9 +1810,17 @@ fn validate_frequency_step(settings: &FrequencyStep) -> Result<(), String> {
 }
 
 fn static_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem) {
-    ui.label("");
-    ui.checkbox(&mut settings.nlgeom, "Geometrisch nichtlinear (Nlgeom)");
-    ui.end_row();
+    increments_form(ui, settings, units, true);
+}
+
+/// Nonlinear geometry, solver and increments of a step with a time period; `mechanical`
+/// shows the geometric nonlinearity, which only steps with displacements have.
+fn increments_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem, mechanical: bool) {
+    if mechanical {
+        ui.label("");
+        ui.checkbox(&mut settings.nlgeom, "Geometrisch nichtlinear (Nlgeom)");
+        ui.end_row();
+    }
     solver_row(ui, &mut settings.solver, false);
     ui.label("Inkrementierung");
     egui::ComboBox::from_id_salt("incrementation")
@@ -1782,6 +2147,104 @@ mod tests {
         settings.nlgeom = true;
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
         assert!(matches!(&fe.steps[2].kind, StepKind::Static(s) if s.nlgeom));
+    }
+
+    #[test]
+    fn a_heat_transfer_step_takes_only_thermal_items() {
+        let mut fe = FeModel::default();
+        Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
+        let mut editor = Editor::create(NewItem::Step, &fe).unwrap();
+        if let Draft::Step(step) = &mut editor.draft {
+            step.kind = StepKind::CoupledTempDisp(HeatTransferStep::default());
+        }
+        editor.apply(&mut fe);
+        let step = &mut fe.steps[1];
+        step.boundary_conditions = vec![
+            BoundaryCondition {
+                name: "Fixed-1".into(),
+                active: true,
+                region: Region::NodeSet("FIX".into()),
+                kind: BoundaryKind::Fixed,
+            },
+            BoundaryCondition {
+                name: "Temperature-1".into(),
+                active: true,
+                region: Region::NodeSet("HOT".into()),
+                kind: BoundaryKind::Temperature(100.0),
+            },
+        ];
+        step.loads = vec![
+            Load {
+                name: "Pressure-1".into(),
+                active: true,
+                region: Region::Surface("TOP".into()),
+                kind: LoadKind::Pressure(1.0),
+            },
+            Load {
+                name: "Convective_Film-1".into(),
+                active: true,
+                region: Region::Surface("TOP".into()),
+                kind: LoadKind::Film {
+                    sink: 20.0,
+                    coefficient: 0.01,
+                },
+            },
+        ];
+        // A heat transfer step after it keeps the temperature and the film only.
+        let mut editor = Editor::create(NewItem::Step, &fe).unwrap();
+        if let Draft::Step(step) = &mut editor.draft {
+            step.kind = StepKind::HeatTransfer(HeatTransferStep::default());
+        }
+        editor.apply(&mut fe);
+        let heat = &fe.steps[2];
+        let names = |s: &Step| -> Vec<String> {
+            (s.boundary_conditions.iter().map(|b| b.name.clone()))
+                .chain(s.loads.iter().map(|l| l.name.clone()))
+                .collect()
+        };
+        assert_eq!(names(heat), ["Temperature-1", "Convective_Film-1"]);
+        // New items there start as the first thermal kind.
+        let Draft::BoundaryCondition(_, bc, _) = Editor::create(NewItem::BoundaryCondition(2), &fe)
+            .unwrap()
+            .draft
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (bc.name.as_str(), bc.kind),
+            ("Temperature-2", BoundaryKind::Temperature(0.0))
+        );
+        let Draft::Load(_, load, region) = Editor::create(NewItem::Load(2), &fe).unwrap().draft
+        else {
+            unreachable!()
+        };
+        assert_eq!(load.kind, LoadKind::ConcentratedFlux(0.0));
+        assert_eq!(region.target, Target::Nodes);
+        // A static step after it leaves the thermal items behind.
+        Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
+        assert!(names(&fe.steps[3]).is_empty());
+    }
+
+    #[test]
+    fn initial_temperatures_are_created_and_switched() {
+        let mut fe = FeModel::default();
+        let mut editor = Editor::create(NewItem::InitialCondition, &fe).unwrap();
+        assert!(editor.validate(&fe).is_err(), "empty region");
+        if let Draft::InitialCondition(_, region) = &mut editor.draft {
+            region.source = Source::Parts;
+            region.parts.insert("A".into());
+        }
+        assert_eq!(editor.validate(&fe), Ok(()));
+        editor.apply(&mut fe);
+        let condition = &fe.initial_conditions[0];
+        assert_eq!(condition.name, "Temperature-1");
+        assert_eq!(condition.region, Region::Parts(vec!["A".into()]));
+        assert_eq!(condition.kind, InitialConditionKind::Temperature(20.0));
+        let item = TreeItem::InitialCondition(0);
+        assert!(toggle_active(&mut fe, &item));
+        assert!(!fe.initial_conditions[0].active);
+        assert!(delete(&mut fe, &item));
+        assert!(fe.initial_conditions.is_empty());
     }
 
     #[test]
