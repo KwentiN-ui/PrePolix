@@ -154,6 +154,26 @@ impl FeMesh {
             .filter(|&(_, n)| !self.node_lookup.contains_key(&n))
             .collect()
     }
+
+    /// Whether a part, set or surface already has this name; CalculiX ignores case.
+    pub fn name_in_use(&self, name: &str) -> bool {
+        let same = |n: &String| n.eq_ignore_ascii_case(name);
+        self.parts.iter().any(|p| same(&p.name))
+            || self.node_sets.keys().any(same)
+            || self.element_sets.keys().any(same)
+            || self.surfaces.keys().any(same)
+    }
+
+    /// Renames a part together with the element set of the same name that an input file
+    /// defines for it. Returns the old name.
+    pub fn rename_part(&mut self, index: usize, name: &str) -> Option<String> {
+        let part = self.parts.get_mut(index)?;
+        let old = std::mem::replace(&mut part.name, name.to_string());
+        if let Some(elements) = self.element_sets.remove(&old) {
+            self.element_sets.insert(name.to_string(), elements);
+        }
+        Some(old)
+    }
 }
 
 /// How a mesh is stored in project files: nodes and elements without lookup tables; element
@@ -254,6 +274,23 @@ mod tests {
             shape: ElementShape::Tet4,
             nodes,
         }
+    }
+
+    #[test]
+    fn renamed_parts_take_their_element_set_along() {
+        let mut mesh = FeMesh::default();
+        mesh.parts.push(Part {
+            name: "SOLID".into(),
+            elements: vec![7],
+        });
+        mesh.element_sets.insert("SOLID".into(), vec![7]);
+        mesh.node_sets.insert("FIX".into(), vec![1]);
+        assert!(mesh.name_in_use("fix") && mesh.name_in_use("Solid"));
+        assert_eq!(mesh.rename_part(0, "BRACKET").as_deref(), Some("SOLID"));
+        assert_eq!(mesh.parts[0].name, "BRACKET");
+        assert_eq!(mesh.element_sets.get("BRACKET"), Some(&vec![7]));
+        assert!(!mesh.name_in_use("SOLID"));
+        assert_eq!(mesh.rename_part(1, "X"), None);
     }
 
     #[test]

@@ -140,6 +140,44 @@ fn vs_edge(in: SurfaceIn) -> EdgeOut {
     return out;
 }
 
+// One corner of the quad of a wide line segment from `a` to `b`; corners 0 and 2 lie at `a`,
+// 1 and 3 at `b`, on either side of the line, drawn as triangles 0-1-2 and 2-1-3.
+@vertex
+fn vs_wide_edge(
+    @builtin(vertex_index) index: u32,
+    @location(0) a: vec3<f32>,
+    @location(1) color: vec3<f32>,
+    @location(2) b: vec3<f32>,
+) -> EdgeOut {
+    let corner = array<u32, 6>(0u, 1u, 2u, 2u, 1u, 3u)[index];
+    var ends = array<vec4<f32>, 2>(
+        globals.view_proj * vec4<f32>(a, 1.0),
+        globals.view_proj * vec4<f32>(b, 1.0),
+    );
+    let size = globals.edge.yz;
+    let screen_a = ends[0].xy / ends[0].w * size;
+    let screen_b = ends[1].xy / ends[1].w * size;
+    var along = screen_b - screen_a;
+    if length(along) < 1e-6 {
+        along = vec2<f32>(1.0, 0.0);
+    }
+    along = normalize(along);
+    let across = vec2<f32>(-along.y, along.x);
+    let end = corner & 1u;
+    let side = f32(corner >> 1u) * 2.0 - 1.0;
+    let forward = f32(end) * 2.0 - 1.0;
+    // Half the width to each side and beyond each end, so that segments join without gaps;
+    // NDC spans two units across the target.
+    let offset = (across * side + along * forward) * globals.edge.w / size;
+    var out: EdgeOut;
+    out.position = ends[end];
+    out.position.z -= globals.edge.x * out.position.w;
+    out.position = vec4<f32>(out.position.xy + offset * out.position.w, out.position.zw);
+    out.color = vec4<f32>(color, 1.0);
+    out.world = select(a, b, end == 1u);
+    return out;
+}
+
 @fragment
 fn fs_edge(in: EdgeOut) -> @location(0) vec4<f32> {
     if clipped(in.world) {

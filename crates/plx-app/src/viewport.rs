@@ -111,8 +111,38 @@ pub struct ViewportResponse {
     pub box_select: Option<BoxSelect>,
     /// The mouse came to rest over the scene (`Some(ray)`) or left it (`Some(None)`).
     pub hover: Option<Option<Click>>,
+    /// A right click, which opens the context menu; the owner adds what was clicked on.
+    pub secondary_click: Option<Click>,
+    /// The view's response, for the owner's context menu.
+    pub response: Option<egui::Response>,
     /// The section plane manipulator was dragged.
     pub gizmo: Option<GizmoDrag>,
+}
+
+/// The view entries of the 3D view's context menu.
+pub fn view_menu(ui: &mut Ui) -> Option<ViewCommand> {
+    let mut command = None;
+    if ui.button("Einpassen").clicked() {
+        command = Some(ViewCommand::Fit);
+    }
+    if ui.button("Vertikal").clicked() {
+        command = Some(ViewCommand::Vertical);
+    }
+    ui.menu_button("Ansicht senkrecht zu", |ui| {
+        for axis in Axis::ALL {
+            if ui.button(axis.label()).clicked() {
+                command = Some(ViewCommand::AxisView(axis));
+            }
+        }
+    });
+    ui.menu_button("Isometrisch, Achse oben", |ui| {
+        for axis in Axis::ALL {
+            if ui.button(axis.label()).clicked() {
+                command = Some(ViewCommand::IsometricAxis(axis));
+            }
+        }
+    });
+    command
 }
 
 /// Camera requests from toolbar, menu or tree, applied by the owner of the model bounds.
@@ -283,28 +313,11 @@ impl Viewport {
                 );
             }
         }
-        response.context_menu(|ui| {
-            if ui.button("Einpassen").clicked() {
-                result.command = Some(ViewCommand::Fit);
-            }
-            if ui.button("Vertikal").clicked() {
-                result.command = Some(ViewCommand::Vertical);
-            }
-            ui.menu_button("Ansicht senkrecht zu", |ui| {
-                for axis in Axis::ALL {
-                    if ui.button(axis.label()).clicked() {
-                        result.command = Some(ViewCommand::AxisView(axis));
-                    }
-                }
-            });
-            ui.menu_button("Isometrisch, Achse oben", |ui| {
-                for axis in Axis::ALL {
-                    if ui.button(axis.label()).clicked() {
-                        result.command = Some(ViewCommand::IsometricAxis(axis));
-                    }
-                }
-            });
-        });
+        if response.secondary_clicked()
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            result.secondary_click = Some(self.click_at(rect, pointer, modifiers));
+        }
         if response.double_clicked() {
             result.command = Some(ViewCommand::Fit);
         } else if response.clicked()
@@ -342,6 +355,7 @@ impl Viewport {
             }
         }
         result.hover = self.hover(ui, rect, &response);
+        result.response = Some(response);
 
         let pixels_per_point = ui.ctx().pixels_per_point();
         let width = (rect.width() * pixels_per_point).round() as u32;

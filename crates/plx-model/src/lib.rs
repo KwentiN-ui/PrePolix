@@ -51,6 +51,28 @@ impl FeModel {
             }
         }
     }
+
+    /// Follows a renamed part: regions on the part, or on the element set an input file
+    /// defines for it, keep pointing at it.
+    pub fn rename_part(&mut self, old: &str, new: &str) {
+        let regions = (self.sections.iter_mut().map(|s| &mut s.region)).chain(
+            self.steps.iter_mut().flat_map(|step| {
+                (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
+                    .chain(step.loads.iter_mut().map(|l| &mut l.region))
+            }),
+        );
+        for region in regions {
+            match region {
+                Region::Parts(names) => {
+                    for name in names.iter_mut().filter(|n| n.as_str() == old) {
+                        *name = new.to_string();
+                    }
+                }
+                Region::ElementSet(name) if name == old => *name = new.to_string(),
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Lines of the user's own written into the input file at a fixed place, like PrePoMax's
@@ -274,6 +296,39 @@ pub fn next_name<'a>(prefix: &str, existing: impl IntoIterator<Item = &'a str>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regions_follow_renamed_parts() {
+        let mut model = FeModel::default();
+        model.sections.push(Section {
+            name: "Section-1".into(),
+            material: "Steel".into(),
+            region: Region::Parts(vec!["A".into(), "B".into()]),
+        });
+        let mut step = Step::new_static("Step-1");
+        step.boundary_conditions.push(BoundaryCondition {
+            name: "Fixed-1".into(),
+            region: Region::ElementSet("A".into()),
+            kind: BoundaryKind::Fixed,
+        });
+        step.loads.push(Load {
+            name: "Pressure-1".into(),
+            region: Region::Surface("A".into()),
+            kind: LoadKind::Pressure(1.0),
+        });
+        model.steps.push(step);
+        model.rename_part("A", "C");
+        assert_eq!(
+            model.sections[0].region,
+            Region::Parts(vec!["C".into(), "B".into()])
+        );
+        let step = &model.steps[0];
+        assert_eq!(
+            step.boundary_conditions[0].region,
+            Region::ElementSet("C".into())
+        );
+        assert_eq!(step.loads[0].region, Region::Surface("A".into()));
+    }
 
     #[test]
     fn default_names_count_up_per_kind() {

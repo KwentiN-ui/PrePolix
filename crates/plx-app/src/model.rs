@@ -9,11 +9,11 @@ use plx_mesh::{ElementId, FeMesh, NodeId, PartSkin, extract_part_skin};
 use plx_model::FeModel;
 use plx_render::contour::normalize;
 use plx_render::{
-    ClipPlane, RenderMesh, SectionCells, lighten, part_color, part_render_mesh, section_mesh,
-    wireframe_edges,
+    ClipPlane, RenderMesh, SectionCells, Vertex, lighten, part_color, part_render_mesh,
+    section_mesh, wireframe_edges,
 };
 
-use crate::results::ResultsView;
+use crate::results::{Deformation, ResultsView};
 
 /// Angle between neighbouring faces above which their common edge counts as a feature edge
 /// and the shading across it stays sharp.
@@ -70,10 +70,22 @@ pub struct Model {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Highlight {
     pub parts: HashSet<usize>,
+    /// Parts drawn with a red outline only, as PrePoMax shows a selected part.
+    pub outlines: HashSet<usize>,
     /// Element faces as (element, CalculiX face number).
     pub faces: HashSet<(ElementId, u8)>,
     /// Nodes, drawn as points over the scene.
     pub nodes: Vec<NodeId>,
+}
+
+impl Highlight {
+    /// A whole part, such as one selected in the tree or clicked in the 3D view.
+    pub fn part(index: usize) -> Self {
+        Self {
+            outlines: HashSet::from([index]),
+            ..Self::default()
+        }
+    }
 }
 
 /// A visible face under the mouse.
@@ -162,6 +174,11 @@ pub fn load(path: &Path) -> Result<LoadedModel, String> {
     }
     let results = increments.map(|(increments, date, time)| {
         let mut view = ResultsView::new(increments, mesh.bounds());
+        // Several parts usually mean contact, where an exaggerated deformation shows parts
+        // penetrating each other; true scale is less confusing there.
+        if mesh.parts.len() > 1 {
+            view.deformation = Deformation::TrueScale;
+        }
         view.date = date;
         view.time = time;
         view
@@ -199,27 +216,37 @@ impl Model {
         self.results.is_some()
     }
 
+    /// Node coordinates as drawn: with the shown deformation of results.
+    pub fn shown_coords(&self) -> std::borrow::Cow<'_, [[f64; 3]]> {
+        let coords = self.mesh.coords();
+        let Some(view) = &self.results else {
+            return std::borrow::Cow::Borrowed(coords);
+        };
+        let scale = (view.scale() * view.amplitude()) as f64;
+        match view.current_increment().and_then(|i| i.displacements()) {
+            Some(displacements) if scale != 0.0 => std::borrow::Cow::Owned(
+                coords
+                    .iter()
+                    .zip(&displacements)
+                    .map(|(p, d)| [0, 1, 2].map(|k| p[k] + scale * d[k] as f64))
+                    .collect(),
+            ),
+            _ => std::borrow::Cow::Borrowed(coords),
+        }
+    }
+
     /// Node coordinates as drawn and the normalized contour values, if a result is shown;
     /// the flag tells whether the shape is deformed and the undeformed outline is wanted.
     fn shown_state(&self) -> ShownState<'_> {
-        let mut coords = std::borrow::Cow::Borrowed(self.mesh.coords());
+        let coords = self.shown_coords();
         let mut scalars = None;
         let mut deformed = false;
         if let Some(view) = &self.results {
-            let scale = (view.scale() * view.amplitude()) as f64;
-            let displacements = view.current_increment().and_then(|i| i.displacements());
-            if let (Some(displacements), true) = (displacements, scale != 0.0) {
-                coords = std::borrow::Cow::Owned(
-                    coords
-                        .iter()
-                        .zip(&displacements)
-                        .map(|(p, d)| [0, 1, 2].map(|k| p[k] + scale * d[k] as f64))
-                        .collect(),
-                );
+            if matches!(coords, std::borrow::Cow::Owned(_)) {
                 deformed = view.show_undeformed;
             }
             if let (Some((_, component)), Some(legend)) = (view.current(), view.legend()) {
-                let amplitude = view.amplitude();
+                let amplitude = view.value_amplitude();
                 let values: Vec<f32> = component.values.iter().map(|v| v * amplitude).collect();
                 scalars = Some(normalize(&values, legend.min, legend.max));
             }
@@ -299,6 +326,14 @@ impl Model {
 
     /// Recolours the vertices of highlighted faces; vertices are laid out face by face.
     fn highlight_faces(&self, part: usize, skin: &PartSkin, mesh: &mut RenderMesh) {
+        if self.highlight.outlines.contains(&part) {
+            mesh.wide_edges = (mesh.feature_edges.iter())
+                .map(|&vertex| Vertex {
+                    color: HIGHLIGHT_COLOR,
+                    ..vertex
+                })
+                .collect();
+        }
         if self.highlight.faces.is_empty() && !self.highlight.parts.contains(&part) {
             return;
         }
@@ -344,9 +379,9 @@ impl Model {
         &self.skins[part]
     }
 
-    /// Undeformed position of a node relative to the model origin, where picking happens.
+    /// Position of a node relative to the model origin as drawn, where picking happens.
     pub fn render_position(&self, index: usize) -> Vec3 {
-        (DVec3::from(self.mesh.coords()[index]) - self.origin).as_vec3()
+        self.node_position(index).unwrap_or(Vec3::ZERO)
     }
 
     /// All nodes of the visible parts.
@@ -374,9 +409,39 @@ impl Model {
             .collect()
     }
 
+    /// Renames a part as CalculiX needs it: upper case, unique among parts, sets and
+    /// surfaces. Sections, boundary conditions and loads on the part follow.
+    pub fn rename_part(&mut self, index: usize, name: &str) -> Result<(), String> {
+        let name = name.trim().to_ascii_uppercase();
+        if name.is_empty() {
+            return Err("Der Name darf nicht leer sein.".into());
+        }
+        if name.len() > 80 {
+            return Err("Der Name darf höchstens 80 Zeichen lang sein.".into());
+        }
+        if !(name.chars()).all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            return Err("Erlaubt sind Buchstaben ohne Umlaute, Ziffern, _ und -.".into());
+        }
+        let current = self
+            .parts
+            .get(index)
+            .ok_or("Das Part gibt es nicht mehr.")?;
+        if current.name == name {
+            return Ok(());
+        }
+        if self.mesh.name_in_use(&name) {
+            return Err(format!("Der Name {name} ist bereits vergeben."));
+        }
+        if let Some(old) = self.mesh.rename_part(index, &name) {
+            self.fe.rename_part(&old, &name);
+        }
+        self.parts[index].name = name;
+        Ok(())
+    }
+
     /// The nearest visible face hit by a ray, both relative to the model origin.
     pub fn pick(&self, origin: Vec3, direction: Vec3) -> Option<Hit> {
-        let coords = self.mesh.coords();
+        let coords = self.shown_coords();
         let position = |node: usize| (DVec3::from(coords[node]) - self.origin).as_vec3();
         let mut best: Option<(f32, Hit)> = None;
         for (part, skin) in self.skins.iter().enumerate() {
@@ -413,7 +478,7 @@ impl Model {
     /// The node of the hit face nearest to the hit point.
     pub fn hit_node(&self, hit: &Hit) -> NodeId {
         let face = &self.skins[hit.part].faces[hit.face];
-        let coords = self.mesh.coords();
+        let coords = self.shown_coords();
         let distance = |node: usize| {
             ((DVec3::from(coords[node]) - self.origin).as_vec3() - hit.point).length_squared()
         };
@@ -516,6 +581,30 @@ mod tests {
     }
 
     #[test]
+    fn renamed_parts_keep_their_references() {
+        let mut model = load(&testdata("platte_mit_stuetzen.inp")).unwrap().model;
+        let (first, second) = (model.parts[0].name.clone(), model.parts[1].name.clone());
+        model.fe.sections.push(plx_model::Section {
+            name: "Section-1".into(),
+            material: "Steel".into(),
+            region: plx_model::Region::Parts(vec![first.clone()]),
+        });
+        assert!(model.rename_part(0, "").is_err());
+        assert!(model.rename_part(0, "zwei wörter").is_err());
+        assert!(model.rename_part(0, &second.to_lowercase()).is_err());
+        assert_eq!(model.rename_part(0, " Platte-1 "), Ok(()));
+        assert_eq!(model.parts[0].name, "PLATTE-1");
+        assert_eq!(model.mesh.parts[0].name, "PLATTE-1");
+        assert!(model.mesh.element_sets.contains_key("PLATTE-1"));
+        assert!(!model.mesh.element_sets.contains_key(&first));
+        assert_eq!(
+            model.fe.sections[0].region,
+            plx_model::Region::Parts(vec!["PLATTE-1".into()])
+        );
+        assert_eq!(model.rename_part(0, "platte-1"), Ok(()));
+    }
+
+    #[test]
     fn projects_open_with_their_fe_model() {
         let mut model = load(&testdata("platte_mit_stuetzen.inp")).unwrap().model;
         assert!(!model.is_project());
@@ -558,6 +647,28 @@ mod tests {
                 .iter()
                 .all(|v| v.scalar >= 0.0)
         );
+    }
+
+    #[test]
+    fn multi_part_results_open_in_true_scale() {
+        let single = load(&testdata("kragbalken_c3d8.frd")).unwrap().model;
+        assert_eq!(
+            single.results.unwrap().deformation,
+            Deformation::Automatic(1.0)
+        );
+        // Give the first element another material, which makes it a second part.
+        let text = std::fs::read_to_string(testdata("kragbalken_c3d8.frd")).unwrap();
+        let text = text.replacen(
+            " -1         1    1    0    1",
+            " -1         1    1    0    2",
+            1,
+        );
+        let path = std::env::temp_dir().join("prepolix_test_zwei_parts.frd");
+        std::fs::write(&path, text).unwrap();
+        let multi = load(&path).unwrap().model;
+        std::fs::remove_file(&path).ok();
+        assert_eq!(multi.parts.len(), 2);
+        assert_eq!(multi.results.unwrap().deformation, Deformation::TrueScale);
     }
 
     #[test]

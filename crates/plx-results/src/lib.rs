@@ -5,8 +5,13 @@
 //! `NaN`.
 
 mod derived;
+pub mod equation;
+pub mod field_output;
+pub mod history_output;
 
 pub use derived::{add_derived_components, principal_values};
+pub use equation::Equation;
+pub use field_output::{FieldOutput, FieldOutputKind, LimitBasis};
 
 /// Kind of analysis an increment belongs to, as CalculiX reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +44,16 @@ pub struct Component {
 }
 
 impl Component {
+    /// A magnitude or equivalent value that never turns negative (`ALL`, `MISES`, `TRESCA`,
+    /// `EQUIVALENT`): it keeps its sign when the result is scaled by a negative factor.
+    pub fn is_invariant(&self) -> bool {
+        self.derived
+            && matches!(
+                self.name.as_str(),
+                "ALL" | "MISES" | "TRESCA" | "EQUIVALENT"
+            )
+    }
+
     /// Smallest and largest finite value, if any.
     pub fn range(&self) -> Option<(f32, f32)> {
         self.values

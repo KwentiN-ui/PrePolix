@@ -1,10 +1,12 @@
 //! Result animation as in PrePoMax: either the deformation of one increment grows from zero to
-//! its full scale, or the increments of a step play one after another.
+//! its full scale, or the increments of a step play one after another. A mode shape of a
+//! frequency or buckling step swings from -1 to 1 instead, so both halves of the oscillation show.
 
 /// What the frames of an animation show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnimationKind {
-    /// The shown result scaled from 0 to 1 over the frames (PrePoMax: "Scale factor").
+    /// The shown result scaled from 0 to 1 over the frames, from -1 to 1 for a mode shape
+    /// (PrePoMax: "Scale factor").
     ScaleFactor,
     /// Each frame is one increment of the shown step (PrePoMax: "Time increments").
     Increments,
@@ -44,12 +46,19 @@ pub struct Animation {
     pub increments: Vec<usize>,
     /// Increment shown before the animation started, shown again when it ends.
     pub start_increment: usize,
+    /// The shown result is a mode shape (frequency or buckling step): scaling runs from -1 to 1.
+    pub modal: bool,
     forward: bool,
     elapsed: f32,
 }
 
 impl Animation {
-    pub fn new(kind: AnimationKind, increments: Vec<usize>, start_increment: usize) -> Self {
+    pub fn new(
+        kind: AnimationKind,
+        increments: Vec<usize>,
+        start_increment: usize,
+        modal: bool,
+    ) -> Self {
         // An increment animation starts where the user was looking.
         let frame = increments
             .iter()
@@ -69,6 +78,7 @@ impl Animation {
             playing: false,
             increments,
             start_increment,
+            modal,
             forward: true,
             elapsed: 0.0,
         }
@@ -85,7 +95,15 @@ impl Animation {
     pub fn amplitude(&self) -> f32 {
         match self.kind {
             AnimationKind::ScaleFactor => {
-                self.frame.min(self.frame_count() - 1) as f32 / (self.frame_count() - 1) as f32
+                let t =
+                    self.frame.min(self.frame_count() - 1) as f32 / (self.frame_count() - 1) as f32;
+                if self.modal {
+                    // PrePoMax's modal ratios: a sine from -1 to 1, slow at the turning points
+                    // like the oscillation itself.
+                    ((2.0 * t - 1.0) * std::f32::consts::FRAC_PI_2).sin()
+                } else {
+                    t
+                }
             }
             AnimationKind::Increments => 1.0,
         }
@@ -180,7 +198,7 @@ mod tests {
     use super::*;
 
     fn scale_animation(frames: u32, playback: Playback) -> Animation {
-        let mut animation = Animation::new(AnimationKind::ScaleFactor, Vec::new(), 0);
+        let mut animation = Animation::new(AnimationKind::ScaleFactor, Vec::new(), 0, false);
         animation.frames = frames;
         animation.playback = playback;
         animation.frame = 0;
@@ -208,6 +226,22 @@ mod tests {
     }
 
     #[test]
+    fn mode_shape_swings_from_minus_one_to_one() {
+        let mut animation = scale_animation(5, Playback::Once);
+        animation.modal = true;
+        let amplitudes: Vec<f32> = (0..5)
+            .map(|frame| {
+                animation.go_to(frame);
+                animation.amplitude()
+            })
+            .collect();
+        let expected = [-1.0, -std::f32::consts::FRAC_1_SQRT_2, 0.0, 0.70710677, 1.0];
+        for (a, e) in amplitudes.iter().zip(expected) {
+            assert!((a - e).abs() < 1e-6, "{amplitudes:?}");
+        }
+    }
+
+    #[test]
     fn swing_turns_at_both_ends_and_loop_wraps() {
         let mut swing = scale_animation(3, Playback::Swing);
         assert_eq!(sequence(&mut swing, 6), [1, 2, 1, 0, 1, 2]);
@@ -217,7 +251,7 @@ mod tests {
 
     #[test]
     fn increment_animation_starts_at_the_shown_increment() {
-        let animation = Animation::new(AnimationKind::Increments, vec![3, 4, 5], 4);
+        let animation = Animation::new(AnimationKind::Increments, vec![3, 4, 5], 4, false);
         assert_eq!(animation.frame, 1);
         assert_eq!(animation.increment(), Some(4));
         assert_eq!(animation.amplitude(), 1.0);
