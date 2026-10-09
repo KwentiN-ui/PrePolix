@@ -6,6 +6,7 @@ mod app;
 mod icons;
 mod keywords;
 mod model;
+mod numeric;
 mod overlay;
 mod properties;
 mod results;

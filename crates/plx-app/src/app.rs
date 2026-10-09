@@ -8,6 +8,7 @@ use crate::animation::{AnimationKind, ColorLimits, Playback};
 use crate::icons::{self, Icon};
 use crate::keywords::KeywordEditor;
 use crate::model::{self, LoadedModel, Model};
+use crate::numeric;
 use crate::overlay::{Marker, Overlay};
 use crate::properties;
 use crate::results::{Deformation, ResultsView, format_legend_value};
@@ -1140,7 +1141,7 @@ fn results_tool_bar(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
         let mut factor = if user { view.user_scale } else { view.scale() };
         let response = ui.add_enabled(
             user,
-            egui::DragValue::new(&mut factor).speed(0.1).max_decimals(4),
+            numeric::drag_value(&mut factor).speed(0.1).max_decimals(4),
         );
         if user && response.changed() {
             view.user_scale = factor;
@@ -1152,7 +1153,7 @@ fn results_tool_bar(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
         ui.separator();
         ui.label("Farbstufen");
         changed |= ui
-            .add(egui::DragValue::new(&mut view.levels).range(2..=plx_render::contour::MAX_LEVELS))
+            .add(numeric::drag_value(&mut view.levels).range(2..=plx_render::contour::MAX_LEVELS))
             .changed();
         ui.separator();
 
@@ -1251,7 +1252,7 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView) -> WindowEvent 
                     ui.end_row();
                     if animation.kind == AnimationKind::ScaleFactor {
                         ui.label("Bilder");
-                        let frames = egui::DragValue::new(&mut animation.frames).range(2..=200);
+                        let frames = numeric::drag_value(&mut animation.frames).range(2..=200);
                         if ui.add(frames).changed() {
                             animation.go_to(animation.frame);
                             event = WindowEvent::Settings;
@@ -1259,7 +1260,7 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView) -> WindowEvent 
                         ui.end_row();
                     }
                     ui.label("Bilder pro Sekunde");
-                    ui.add(egui::DragValue::new(&mut animation.fps).range(1.0..=60.0));
+                    ui.add(numeric::drag_value(&mut animation.fps).range(1.0..=60.0));
                     ui.end_row();
                     ui.label("Ablauf");
                     ui.horizontal(|ui| {
