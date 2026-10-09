@@ -1,6 +1,8 @@
 use plx_mesh::{ElementShape, FeMesh};
 use serde::{Deserialize, Serialize};
 
+use crate::UnitSystem;
+
 /// What the model is about as a whole, PrePoMax's model properties: the model space and the
 /// unit system.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,9 +137,7 @@ impl ModelSpace {
             ));
         }
         if family(ElementFamily::Line) {
-            return Err(
-                "Linien (Balken, Stäbe) lassen sich nur in 3D-Modellen vernetzen".into(),
-            );
+            return Err("Linien (Balken, Stäbe) lassen sich nur in 3D-Modellen vernetzen".into());
         }
         let Some((min, max)) = mesh.bounds() else {
             return Ok(());
@@ -182,105 +182,6 @@ fn plane_prefix(type_name: &str) -> Option<&'static str> {
     ["CPS", "CPE", "CAX"]
         .into_iter()
         .find(|prefix| upper.starts_with(prefix))
-}
-
-/// The units the model's values are given in, PrePoMax's unit system types.
-///
-/// For now this only names the units; values are not converted and the GUI shows no units
-/// next to them yet.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum UnitSystem {
-    Unitless,
-    MKgSC,
-    #[default]
-    MmTonSC,
-    MTonSC,
-    InLbSF,
-}
-
-/// Kinds of quantities the unit system names a unit for, PrePoMax's base and derived units.
-pub const BASE_QUANTITIES: [&str; 5] = ["Länge", "Winkel", "Masse", "Zeit", "Temperatur"];
-pub const DERIVED_QUANTITIES: [&str; 13] = [
-    "Fläche",
-    "Volumen",
-    "Geschwindigkeit",
-    "Winkelgeschwindigkeit",
-    "Beschleunigung",
-    "Kraft",
-    "Kraft pro Länge",
-    "Moment",
-    "Druck",
-    "Dichte",
-    "Energie",
-    "Leistung",
-    "Frequenz",
-];
-
-impl UnitSystem {
-    /// In PrePoMax's order of the list.
-    pub const ALL: [UnitSystem; 5] = [
-        UnitSystem::Unitless,
-        UnitSystem::MKgSC,
-        UnitSystem::MmTonSC,
-        UnitSystem::MTonSC,
-        UnitSystem::InLbSF,
-    ];
-
-    /// PrePoMax's name of the unit system.
-    pub fn label(self) -> &'static str {
-        match self {
-            UnitSystem::Unitless => "Ohne Einheiten",
-            UnitSystem::MKgSC => "m, kg, s, °C",
-            UnitSystem::MmTonSC => "mm, ton, s, °C",
-            UnitSystem::MTonSC => "m, ton, s, °C",
-            UnitSystem::InLbSF => "in, lbf·s²/in, s, °F",
-        }
-    }
-
-    /// Units of [`BASE_QUANTITIES`], empty without units.
-    pub fn base_units(self) -> [&'static str; 5] {
-        match self {
-            UnitSystem::Unitless => [""; 5],
-            UnitSystem::MKgSC => ["m", "rad", "kg", "s", "°C"],
-            UnitSystem::MmTonSC => ["mm", "rad", "t", "s", "°C"],
-            UnitSystem::MTonSC => ["m", "rad", "t", "s", "°C"],
-            UnitSystem::InLbSF => ["in", "rad", "lbf·s²/in", "s", "°F"],
-        }
-    }
-
-    /// Units of [`DERIVED_QUANTITIES`], empty without units.
-    pub fn derived_units(self) -> [&'static str; 13] {
-        match self {
-            UnitSystem::Unitless => [""; 13],
-            UnitSystem::MKgSC => [
-                "m²", "m³", "m/s", "rad/s", "m/s²", "N", "N/m", "N·m", "Pa", "kg/m³", "J", "W",
-                "Hz",
-            ],
-            UnitSystem::MmTonSC => [
-                "mm²", "mm³", "mm/s", "rad/s", "mm/s²", "N", "N/mm", "N·mm", "MPa", "t/mm³", "mJ",
-                "mW", "Hz",
-            ],
-            UnitSystem::MTonSC => [
-                "m²", "m³", "m/s", "rad/s", "m/s²", "kN", "kN/m", "kN·m", "kPa", "t/m³", "kJ",
-                "kW", "Hz",
-            ],
-            UnitSystem::InLbSF => [
-                "in²",
-                "in³",
-                "in/s",
-                "rad/s",
-                "in/s²",
-                "lbf",
-                "lbf/in",
-                "lbf·in",
-                "psi",
-                "lbf·s²/in^4",
-                "lbf·in",
-                "lbf·in/s",
-                "Hz",
-            ],
-        }
-    }
 }
 
 #[cfg(test)]

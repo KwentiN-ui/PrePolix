@@ -929,9 +929,12 @@ mod tests {
     /// The 100 x 10 x 10 cantilever of 10 x 2 x 2 hexahedra, hit from above at x = 95, y = 5,
     /// plus a tolerance of 0.5 mm.
     fn beam_hit(x: f32, y: f32) -> (Model, Hit) {
-        let model = crate::model::load(&testdata("kragbalken_c3d8.inp"))
-            .unwrap()
-            .model;
+        let model = crate::model::load(
+            &testdata("kragbalken_c3d8.inp"),
+            plx_model::UnitSystem::MmTonSC,
+        )
+        .unwrap()
+        .model;
         // Render coordinates are relative to the model centre.
         let p = model.mesh.coords()[0];
         let first = Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32);

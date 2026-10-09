@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use plx_model::{Algorithm2d, Algorithm3d, MeshSetupItem, MeshSetupKind};
+use plx_model::{Algorithm2d, Algorithm3d, MeshSetupItem, MeshSetupKind, UnitSystem};
 
 use super::*;
 
@@ -71,7 +71,7 @@ fn step_files_import_with_faces_and_edges() {
     if !gmsh_available() {
         return;
     }
-    let import = import_cad(&testdata("platte_mit_loch.step")).unwrap();
+    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC).unwrap();
     let display = &import.display;
     assert_eq!(display.solids, 1);
     // Four sides, top and bottom with the hole, and the hole's wall.
@@ -104,12 +104,36 @@ fn step_files_import_with_faces_and_edges() {
     assert_eq!(geometry.meshing.max_size, 5.0);
 }
 
+/// The extent of the geometry's display mesh along x.
+fn width(display: &GeometryDisplay) -> f64 {
+    let (min, max) = display.mesh.bounds().unwrap();
+    max[0] - min[0]
+}
+
+#[test]
+fn step_files_import_in_the_models_length_unit() {
+    if !gmsh_available() {
+        return;
+    }
+    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MKgSC).unwrap();
+    assert!((width(&import.display) - 0.1).abs() < 1e-6);
+    assert_eq!(import.geometry.meshing.max_size, 0.005);
+    // Scaled back to millimetres, the plate is as wide as one read in millimetres.
+    let scaled = scale_geometry(&import.geometry, 1000.0).unwrap();
+    let display = tessellate(&scaled).unwrap();
+    assert!((width(&display) - 100.0).abs() < 1e-3);
+    assert_eq!(display.faces, import.display.faces);
+    // The option does not stick to later imports.
+    let again = tessellate(&import.geometry).unwrap();
+    assert!((width(&again) - 0.1).abs() < 1e-6);
+}
+
 #[test]
 fn quadratic_tetrahedra_follow_calculix_numbering() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("platte_mit_loch.step"))
+    let mut geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC)
         .unwrap()
         .geometry;
     geometry.meshing.max_size = 8.0;
@@ -147,7 +171,9 @@ fn every_solid_becomes_a_part_and_size_controls_the_count() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("zwei_bloecke.step")).unwrap().geometry;
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
     geometry.meshing.second_order = false;
     geometry.meshing.max_size = 5.0;
     let coarse = generate_mesh(&geometry).unwrap().mesh;
@@ -178,7 +204,9 @@ fn a_remeshed_part_replaces_its_old_mesh_and_leaves_the_others() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("zwei_bloecke.step")).unwrap().geometry;
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
     geometry.meshing.second_order = false;
     geometry.meshing.max_size = 5.0;
     assert_eq!(part_names(&geometry).unwrap(), ["SOLID-1", "SOLID-2"]);
@@ -229,7 +257,7 @@ fn local_mesh_sizes_refine_faces_and_edges() {
     if !gmsh_available() {
         return;
     }
-    let import = import_cad(&testdata("platte_mit_loch.step")).unwrap();
+    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC).unwrap();
     let mut geometry = import.geometry;
     geometry.meshing.max_size = 8.0;
     geometry.meshing.second_order = false;
@@ -270,7 +298,7 @@ fn every_gmsh_algorithm_gives_valid_tetrahedra() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("platte_mit_loch.step"))
+    let mut geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC)
         .unwrap()
         .geometry;
     geometry.meshing.max_size = 8.0;
@@ -306,11 +334,13 @@ fn invalid_sizes_and_files_are_reported() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("zwei_bloecke.step")).unwrap().geometry;
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
     geometry.meshing.max_size = 0.0;
     assert!(generate_mesh(&geometry).is_err());
-    assert!(import_cad(&testdata("wuerfel_c3d10.inp")).is_err());
-    assert!(import_cad(&testdata("gibt_es_nicht.step")).is_err());
+    assert!(import_cad(&testdata("wuerfel_c3d10.inp"), UnitSystem::MmTonSC).is_err());
+    assert!(import_cad(&testdata("gibt_es_nicht.step"), UnitSystem::MmTonSC).is_err());
 }
 
 #[test]
@@ -338,6 +368,7 @@ fn rectangle(origin: [f64; 3], size: [f64; 2], radius: f64) -> Geometry {
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(size[0].hypot(size[1])),
         mesh_items: Vec::new(),
+        part_names: Vec::new(),
     }
 }
 
@@ -436,6 +467,7 @@ fn box_and_lines() -> Geometry {
             ..MeshingParameters::default()
         },
         mesh_items: Vec::new(),
+        part_names: Vec::new(),
     }
 }
 
@@ -501,4 +533,75 @@ fn edges_outside_faces_are_meshed_as_line_parts() {
     });
     let fine = generate_part_mesh(&geometry, "LINE-2").unwrap().mesh;
     assert_eq!(fine.element_count(), 20);
+}
+
+#[test]
+fn a_deleted_part_leaves_the_others_with_their_names_and_local_sizes() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
+    geometry.meshing.second_order = false;
+    geometry.meshing.max_size = 5.0;
+    // A face of each block; the second block's face must follow it into the new numbering.
+    let file = TempFile::with_contents("brep", &geometry.brep).unwrap();
+    let (first, second, second_box) = with_gmsh(|gmsh| {
+        gmsh.import_shapes(&file.0)?;
+        let volumes = gmsh.entities(3)?;
+        let first = gmsh.adjacencies(3, volumes[0])?.1[0];
+        let second = *gmsh.adjacencies(3, volumes[1])?.1.last().unwrap();
+        Ok((first, second, gmsh.entity_bounding_box(2, second)?))
+    })
+    .unwrap();
+    geometry.mesh_items.push(MeshSetupItem {
+        name: "Local_Mesh_Size-1".into(),
+        kind: MeshSetupKind::LocalMeshSize {
+            faces: vec![first, second],
+            edges: Vec::new(),
+            size: 1.0,
+        },
+    });
+
+    let smaller = delete_part(&geometry, "SOLID-1").unwrap().unwrap();
+    // Gmsh alone would call the block that is left SOLID-1.
+    assert_eq!(part_names(&smaller).unwrap(), ["SOLID-2"]);
+    let mesh = generate_mesh(&smaller).unwrap().mesh;
+    let names: Vec<&str> = mesh.parts.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["SOLID-2"]);
+    let display = tessellate(&smaller).unwrap();
+    assert_eq!(display.mesh.parts[0].name, "SOLID-2");
+    let MeshSetupKind::LocalMeshSize { faces, .. } = &smaller.mesh_items[0].kind else {
+        panic!("local mesh size expected");
+    };
+    assert_eq!(faces.len(), 1, "the face of the deleted block is dropped");
+    let file = TempFile::with_contents("brep", &smaller.brep).unwrap();
+    let moved = with_gmsh(|gmsh| {
+        gmsh.import_shapes(&file.0)?;
+        gmsh.entity_bounding_box(2, faces[0])
+    })
+    .unwrap();
+    assert!(same_box(&moved, &second_box));
+
+    assert!(delete_part(&smaller, "SOLID-1").is_err());
+    assert_eq!(delete_part(&smaller, "SOLID-2").unwrap(), None);
+}
+
+#[test]
+fn a_deleted_mesh_part_takes_its_elements_and_nodes() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
+    geometry.meshing.second_order = false;
+    geometry.meshing.max_size = 5.0;
+    let whole = generate_mesh(&geometry).unwrap().mesh;
+    let smaller = delete_mesh_part(&whole, "solid-1");
+    assert_eq!(smaller.parts, whole.parts[1..]);
+    assert_eq!(smaller.element_count(), whole.parts[1].elements.len());
+    assert!(smaller.missing_nodes().is_empty());
+    assert!(smaller.node_count() < whole.node_count());
 }

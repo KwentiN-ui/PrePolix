@@ -437,10 +437,19 @@ impl Gmsh {
 
     /// Bounding box of the whole model.
     pub fn bounding_box(&self) -> Result<([f64; 3], [f64; 3]), GmshError> {
+        self.entity_bounding_box(-1, -1)
+    }
+
+    /// Bounding box of one entity.
+    pub fn entity_bounding_box(
+        &self,
+        dim: i32,
+        tag: i32,
+    ) -> Result<([f64; 3], [f64; 3]), GmshError> {
         let (mut min, mut max) = ([0.0; 3], [0.0; 3]);
         let [x0, y0, z0] = &mut min;
         let [x1, y1, z1] = &mut max;
-        self.call(|e| unsafe { (self.api.get_bounding_box)(-1, -1, x0, y0, z0, x1, y1, z1, e) })?;
+        self.call(|e| unsafe { (self.api.get_bounding_box)(dim, tag, x0, y0, z0, x1, y1, z1, e) })?;
         Ok((min, max))
     }
 

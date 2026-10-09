@@ -8,7 +8,8 @@ use std::time::Instant;
 use plx_mesh::{ElementShape, NodeId};
 use plx_mesher::{CadEntity, GeneratedMesh};
 use plx_model::{
-    Algorithm2d, Algorithm3d, Geometry, MeshSetupItem, MeshSetupKind, MeshingParameters, next_name,
+    Algorithm2d, Algorithm3d, Geometry, MeshSetupItem, MeshSetupKind, MeshingParameters, Quantity,
+    UnitSystem, next_name,
 };
 
 use crate::model::{Highlight, Hit, Model};
@@ -19,12 +20,12 @@ use crate::viewport::Preview;
 const ERROR: egui::Color32 = egui::Color32::from_rgb(200, 0, 0);
 
 /// The rows of the meshing parameters in a two-column grid.
-fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters) {
+fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem) {
     ui.label("Max. Elementgröße");
-    ui.add(numeric::drag_value(&mut d.max_size).range(0.0..=f64::MAX));
+    ui.add(numeric::quantity(&mut d.max_size, units, Quantity::Length).range(0.0..=f64::MAX));
     ui.end_row();
     ui.label("Min. Elementgröße");
-    ui.add(numeric::drag_value(&mut d.min_size).range(0.0..=f64::MAX));
+    ui.add(numeric::quantity(&mut d.min_size, units, Quantity::Length).range(0.0..=f64::MAX));
     ui.end_row();
     ui.label("Elemente pro Krümmungsradius")
         .on_hover_text("0 schaltet die Verfeinerung an gekrümmten Flächen ab.");
@@ -51,6 +52,8 @@ fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters) {
 /// Meshing Parameters item covers.
 pub struct MeshSetupWindow {
     draft: MeshingParameters,
+    /// Unit system of the model, the unit of the sizes.
+    units: UnitSystem,
 }
 
 pub enum MeshSetupResult {
@@ -63,8 +66,11 @@ pub enum MeshSetupResult {
 }
 
 impl MeshSetupWindow {
-    pub fn new(setup: &MeshingParameters) -> Self {
-        Self { draft: *setup }
+    pub fn new(setup: &MeshingParameters, units: UnitSystem) -> Self {
+        Self {
+            draft: *setup,
+            units,
+        }
     }
 
     pub fn show(&mut self, ctx: &egui::Context) -> MeshSetupResult {
@@ -78,12 +84,12 @@ impl MeshSetupWindow {
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                let d = &mut self.draft;
+                let (d, units) = (&mut self.draft, self.units);
                 ui.weak("Gelten für alle Parts ohne eigene Meshing Parameters.");
                 egui::Grid::new("mesh size")
                     .num_columns(2)
                     .spacing([12.0, 6.0])
-                    .show(ui, |ui| parameters_ui(ui, d));
+                    .show(ui, |ui| parameters_ui(ui, d, units));
                 if d.max_size <= 0.0 {
                     ui.colored_label(ERROR, "Die maximale Elementgröße muss größer als 0 sein.");
                 }
@@ -168,6 +174,8 @@ pub struct MeshItemEditor {
     /// Faces and edges of a local mesh size.
     picks: History<CadEntity>,
     error: Option<String>,
+    /// Unit system of the model, the unit of the sizes.
+    units: UnitSystem,
 }
 
 pub enum MeshItemResult {
@@ -178,7 +186,7 @@ pub enum MeshItemResult {
 }
 
 impl MeshItemEditor {
-    pub fn create(geometry: &Geometry) -> Self {
+    pub fn create(geometry: &Geometry, units: UnitSystem) -> Self {
         let others: Vec<String> = geometry.mesh_items.iter().map(|i| i.name.clone()).collect();
         let kind = new_kind(0, geometry);
         let name = next_name(kind.type_name(), others.iter().map(String::as_str));
@@ -188,10 +196,11 @@ impl MeshItemEditor {
             others,
             picks: History::default(),
             error: None,
+            units,
         }
     }
 
-    pub fn edit(geometry: &Geometry, index: usize) -> Option<Self> {
+    pub fn edit(geometry: &Geometry, index: usize, units: UnitSystem) -> Option<Self> {
         let draft = geometry.mesh_items.get(index)?.clone();
         let others = (geometry.mesh_items.iter().enumerate())
             .filter(|&(i, _)| i != index)
@@ -210,6 +219,7 @@ impl MeshItemEditor {
             others,
             picks,
             error: None,
+            units,
         })
     }
 
@@ -302,7 +312,7 @@ impl MeshItemEditor {
         match &mut self.draft.kind {
             MeshSetupKind::MeshingParameters { parts, parameters } => {
                 parts_ui(ui, parts, &part_names);
-                parameters_ui(ui, parameters);
+                parameters_ui(ui, parameters, self.units);
             }
             MeshSetupKind::LocalMeshSize { size, .. } => {
                 ui.label("Region");
@@ -334,7 +344,7 @@ impl MeshItemEditor {
                 });
                 ui.end_row();
                 ui.label("Elementgröße");
-                ui.add(numeric::drag_value(size).range(0.0..=f64::MAX));
+                ui.add(numeric::quantity(size, self.units, Quantity::Length).range(0.0..=f64::MAX));
                 ui.end_row();
             }
             MeshSetupKind::TetrahedralGmsh {
@@ -674,7 +684,7 @@ mod tests {
     fn geometry_view() -> Option<(Geometry, Model)> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata/platte_mit_loch.step");
-        match crate::model::load(&path) {
+        match crate::model::load(&path, plx_model::UnitSystem::MmTonSC) {
             Ok(loaded) => Some((loaded.model.geometry?, loaded.geometry_view?)),
             Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
                 eprintln!("Gmsh nicht verfügbar, Test übersprungen: {error}");
@@ -702,7 +712,7 @@ mod tests {
         assert!(matches!(edge, Some(CadEntity::Edge(_))), "{edge:?}");
         assert_eq!(cad_pick(&view, &hit(&view, 30.0, 0.0), 0.5), top);
 
-        let mut editor = MeshItemEditor::create(&geometry);
+        let mut editor = MeshItemEditor::create(&geometry, UnitSystem::MmTonSC);
         editor.draft.kind = new_kind(1, &geometry);
         let (face_hit, edge_hit) = (hit(&view, -30.0, 0.0), hit(&view, -30.0, -19.8));
         editor.click(&view, Some((&face_hit, 0.5)), Operation::Replace);
@@ -726,7 +736,7 @@ mod tests {
         let Some((geometry, view)) = geometry_view() else {
             return;
         };
-        let mut editor = MeshItemEditor::create(&geometry);
+        let mut editor = MeshItemEditor::create(&geometry, UnitSystem::MmTonSC);
         assert_eq!(editor.draft.name, "Meshing_Parameters-1");
         assert!(editor.finish().is_err(), "no part chosen");
         let hit = hit(&view, -30.0, 0.0);
@@ -743,9 +753,9 @@ mod tests {
 
         let mut with_item = geometry.clone();
         with_item.mesh_items.push(item);
-        let edited = MeshItemEditor::edit(&with_item, 0).unwrap();
+        let edited = MeshItemEditor::edit(&with_item, 0, UnitSystem::MmTonSC).unwrap();
         assert!(edited.finish().is_ok(), "its own name is no clash");
-        let mut other = MeshItemEditor::create(&with_item);
+        let mut other = MeshItemEditor::create(&with_item, UnitSystem::MmTonSC);
         assert_eq!(other.draft.name, "Meshing_Parameters-2");
         other.draft.name = "meshing_parameters-1".into();
         other.click(&view, Some((&hit, 0.5)), Operation::Replace);

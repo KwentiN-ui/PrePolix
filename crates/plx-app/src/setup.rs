@@ -12,8 +12,8 @@ use plx_model::{
     BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, BoundaryKind, Constraint,
     ContactPair, Elastic, EquationSolver, Extrapolation, FeModel, FieldOutput, FrequencyStep,
     HotSpot, HotSpotComponent, Incrementation, Load, LoadKind, Material, ModelSpace, OutputKind,
-    Region, Section, SectionKind, StaticStep, Step, StepKind, SurfaceInteraction,
-    extrapolation_weights, next_name,
+    Quantity, Region, Section, SectionKind, StaticStep, Step, StepKind, SurfaceInteraction,
+    UnitSystem, extrapolation_weights, next_name,
 };
 
 use crate::constraint_dialog::ConstraintDraft;
@@ -398,11 +398,11 @@ fn face_target(fe: &FeModel) -> Target {
 }
 
 /// The components of a force; 2D models have none along z.
-fn force_rows(ui: &mut Ui, force: &mut [f64; 3], two_d: bool) {
+fn force_rows(ui: &mut Ui, force: &mut [f64; 3], two_d: bool, units: UnitSystem) {
     let count = if two_d { 2 } else { 3 };
     for (value, label) in force.iter_mut().zip(["F1", "F2", "F3"]).take(count) {
         ui.label(label);
-        ui.add(numeric::drag_value(value).speed(1.0));
+        ui.add(numeric::quantity(value, units, Quantity::Force).speed(1.0));
         ui.end_row();
     }
 }
@@ -473,8 +473,7 @@ enum Draft {
     FieldOutput(usize, FieldOutput),
     HotSpot(HotSpot, RegionDraft, HotSpotText),
     Constraint(ConstraintDraft),
-    /// The interaction with the index of the model whose properties are shown.
-    SurfaceInteraction(SurfaceInteraction, usize),
+    SurfaceInteraction(SurfaceInteraction, contacts::InteractionView),
     ContactPair(ContactPair, MasterSlave),
 }
 
@@ -624,13 +623,12 @@ impl Editor {
             NewItem::Constraint => Draft::Constraint(ConstraintDraft::new(fe)),
             NewItem::SurfaceInteraction => {
                 let existing = names(&fe.surface_interactions, |s| &s.name);
-                Draft::SurfaceInteraction(
-                    SurfaceInteraction {
-                        name: next_name("Surface_Interaction", existing),
-                        properties: Vec::new(),
-                    },
-                    0,
-                )
+                let interaction = SurfaceInteraction {
+                    name: next_name("Surface_Interaction", existing),
+                    properties: Vec::new(),
+                };
+                let view = contacts::InteractionView::new(&interaction);
+                Draft::SurfaceInteraction(interaction, view)
             }
             NewItem::ContactPair => {
                 let existing = names(&fe.contact_pairs, |c| &c.name);
@@ -690,10 +688,11 @@ impl Editor {
                 Draft::Constraint(ConstraintDraft::edit(fe.constraints.get(i)?, mesh)),
                 i,
             ),
-            TreeItem::SurfaceInteraction(i) => (
-                Draft::SurfaceInteraction(fe.surface_interactions.get(i)?.clone(), 0),
-                i,
-            ),
+            TreeItem::SurfaceInteraction(i) => {
+                let interaction = fe.surface_interactions.get(i)?.clone();
+                let view = contacts::InteractionView::new(&interaction);
+                (Draft::SurfaceInteraction(interaction, view), i)
+            }
             TreeItem::ContactPair(i) => {
                 let pair = fe.contact_pairs.get(i)?.clone();
                 let regions = MasterSlave::from_regions(&pair.master, &pair.slave, mesh);
@@ -823,10 +822,14 @@ impl Editor {
             .pivot(egui::Align2::LEFT_TOP)
             .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
             .show(ctx, |ui| {
-                egui::Grid::new("item form")
-                    .num_columns(2)
-                    .spacing([12.0, 6.0])
-                    .show(ui, |ui| self.form(ui, model));
+                if let Draft::SurfaceInteraction(interaction, view) = &mut self.draft {
+                    contacts::interaction_dialog(ui, interaction, view, model.fe.properties.units);
+                } else {
+                    egui::Grid::new("item form")
+                        .num_columns(2)
+                        .spacing([12.0, 6.0])
+                        .show(ui, |ui| self.form(ui, model));
+                }
                 if let Some(error) = &self.error {
                     ui.colored_label(egui::Color32::from_rgb(200, 0, 0), error);
                 }
@@ -865,8 +868,9 @@ impl Editor {
         let taken = self.taken(&model.fe);
         let space = model.fe.properties.space;
         let (two_d, axisymmetric) = (space.is_2d(), space == ModelSpace::Axisymmetric);
+        let units = model.fe.properties.units;
         match &mut self.draft {
-            Draft::Material(material) => material_form(ui, material),
+            Draft::Material(material) => material_form(ui, material, units),
             Draft::Section(section, region) => {
                 name_row(ui, &mut section.name);
                 ui.label("Art");
@@ -909,17 +913,20 @@ impl Editor {
                         if model.fe.properties.space.has_thickness() {
                             ui.label("Dicke");
                             ui.add(
-                                numeric::drag_value(&mut section.thickness).range(0.0..=f64::MAX),
+                                numeric::quantity(&mut section.thickness, units, Quantity::Length)
+                                    .range(0.0..=f64::MAX),
                             );
                             ui.end_row();
                         }
                     }
                     SectionKind::Truss { area } => {
                         ui.label("Querschnittsfläche");
-                        ui.add(numeric::drag_value(area).range(0.0..=f64::MAX));
+                        ui.add(
+                            numeric::quantity(area, units, Quantity::Area).range(0.0..=f64::MAX),
+                        );
                         ui.end_row();
                     }
-                    SectionKind::Beam(beam) => beam_form(ui, beam),
+                    SectionKind::Beam(beam) => beam_form(ui, beam, units),
                 }
                 region.ui(ui, model);
             }
@@ -943,15 +950,23 @@ impl Editor {
                 if let BoundaryKind::Displacement(values) = &mut bc.kind {
                     // Nodes of 2D models only move in the x-y plane.
                     let dofs = if two_d { 2 } else { 6 };
-                    for (value, label) in values
+                    for (i, (value, label)) in values
                         .iter_mut()
                         .zip(["U1", "U2", "U3", "UR1", "UR2", "UR3"])
                         .take(dofs)
+                        .enumerate()
                     {
                         let mut set = value.is_some();
                         ui.checkbox(&mut set, label);
                         let mut number = value.unwrap_or(0.0);
-                        ui.add_enabled(set, numeric::drag_value(&mut number).speed(0.01));
+                        // Displacements are lengths, rotations angles in radian.
+                        let quantity = if i < 3 {
+                            Quantity::Length
+                        } else {
+                            Quantity::Angle
+                        };
+                        let field = numeric::quantity(&mut number, units, quantity).speed(0.01);
+                        ui.add_enabled(set, field);
                         *value = set.then_some(number);
                         ui.end_row();
                     }
@@ -980,7 +995,7 @@ impl Editor {
                 ui.end_row();
                 match &mut load.kind {
                     LoadKind::ConcentratedForce(force) => {
-                        force_rows(ui, force, two_d);
+                        force_rows(ui, force, two_d, units);
                         ui.label("");
                         ui.weak("Die Kraft wirkt an jedem Knoten der Region.");
                         ui.end_row();
@@ -988,11 +1003,11 @@ impl Editor {
                     }
                     LoadKind::Pressure(pressure) => {
                         ui.label("Druck");
-                        ui.add(numeric::drag_value(pressure).speed(0.1));
+                        ui.add(numeric::quantity(pressure, units, Quantity::Pressure).speed(0.1));
                         ui.end_row();
                     }
                     LoadKind::SurfaceTraction(force) => {
-                        force_rows(ui, force, two_d);
+                        force_rows(ui, force, two_d, units);
                         ui.label("");
                         ui.weak(
                             "Gesamtkraft, beim Export flächengewichtet auf die Knoten verteilt.",
@@ -1031,10 +1046,8 @@ impl Editor {
                 hot_spot_form(ui, model, hot_spot, region, text)
             }
             Draft::Constraint(c) => c.form(ui, model, &taken, self.index.is_none()),
-            Draft::SurfaceInteraction(interaction, selected) => {
-                name_row(ui, &mut interaction.name);
-                contacts::interaction_form(ui, interaction, selected);
-            }
+            // Laid out by its own dialog, see show.
+            Draft::SurfaceInteraction(..) => {}
             Draft::ContactPair(pair, regions) => {
                 name_row(ui, &mut pair.name);
                 contacts::contact_pair_form(ui, model, pair, regions);
@@ -1153,6 +1166,22 @@ impl Editor {
     }
 
     /// Copies the draft into the model.
+    /// The tree item a new constraint, surface interaction or contact pair gets once
+    /// applied to `fe`, to show it in the tree.
+    pub fn new_interaction_item(&self, fe: &FeModel) -> Option<TreeItem> {
+        if self.index.is_some() {
+            return None;
+        }
+        match self.draft {
+            Draft::Constraint(_) => Some(TreeItem::Constraint(fe.constraints.len())),
+            Draft::SurfaceInteraction(..) => {
+                Some(TreeItem::SurfaceInteraction(fe.surface_interactions.len()))
+            }
+            Draft::ContactPair(..) => Some(TreeItem::ContactPair(fe.contact_pairs.len())),
+            _ => None,
+        }
+    }
+
     pub fn apply(self, fe: &mut FeModel) {
         fn put<T>(items: &mut Vec<T>, index: Option<usize>, item: T) {
             match index.and_then(|i| items.get_mut(i)) {
@@ -1336,7 +1365,7 @@ fn name_row(ui: &mut Ui, name: &mut String) {
 
 /// Profile, normal and offsets of a beam section, with CalculiX's directions: the
 /// 1-direction is the normal, the 2-direction the beam axis crossed with it.
-fn beam_form(ui: &mut Ui, beam: &mut BeamSection) {
+fn beam_form(ui: &mut Ui, beam: &mut BeamSection, units: UnitSystem) {
     ui.label("Profil");
     egui::ComboBox::from_id_salt("beam profile")
         .selected_text(beam.profile.label())
@@ -1352,7 +1381,7 @@ fn beam_form(ui: &mut Ui, beam: &mut BeamSection) {
     ui.end_row();
     let positive = |ui: &mut Ui, label: &str, value: &mut f64| {
         ui.label(label);
-        ui.add(numeric::drag_value(value).range(0.0..=f64::MAX));
+        ui.add(numeric::quantity(value, units, Quantity::Length).range(0.0..=f64::MAX));
         ui.end_row();
     };
     match &mut beam.profile {
@@ -1425,12 +1454,15 @@ fn beam_form(ui: &mut Ui, beam: &mut BeamSection) {
     ui.end_row();
 }
 
-fn material_form(ui: &mut Ui, material: &mut Material) {
+fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     name_row(ui, &mut material.name);
     let mut has_density = material.density.is_some();
     ui.checkbox(&mut has_density, "Dichte");
     let mut density = material.density.unwrap_or(0.0);
-    ui.add_enabled(has_density, number(&mut density));
+    ui.add_enabled(
+        has_density,
+        numeric::physical(&mut density, units, Quantity::Density),
+    );
     material.density = has_density.then_some(density);
     ui.end_row();
     let mut elastic = material.elastic.is_some();
@@ -1441,7 +1473,10 @@ fn material_form(ui: &mut Ui, material: &mut Material) {
         poisson: 0.0,
     });
     ui.label("    E-Modul");
-    ui.add_enabled(elastic, number(&mut values.young));
+    ui.add_enabled(
+        elastic,
+        numeric::physical(&mut values.young, units, Quantity::Pressure),
+    );
     ui.end_row();
     ui.label("    Querkontraktionszahl");
     ui.add_enabled(
@@ -1513,8 +1548,8 @@ fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
     }
     ui.end_row();
     match &mut step.kind {
-        StepKind::Static(settings) => static_form(ui, settings),
-        StepKind::Frequency(settings) => frequency_form(ui, settings),
+        StepKind::Static(settings) => static_form(ui, settings, fe.properties.units),
+        StepKind::Frequency(settings) => frequency_form(ui, settings, fe.properties.units),
     }
 }
 
@@ -1533,7 +1568,7 @@ fn solver_row(ui: &mut Ui, solver: &mut EquationSolver, eigenvalues: bool) {
     ui.end_row();
 }
 
-fn frequency_form(ui: &mut Ui, settings: &mut FrequencyStep) {
+fn frequency_form(ui: &mut Ui, settings: &mut FrequencyStep, units: UnitSystem) {
     ui.label("");
     ui.checkbox(
         &mut settings.perturbation,
@@ -1553,10 +1588,9 @@ fn frequency_form(ui: &mut Ui, settings: &mut FrequencyStep) {
         let mut value = bound.unwrap_or(0.0);
         ui.add_enabled(
             set,
-            numeric::drag_value(&mut value)
+            numeric::quantity(&mut value, units, Quantity::Frequency)
                 .range(0.0..=f64::MAX)
-                .speed(1.0)
-                .suffix(" Hz"),
+                .speed(1.0),
         );
         *bound = set.then_some(value);
         ui.end_row();
@@ -1584,7 +1618,7 @@ fn validate_frequency_step(settings: &FrequencyStep) -> Result<(), String> {
     Ok(())
 }
 
-fn static_form(ui: &mut Ui, settings: &mut StaticStep) {
+fn static_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem) {
     ui.label("");
     ui.checkbox(&mut settings.nlgeom, "Geometrisch nichtlinear (Nlgeom)");
     ui.end_row();
@@ -1618,7 +1652,7 @@ fn static_form(ui: &mut Ui, settings: &mut StaticStep) {
         ("Max. Inkrement", &mut settings.max_increment, automatic),
     ] {
         ui.label(label);
-        ui.add_enabled(enabled, number(value));
+        ui.add_enabled(enabled, numeric::physical(value, units, Quantity::Time));
         ui.end_row();
     }
 }
@@ -1642,14 +1676,19 @@ fn hot_spot_form(
                 ui.selectable_value(&mut hot_spot.extrapolation, method, label);
             }
             if ui.selectable_label(custom, "Eigene Lesepunkte").clicked() && !custom {
-                let distances = hot_spot.distances();
+                let distances = hot_spot.distances_in(model.fe.properties.units);
                 text.distances = format_distances(&distances);
                 hot_spot.extrapolation = Extrapolation::Custom(distances);
             }
         });
     ui.end_row();
     if let Extrapolation::Custom(distances) = &mut hot_spot.extrapolation {
-        ui.label("Abstände");
+        let unit = model.fe.properties.units.unit(Quantity::Length);
+        ui.label(if unit.is_empty() {
+            "Abstände".to_string()
+        } else {
+            format!("Abstände [{unit}]")
+        });
         let edit = egui::TextEdit::singleline(&mut text.distances)
             .hint_text("z. B. 2, 6, 10")
             .desired_width(200.0);
@@ -1661,9 +1700,13 @@ fn hot_spot_form(
     ui.label("Blechdicke t");
     ui.add_enabled(
         hot_spot.extrapolation.uses_thickness(),
-        numeric::drag_value(&mut hot_spot.thickness)
-            .range(0.0..=f64::MAX)
-            .speed(0.1),
+        numeric::quantity(
+            &mut hot_spot.thickness,
+            model.fe.properties.units,
+            Quantity::Length,
+        )
+        .range(0.0..=f64::MAX)
+        .speed(0.1),
     );
     ui.end_row();
     ui.label("Lesepunkte");
@@ -1679,15 +1722,7 @@ fn hot_spot_form(
         };
         formula += &format!("{sign} {:.3} S({})", w.abs(), crate::hot_spots::short(*d));
     }
-    ui.vertical(|ui| {
-        ui.label(formula);
-        if matches!(
-            hot_spot.extrapolation,
-            Extrapolation::IiwTypeBFine | Extrapolation::IiwTypeBCoarse
-        ) {
-            ui.weak("Abstände in mm: das Modell muss in mm sein.");
-        }
-    });
+    ui.label(formula);
     ui.end_row();
     ui.label("Spannung");
     egui::ComboBox::from_id_salt("hot spot component")
@@ -1772,19 +1807,6 @@ fn incrementation_label(incrementation: Incrementation) -> &'static str {
         Incrementation::Automatic => "Automatisch",
         Incrementation::Direct => "Fest (Direct)",
     }
-}
-
-/// Field for physical values that may be very small or large, such as a density of 7.85e-9.
-pub(crate) fn number(value: &mut f64) -> egui::DragValue<'_> {
-    numeric::drag_value(value)
-        .speed(0.0)
-        .custom_formatter(|v, _| {
-            if v != 0.0 && !(1e-3..1e7).contains(&v.abs()) {
-                format!("{v:e}")
-            } else {
-                format!("{v}")
-            }
-        })
 }
 
 #[cfg(test)]
