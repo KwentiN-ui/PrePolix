@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use plx_mesh::{Element, ElementId, ElementShape, FeMesh, NodeId, Part};
-use plx_model::{Geometry, MeshSetup};
+use plx_mesh::{Element, ElementId, ElementShape, FeMesh, NodeId, Part, SurfaceDefinition};
+use plx_model::{Algorithm2d, Algorithm3d, Geometry, MeshingParameters};
 
 use gmsh::{Gmsh, with_gmsh};
 pub use gmsh::{GmshError, LibraryInfo, loaded_library, set_library_path};
@@ -37,7 +37,7 @@ pub fn is_cad_file(path: &Path) -> bool {
 }
 
 /// A face or edge of the CAD geometry, by Gmsh's tag.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CadEntity {
     Face(i32),
     Edge(i32),
@@ -107,7 +107,8 @@ pub fn import_cad(path: &Path) -> Result<CadImport, GmshError> {
             |n| n.to_string_lossy().into(),
         ),
         brep,
-        mesh_setup: MeshSetup::for_diagonal(diagonal),
+        meshing: MeshingParameters::for_diagonal(diagonal),
+        mesh_items: Vec::new(),
     };
     let display = tessellate(&geometry)?;
     Ok(CadImport {
@@ -127,7 +128,16 @@ pub fn tessellate(geometry: &Geometry) -> Result<GeometryDisplay, GmshError> {
             .map(|k| (max[k] - min[k]).powi(2))
             .sum::<f64>()
             .sqrt();
-        set_mesh_options(gmsh, diagonal / 15.0, 0.0, 24.0, 1, true, false)?;
+        let options = MeshOptions {
+            max_size: diagonal / 15.0,
+            min_size: 0.0,
+            elements_per_2pi: 24.0,
+            order: 1,
+            straight_midside_nodes: true,
+            netgen: false,
+            algorithms: Default::default(),
+        };
+        options.apply(gmsh)?;
         // A face Gmsh cannot mesh is left out of the display rather than failing the import.
         if let Err(error) = gmsh.generate(2) {
             log::warn!("Darstellung der Geometrie unvollständig: {error}");
@@ -136,34 +146,71 @@ pub fn tessellate(geometry: &Geometry) -> Result<GeometryDisplay, GmshError> {
     })
 }
 
-/// Meshes the solids of the geometry with tetrahedra, one part per solid.
+/// Meshes every part of the geometry, one after the other as PrePoMax does.
 pub fn generate_mesh(geometry: &Geometry) -> Result<GeneratedMesh, GmshError> {
-    let setup = &geometry.mesh_setup;
+    let mut mesh = FeMesh::default();
+    let mut warnings = Vec::new();
+    for name in part_names(geometry)? {
+        let part = generate_part_mesh(geometry, &name)?;
+        mesh = merge_part(&mesh, part.mesh);
+        warnings.extend(part.warnings);
+    }
+    Ok(GeneratedMesh { mesh, warnings })
+}
+
+/// The names of the parts, one per solid, as the display and the meshes name them.
+pub fn part_names(geometry: &Geometry) -> Result<Vec<String>, GmshError> {
+    let file = TempFile::with_contents("brep", &geometry.brep)?;
+    with_gmsh(|gmsh| {
+        gmsh.import_shapes(&file.0)?;
+        solid_names(gmsh, &gmsh.entities(3)?)
+    })
+}
+
+/// Meshes one part with tetrahedra after its meshing parameters, Gmsh algorithms and local
+/// mesh sizes. The mesh holds the one part; its numbers count from 1, see [`merge_part`].
+pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMesh, GmshError> {
+    let setup = geometry.parameters(part);
     if !(setup.max_size > 0.0 && setup.min_size >= 0.0) {
-        return Err(GmshError::Other(
-            "Die maximale Elementgröße muss größer als 0 sein".into(),
-        ));
+        return Err(GmshError::Other(format!(
+            "{part}: Die maximale Elementgröße muss größer als 0 sein"
+        )));
     }
     let file = TempFile::with_contents("brep", &geometry.brep)?;
     with_gmsh(|gmsh| {
         gmsh.import_shapes(&file.0)?;
+        let volumes = gmsh.entities(3)?;
+        let names = solid_names(gmsh, &volumes)?;
+        let index = (names.iter().position(|n| n == part))
+            .ok_or_else(|| GmshError::Other(format!("Die Geometrie hat kein Part {part}")))?;
+        let volume = volumes[index];
+        // The other solids go, so that only this one is meshed.
+        let others: Vec<(i32, i32)> = (volumes.iter())
+            .filter(|&&v| v != volume)
+            .map(|&v| (3, v))
+            .collect();
+        if !others.is_empty() {
+            gmsh.remove(&others)?;
+        }
         let curvature = if setup.elements_per_curvature > 0.0 {
             (std::f64::consts::TAU * setup.elements_per_curvature).round()
         } else {
             0.0
         };
         let order = if setup.second_order { 2 } else { 1 };
-        set_mesh_options(
-            gmsh,
-            setup.max_size,
-            setup.min_size.min(setup.max_size),
-            curvature,
+        let options = MeshOptions {
+            max_size: setup.max_size,
+            min_size: setup.min_size.min(setup.max_size),
+            elements_per_2pi: curvature,
             order,
-            !setup.midside_nodes_on_geometry,
-            setup.optimize,
-        )?;
+            straight_midside_nodes: !setup.midside_nodes_on_geometry,
+            netgen: setup.optimize,
+            algorithms: geometry.algorithms(part),
+        };
+        options.apply(gmsh)?;
+        local_sizes(gmsh, geometry, volume)?;
         gmsh.generate(3)?;
-        let mesh = solid_mesh(gmsh, order)?;
+        let mesh = solid_mesh(gmsh, order, &[(volume, part.to_string())])?;
         Ok(GeneratedMesh {
             mesh,
             warnings: gmsh.warnings()?,
@@ -171,49 +218,221 @@ pub fn generate_mesh(geometry: &Geometry) -> Result<GeneratedMesh, GmshError> {
     })
 }
 
+/// The local mesh sizes on faces and edges of the solid as Gmsh size fields; Gmsh takes the
+/// smallest of them and the other size limits.
+fn local_sizes(gmsh: &Gmsh, geometry: &Geometry, volume: i32) -> Result<(), GmshError> {
+    let faces: BTreeSet<i32> = gmsh.adjacencies(3, volume)?.1.into_iter().collect();
+    let mut edges = BTreeSet::new();
+    for &face in &faces {
+        edges.extend(gmsh.adjacencies(2, face)?.1);
+    }
+    let mut fields = Vec::new();
+    for (local_faces, local_edges, size) in geometry.local_sizes() {
+        let of_solid = |tags: &[i32], own: &BTreeSet<i32>| -> Vec<f64> {
+            (tags.iter())
+                .filter(|t| own.contains(t))
+                .map(|&t| f64::from(t))
+                .collect()
+        };
+        let (local_faces, local_edges) =
+            (of_solid(local_faces, &faces), of_solid(local_edges, &edges));
+        if size.is_nan() || size <= 0.0 || (local_faces.is_empty() && local_edges.is_empty()) {
+            continue;
+        }
+        let field = gmsh.add_field("Constant")?;
+        if !local_faces.is_empty() {
+            gmsh.set_field_numbers(field, "SurfacesList", &local_faces)?;
+        }
+        if !local_edges.is_empty() {
+            gmsh.set_field_numbers(field, "CurvesList", &local_edges)?;
+        }
+        gmsh.set_field_number(field, "VIn", size)?;
+        gmsh.set_field_number(field, "VOut", 1e22)?;
+        gmsh.set_field_number(field, "IncludeBoundary", 1.0)?;
+        fields.push(field);
+    }
+    let background = match fields.as_slice() {
+        [] => return Ok(()),
+        [field] => *field,
+        _ => {
+            let min = gmsh.add_field("Min")?;
+            let list: Vec<f64> = fields.iter().map(|&f| f64::from(f)).collect();
+            gmsh.set_field_numbers(min, "FieldsList", &list)?;
+            min
+        }
+    };
+    gmsh.set_background_field(background)
+}
+
+/// Puts a newly meshed part into a mesh in place of the part of the same name. The other
+/// parts keep their node and element numbers; the new part is numbered after the highest
+/// numbers the mesh had, so that nothing that referred to the old part points into the new
+/// one.
+pub fn merge_part(mesh: &FeMesh, part_mesh: FeMesh) -> FeMesh {
+    let replaced: Vec<String> = part_mesh.parts.iter().map(|p| p.name.clone()).collect();
+    let is_replaced = |p: &Part| replaced.iter().any(|r| r.eq_ignore_ascii_case(&p.name));
+    let removed: BTreeSet<ElementId> = (mesh.parts.iter())
+        .filter(|p| is_replaced(p))
+        .flat_map(|p| p.elements.iter().copied())
+        .collect();
+    let node_offset = mesh.node_ids().iter().copied().max().unwrap_or(0);
+    let element_offset = mesh.elements().iter().map(|e| e.id).max().unwrap_or(0);
+
+    let mut merged = FeMesh::default();
+    let kept: Vec<&Element> = (mesh.elements().iter())
+        .filter(|e| !removed.contains(&e.id))
+        .collect();
+    let used: BTreeSet<NodeId> = kept.iter().flat_map(|e| e.nodes.iter().copied()).collect();
+    let removed_nodes: BTreeSet<NodeId> = (mesh.elements().iter())
+        .filter(|e| removed.contains(&e.id))
+        .flat_map(|e| e.nodes.iter().copied())
+        .filter(|n| !used.contains(n))
+        .collect();
+    for (&id, &coords) in mesh.node_ids().iter().zip(mesh.coords()) {
+        if !removed_nodes.contains(&id) {
+            merged.set_node(id, coords);
+        }
+    }
+    for element in kept {
+        // The elements come from a valid mesh.
+        let _ = merged.add_element(element.clone());
+    }
+    for (&id, &coords) in part_mesh.node_ids().iter().zip(part_mesh.coords()) {
+        merged.set_node(id + node_offset, coords);
+    }
+    for element in part_mesh.elements() {
+        let _ = merged.add_element(Element {
+            id: element.id + element_offset,
+            nodes: element.nodes.iter().map(|n| n + node_offset).collect(),
+            ..element.clone()
+        });
+    }
+    let mut new_parts: Vec<Part> = (part_mesh.parts.into_iter())
+        .map(|p| Part {
+            elements: p.elements.iter().map(|e| e + element_offset).collect(),
+            ..p
+        })
+        .collect();
+    for part in &mesh.parts {
+        if !is_replaced(part) {
+            merged.parts.push(part.clone());
+        } else if let Some(index) =
+            (new_parts.iter()).position(|p| p.name.eq_ignore_ascii_case(&part.name))
+        {
+            merged.parts.push(new_parts.remove(index));
+        }
+    }
+    merged.parts.extend(new_parts);
+    merged.node_sets = (mesh.node_sets.iter())
+        .map(|(name, nodes)| {
+            let nodes = nodes.iter().copied().filter(|n| !removed_nodes.contains(n));
+            (name.clone(), nodes.collect())
+        })
+        .collect();
+    merged.element_sets = (mesh.element_sets.iter())
+        .map(|(name, elements)| {
+            let elements = elements.iter().copied().filter(|e| !removed.contains(e));
+            (name.clone(), elements.collect())
+        })
+        .collect();
+    merged.surfaces = (mesh.surfaces.iter())
+        .map(|(name, surface)| {
+            let surface = match surface {
+                SurfaceDefinition::ElementFaces(faces) => SurfaceDefinition::ElementFaces(
+                    faces
+                        .iter()
+                        .copied()
+                        .filter(|(e, _)| !removed.contains(e))
+                        .collect(),
+                ),
+                SurfaceDefinition::Nodes(nodes) => SurfaceDefinition::Nodes(
+                    nodes
+                        .iter()
+                        .copied()
+                        .filter(|n| !removed_nodes.contains(n))
+                        .collect(),
+                ),
+            };
+            (name.clone(), surface)
+        })
+        .collect();
+    merged
+}
+
 /// Loads Gmsh and meshes a cube, for the self test in the settings.
 pub fn self_test() -> Result<(LibraryInfo, usize), GmshError> {
     with_gmsh(|gmsh| {
         gmsh.add_box([0.0; 3], [10.0; 3])?;
-        set_mesh_options(gmsh, 2.5, 0.0, 0.0, 2, true, false)?;
+        let options = MeshOptions {
+            max_size: 2.5,
+            min_size: 0.0,
+            elements_per_2pi: 0.0,
+            order: 2,
+            straight_midside_nodes: true,
+            netgen: false,
+            algorithms: Default::default(),
+        };
+        options.apply(gmsh)?;
         gmsh.generate(3)?;
-        let mesh = solid_mesh(gmsh, 2)?;
+        let volumes = gmsh.entities(3)?;
+        let named: Vec<(i32, String)> =
+            volumes.iter().map(|&v| (v, format!("SOLID-{v}"))).collect();
+        let mesh = solid_mesh(gmsh, 2, &named)?;
         Ok((gmsh.info().clone(), mesh.element_count()))
     })
 }
 
-/// Sets every meshing option prepolix uses; Gmsh keeps options between uses.
-fn set_mesh_options(
-    gmsh: &Gmsh,
+/// The meshing options prepolix sets.
+struct MeshOptions {
     max_size: f64,
     min_size: f64,
     elements_per_2pi: f64,
     order: i32,
     straight_midside_nodes: bool,
     netgen: bool,
-) -> Result<(), GmshError> {
-    for (name, value) in [
-        ("Mesh.MeshSizeMax", max_size),
-        ("Mesh.MeshSizeMin", min_size),
-        ("Mesh.MeshSizeFromCurvature", elements_per_2pi),
-        ("Mesh.MeshSizeFromPoints", 1.0),
-        ("Mesh.MeshSizeExtendFromBoundary", 1.0),
-        ("Mesh.ElementOrder", f64::from(order)),
-        (
-            "Mesh.SecondOrderLinear",
-            f64::from(u8::from(straight_midside_nodes)),
-        ),
-        ("Mesh.HighOrderOptimize", 0.0),
-        // Frontal-Delaunay on faces, Delaunay in volumes: Gmsh's robust defaults.
-        ("Mesh.Algorithm", 6.0),
-        ("Mesh.Algorithm3D", 1.0),
-        ("Mesh.Optimize", 1.0),
-        ("Mesh.OptimizeNetgen", f64::from(u8::from(netgen))),
-        ("Mesh.RecombineAll", 0.0),
-    ] {
-        gmsh.set_number(name, value)?;
+    algorithms: (Algorithm2d, Algorithm3d),
+}
+
+impl MeshOptions {
+    /// Sets every option; Gmsh keeps options between uses.
+    fn apply(&self, gmsh: &Gmsh) -> Result<(), GmshError> {
+        let (algorithm_2d, algorithm_3d) = self.algorithms;
+        // Gmsh's numbers of the algorithms.
+        let algorithm_2d = match algorithm_2d {
+            Algorithm2d::MeshAdapt => 1.0,
+            Algorithm2d::Automatic => 2.0,
+            Algorithm2d::Delaunay => 5.0,
+            Algorithm2d::FrontalDelaunay => 6.0,
+        };
+        let algorithm_3d = match algorithm_3d {
+            Algorithm3d::Delaunay => 1.0,
+            Algorithm3d::Frontal => 4.0,
+            Algorithm3d::Hxt => 10.0,
+        };
+        for (name, value) in [
+            ("Mesh.MeshSizeMax", self.max_size),
+            ("Mesh.MeshSizeMin", self.min_size),
+            ("Mesh.MeshSizeFromCurvature", self.elements_per_2pi),
+            // Gmsh gives the points of a shape sizes of its own when it reads it or removes
+            // other shapes; the sizes come from the parameters and size fields only.
+            ("Mesh.MeshSizeFromPoints", 0.0),
+            ("Mesh.MeshSizeExtendFromBoundary", 1.0),
+            ("Mesh.ElementOrder", f64::from(self.order)),
+            (
+                "Mesh.SecondOrderLinear",
+                f64::from(u8::from(self.straight_midside_nodes)),
+            ),
+            ("Mesh.HighOrderOptimize", 0.0),
+            ("Mesh.Algorithm", algorithm_2d),
+            ("Mesh.Algorithm3D", algorithm_3d),
+            ("Mesh.Optimize", 1.0),
+            ("Mesh.OptimizeNetgen", f64::from(u8::from(self.netgen))),
+            ("Mesh.RecombineAll", 0.0),
+        ] {
+            gmsh.set_number(name, value)?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 /// Node coordinates of the generated mesh by Gmsh node tag.
@@ -230,9 +449,8 @@ fn node_id(tag: usize) -> Result<NodeId, GmshError> {
     NodeId::try_from(tag).map_err(|_| GmshError::Other("zu viele Knoten".into()))
 }
 
-/// The tetrahedra of all solids, one part per solid.
-fn solid_mesh(gmsh: &Gmsh, order: i32) -> Result<FeMesh, GmshError> {
-    let volumes = gmsh.entities(3)?;
+/// The tetrahedra of the solids given with their part names, one part per solid.
+fn solid_mesh(gmsh: &Gmsh, order: i32, volumes: &[(i32, String)]) -> Result<FeMesh, GmshError> {
     if volumes.is_empty() {
         return Err(GmshError::Other(
             "Die Geometrie enthält keine Volumenkörper".into(),
@@ -244,13 +462,12 @@ fn solid_mesh(gmsh: &Gmsh, order: i32) -> Result<FeMesh, GmshError> {
     } else {
         (TET4, ElementShape::Tet4, "C3D4")
     };
-    let names = solid_names(gmsh, &volumes)?;
     let mut mesh = FeMesh::default();
     let mut next_id: ElementId = 1;
-    for (&volume, name) in volumes.iter().zip(names) {
-        let (_, nodes) = gmsh.elements(gmsh_type, volume)?;
+    for (volume, name) in volumes {
+        let (_, nodes) = gmsh.elements(gmsh_type, *volume)?;
         let mut part = Part {
-            name,
+            name: name.clone(),
             elements: Vec::with_capacity(nodes.len() / shape.node_count()),
         };
         for tet in nodes.chunks_exact(shape.node_count()) {

@@ -33,6 +33,8 @@ pub enum NewItem {
     ResultFieldOutput,
     /// A history output derived from results, created in the Results tree.
     ResultHistoryOutput,
+    /// An item of the geometry's mesh setup, created in the Geometry tree.
+    MeshSetupItem,
 }
 
 /// How a region is given.
@@ -507,7 +509,9 @@ impl Editor {
                     },
                 )
             }
-            NewItem::ResultFieldOutput | NewItem::ResultHistoryOutput => return None,
+            NewItem::ResultFieldOutput | NewItem::ResultHistoryOutput | NewItem::MeshSetupItem => {
+                return None;
+            }
         };
         Some(Self {
             draft,
@@ -723,6 +727,7 @@ impl Editor {
     }
 
     fn form(&mut self, ui: &mut Ui, model: &Model) {
+        let taken = self.taken(&model.fe);
         match &mut self.draft {
             Draft::Material(material) => material_form(ui, material),
             Draft::Section(section, region) => {
@@ -748,12 +753,12 @@ impl Editor {
                     let fixed = matches!(bc.kind, BoundaryKind::Fixed);
                     if ui.radio(fixed, "Fest eingespannt").clicked() && !fixed {
                         bc.kind = BoundaryKind::Fixed;
-                        rename_default(&mut bc.name, DISPLACEMENT, FIXED);
+                        rename_default(&mut bc.name, DISPLACEMENT, FIXED, &taken);
                     }
                     if ui.radio(!fixed, "Verschiebung/Rotation").clicked() && fixed {
                         bc.kind =
                             BoundaryKind::Displacement([Some(0.0), None, None, None, None, None]);
-                        rename_default(&mut bc.name, FIXED, DISPLACEMENT);
+                        rename_default(&mut bc.name, FIXED, DISPLACEMENT, &taken);
                     }
                 });
                 ui.end_row();
@@ -782,7 +787,7 @@ impl Editor {
                             let was_on_nodes = matches!(load.kind, LoadKind::ConcentratedForce(_));
                             let on_nodes = matches!(kind, LoadKind::ConcentratedForce(_));
                             load.kind = kind;
-                            rename_default(&mut load.name, current, name);
+                            rename_default(&mut load.name, current, name, &taken);
                             if on_nodes {
                                 *region = RegionDraft::new(NODE_SOURCES, Target::Nodes);
                             } else if was_on_nodes {
@@ -864,28 +869,42 @@ impl Editor {
         }
     }
 
-    fn validate(&self, fe: &FeModel) -> Result<(), String> {
-        let (name, siblings): (&str, Vec<&str>) = match &self.draft {
-            Draft::Material(m) => (&m.name, names(&fe.materials, |m| &m.name)),
-            Draft::Section(s, _) => (&s.name, names(&fe.sections, |s| &s.name)),
-            Draft::Step(s) => (&s.name, names(&fe.steps, |s| &s.name)),
-            Draft::BoundaryCondition(step, b, _) => (
-                &b.name,
-                names(&fe.steps[*step].boundary_conditions, |b| &b.name),
-            ),
-            Draft::Load(step, l, _) => (&l.name, names(&fe.steps[*step].loads, |l| &l.name)),
-            Draft::FieldOutput(step, f) => {
-                (&f.name, names(&fe.steps[*step].field_outputs, |f| &f.name))
+    /// Names of the other items of the same kind, which the draft's name must not repeat.
+    fn taken<'a>(&self, fe: &'a FeModel) -> Vec<&'a str> {
+        let mut siblings = match &self.draft {
+            Draft::Material(_) => names(&fe.materials, |m| &m.name),
+            Draft::Section(..) => names(&fe.sections, |s| &s.name),
+            Draft::Step(_) => names(&fe.steps, |s| &s.name),
+            Draft::BoundaryCondition(step, ..) => {
+                names(&fe.steps[*step].boundary_conditions, |b| &b.name)
             }
-            Draft::HotSpot(h, ..) => (&h.name, names(&fe.hot_spots, |h| &h.name)),
+            Draft::Load(step, ..) => names(&fe.steps[*step].loads, |l| &l.name),
+            Draft::FieldOutput(step, _) => names(&fe.steps[*step].field_outputs, |f| &f.name),
+            Draft::HotSpot(..) => names(&fe.hot_spots, |h| &h.name),
+        };
+        if let Some(index) = self.index.filter(|&i| i < siblings.len()) {
+            siblings.remove(index);
+        }
+        siblings
+    }
+
+    fn validate(&self, fe: &FeModel) -> Result<(), String> {
+        let name = match &self.draft {
+            Draft::Material(m) => &m.name,
+            Draft::Section(s, _) => &s.name,
+            Draft::Step(s) => &s.name,
+            Draft::BoundaryCondition(_, b, _) => &b.name,
+            Draft::Load(_, l, _) => &l.name,
+            Draft::FieldOutput(_, f) => &f.name,
+            Draft::HotSpot(h, ..) => &h.name,
         };
         if name.trim().is_empty() {
             return Err("Bitte einen Namen eingeben.".into());
         }
-        let duplicate = siblings
+        let duplicate = self
+            .taken(fe)
             .iter()
-            .enumerate()
-            .any(|(i, other)| Some(i) != self.index && other.eq_ignore_ascii_case(name));
+            .any(|other| other.eq_ignore_ascii_case(name));
         if duplicate {
             return Err(format!("Der Name {name} ist schon vergeben."));
         }
@@ -1030,13 +1049,13 @@ pub fn item_region<'a>(fe: &'a FeModel, item: &TreeItem) -> Option<&'a Region> {
     }
 }
 
-/// Keeps a default name in step with the item kind, e.g. Fixed-1 becomes
-/// Displacement_Rotation-1, but leaves names the user chose.
-fn rename_default(name: &mut String, from: &str, to: &str) {
+/// Keeps a default name in step with the item kind, e.g. Fixed-1 becomes the next free
+/// Displacement_Rotation-n, but leaves names the user chose.
+fn rename_default(name: &mut String, from: &str, to: &str, taken: &[&str]) {
     if let Some(number) = name.strip_prefix(from).and_then(|n| n.strip_prefix('-'))
         && number.parse::<u32>().is_ok()
     {
-        *name = format!("{to}-{number}");
+        *name = next_name(to, taken.iter().copied());
     }
 }
 
@@ -1415,11 +1434,36 @@ mod tests {
     #[test]
     fn default_names_follow_the_kind() {
         let mut name = "Fixed-2".to_string();
-        rename_default(&mut name, FIXED, DISPLACEMENT);
-        assert_eq!(name, "Displacement_Rotation-2");
+        rename_default(&mut name, FIXED, DISPLACEMENT, &["Fixed-1"]);
+        assert_eq!(name, "Displacement_Rotation-1");
         let mut name = "Einspannung".to_string();
-        rename_default(&mut name, FIXED, DISPLACEMENT);
+        rename_default(&mut name, FIXED, DISPLACEMENT, &[]);
         assert_eq!(name, "Einspannung");
+    }
+
+    #[test]
+    fn switching_the_kind_proposes_a_free_name() {
+        let mut fe = FeModel::default();
+        let mut step = Step::new_static("Step-1");
+        step.boundary_conditions.push(BoundaryCondition {
+            name: "Displacement_Rotation-1".into(),
+            active: true,
+            region: Region::Nodes(Vec::new()),
+            kind: BoundaryKind::Displacement([Some(0.0), None, None, None, None, None]),
+        });
+        fe.steps.push(step);
+        let mut editor = Editor::create(NewItem::BoundaryCondition(0), &fe).unwrap();
+        let taken = editor.taken(&fe);
+        let Draft::BoundaryCondition(_, bc, _) = &mut editor.draft else {
+            unreachable!()
+        };
+        assert_eq!(bc.name, "Fixed-1");
+        rename_default(&mut bc.name, FIXED, DISPLACEMENT, &taken);
+        assert_eq!(bc.name, "Displacement_Rotation-2");
+        // An edited item does not block its own name.
+        let mut editor = Editor::create(NewItem::BoundaryCondition(0), &fe).unwrap();
+        editor.index = Some(0);
+        assert!(editor.taken(&fe).is_empty());
     }
 
     #[test]

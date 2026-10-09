@@ -39,6 +39,8 @@ pub enum TreeItem {
     Model,
     Mesh,
     Part(usize),
+    /// An item of the geometry's mesh setup.
+    MeshItem(usize),
     NodeSet(String),
     ElementSet(String),
     Surface(String),
@@ -87,21 +89,43 @@ pub struct TreeResponse {
     pub delete: Option<TreeItem>,
     /// Activate a deactivated step, boundary condition or load, or deactivate an active one.
     pub toggle_active: Option<TreeItem>,
-    /// Run the analysis.
-    pub run: bool,
+    /// An entry of the analysis' context menu, or the monitor by double click.
+    pub analysis: Option<AnalysisAction>,
     /// Open the material library.
     pub material_library: bool,
-    /// Open the meshing parameters of the geometry.
-    pub mesh_setup: bool,
-    /// Mesh the geometry.
+    /// Open the default meshing parameters of the geometry.
+    pub mesh_defaults: bool,
+    /// Mesh all parts of the geometry.
     pub generate_mesh: bool,
+    /// Mesh one part of the geometry, by index.
+    pub mesh_part: Option<usize>,
     /// Evaluate the hot spots with the current results.
     pub evaluate_hot_spots: bool,
 }
 
+/// What the user asked of the analysis, PrePoMax's analysis context menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnalysisAction {
+    /// Edit the job: executable, work directory and threads, which are settings here.
+    Edit,
+    Run,
+    CheckModel,
+    Monitor,
+    Results,
+    Kill,
+}
+
+/// What the tree shows of the analysis job.
+#[derive(Clone, Copy, Debug)]
+pub struct JobState {
+    pub status: JobStatus,
+    /// A results file is there to be opened.
+    pub results: bool,
+}
+
 /// Tree label with a fixed size: highlight and hover frame are painted over the same area, so
 /// that hovering never moves the rows below (egui's selectable label grows by its frame).
-fn row_label(
+pub(crate) fn row_label(
     ui: &mut Ui,
     selected: bool,
     color: Option<Color32>,
@@ -200,6 +224,7 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
         TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
         TreeItem::Group(HOT_SPOTS) => Some(NewItem::HotSpot),
+        TreeItem::Group("Mesh Setup") => Some(NewItem::MeshSetupItem),
         TreeItem::FieldOutputs => Some(NewItem::ResultFieldOutput),
         TreeItem::Group("History Outputs") => Some(NewItem::ResultHistoryOutput),
         _ => None,
@@ -316,9 +341,22 @@ fn part_icon(part: &PartInfo) -> TreeIcon {
     }
 }
 
-/// Context menu of a part, the same in the tree and in the 3D view.
-pub fn part_menu(ui: &mut Ui, index: usize, visible: bool, response: &mut TreeResponse) {
+/// Context menu of a part, the same in the tree and in the 3D view. A part of the geometry
+/// is meshed from here, as in PrePoMax.
+pub fn part_menu(
+    ui: &mut Ui,
+    index: usize,
+    visible: bool,
+    geometry: bool,
+    response: &mut TreeResponse,
+) {
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+    if geometry {
+        if ui.button("Netz erzeugen").clicked() {
+            response.mesh_part = Some(index);
+        }
+        ui.separator();
+    }
     if ui.button("Eigenschaften …").clicked() {
         response.open = Some(TreeItem::Part(index));
     }
@@ -339,8 +377,8 @@ struct Tree<'a> {
     view: TreeView,
     state: &'a mut TreeState,
     response: TreeResponse,
-    /// Status of the analysis job, shown as the icon of the analysis.
-    job: Option<JobStatus>,
+    /// The analysis job: its status is the icon of the analysis.
+    job: Option<JobState>,
     /// Rows of the open branches, innermost last, for the connector lines.
     levels: Vec<Vec<Row>>,
     /// Inside an item being expanded or collapsed: the state all branches take.
@@ -391,26 +429,19 @@ impl Tree<'_> {
             response = response.on_hover_text(reason);
         }
         let creates = creates(&item).filter(|_| closed.is_none());
-        let meshing = self.view == TreeView::Geometry
-            && matches!(
-                item,
-                TreeItem::Group("Mesh Setup") | TreeItem::Group("Parts")
-            );
-        if response.double_clicked() && item == TreeItem::Group("Mesh Setup") {
-            self.response.mesh_setup = true;
-        }
-        if meshing {
+        if self.view == TreeView::Geometry && item == TreeItem::Group("Parts") {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                if ui.button("Netzparameter …").clicked() {
-                    self.response.mesh_setup = true;
-                }
-                if ui.button("Netz erzeugen").clicked() {
+                if ui.button("Alle Parts vernetzen").clicked() {
                     self.response.generate_mesh = true;
                 }
             });
         }
-        if response.double_clicked() {
+        if response.double_clicked() && item == TreeItem::Analysis {
+            // Unlike PrePoMax, which edits the job, a double click reopens the monitor: the
+            // job settings are global settings here.
+            self.response.analysis = Some(AnalysisAction::Monitor);
+        } else if response.double_clicked() {
             match creates {
                 // PrePoMax creates an item when its container is double-clicked.
                 Some(kind) => self.response.create = Some(kind),
@@ -422,9 +453,12 @@ impl Tree<'_> {
         let editable = is_fe_item(&item)
             || matches!(
                 item,
-                TreeItem::ResultFieldOutput(_) | TreeItem::HistorySet(_)
+                TreeItem::ResultFieldOutput(_) | TreeItem::HistorySet(_) | TreeItem::MeshItem(_)
             );
-        if creates.is_some() || editable || item == TreeItem::Analysis {
+        if item == TreeItem::Analysis {
+            response.context_menu(|ui| self.analysis_menu(ui));
+        }
+        if creates.is_some() || editable {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 if let Some(kind) = creates
@@ -436,6 +470,15 @@ impl Tree<'_> {
                     ui.separator();
                     if ui.button("Materialbibliothek …").clicked() {
                         self.response.material_library = true;
+                    }
+                }
+                if item == TreeItem::Group("Mesh Setup") {
+                    ui.separator();
+                    if ui.button("Standard-Netzparameter …").clicked() {
+                        self.response.mesh_defaults = true;
+                    }
+                    if ui.button("Alle Parts vernetzen").clicked() {
+                        self.response.generate_mesh = true;
                     }
                 }
                 if item == TreeItem::Group(HOT_SPOTS) {
@@ -474,12 +517,39 @@ impl Tree<'_> {
                         self.response.delete = Some(item.clone());
                     }
                 }
-                if item == TreeItem::Analysis && ui.button("Starten").clicked() {
-                    self.response.run = true;
-                }
             });
         }
         response
+    }
+
+    /// PrePoMax's context menu of an analysis. Duplicating and deleting are shown but
+    /// disabled, as there is one analysis only.
+    fn analysis_menu(&mut self, ui: &mut Ui) {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        let running = self.job.is_some_and(|j| j.status == JobStatus::Running);
+        let results = self.job.is_some_and(|j| j.results) && !running;
+        let single = "Es gibt nur eine Analyse.";
+        let mut action = |ui: &mut Ui, enabled: bool, text: &str, action: AnalysisAction| {
+            if ui.add_enabled(enabled, egui::Button::new(text)).clicked() {
+                self.response.analysis = Some(action);
+            }
+        };
+        action(ui, true, "Bearbeiten …", AnalysisAction::Edit);
+        ui.add_enabled(false, egui::Button::new("Duplizieren"))
+            .on_disabled_hover_text(single);
+        ui.separator();
+        action(ui, !running, "Starten", AnalysisAction::Run);
+        action(ui, !running, "Modell prüfen", AnalysisAction::CheckModel);
+        action(ui, self.job.is_some(), "Monitor", AnalysisAction::Monitor);
+        action(ui, results, "Ergebnisse", AnalysisAction::Results);
+        action(ui, running, "Abbrechen", AnalysisAction::Kill);
+        ui.separator();
+        // An analysis has no children, as in PrePoMax the entries are there all the same.
+        ui.add_enabled(false, egui::Button::new("Alle aufklappen"));
+        ui.add_enabled(false, egui::Button::new("Alle zuklappen"));
+        ui.separator();
+        ui.add_enabled(false, egui::Button::new("Löschen"))
+            .on_disabled_hover_text(single);
     }
 
     /// PrePoMax's image of a node; containers without an own image get the dotted line.
@@ -525,7 +595,7 @@ impl Tree<'_> {
             TreeItem::StepGroup(_, "Defined Fields") => TreeIcon::DefinedField,
             TreeItem::Group("Analyses") => TreeIcon::Analysis,
             TreeItem::Group(HOT_SPOTS) => TreeIcon::HotSpot,
-            TreeItem::Analysis => match self.job {
+            TreeItem::Analysis => match self.job.map(|j| j.status) {
                 Some(JobStatus::Running) => TreeIcon::Running,
                 Some(JobStatus::Completed) => TreeIcon::Finished,
                 Some(JobStatus::FailedWithResults) => TreeIcon::Warning,
@@ -694,8 +764,9 @@ impl Tree<'_> {
                 if changed {
                     tree.response.visibility.push((index, part.visible));
                 }
+                let geometry = tree.view == TreeView::Geometry;
                 response.context_menu(|ui| {
-                    part_menu(ui, index, part.visible, &mut tree.response);
+                    part_menu(ui, index, part.visible, geometry, &mut tree.response);
                 });
             }
         });
@@ -797,11 +868,13 @@ impl Tree<'_> {
     }
 }
 
+/// `mesh_items` names the items of the geometry's mesh setup, for the Geometry tree.
 pub fn show(
     ui: &mut Ui,
     view: TreeView,
     model: Option<&mut Model>,
-    job: Option<JobStatus>,
+    mesh_items: &[String],
+    job: Option<JobState>,
     state: &mut TreeState,
 ) -> TreeResponse {
     let mut tree = Tree {
@@ -832,7 +905,10 @@ pub fn show(
                             tree.leaf(ui, TreeItem::Group("Parts"), "Parts");
                         }
                     }
-                    tree.leaf(ui, TreeItem::Group("Mesh Setup"), "Mesh Setup");
+                    let items = (mesh_items.iter().enumerate())
+                        .map(|(i, name)| (TreeItem::MeshItem(i), name.as_str()))
+                        .collect();
+                    tree.container(ui, "Mesh Setup", items);
                 }
                 TreeView::FeModel => fe_model(&mut tree, ui, model),
                 TreeView::Results => results(&mut tree, ui, model),

@@ -30,25 +30,32 @@ pub enum MonitorEvent {
 
 impl Analysis {
     /// Writes `Analysis-1.inp` into the work directory and starts CalculiX on it; steps left
-    /// at the default solver use `default_solver`, see [`Solver::default_solver`].
+    /// at the default solver use `default_solver`, see [`Solver::default_solver`]. With
+    /// `check_model` CalculiX only reads and checks the model (PrePoMax's "Check Model").
     pub fn start(
         solver: &Solver,
         model: &Model,
         default_solver: EquationSolver,
+        check_model: bool,
     ) -> Result<Self, String> {
-        if model.fe.steps.is_empty() {
+        if model.fe.steps.is_empty() && !check_model {
             return Err(
                 "Analyse nicht gestartet: Das Modell hat keinen Step (Modell > Step erstellen)."
                     .into(),
             );
         }
-        if !model.fe.steps.iter().any(|s| s.active) {
+        if !check_model && !model.fe.steps.iter().any(|s| s.active) {
             return Err("Analyse nicht gestartet: Alle Steps sind deaktiviert.".into());
         }
         let heading = format!("prepolix: {}", model.file_name());
         let mut fe = model.fe.clone();
         fe.resolve_default_solver(default_solver);
-        let input = plx_io::inp::write_inp(&model.mesh, &fe, &heading)
+        let write = if check_model {
+            plx_io::inp::write_check_inp
+        } else {
+            plx_io::inp::write_inp
+        };
+        let input = write(&model.mesh, &fe, &heading)
             .map_err(|e| format!("Eingabedatei nicht geschrieben: {e}"))?;
         let work_dir = solver.work_dir();
         let job_solver = solver.job_solver();
@@ -64,8 +71,13 @@ impl Analysis {
         })?;
         Ok(Self {
             output: vec![format!(
-                "{} gestartet in {}",
+                "{} {} in {}",
                 ANALYSIS_NAME,
+                if check_model {
+                    "Modellprüfung gestartet"
+                } else {
+                    "gestartet"
+                },
                 work_dir.display()
             )],
             job,

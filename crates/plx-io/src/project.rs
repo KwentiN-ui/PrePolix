@@ -65,7 +65,10 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
 
 #[cfg(test)]
 mod tests {
-    use plx_model::{Extrapolation, HotSpot, Material, MeshSetup, Region, Step, UserKeyword};
+    use plx_model::{
+        Algorithm2d, Algorithm3d, Extrapolation, HotSpot, Material, MeshSetupItem, MeshSetupKind,
+        MeshingParameters, Region, Step, UserKeyword,
+    };
 
     use super::*;
     use crate::inp::read_inp;
@@ -101,7 +104,25 @@ mod tests {
         let geometry = Geometry {
             source: "block.step".into(),
             brep: "DBRep_DrawableShape\n\"quoted\" lines\n".into(),
-            mesh_setup: MeshSetup::for_diagonal(100.0),
+            meshing: MeshingParameters::for_diagonal(100.0),
+            mesh_items: vec![
+                MeshSetupItem {
+                    name: "Local_Mesh_Size-1".into(),
+                    kind: MeshSetupKind::LocalMeshSize {
+                        faces: vec![3, 4],
+                        edges: vec![7],
+                        size: 0.5,
+                    },
+                },
+                MeshSetupItem {
+                    name: "Tetrahedral_Gmsh-1".into(),
+                    kind: MeshSetupKind::TetrahedralGmsh {
+                        parts: vec!["SOLID-1".into()],
+                        algorithm_2d: Algorithm2d::Delaunay,
+                        algorithm_3d: Algorithm3d::Hxt,
+                    },
+                },
+            ],
         };
         save_project(&path, Some(&geometry), &mesh, &model).unwrap();
         let project = read_project(&path).unwrap();

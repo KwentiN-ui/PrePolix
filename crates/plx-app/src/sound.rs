@@ -77,6 +77,12 @@ pub struct ModeSound {
     pub show_shape: bool,
     /// Time of the egui clock when the sound was started.
     pub started: Option<f64>,
+    /// Swings of the lowest overlaid mode per second in the 3D view.
+    pub shape_speed: f32,
+    /// Frames per second of the overlay.
+    pub shape_fps: f32,
+    /// Swings of the lowest mode shown so far, and the clock time of the last frame.
+    pub shape_clock: (f64, f64),
     /// Mode shapes prepared for the overlay; rebuilt when the settings or the shown
     /// component change.
     pub mix: Option<ShapeMix>,
@@ -123,6 +129,9 @@ impl ModeSound {
             message: None,
             show_shape: true,
             started: None,
+            shape_speed: DEFAULT_SHAPE_SPEED,
+            shape_fps: DEFAULT_SHAPE_FPS,
+            shape_clock: (0.0, 0.0),
             mix: None,
         })
     }
@@ -375,9 +384,11 @@ impl Player {
     }
 }
 
-/// Slow-motion frequency of the lowest chosen mode in the 3D view, in hertz. The other modes
-/// swing faster in the ratio of their eigenfrequencies, as they sound.
-pub const SHAPE_BASE_FREQUENCY: f64 = 0.5;
+/// Default slow-motion frequency of the lowest chosen mode in the 3D view, in hertz. The
+/// other modes swing faster in the ratio of their eigenfrequencies, as they sound.
+pub const DEFAULT_SHAPE_SPEED: f32 = 0.5;
+/// Default frame rate of the overlay.
+pub const DEFAULT_SHAPE_FPS: f32 = 30.0;
 
 /// The chosen mode shapes, prepared to be overlaid frame by frame while the sound plays.
 pub struct ShapeMix {
@@ -392,8 +403,8 @@ pub struct ShapeMix {
 }
 
 struct MixMode {
-    /// Frequency in the 3D view, in hertz.
-    visual: f64,
+    /// Eigenfrequency relative to the lowest overlaid mode.
+    ratio: f64,
     /// Factor that gives every mode the same largest displacement, times its level.
     weight: f32,
     decay: f32,
@@ -463,7 +474,7 @@ impl ShapeMix {
                     None => vec![component_values(increment, field, component)],
                 };
                 MixMode {
-                    visual: SHAPE_BASE_FREQUENCY * voice.frequency / lowest,
+                    ratio: voice.frequency / lowest,
                     weight,
                     decay: sound.decay_of(voice.frequency, lowest),
                     displacements: displacements.clone(),
@@ -495,13 +506,14 @@ impl ShapeMix {
         self.field == field && self.component == component
     }
 
-    /// The overlaid mode shapes `time` seconds after the sound started.
-    pub fn frame(&self, time: f64) -> Superposition {
+    /// The overlaid mode shapes after `swings` swings of the lowest mode, `time` seconds after
+    /// the sound started (for a struck sound dying away).
+    pub fn frame(&self, swings: f64, time: f64) -> Superposition {
         let factors: Vec<f32> = self
             .modes
             .iter()
             .map(|m| {
-                let swing = (TAU * m.visual * time).sin() as f32;
+                let swing = (TAU * m.ratio * swings).sin() as f32;
                 m.weight * (-(time as f32) / m.decay).exp() * swing
             })
             .collect();
@@ -627,12 +639,15 @@ pub fn window(
                             ui.end_row();
                             for voice in &mut sound.voices {
                                 actions.changed |= ui.checkbox(&mut voice.enabled, "").changed();
-                                let label = ui
-                                    .selectable_label(
-                                        voice.increment == shown,
-                                        voice.mode.to_string(),
-                                    )
-                                    .on_hover_text("Diese Eigenform anzeigen");
+                                // Fixed size like the tree rows, so hovering does not make the
+                                // row taller.
+                                let label = crate::tree::row_label(
+                                    ui,
+                                    voice.increment == shown,
+                                    None,
+                                    voice.mode.to_string(),
+                                )
+                                .on_hover_text("Diese Eigenform anzeigen");
                                 if label.clicked() {
                                     actions.show = Some(voice.increment);
                                 }
@@ -739,6 +754,25 @@ pub fn window(
                         )
                         .changed();
                     ui.end_row();
+                    if sound.show_shape {
+                        ui.label("Geschwindigkeit");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                numeric::drag_value(&mut sound.shape_speed)
+                                    .range(0.02..=10.0)
+                                    .speed(0.01),
+                            )
+                            .on_hover_text(
+                                "Schwingungen pro Sekunde der tiefsten Mode im Bild; die \
+                                 anderen schwingen im Verhältnis ihrer Frequenzen schneller",
+                            );
+                            ui.label("Hz (tiefste Mode)");
+                        });
+                        ui.end_row();
+                        ui.label("Bilder pro Sekunde");
+                        ui.add(numeric::drag_value(&mut sound.shape_fps).range(1.0..=60.0));
+                        ui.end_row();
+                    }
                     ui.label("Lautstärke");
                     actions.changed |= ui
                         .add(egui::Slider::new(&mut sound.volume, 0.0..=1.0).show_value(false))
@@ -960,15 +994,14 @@ mod tests {
         sound.voices[1].enabled = true;
         sound.voices[1].level = 0.5;
         let mix = ShapeMix::new(&sound, &increments, "DISP", "U2").unwrap();
-        // A quarter period of the slowed down lowest mode: mode 1 at its peak, mode 2 (twice
-        // as fast) back at zero.
-        let quarter = 0.25 / SHAPE_BASE_FREQUENCY;
-        let frame = mix.frame(quarter);
+        // A quarter swing of the lowest mode: mode 1 at its peak, mode 2 (twice as fast) back
+        // at zero.
+        let frame = mix.frame(0.25, 0.0);
         assert!((frame.displacements[0][0] - 10.0).abs() < 1e-4);
         assert!(frame.displacements[0][1].abs() < 1e-4);
         // An eighth period: mode 2 at its peak, scaled to the size of the largest mode and
         // by level 0.5.
-        let frame = mix.frame(quarter / 2.0);
+        let frame = mix.frame(0.125, 0.0);
         assert!((frame.displacements[0][1] - 5.0).abs() < 1e-4);
         assert_eq!(frame.values.unwrap()[0], frame.displacements[0][1]);
         assert_eq!(frame.modes, [1, 2]);
@@ -998,7 +1031,7 @@ mod tests {
         let mix = ShapeMix::new(&sound, &increments, "STRESS", "MISES").unwrap();
         // Same frequency, opposite stresses: they cancel, so the von Mises stress is zero
         // although each mode alone has 10.
-        let frame = mix.frame(0.25 / SHAPE_BASE_FREQUENCY);
+        let frame = mix.frame(0.25, 0.0);
         assert!(frame.values.unwrap()[0].abs() < 1e-4);
         assert_eq!(frame.range, Some((0.0, 20.0)));
     }
