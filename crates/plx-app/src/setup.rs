@@ -1096,6 +1096,22 @@ impl Editor {
     }
 
     /// Copies the draft into the model.
+    /// The tree item a new constraint, surface interaction or contact pair gets once
+    /// applied to `fe`, to show it in the tree.
+    pub fn new_interaction_item(&self, fe: &FeModel) -> Option<TreeItem> {
+        if self.index.is_some() {
+            return None;
+        }
+        match self.draft {
+            Draft::Constraint(_) => Some(TreeItem::Constraint(fe.constraints.len())),
+            Draft::SurfaceInteraction(..) => {
+                Some(TreeItem::SurfaceInteraction(fe.surface_interactions.len()))
+            }
+            Draft::ContactPair(..) => Some(TreeItem::ContactPair(fe.contact_pairs.len())),
+            _ => None,
+        }
+    }
+
     pub fn apply(self, fe: &mut FeModel) {
         fn put<T>(items: &mut Vec<T>, index: Option<usize>, item: T) {
             match index.and_then(|i| items.get_mut(i)) {

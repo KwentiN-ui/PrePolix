@@ -2427,6 +2427,16 @@ impl Workbench {
                     ties.len(),
                     pairs.len()
                 );
+                // The first new item shows in the tree, even in a collapsed branch.
+                let first = if pairs.is_empty() {
+                    (!ties.is_empty()).then_some(TreeItem::Constraint(model.fe.constraints.len()))
+                } else {
+                    Some(TreeItem::ContactPair(model.fe.contact_pairs.len()))
+                };
+                if let Some(item) = first {
+                    self.tree.selected = Some((TreeView::FeModel, item));
+                    self.tree.reveal = true;
+                }
                 model.fe.constraints.extend(ties);
                 model.fe.contact_pairs.extend(pairs);
                 self.output.push(created);
@@ -2448,7 +2458,13 @@ impl Workbench {
             EditorResult::Open => {}
             EditorResult::Ok => {
                 if let Some(editor) = self.editor.take() {
+                    let created = editor.new_interaction_item(&model.fe);
                     editor.apply(&mut model.fe);
+                    // The new item shows in the tree, even in a collapsed branch.
+                    if let Some(item) = created {
+                        self.tree.selected = Some((TreeView::FeModel, item));
+                        self.tree.reveal = true;
+                    }
                 }
                 self.highlighted = None;
             }
