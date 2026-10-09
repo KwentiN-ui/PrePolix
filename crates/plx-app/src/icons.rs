@@ -16,6 +16,8 @@ const ACCENT: Color32 = Color32::from_rgb(70, 140, 215);
 pub enum Icon {
     New,
     Open,
+    /// Import of geometry: an arrow pointing into a sheet.
+    Import,
     Save,
     Fit,
     /// Standard view; the cube face looked at is highlighted.
@@ -170,6 +172,33 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
                 &[p(10.0, 1.5), p(10.0, 5.0), p(13.5, 5.0)],
                 1.0,
                 OUTLINE,
+            );
+        }
+        Icon::Import => {
+            polygon(
+                shapes,
+                vec![
+                    p(5.5, 1.5),
+                    p(11.0, 1.5),
+                    p(14.5, 5.0),
+                    p(14.5, 14.5),
+                    p(5.5, 14.5),
+                ],
+                Color32::WHITE,
+                OUTLINE,
+            );
+            line(
+                shapes,
+                &[p(11.0, 1.5), p(11.0, 5.0), p(14.5, 5.0)],
+                1.0,
+                OUTLINE,
+            );
+            line(shapes, &[p(1.0, 9.0), p(7.0, 9.0)], 2.0, ACCENT);
+            polygon(
+                shapes,
+                vec![p(11.0, 9.0), p(6.5, 5.5), p(6.5, 12.5)],
+                ACCENT,
+                ACCENT,
             );
         }
         Icon::Open => {

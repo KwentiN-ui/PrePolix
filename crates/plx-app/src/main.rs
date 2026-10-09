@@ -11,6 +11,7 @@ mod hot_spots;
 mod icons;
 mod keywords;
 mod material_library;
+mod meshing;
 mod model;
 mod numeric;
 mod overlay;
