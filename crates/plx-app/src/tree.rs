@@ -55,6 +55,8 @@ pub enum TreeItem {
 #[derive(Default)]
 pub struct TreeState {
     pub selected: Option<(TreeView, TreeItem)>,
+    /// Expand (true) or collapse an item with all its descendants in the next frame.
+    expand: Option<(TreeView, TreeItem, bool)>,
 }
 
 /// What the user did in the tree this frame.
@@ -70,6 +72,8 @@ pub struct TreeResponse {
     pub delete: Option<TreeItem>,
     /// Run the analysis.
     pub run: bool,
+    /// Open the material library.
+    pub material_library: bool,
 }
 
 /// Tree label with a fixed size: highlight and hover frame are painted over the same area, so
@@ -120,6 +124,15 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
     }
 }
 
+/// Whether double-clicking opens a dialog. As in PrePoMax, containers such as "Mesh" or
+/// "Parts" have none: they create their kind of item or open and close.
+fn has_properties(item: &TreeItem) -> bool {
+    !matches!(
+        item,
+        TreeItem::Group(_) | TreeItem::Mesh | TreeItem::StepGroup(..) | TreeItem::FieldOutputs
+    )
+}
+
 /// Items of the FE model that have an edit dialog.
 fn is_fe_item(item: &TreeItem) -> bool {
     matches!(
@@ -146,6 +159,8 @@ struct Tree<'a> {
     view: TreeView,
     state: &'a mut TreeState,
     response: TreeResponse,
+    /// Inside an item being expanded or collapsed: the state all branches take.
+    forced_open: Option<bool>,
 }
 
 impl Tree<'_> {
@@ -167,16 +182,34 @@ impl Tree<'_> {
             match creates {
                 // PrePoMax creates an item when its container is double-clicked.
                 Some(kind) => self.response.create = Some(kind),
-                None => self.response.open = Some(item.clone()),
+                None if has_properties(&item) => self.response.open = Some(item.clone()),
+                // Other containers only open or close, see `branch`.
+                None => {}
             }
         }
         let editable = is_fe_item(&item);
         if creates.is_some() || editable || item == TreeItem::Analysis {
             response.context_menu(|ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 if let Some(kind) = creates
                     && ui.button("Erstellen …").clicked()
                 {
                     self.response.create = Some(kind);
+                }
+                if item == TreeItem::Group("Materials") {
+                    ui.separator();
+                    if ui.button("Materialbibliothek …").clicked() {
+                        self.response.material_library = true;
+                    }
+                }
+                if creates.is_some() {
+                    ui.separator();
+                    if ui.button("Alle aufklappen").clicked() {
+                        self.state.expand = Some((self.view, item.clone(), true));
+                    }
+                    if ui.button("Alle zuklappen").clicked() {
+                        self.state.expand = Some((self.view, item.clone(), false));
+                    }
                 }
                 if editable {
                     if ui.button("Bearbeiten …").clicked() {
@@ -213,9 +246,29 @@ impl Tree<'_> {
         body: impl FnOnce(&mut Self, &mut Ui),
     ) {
         let id = ui.make_persistent_id((self.view, &item));
-        CollapsingState::load_with_default_open(ui.ctx(), id, default_open)
+        let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, default_open);
+        let outer = self.forced_open;
+        if let Some((view, target, open)) = &self.state.expand
+            && *view == self.view
+            && *target == item
+        {
+            self.forced_open = Some(*open);
+        }
+        if let Some(open) = self.forced_open {
+            // While a branch closes, egui still draws its body for the animation, so the
+            // descendants are collapsed as well.
+            state.set_open(open);
+        }
+        let toggles = creates(&item).is_none() && !has_properties(&item);
+        let (_, header, _) = state
             .show_header(ui, |ui| self.label(ui, item, text))
             .body(|ui| body(self, ui));
+        self.forced_open = outer;
+        if toggles && header.inner.double_clicked() {
+            let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, default_open);
+            state.toggle(ui);
+            state.store(ui.ctx());
+        }
     }
 
     /// Group node that may be empty: a placeholder leaf without children.
@@ -359,7 +412,9 @@ pub fn show(
         view,
         state,
         response: TreeResponse::default(),
+        forced_open: None,
     };
+    let expanding = tree.state.expand.clone();
     egui::ScrollArea::both()
         .auto_shrink([false, false])
         .show(ui, |ui| match view {
@@ -370,12 +425,16 @@ pub fn show(
             TreeView::FeModel => fe_model(&mut tree, ui, model),
             TreeView::Results => results(&mut tree, ui, model),
         });
+    // Applied for one frame; a request made in this frame's context menu waits for the next.
+    if tree.state.expand == expanding {
+        tree.state.expand = None;
+    }
     tree.response
 }
 
 fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
     // A results file has no FE model, as in PrePoMax; its mesh lives in the Results tree.
-    let model = model.filter(|m| !m.results_only);
+    let model = model.filter(|m| !m.is_results());
     let fe = model.as_ref().map(|m| m.fe.clone()).unwrap_or_default();
     let has_model = model.is_some();
     tree.branch(ui, TreeItem::Model, "Model", true, |tree, ui| {
@@ -499,4 +558,24 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
             tree.leaf(ui, TreeItem::Group("History Outputs"), "History Outputs");
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn containers_have_no_properties_dialog() {
+        for item in [
+            TreeItem::Mesh,
+            TreeItem::Group("Parts"),
+            TreeItem::StepGroup(0, "BCs"),
+            TreeItem::FieldOutputs,
+        ] {
+            assert!(!has_properties(&item), "{item:?}");
+        }
+        for item in [TreeItem::Model, TreeItem::Part(0), TreeItem::Material(0)] {
+            assert!(has_properties(&item), "{item:?}");
+        }
+    }
 }

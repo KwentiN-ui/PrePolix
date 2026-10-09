@@ -2,7 +2,9 @@
 //!
 //! The mesh is written together with the analysis of a [`FeModel`]. Regions the user picked in
 //! the GUI become node sets, element sets and surfaces named like PrePoMax's internal
-//! selections (`Internal_Selection-1_Fixed-1`), so the user never defines sets by hand.
+//! selections (`Internal_Selection-1_Fixed-1`), so the user never defines sets by hand. The
+//! file is built as a [`Keyword`] tree first, which is where the keyword editor inserts the
+//! user's own keywords.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -10,7 +12,7 @@ use std::fmt::Write as _;
 use plx_mesh::{ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
     BoundaryKind, FeModel, FieldOutput, Incrementation, LoadKind, OutputKind, Region, StaticStep,
-    Step, StepKind,
+    Step, StepKind, UserKeyword,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -21,63 +23,227 @@ pub enum WriteError {
     UnknownMaterial { item: String, material: String },
 }
 
-/// Writes the mesh and the analysis as the text of an input file.
-pub fn write_inp(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<String, WriteError> {
-    let mut sets = Sets::new(mesh);
-    // Regions are resolved first: their sets must precede the materials and steps.
-    let analysis = analysis(&mut sets, model)?;
-
-    let mut out = String::new();
-    title(&mut out, "Heading");
-    out.push_str("*Heading\n");
-    out.push_str(heading.lines().next().unwrap_or_default());
-    out.push('\n');
-    title(&mut out, "Nodes");
-    out.push_str("*Node\n");
-    for (id, &[x, y, z]) in mesh.node_ids().iter().zip(mesh.coords()) {
-        let _ = writeln!(out, "{id}, {:.8E}, {:.8E}, {:.8E}", x, y, z);
-    }
-    title(&mut out, "Elements");
-    elements(&mut out, mesh);
-    title(&mut out, "Node sets");
-    for (name, ids) in &sets.node_sets {
-        write_list(&mut out, &format!("*Nset, Nset={name}"), ids);
-    }
-    title(&mut out, "Element sets");
-    for (name, members) in &sets.element_sets {
-        let _ = writeln!(out, "*Elset, Elset={name}");
-        match members {
-            Members::Ids(ids) => write_ids(&mut out, ids),
-            Members::Parts(parts) => {
-                let _ = writeln!(out, "{}", parts.join(",\n"));
-            }
-        }
-    }
-    title(&mut out, "Surfaces");
-    for (name, surface) in &sets.surfaces {
-        match surface {
-            Surface::Faces(faces) => {
-                let _ = writeln!(out, "*Surface, Name={name}, Type=Element");
-                for (set, face) in faces {
-                    let _ = writeln!(out, "{set}, S{face}");
-                }
-            }
-            Surface::Nodes(set) => {
-                let _ = writeln!(out, "*Surface, Name={name}, Type=Node\n{set}");
-            }
-        }
-    }
-    out.push_str(&analysis);
-    Ok(out)
+/// One entry of the keyword tree of an input file, the structure PrePoMax's keyword editor
+/// shows: section titles hold the keywords written under them, a step holds its loads and
+/// outputs. The text of the file is the tree written depth first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Keyword {
+    pub kind: KeywordKind,
+    /// The lines of a generated keyword, each ending in a newline, or the user's text.
+    pub text: String,
+    pub children: Vec<Keyword>,
 }
 
-/// Section banner as PrePoMax writes it: `** Nodes ++++…`, 60 characters wide.
-fn title(out: &mut String, title: &str) {
-    let _ = writeln!(out, "**\n{:+<60}\n**", format!("** {title} "));
+#[derive(Clone, Debug, PartialEq)]
+pub enum KeywordKind {
+    /// Section banner such as `** Materials ++++`; the text is empty.
+    Title(String),
+    /// Written from the mesh and the FE model.
+    Generated,
+    /// Added by the user; written commented out when inactive.
+    User { active: bool },
+}
+
+impl Keyword {
+    fn title(name: &str, children: Vec<Keyword>) -> Self {
+        Self {
+            kind: KeywordKind::Title(name.to_owned()),
+            text: String::new(),
+            children,
+        }
+    }
+
+    fn generated(text: String) -> Self {
+        Self::parent(text, Vec::new())
+    }
+
+    fn parent(text: String, children: Vec<Keyword>) -> Self {
+        Self {
+            kind: KeywordKind::Generated,
+            text,
+            children,
+        }
+    }
+
+    pub fn user(keyword: &UserKeyword) -> Self {
+        Self {
+            kind: KeywordKind::User {
+                active: keyword.active,
+            },
+            text: keyword.text.clone(),
+            children: Vec::new(),
+        }
+    }
+
+    /// What this keyword adds to the file, without its children.
+    pub fn output(&self) -> String {
+        match &self.kind {
+            KeywordKind::Title(name) => format!("**\n{:+<60}\n**\n", format!("** {name} ")),
+            KeywordKind::Generated => self.text.clone(),
+            KeywordKind::User { active } => {
+                let mut out = String::new();
+                for line in self.text.lines() {
+                    if !active {
+                        out.push_str("** ");
+                    }
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                out
+            }
+        }
+    }
+}
+
+/// Writes the mesh and the analysis as the text of an input file, with the user's keywords.
+pub fn write_inp(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<String, WriteError> {
+    let mut tree = model_keywords(mesh, model, heading)?;
+    insert_user_keywords(&mut tree, &model.user_keywords);
+    Ok(write_keywords(&tree))
+}
+
+/// The text of a keyword tree.
+pub fn write_keywords(tree: &[Keyword]) -> String {
+    fn write(out: &mut String, keyword: &Keyword) {
+        out.push_str(&keyword.output());
+        for child in &keyword.children {
+            write(out, child);
+        }
+    }
+    let mut out = String::new();
+    for keyword in tree {
+        write(&mut out, keyword);
+    }
+    out
+}
+
+/// Inserts the user keywords at their positions, the way PrePoMax's
+/// `AddUserKeywordByIndices` does. Returns whether each one found its place; a keyword whose
+/// place no longer exists because the model changed is left out.
+pub fn insert_user_keywords(tree: &mut Vec<Keyword>, keywords: &[UserKeyword]) -> Vec<bool> {
+    keywords
+        .iter()
+        .map(|keyword| {
+            let Some((&index, parents)) = keyword.position.split_last() else {
+                return false;
+            };
+            let mut siblings = &mut *tree;
+            for &parent in parents {
+                match siblings.get_mut(parent) {
+                    Some(p) if !matches!(p.kind, KeywordKind::User { .. }) => {
+                        siblings = &mut p.children
+                    }
+                    _ => return false,
+                }
+            }
+            if index > siblings.len() {
+                return false;
+            }
+            siblings.insert(index, Keyword::user(keyword));
+            true
+        })
+        .collect()
+}
+
+/// The user keywords of a tree with their positions, in the order they are inserted again.
+pub fn user_keywords(tree: &[Keyword]) -> Vec<UserKeyword> {
+    fn collect(siblings: &[Keyword], path: &mut Vec<usize>, out: &mut Vec<UserKeyword>) {
+        for (index, keyword) in siblings.iter().enumerate() {
+            path.push(index);
+            if let KeywordKind::User { active } = keyword.kind {
+                out.push(UserKeyword {
+                    position: path.clone(),
+                    text: keyword.text.clone(),
+                    active,
+                });
+            }
+            collect(&keyword.children, path, out);
+            path.pop();
+        }
+    }
+    let mut out = Vec::new();
+    collect(tree, &mut Vec::new(), &mut out);
+    out
+}
+
+/// The keyword tree written from mesh and model, without user keywords. Like PrePoMax it
+/// always has every section title, so the user can add keywords under any of them.
+pub fn model_keywords(
+    mesh: &FeMesh,
+    model: &FeModel,
+    heading: &str,
+) -> Result<Vec<Keyword>, WriteError> {
+    let mut sets = Sets::new(mesh);
+    // Regions are resolved first: their sets must precede the materials and steps.
+    let materials = materials(model);
+    let sections = sections(&mut sets, model)?;
+    let steps = model
+        .steps
+        .iter()
+        .map(|step| write_step(&mut sets, step))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut nodes = String::from("*Node\n");
+    for (id, &[x, y, z]) in mesh.node_ids().iter().zip(mesh.coords()) {
+        let _ = writeln!(nodes, "{id}, {:.8E}, {:.8E}, {:.8E}", x, y, z);
+    }
+    let node_sets = sets
+        .node_sets
+        .iter()
+        .map(|(name, ids)| Keyword::generated(id_list(&format!("*Nset, Nset={name}"), ids)))
+        .collect();
+    let element_sets = sets
+        .element_sets
+        .iter()
+        .map(|(name, members)| {
+            let header = format!("*Elset, Elset={name}");
+            Keyword::generated(match members {
+                Members::Ids(ids) => id_list(&header, ids),
+                Members::Parts(parts) => format!("{header}\n{}\n", parts.join(",\n")),
+            })
+        })
+        .collect();
+    let surfaces = sets
+        .surfaces
+        .iter()
+        .map(|(name, surface)| {
+            Keyword::generated(match surface {
+                Surface::Faces(faces) => {
+                    let mut out = format!("*Surface, Name={name}, Type=Element\n");
+                    for (set, face) in faces {
+                        let _ = writeln!(out, "{set}, S{face}");
+                    }
+                    out
+                }
+                Surface::Nodes(set) => format!("*Surface, Name={name}, Type=Node\n{set}\n"),
+            })
+        })
+        .collect();
+    let heading = format!("*Heading\n{}\n", heading.lines().next().unwrap_or_default());
+    let empty = |name| Keyword::title(name, Vec::new());
+    Ok(vec![
+        Keyword::title("Heading", vec![Keyword::generated(heading)]),
+        Keyword::title("Nodes", vec![Keyword::generated(nodes)]),
+        Keyword::title("Elements", elements(mesh)),
+        Keyword::title("Node sets", node_sets),
+        Keyword::title("Element sets", element_sets),
+        Keyword::title("Surfaces", surfaces),
+        empty("Physical constants"),
+        empty("Coordinate systems"),
+        Keyword::title("Materials", materials),
+        Keyword::title("Sections", sections),
+        empty("Pre-tension sections"),
+        empty("Constraints"),
+        empty("Surface interactions"),
+        empty("Contact pairs"),
+        empty("Amplitudes"),
+        empty("Initial conditions"),
+        Keyword::title("Steps", steps),
+    ])
 }
 
 /// One `*Element` block per part and element type; the part name is the element set.
-fn elements(out: &mut String, mesh: &FeMesh) {
+fn elements(mesh: &FeMesh) -> Vec<Keyword> {
     let mut written = vec![false; mesh.element_count()];
     let mut groups: Vec<(Option<&str>, &str, Vec<ElementId>)> = Vec::new();
     for part in &mesh.parts {
@@ -96,10 +262,11 @@ fn elements(out: &mut String, mesh: &FeMesh) {
             group(&mut groups, None, &element.type_name).push(element.id);
         }
     }
+    let mut blocks = Vec::new();
     for (set, type_name, mut ids) in groups {
-        let _ = match set {
-            Some(set) => writeln!(out, "*Element, Type={type_name}, Elset={set}"),
-            None => writeln!(out, "*Element, Type={type_name}"),
+        let mut out = match set {
+            Some(set) => format!("*Element, Type={type_name}, Elset={set}\n"),
+            None => format!("*Element, Type={type_name}\n"),
         };
         ids.sort_unstable();
         for element in ids.iter().filter_map(|&id| mesh.element(id)) {
@@ -111,7 +278,9 @@ fn elements(out: &mut String, mesh: &FeMesh) {
             }
             out.push('\n');
         }
+        blocks.push(Keyword::generated(out));
     }
+    blocks
 }
 
 fn group<'a, 'b>(
@@ -290,20 +459,32 @@ impl<'a> Sets<'a> {
     }
 }
 
-fn analysis(sets: &mut Sets, model: &FeModel) -> Result<String, WriteError> {
-    let mut out = String::new();
-    title(&mut out, "Materials");
-    for material in &model.materials {
-        let _ = writeln!(out, "*Material, Name={}", name(&material.name));
-        if let Some(density) = material.density {
-            let _ = writeln!(out, "*Density\n{}", number(density));
-        }
-        if let Some(elastic) = material.elastic {
-            let (young, poisson) = (number(elastic.young), number(elastic.poisson));
-            let _ = writeln!(out, "*Elastic\n{young}, {poisson}");
-        }
-    }
-    title(&mut out, "Sections");
+fn materials(model: &FeModel) -> Vec<Keyword> {
+    model
+        .materials
+        .iter()
+        .map(|material| {
+            let mut properties = Vec::new();
+            if let Some(density) = material.density {
+                properties.push(Keyword::generated(format!(
+                    "*Density\n{}\n",
+                    number(density)
+                )));
+            }
+            if let Some(elastic) = material.elastic {
+                let (young, poisson) = (number(elastic.young), number(elastic.poisson));
+                properties.push(Keyword::generated(format!(
+                    "*Elastic\n{young}, {poisson}\n"
+                )));
+            }
+            let header = format!("*Material, Name={}\n", name(&material.name));
+            Keyword::parent(header, properties)
+        })
+        .collect()
+}
+
+fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+    let mut keywords = Vec::new();
     for section in &model.sections {
         if !model.materials.iter().any(|m| m.name == section.material) {
             return Err(WriteError::UnknownMaterial {
@@ -313,26 +494,24 @@ fn analysis(sets: &mut Sets, model: &FeModel) -> Result<String, WriteError> {
         }
         let set = sets.element_set(&section.name, &section.region)?;
         let material = name(&section.material);
-        let _ = writeln!(out, "** Name: {}", section.name);
-        let _ = writeln!(out, "*Solid section, Elset={set}, Material={material}");
+        keywords.push(Keyword::generated(format!(
+            "** Name: {}\n*Solid section, Elset={set}, Material={material}\n",
+            section.name
+        )));
     }
-    title(&mut out, "Steps");
-    for step in &model.steps {
-        write_step(&mut out, sets, step)?;
-    }
-    Ok(out)
+    Ok(keywords)
 }
 
-fn write_step(out: &mut String, sets: &mut Sets, step: &Step) -> Result<(), WriteError> {
-    title(out, &step.name);
-    match &step.kind {
-        StepKind::Static(settings) => static_step(out, settings),
-    }
-    title(out, "Boundary conditions");
-    out.push_str("*Boundary, op=New\n");
+/// A step as PrePoMax structures it: the step title holds `*Step`, which holds the procedure
+/// and a title for each kind of item, down to the one holding `*End step`.
+fn write_step(sets: &mut Sets, step: &Step) -> Result<Keyword, WriteError> {
+    let (header, procedure) = match &step.kind {
+        StepKind::Static(settings) => static_step(settings),
+    };
+    let mut boundaries = vec![Keyword::generated("*Boundary, op=New\n".into())];
     for bc in &step.boundary_conditions {
         let set = sets.node_set(&bc.name, &bc.region)?;
-        let _ = writeln!(out, "** Name: {}\n*Boundary", bc.name);
+        let mut out = format!("** Name: {}\n*Boundary\n", bc.name);
         match bc.kind {
             BoundaryKind::Fixed => {
                 let _ = writeln!(out, "{set}, 1, 6, 0");
@@ -345,11 +524,14 @@ fn write_step(out: &mut String, sets: &mut Sets, step: &Step) -> Result<(), Writ
                 }
             }
         }
+        boundaries.push(Keyword::generated(out));
     }
-    title(out, "Loads");
-    out.push_str("*Cload, op=New\n*Dload, op=New\n");
+    let mut loads = vec![
+        Keyword::generated("*Cload, op=New\n".into()),
+        Keyword::generated("*Dload, op=New\n".into()),
+    ];
     for load in &step.loads {
-        let _ = writeln!(out, "** Name: {}", load.name);
+        let mut out = format!("** Name: {}\n", load.name);
         match load.kind {
             LoadKind::ConcentratedForce(force) => {
                 let set = sets.node_set(&load.name, &load.region)?;
@@ -382,14 +564,25 @@ fn write_step(out: &mut String, sets: &mut Sets, step: &Step) -> Result<(), Writ
                 }
             }
         }
+        loads.push(Keyword::generated(out));
     }
-    title(out, "Field outputs");
-    for output in &step.field_outputs {
-        field_output(out, output);
-    }
-    title(out, "End step");
-    out.push_str("*End step\n");
-    Ok(())
+    let field_outputs = step.field_outputs.iter().filter_map(field_output).collect();
+    let end = Keyword::generated("*End step\n".into());
+    let contents = vec![
+        Keyword::generated(procedure),
+        Keyword::title("Controls", Vec::new()),
+        Keyword::title("Output frequency", Vec::new()),
+        Keyword::title("Boundary conditions", boundaries),
+        Keyword::title("Loads", loads),
+        Keyword::title("Defined fields", Vec::new()),
+        Keyword::title("History outputs", Vec::new()),
+        Keyword::title("Field outputs", field_outputs),
+        Keyword::title("End step", vec![end]),
+    ];
+    Ok(Keyword::title(
+        &step.name,
+        vec![Keyword::parent(header, contents)],
+    ))
 }
 
 /// Equivalent nodal forces of a total force spread evenly over element faces, the way
@@ -462,44 +655,39 @@ fn polygon_area(corners: &[[f64; 3]]) -> f64 {
     0.5 * (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt()
 }
 
-fn static_step(out: &mut String, settings: &StaticStep) {
+/// The `*Step` line and the procedure keyword of a static step.
+fn static_step(settings: &StaticStep) -> (String, String) {
     let default = settings.incrementation == Incrementation::Default;
-    out.push_str("*Step");
+    let mut header = String::from("*Step");
     if settings.nlgeom {
-        out.push_str(", Nlgeom");
+        header.push_str(", Nlgeom");
     }
     if !default {
-        let _ = write!(out, ", Inc={}", settings.max_increments);
+        let _ = write!(header, ", Inc={}", settings.max_increments);
     }
-    out.push_str("\n*Static");
-    match settings.incrementation {
-        Incrementation::Default => out.push('\n'),
-        Incrementation::Automatic => {
-            let _ = writeln!(
-                out,
-                "\n{}, {}, {}, {}",
-                number(settings.initial_increment),
-                number(settings.time_period),
-                number(settings.min_increment),
-                number(settings.max_increment)
-            );
-        }
-        Incrementation::Direct => {
-            let _ = writeln!(
-                out,
-                ", Direct\n{}, {}",
-                number(settings.initial_increment),
-                number(settings.time_period)
-            );
-        }
-    }
+    header.push('\n');
+    let procedure = match settings.incrementation {
+        Incrementation::Default => "*Static\n".to_owned(),
+        Incrementation::Automatic => format!(
+            "*Static\n{}, {}, {}, {}\n",
+            number(settings.initial_increment),
+            number(settings.time_period),
+            number(settings.min_increment),
+            number(settings.max_increment)
+        ),
+        Incrementation::Direct => format!(
+            "*Static, Direct\n{}, {}\n",
+            number(settings.initial_increment),
+            number(settings.time_period)
+        ),
+    };
+    (header, procedure)
 }
 
-fn field_output(out: &mut String, output: &FieldOutput) {
+fn field_output(output: &FieldOutput) -> Option<Keyword> {
     if output.variables.is_empty() {
-        return;
+        return None;
     }
-    let _ = writeln!(out, "** Name: {}", output.name);
     let mut variables = output.variables.join(", ");
     let keyword = match output.kind {
         OutputKind::Node => "*Node file",
@@ -512,16 +700,14 @@ fn field_output(out: &mut String, output: &FieldOutput) {
             "*El file"
         }
     };
-    let _ = writeln!(out, "{keyword}\n{variables}");
+    Some(Keyword::generated(format!(
+        "** Name: {}\n{keyword}\n{variables}\n",
+        output.name
+    )))
 }
 
-/// Writes ids with 16 per line, the most CalculiX reads on one line.
-fn write_list(out: &mut String, header: &str, ids: &[u32]) {
-    let _ = writeln!(out, "{header}");
-    write_ids(out, ids);
-}
-
-fn write_ids(out: &mut String, ids: &[u32]) {
+/// A keyword line followed by ids, 16 per line, the most CalculiX reads on one line.
+fn id_list(header: &str, ids: &[u32]) -> String {
     let lines: Vec<String> = ids
         .chunks(16)
         .map(|chunk| {
@@ -529,7 +715,7 @@ fn write_ids(out: &mut String, ids: &[u32]) {
             ids.join(", ")
         })
         .collect();
-    let _ = writeln!(out, "{}", lines.join(",\n"));
+    format!("{header}\n{}\n", lines.join(",\n"))
 }
 
 /// A real number in at most 16 characters, CalculiX's field width.

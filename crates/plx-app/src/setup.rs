@@ -7,14 +7,17 @@
 use std::collections::BTreeSet;
 
 use egui::Ui;
-use plx_mesh::{ElementId, NodeId};
+use plx_mesh::{ElementId, FeMesh, NodeId};
 use plx_model::{
     BoundaryCondition, BoundaryKind, Elastic, FeModel, FieldOutput, Incrementation, Load, LoadKind,
     Material, OutputKind, Region, Section, Step, StepKind, next_name,
 };
 
 use crate::model::{Highlight, Hit, Model};
+use crate::numeric;
+use crate::selection::{History, Items, Operation, Picker, PickerAction, Target};
 use crate::tree::TreeItem;
+use crate::viewport::{BoxSelect, Preview};
 
 /// Kinds of items the tree can create.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,54 +52,31 @@ impl Source {
     }
 }
 
-/// What a click in the 3D view selects.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PickMode {
-    Node,
-    ElementFace,
-    /// The smooth surface patch around the clicked face, bounded by feature edges; the
-    /// closest the mesh has to PrePoMax's selection of a geometry face.
-    Surface,
-}
-
-impl PickMode {
-    fn label(self) -> &'static str {
-        match self {
-            PickMode::Node => "Knoten",
-            PickMode::ElementFace => "Elementfläche",
-            PickMode::Surface => "Fläche bis Kante",
-        }
-    }
-}
-
 /// A region while it is edited in a dialog.
 #[derive(Clone, Debug, PartialEq)]
 struct RegionDraft {
     sources: &'static [Source],
-    modes: &'static [PickMode],
     source: Source,
-    mode: PickMode,
-    nodes: BTreeSet<NodeId>,
-    faces: BTreeSet<(ElementId, u8)>,
+    /// Whether picks select nodes or element faces.
+    target: Target,
+    nodes: History<NodeId>,
+    faces: History<(ElementId, u8)>,
     parts: BTreeSet<String>,
     set: String,
 }
 
 const NODE_SOURCES: &[Source] = &[Source::Selection, Source::NodeSet, Source::Surface];
-const ALL_MODES: &[PickMode] = &[PickMode::Surface, PickMode::ElementFace, PickMode::Node];
 const FACE_SOURCES: &[Source] = &[Source::Selection, Source::Surface];
-const FACE_MODES: &[PickMode] = &[PickMode::Surface, PickMode::ElementFace];
 const ELEMENT_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet];
 
 impl RegionDraft {
-    fn new(sources: &'static [Source], modes: &'static [PickMode]) -> Self {
+    fn new(sources: &'static [Source], target: Target) -> Self {
         Self {
             sources,
-            modes,
             source: sources[0],
-            mode: modes.first().copied().unwrap_or(PickMode::Surface),
-            nodes: BTreeSet::new(),
-            faces: BTreeSet::new(),
+            target,
+            nodes: History::default(),
+            faces: History::default(),
             parts: BTreeSet::new(),
             set: String::new(),
         }
@@ -105,21 +85,20 @@ impl RegionDraft {
     fn from_region(
         region: &Region,
         sources: &'static [Source],
-        modes: &'static [PickMode],
+        target: Target,
+        mesh: &FeMesh,
     ) -> Self {
-        let mut draft = Self::new(sources, modes);
+        let mut draft = Self::new(sources, target);
         match region {
             Region::Parts(parts) => {
                 draft.source = Source::Parts;
                 draft.parts = parts.iter().cloned().collect();
             }
-            Region::Nodes(nodes) => {
-                draft.mode = PickMode::Node;
-                draft.nodes = nodes.iter().copied().collect();
+            Region::Nodes(nodes) => draft.nodes = History::from_items(nodes.iter().copied()),
+            Region::Faces(faces) if target == Target::Faces => {
+                draft.faces = History::from_items(faces.iter().copied());
             }
-            Region::Faces(faces) => {
-                draft.faces = faces.iter().copied().collect();
-            }
+            Region::Faces(_) => draft.nodes = History::from_items(region.nodes(mesh)),
             Region::NodeSet(set) | Region::ElementSet(set) | Region::Surface(set) => {
                 draft.source = match region {
                     Region::NodeSet(_) => Source::NodeSet,
@@ -134,10 +113,10 @@ impl RegionDraft {
 
     fn region(&self) -> Region {
         match self.source {
-            Source::Selection if self.mode == PickMode::Node => {
-                Region::Nodes(self.nodes.iter().copied().collect())
-            }
-            Source::Selection => Region::Faces(self.faces.iter().copied().collect()),
+            Source::Selection => match self.target {
+                Target::Nodes => Region::Nodes(self.nodes.items().into_iter().collect()),
+                Target::Faces => Region::Faces(self.faces.items().into_iter().collect()),
+            },
             Source::Parts => Region::Parts(self.parts.iter().cloned().collect()),
             Source::NodeSet => Region::NodeSet(self.set.clone()),
             Source::ElementSet => Region::ElementSet(self.set.clone()),
@@ -147,38 +126,112 @@ impl RegionDraft {
 
     fn is_empty(&self) -> bool {
         match self.source {
-            Source::Selection if self.mode == PickMode::Node => self.nodes.is_empty(),
-            Source::Selection => self.faces.is_empty(),
+            Source::Selection => match self.target {
+                Target::Nodes => self.nodes.items().is_empty(),
+                Target::Faces => self.faces.items().is_empty(),
+            },
             Source::Parts => self.parts.is_empty(),
             _ => self.set.is_empty(),
         }
     }
 
-    fn click(&mut self, model: &Model, hit: &Hit, remove: bool) {
-        fn toggle<T: Ord>(set: &mut BTreeSet<T>, items: impl IntoIterator<Item = T>, remove: bool) {
-            for item in items {
-                if remove {
-                    set.remove(&item);
-                } else {
-                    set.insert(item);
+    fn count(&self) -> usize {
+        match self.target {
+            Target::Nodes => self.nodes.items().len(),
+            Target::Faces => self.faces.items().len(),
+        }
+    }
+
+    fn click(
+        &mut self,
+        model: &Model,
+        picker: &Picker,
+        pick: Option<(&Hit, f32)>,
+        operation: Operation,
+    ) {
+        match self.source {
+            Source::Parts => {
+                if let Some((hit, _)) = pick {
+                    let name = model.parts[hit.part].name.clone();
+                    if operation == Operation::Subtract {
+                        self.parts.remove(&name);
+                    } else {
+                        self.parts.insert(name);
+                    }
                 }
             }
-        }
-        match (self.source, self.mode) {
-            (Source::Parts, _) => {
-                let name = model.parts[hit.part].name.clone();
-                toggle(&mut self.parts, [name], remove);
-            }
-            (Source::Selection, PickMode::Node) => {
-                toggle(&mut self.nodes, [model.hit_node(hit)], remove);
-            }
-            (Source::Selection, PickMode::ElementFace) => {
-                toggle(&mut self.faces, [model.hit_face(hit)], remove);
-            }
-            (Source::Selection, PickMode::Surface) => {
-                toggle(&mut self.faces, model.hit_patch(hit), remove);
-            }
+            Source::Selection => match pick {
+                Some((hit, precision)) => {
+                    self.take(picker.pick(model, hit, self.target, precision), operation);
+                }
+                // PrePoMax clears the selection on a plain click into empty space.
+                None if operation == Operation::Replace => self.clear(),
+                None => {}
+            },
             _ => {}
+        }
+    }
+
+    fn clear(&mut self) {
+        self.nodes.clear();
+        self.faces.clear();
+    }
+
+    fn take(&mut self, items: Items, operation: Operation) {
+        match items {
+            Items::Nodes(nodes) => self.nodes.push(operation, nodes),
+            Items::Faces(faces) => self.faces.push(operation, faces),
+        }
+    }
+
+    fn can_undo(&self) -> bool {
+        match self.target {
+            Target::Nodes => self.nodes.can_undo(),
+            Target::Faces => self.faces.can_undo(),
+        }
+    }
+
+    /// Applies a button of the selection window.
+    fn action(&mut self, model: &Model, action: PickerAction) {
+        match (action, self.target) {
+            (PickerAction::Undo, Target::Nodes) => self.nodes.undo(),
+            (PickerAction::Undo, Target::Faces) => self.faces.undo(),
+            (PickerAction::Clear, _) => self.clear(),
+            (PickerAction::All, Target::Nodes) => {
+                self.nodes.push(Operation::Replace, model.visible_nodes());
+            }
+            (PickerAction::All, Target::Faces) => {
+                self.faces.push(Operation::Replace, model.visible_faces());
+            }
+            (PickerAction::Invert, Target::Nodes) => {
+                let selected = self.nodes.items();
+                let mut all = model.visible_nodes();
+                all.retain(|n| !selected.contains(n));
+                self.nodes.push(Operation::Replace, all);
+            }
+            (PickerAction::Invert, Target::Faces) => {
+                let selected = self.faces.items();
+                let mut all = model.visible_faces();
+                all.retain(|f| !selected.contains(f));
+                self.faces.push(Operation::Replace, all);
+            }
+            (PickerAction::Ids(operation, ids), Target::Nodes) => {
+                let ids = ids
+                    .into_iter()
+                    .filter(|&id| model.mesh.node_index(id).is_some())
+                    .collect();
+                self.nodes.push(operation, ids);
+            }
+            (PickerAction::Ids(operation, ids), Target::Faces) => {
+                // Ids of elements: their faces on the surface.
+                let elements: BTreeSet<ElementId> = ids.into_iter().collect();
+                let faces = model
+                    .visible_faces()
+                    .into_iter()
+                    .filter(|(element, _)| elements.contains(element))
+                    .collect();
+                self.faces.push(operation, faces);
+            }
         }
     }
 
@@ -196,29 +249,21 @@ impl RegionDraft {
             match self.source {
                 Source::Selection => {
                     ui.horizontal(|ui| {
-                        for &mode in self.modes {
-                            if ui.radio(self.mode == mode, mode.label()).clicked() {
-                                if (mode == PickMode::Node) != (self.mode == PickMode::Node) {
-                                    self.nodes.clear();
-                                    self.faces.clear();
-                                }
-                                self.mode = mode;
-                            }
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        let count = if self.mode == PickMode::Node {
-                            format!("{} Knoten", self.nodes.len())
-                        } else {
-                            format!("{} Elementflächen", self.faces.len())
+                        let count = self.count();
+                        let what = match self.target {
+                            Target::Nodes => "Knoten",
+                            Target::Faces => "Elementflächen",
                         };
-                        ui.label(count);
+                        if count == 0 {
+                            ui.label("Leer");
+                        } else {
+                            ui.label(format!("{count} {what}"));
+                        }
                         if ui.button("Auswahl löschen").clicked() {
-                            self.nodes.clear();
-                            self.faces.clear();
+                            self.clear();
                         }
                     });
-                    ui.weak("Klick wählt aus, Strg+Klick entfernt.");
+                    ui.weak("Im Fenster \"Auswahl\" wählen, was ein Klick auswählt.");
                 }
                 Source::Parts => {
                     for part in &model.parts {
@@ -257,11 +302,7 @@ impl RegionDraft {
     }
 
     fn highlight(&self, model: &Model) -> Highlight {
-        let mut highlight = region_highlight(model, &self.region());
-        if self.source == Source::Selection && self.mode == PickMode::Node {
-            highlight.faces.clear();
-        }
-        highlight
+        region_highlight(model, &self.region())
     }
 }
 
@@ -288,7 +329,18 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
                 .filter(|(element, _)| elements.contains(element))
                 .collect();
         }
-        Region::Nodes(_) | Region::NodeSet(_) => highlight.nodes = region.nodes(&model.mesh),
+        Region::Nodes(_) | Region::NodeSet(_) => {
+            highlight.nodes = region.nodes(&model.mesh);
+            // Faces whose corners are all selected show as faces, like PrePoMax does for
+            // picked surfaces.
+            let selected: std::collections::HashSet<NodeId> =
+                highlight.nodes.iter().copied().collect();
+            highlight.faces = model
+                .skin_faces_with_corners()
+                .filter(|(_, corners)| corners.iter().all(|n| selected.contains(n)))
+                .map(|(face, _)| face)
+                .collect();
+        }
     }
     highlight
 }
@@ -309,6 +361,8 @@ pub struct Editor {
     /// Index of the edited item; `None` creates a new one.
     index: Option<usize>,
     error: Option<String>,
+    /// The selection window shown while the region is picked in the 3D view.
+    picker: Picker,
 }
 
 pub enum EditorResult {
@@ -365,7 +419,7 @@ impl Editor {
                         .unwrap_or_default(),
                     region: Region::Parts(Vec::new()),
                 },
-                RegionDraft::new(ELEMENT_SOURCES, &[]),
+                RegionDraft::new(ELEMENT_SOURCES, Target::Faces),
             ),
             NewItem::Step => {
                 let mut step = Step::new_static(next_name("Step", names(&fe.steps, |s| &s.name)));
@@ -387,13 +441,12 @@ impl Editor {
                         region: Region::Nodes(Vec::new()),
                         kind: BoundaryKind::Fixed,
                     },
-                    RegionDraft::new(NODE_SOURCES, ALL_MODES),
+                    RegionDraft::new(NODE_SOURCES, Target::Nodes),
                 )
             }
             NewItem::Load(step) => {
                 let existing = names(&fe.steps.get(step)?.loads, |l| &l.name);
-                let mut region = RegionDraft::new(NODE_SOURCES, ALL_MODES);
-                region.mode = PickMode::Node;
+                let region = RegionDraft::new(NODE_SOURCES, Target::Nodes);
                 Draft::Load(
                     step,
                     Load {
@@ -409,31 +462,34 @@ impl Editor {
             draft,
             index: None,
             error: None,
+            picker: Picker::default(),
         })
     }
 
-    pub fn edit(item: &TreeItem, fe: &FeModel) -> Option<Self> {
+    pub fn edit(item: &TreeItem, fe: &FeModel, mesh: &FeMesh) -> Option<Self> {
         let (draft, index) = match *item {
             TreeItem::Material(i) => (Draft::Material(fe.materials.get(i)?.clone()), i),
             TreeItem::Section(i) => {
                 let section = fe.sections.get(i)?.clone();
-                let region = RegionDraft::from_region(&section.region, ELEMENT_SOURCES, &[]);
+                let region =
+                    RegionDraft::from_region(&section.region, ELEMENT_SOURCES, Target::Faces, mesh);
                 (Draft::Section(section, region), i)
             }
             TreeItem::Step(i) => (Draft::Step(fe.steps.get(i)?.clone()), i),
             TreeItem::BoundaryCondition(s, i) => {
                 let bc = fe.steps.get(s)?.boundary_conditions.get(i)?.clone();
-                let region = RegionDraft::from_region(&bc.region, NODE_SOURCES, ALL_MODES);
+                let region =
+                    RegionDraft::from_region(&bc.region, NODE_SOURCES, Target::Nodes, mesh);
                 (Draft::BoundaryCondition(s, bc, region), i)
             }
             TreeItem::Load(s, i) => {
                 let load = fe.steps.get(s)?.loads.get(i)?.clone();
                 let region = match load.kind {
                     LoadKind::ConcentratedForce(_) => {
-                        RegionDraft::from_region(&load.region, NODE_SOURCES, ALL_MODES)
+                        RegionDraft::from_region(&load.region, NODE_SOURCES, Target::Nodes, mesh)
                     }
                     LoadKind::Pressure(_) | LoadKind::SurfaceTraction(_) => {
-                        RegionDraft::from_region(&load.region, FACE_SOURCES, FACE_MODES)
+                        RegionDraft::from_region(&load.region, FACE_SOURCES, Target::Faces, mesh)
                     }
                 };
                 (Draft::Load(s, load, region), i)
@@ -448,6 +504,7 @@ impl Editor {
             draft,
             index: Some(index),
             error: None,
+            picker: Picker::default(),
         })
     }
 
@@ -483,11 +540,43 @@ impl Editor {
         }
     }
 
-    pub fn click(&mut self, model: &Model, hit: &Hit, remove: bool) {
+    /// A click in the 3D view: the hit with the pick tolerance there, or `None` for empty
+    /// space.
+    pub fn click(&mut self, model: &Model, pick: Option<(&Hit, f32)>, operation: Operation) {
         if let Draft::Section(_, r) | Draft::BoundaryCondition(_, _, r) | Draft::Load(_, _, r) =
             &mut self.draft
         {
-            r.click(model, hit, remove);
+            r.click(model, &self.picker, pick, operation);
+        }
+    }
+
+    /// A selection box dragged in the 3D view.
+    pub fn box_select(&mut self, model: &Model, area: &BoxSelect, operation: Operation) {
+        if let Draft::Section(_, r) | Draft::BoundaryCondition(_, _, r) | Draft::Load(_, _, r) =
+            &mut self.draft
+            && r.source == Source::Selection
+        {
+            r.take(self.picker.pick_box(model, area, r.target), operation);
+        }
+    }
+
+    /// What a click at the hit would select, for the hover preview.
+    pub fn preview(&self, model: &Model, hit: &Hit, precision: f32) -> Preview {
+        match self.region() {
+            Some(region) if region.source == Source::Selection => {
+                let items = self.picker.pick(model, hit, region.target, precision);
+                crate::selection::preview(model, &items)
+            }
+            _ => Preview::default(),
+        }
+    }
+
+    fn region_mut(&mut self) -> Option<&mut RegionDraft> {
+        match &mut self.draft {
+            Draft::Section(_, r) | Draft::BoundaryCondition(_, _, r) | Draft::Load(_, _, r) => {
+                Some(r)
+            }
+            _ => None,
         }
     }
 
@@ -500,7 +589,7 @@ impl Editor {
     pub fn show(&mut self, ctx: &egui::Context, model: &Model) -> EditorResult {
         let mut result = EditorResult::Open;
         let mut open = true;
-        egui::Window::new(self.title())
+        let window = egui::Window::new(self.title())
             .id(egui::Id::new("item editor"))
             .open(&mut open)
             .collapsible(false)
@@ -528,6 +617,18 @@ impl Editor {
                     }
                 });
             });
+        if let Some(window) = window
+            && let Some(region) = self.region()
+            && region.source == Source::Selection
+        {
+            let (target, can_undo) = (region.target, region.can_undo());
+            let action = self
+                .picker
+                .window(ctx, window.response.rect, target, can_undo);
+            if let (Some(action), Some(region)) = (action, self.region_mut()) {
+                region.action(model, action);
+            }
+        }
         if !open {
             result = EditorResult::Cancel;
         }
@@ -577,7 +678,7 @@ impl Editor {
                         let mut set = value.is_some();
                         ui.checkbox(&mut set, label);
                         let mut number = value.unwrap_or(0.0);
-                        ui.add_enabled(set, egui::DragValue::new(&mut number).speed(0.01));
+                        ui.add_enabled(set, numeric::drag_value(&mut number).speed(0.01));
                         *value = set.then_some(number);
                         ui.end_row();
                     }
@@ -596,10 +697,9 @@ impl Editor {
                             load.kind = kind;
                             rename_default(&mut load.name, current, name);
                             if on_nodes {
-                                *region = RegionDraft::new(NODE_SOURCES, ALL_MODES);
-                                region.mode = PickMode::Node;
+                                *region = RegionDraft::new(NODE_SOURCES, Target::Nodes);
                             } else if was_on_nodes {
-                                *region = RegionDraft::new(FACE_SOURCES, FACE_MODES);
+                                *region = RegionDraft::new(FACE_SOURCES, Target::Faces);
                             }
                         }
                     }
@@ -609,7 +709,7 @@ impl Editor {
                     LoadKind::ConcentratedForce(force) => {
                         for (value, label) in force.iter_mut().zip(["F1", "F2", "F3"]) {
                             ui.label(label);
-                            ui.add(egui::DragValue::new(value).speed(1.0));
+                            ui.add(numeric::drag_value(value).speed(1.0));
                             ui.end_row();
                         }
                         ui.label("");
@@ -618,13 +718,13 @@ impl Editor {
                     }
                     LoadKind::Pressure(pressure) => {
                         ui.label("Druck");
-                        ui.add(egui::DragValue::new(pressure).speed(0.1));
+                        ui.add(numeric::drag_value(pressure).speed(0.1));
                         ui.end_row();
                     }
                     LoadKind::SurfaceTraction(force) => {
                         for (value, label) in force.iter_mut().zip(["F1", "F2", "F3"]) {
                             ui.label(label);
-                            ui.add(egui::DragValue::new(value).speed(1.0));
+                            ui.add(numeric::drag_value(value).speed(1.0));
                             ui.end_row();
                         }
                         ui.label("");
@@ -820,7 +920,7 @@ fn material_form(ui: &mut Ui, material: &mut Material) {
     ui.label("    Querkontraktionszahl");
     ui.add_enabled(
         elastic,
-        egui::DragValue::new(&mut values.poisson)
+        numeric::drag_value(&mut values.poisson)
             .range(0.0..=0.5)
             .speed(0.01)
             .max_decimals(4),
@@ -857,7 +957,7 @@ fn step_form(ui: &mut Ui, step: &mut Step) {
     ui.label("Max. Inkremente");
     ui.add_enabled(
         custom,
-        egui::DragValue::new(&mut settings.max_increments).range(1..=1_000_000),
+        numeric::drag_value(&mut settings.max_increments).range(1..=1_000_000),
     );
     ui.end_row();
     for (label, value, enabled) in [
@@ -882,7 +982,7 @@ fn incrementation_label(incrementation: Incrementation) -> &'static str {
 
 /// Field for physical values that may be very small or large, such as a density of 7.85e-9.
 fn number(value: &mut f64) -> egui::DragValue<'_> {
-    egui::DragValue::new(value)
+    numeric::drag_value(value)
         .speed(0.0)
         .custom_formatter(|v, _| {
             if v != 0.0 && !(1e-3..1e7).contains(&v.abs()) {
@@ -891,7 +991,6 @@ fn number(value: &mut f64) -> egui::DragValue<'_> {
                 format!("{v}")
             }
         })
-        .custom_parser(|text| text.trim().replace(',', ".").parse().ok())
 }
 
 #[cfg(test)]
@@ -910,17 +1009,18 @@ mod tests {
 
     #[test]
     fn regions_survive_the_dialog() {
-        for region in [
-            Region::Nodes(vec![1, 5]),
-            Region::Faces(vec![(3, 2), (4, 6)]),
-            Region::NodeSet("FIX".into()),
-            Region::Surface("TIP".into()),
+        let mesh = FeMesh::default();
+        for (region, target) in [
+            (Region::Nodes(vec![1, 5]), Target::Nodes),
+            (Region::Faces(vec![(3, 2), (4, 6)]), Target::Faces),
+            (Region::NodeSet("FIX".into()), Target::Nodes),
+            (Region::Surface("TIP".into()), Target::Faces),
         ] {
-            let draft = RegionDraft::from_region(&region, NODE_SOURCES, ALL_MODES);
+            let draft = RegionDraft::from_region(&region, NODE_SOURCES, target, &mesh);
             assert_eq!(draft.region(), region);
         }
         let parts = Region::Parts(vec!["A".into(), "B".into()]);
-        let draft = RegionDraft::from_region(&parts, ELEMENT_SOURCES, &[]);
+        let draft = RegionDraft::from_region(&parts, ELEMENT_SOURCES, Target::Faces, &mesh);
         assert_eq!(draft.region(), parts);
     }
 
@@ -935,14 +1035,16 @@ mod tests {
         let mut editor = Editor::create(NewItem::BoundaryCondition(0), &fe).unwrap();
         assert!(editor.validate(&fe).is_err(), "empty region");
         if let Draft::BoundaryCondition(_, _, region) = &mut editor.draft {
-            region.faces.insert((1, 4));
+            region
+                .nodes
+                .push(Operation::Replace, BTreeSet::from([1, 4]));
         }
         assert_eq!(editor.validate(&fe), Ok(()));
         editor.apply(&mut fe);
         let bc = &fe.steps[0].boundary_conditions[0];
         assert_eq!(
             (bc.name.as_str(), &bc.region),
-            ("Fixed-1", &Region::Faces(vec![(1, 4)]))
+            ("Fixed-1", &Region::Nodes(vec![1, 4]))
         );
         assert!(Editor::create(NewItem::Load(3), &fe).is_none());
     }

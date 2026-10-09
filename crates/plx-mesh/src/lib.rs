@@ -1,6 +1,7 @@
 //! FE-Netz: Knoten, Elemente, Sets, Surfaces, Geometrie-Topologie.
 
 mod element;
+mod fast_map;
 mod mesh;
 mod skin;
 

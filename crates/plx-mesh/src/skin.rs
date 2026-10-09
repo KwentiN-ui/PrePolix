@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use crate::element::ElementFamily;
+use crate::element::{ElementFamily, ElementShape};
+use crate::fast_map::FastMap;
 use crate::mesh::{FeMesh, Part};
 
 /// A visible element face. Node references are indices into [`FeMesh::coords`].
@@ -44,21 +45,20 @@ pub struct PartSkin {
 /// Elements that reference undefined nodes are skipped.
 pub fn extract_part_skin(mesh: &FeMesh, part: &Part, feature_angle_deg: f64) -> PartSkin {
     let mut skin = PartSkin::default();
-    let mut solid_faces: HashMap<[usize; 4], Option<SkinFace>> = HashMap::new();
+    // Faces of solid elements by sorted corner nodes: the first element and face seen, and
+    // whether a second element shares the face. Only unshared faces are built afterwards.
+    let mut solid_faces: FastMap<[usize; 4], (usize, usize, bool)> =
+        FastMap::with_capacity_and_hasher(part.elements.len() * 3, Default::default());
+    let mut nodes = Vec::new();
 
     for &element_id in &part.elements {
         let Some(element_index) = mesh.element_index(element_id) else {
             continue;
         };
         let element = &mesh.elements()[element_index];
-        let Some(nodes) = element
-            .nodes
-            .iter()
-            .map(|&id| mesh.node_index(id))
-            .collect::<Option<Vec<_>>>()
-        else {
+        if !node_indices(mesh, element, &mut nodes) {
             continue;
-        };
+        }
         let shape = element.shape;
         if shape.family() == ElementFamily::Line {
             skin.lines.extend(
@@ -70,35 +70,89 @@ pub fn extract_part_skin(mesh: &FeMesh, part: &Part, feature_angle_deg: f64) -> 
             continue;
         }
         for (face_index, topology) in shape.faces().iter().enumerate() {
-            let face = SkinFace {
-                element: element_index,
-                face: face_index,
-                corners: topology.corners.iter().map(|&i| nodes[i]).collect(),
-                mids: if shape.is_quadratic() {
-                    topology.mids.iter().map(|&i| nodes[i]).collect()
-                } else {
-                    Vec::new()
-                },
-                region: 0,
-            };
             if shape.family() == ElementFamily::Surface {
-                skin.faces.push(face);
+                skin.faces
+                    .push(skin_face(element_index, face_index, shape, &nodes));
                 continue;
             }
+            // Degenerate elements repeat nodes, e.g. pyramids written as C3D6 or C3D8 with a
+            // collapsed corner: their faces are keyed by distinct nodes only, so a collapsed
+            // quad still matches the neighbour's triangle. Faces collapsed to a line are skipped.
             let mut key = [usize::MAX; 4];
-            key[..face.corners.len()].copy_from_slice(&face.corners);
+            for (k, &corner) in topology.corners.iter().enumerate() {
+                key[k] = nodes[corner];
+            }
             key.sort_unstable();
+            let mut distinct = 0;
+            for k in 0..4 {
+                if key[k] != usize::MAX && (distinct == 0 || key[k] != key[distinct - 1]) {
+                    key[distinct] = key[k];
+                    distinct += 1;
+                }
+            }
+            if distinct < 3 {
+                continue;
+            }
+            key[distinct..].fill(usize::MAX);
             solid_faces
                 .entry(key)
-                .and_modify(|seen| *seen = None)
-                .or_insert(Some(face));
+                .and_modify(|seen| seen.2 = true)
+                .or_insert((element_index, face_index, false));
         }
     }
-    let mut outer: Vec<SkinFace> = solid_faces.into_values().flatten().collect();
-    outer.sort_by_key(|f| (f.element, f.face));
-    skin.faces.extend(outer);
+    let mut outer: Vec<(usize, usize)> = solid_faces
+        .into_values()
+        .filter(|&(.., shared)| !shared)
+        .map(|(element, face, _)| (element, face))
+        .collect();
+    outer.sort_unstable();
+    for (element_index, face_index) in outer {
+        let element = &mesh.elements()[element_index];
+        node_indices(mesh, element, &mut nodes);
+        skin.faces
+            .push(skin_face(element_index, face_index, element.shape, &nodes));
+    }
     skin.edges = collect_edges(mesh.coords(), &mut skin.faces, feature_angle_deg);
     skin
+}
+
+/// Node indices of the element's nodes; false if one is undefined.
+fn node_indices(mesh: &FeMesh, element: &crate::Element, nodes: &mut Vec<usize>) -> bool {
+    nodes.clear();
+    for &id in &element.nodes {
+        match mesh.node_index(id) {
+            Some(index) => nodes.push(index),
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Builds a face, dropping repeated corners of collapsed elements together with the midside
+/// node between them.
+fn skin_face(element: usize, face: usize, shape: ElementShape, nodes: &[usize]) -> SkinFace {
+    let topology = &shape.faces()[face];
+    let quadratic = shape.is_quadratic();
+    let n = topology.corners.len();
+    let mut corners = Vec::with_capacity(n);
+    let mut mids = Vec::new();
+    for i in 0..n {
+        let corner = nodes[topology.corners[i]];
+        if corner == nodes[topology.corners[(i + 1) % n]] {
+            continue;
+        }
+        corners.push(corner);
+        if quadratic {
+            mids.push(nodes[topology.mids[i]]);
+        }
+    }
+    SkinFace {
+        element,
+        face,
+        corners,
+        mids,
+        region: 0,
+    }
 }
 
 struct EdgeAccumulator {
@@ -125,7 +179,8 @@ fn collect_edges(
         .map(|f| face_normal(coords, &f.corners))
         .collect();
     let mut order = Vec::new();
-    let mut edges: HashMap<(usize, usize), EdgeAccumulator> = HashMap::new();
+    let mut edges: FastMap<(usize, usize), EdgeAccumulator> =
+        FastMap::with_capacity_and_hasher(faces.len() * 2, Default::default());
     for (face_index, face) in faces.iter().enumerate() {
         let n = face.corners.len();
         for i in 0..n {
@@ -191,7 +246,7 @@ const MAX_NOISE_FOLD_DEG: f64 = 60.0;
 /// meshes of curved surfaces otherwise break into small patches whose outlines clutter the view.
 fn merge_tiny_patches(
     coords: &[[f64; 3]],
-    edges: &HashMap<(usize, usize), EdgeAccumulator>,
+    edges: &FastMap<(usize, usize), EdgeAccumulator>,
     normals: &[[f64; 3]],
     patches: &mut UnionFind,
 ) {
@@ -335,6 +390,57 @@ mod tests {
             elements: (1..=nx).collect(),
         });
         mesh
+    }
+
+    #[test]
+    fn collapsed_wedge_faces_match_tet_neighbours() {
+        // A pyramid written as C3D6 with the apex repeated, like PrePoMax exports, next to a
+        // tet on one of its collapsed quad faces.
+        let mut mesh = FeMesh::default();
+        let coords = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.5, 0.5, 1.0],
+            [-1.0, 0.5, 0.5],
+        ];
+        for (i, c) in coords.iter().enumerate() {
+            mesh.set_node(i as u32 + 1, *c);
+        }
+        mesh.add_element(Element {
+            id: 1,
+            type_name: "C3D6".into(),
+            shape: ElementShape::Wedge6,
+            nodes: vec![1, 5, 2, 4, 5, 3],
+        })
+        .unwrap();
+        mesh.add_element(Element {
+            id: 2,
+            type_name: "C3D4".into(),
+            shape: ElementShape::Tet4,
+            nodes: vec![1, 4, 5, 6],
+        })
+        .unwrap();
+        mesh.parts.push(Part {
+            name: "PYRAMID".into(),
+            elements: vec![1, 2],
+        });
+        let skin = extract_part_skin(&mesh, &mesh.parts[0], 30.0);
+        // 5 pyramid faces and 4 tet faces, minus the shared one on each side.
+        assert_eq!(skin.faces.len(), 7);
+        let collapsed = skin
+            .faces
+            .iter()
+            .find(|f| f.element == 0 && f.face == 3)
+            .unwrap();
+        assert_eq!(collapsed.corners.len(), 3);
+        assert!(skin.faces.iter().all(|f| {
+            let mut c = f.corners.clone();
+            c.sort_unstable();
+            c.dedup();
+            c.len() == f.corners.len()
+        }));
     }
 
     #[test]

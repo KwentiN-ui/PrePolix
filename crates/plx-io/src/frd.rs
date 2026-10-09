@@ -4,6 +4,7 @@
 //! to solids by CalculiX) followed by one block per result field and increment. Component names
 //! follow PrePoMax: `D1` becomes `U1`, `SXX` becomes `S11` and so on.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -50,6 +51,7 @@ pub fn read_frd_bytes(bytes: &[u8]) -> Result<FrdImport, FrdError> {
         import: FrdImport::default(),
         element_materials: BTreeMap::new(),
         pending: None,
+        blocks: Vec::new(),
     }
     .run()
 }
@@ -69,6 +71,21 @@ struct Reader<'a> {
     import: FrdImport,
     element_materials: BTreeMap<i32, Vec<u32>>,
     pending: Option<StepHeader>,
+    /// Result blocks found so far; their values are parsed in parallel at the end.
+    blocks: Vec<ResultBlock<'a>>,
+}
+
+/// A result block whose header has been read, with its values still unparsed.
+struct ResultBlock<'a> {
+    step: u32,
+    increment: u32,
+    kind: AnalysisKind,
+    value: f64,
+    field_name: String,
+    names: Vec<String>,
+    /// Bytes per binary float, `None` for ASCII.
+    binary: Option<usize>,
+    body: &'a [u8],
 }
 
 impl<'a> Reader<'a> {
@@ -100,6 +117,40 @@ impl<'a> Reader<'a> {
     }
 
     fn finish(mut self) -> Result<FrdImport, FrdError> {
+        let blocks = std::mem::take(&mut self.blocks);
+        let mesh = &self.import.mesh;
+        let fields = parallel_map(&blocks, |block| {
+            let mut field = Field {
+                name: block.field_name.clone(),
+                components: block
+                    .names
+                    .iter()
+                    .zip(block_values(block, mesh))
+                    .map(|(name, values)| Component {
+                        name: name.clone(),
+                        values,
+                        derived: false,
+                    })
+                    .collect(),
+            };
+            add_derived_components(&mut field);
+            field
+        });
+        for (block, field) in blocks.iter().zip(fields) {
+            let target = self.import.increments.iter_mut().find(|i| {
+                i.step == block.step && i.increment == block.increment && i.kind == block.kind
+            });
+            match target {
+                Some(target) => target.fields.push(field),
+                None => self.import.increments.push(Increment {
+                    step: block.step,
+                    increment: block.increment,
+                    kind: block.kind,
+                    value: block.value,
+                    fields: vec![field],
+                }),
+            }
+        }
         let materials = std::mem::take(&mut self.element_materials);
         for (material, elements) in materials {
             let name = self
@@ -116,26 +167,23 @@ impl<'a> Reader<'a> {
                 });
             self.import.mesh.parts.push(Part { name, elements });
         }
-        for increment in &mut self.import.increments {
-            for field in &mut increment.fields {
-                add_derived_components(field);
-            }
-        }
         Ok(self.import)
     }
 
-    /// Next text line without the line break; `None` at the end of the data.
-    fn next_line(&mut self) -> Option<String> {
+    /// Next text line without the line break; `None` at the end of the data. Borrowed from
+    /// the data unless it is not valid UTF-8.
+    fn next_line(&mut self) -> Option<Cow<'a, str>> {
         if self.pos >= self.data.len() {
             return None;
         }
-        let rest = &self.data[self.pos..];
+        let data: &'a [u8] = self.data;
+        let rest = &data[self.pos..];
         let end = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
         self.pos += (end + 1).min(rest.len());
         self.line += 1;
         let text = &rest[..end];
         let text = text.strip_suffix(b"\r").unwrap_or(text);
-        Some(String::from_utf8_lossy(text).into_owned())
+        Some(String::from_utf8_lossy(text))
     }
 
     fn error(&self, message: impl Into<String>) -> FrdError {
@@ -335,79 +383,124 @@ impl<'a> Reader<'a> {
             }
         }
 
-        let node_count = self.import.mesh.node_count();
-        let mut columns = vec![vec![f32::NAN; node_count]; names.len()];
+        let start = self.pos;
         match binary {
             Some(size) => {
-                let record = 4 + names.len() * size;
-                let block = self.take_bytes(value_count * record)?;
-                for chunk in block.chunks_exact(record) {
-                    let id = i32_at(chunk, 0);
-                    if let Some(index) = self.import.mesh.node_index(id as u32) {
-                        for (k, column) in columns.iter_mut().enumerate() {
-                            column[index] = float_at(chunk, 4 + k * size, size) as f32;
-                        }
-                    }
-                }
+                self.take_bytes(value_count * (4 + names.len() * size))?;
             }
             None => {
-                let mut index = None;
-                let mut filled = 0;
-                while let Some(line) = self.next_line() {
-                    if line.starts_with(" -3") {
+                // Up to the end of block line " -3".
+                while let Some(line) = self.next_raw_line() {
+                    if line.starts_with(b" -3") {
                         break;
-                    }
-                    if line.starts_with(" -1") {
-                        index = int_field(&line, 3..13)
-                            .and_then(|id| self.import.mesh.node_index(id as u32));
-                        filled = 0;
-                    } else if !line.starts_with(" -2") {
-                        continue;
-                    }
-                    let Some(index) = index else { continue };
-                    for value in fixed_floats(&line, 13, names.len() - filled.min(names.len())) {
-                        if let Some(column) = columns.get_mut(filled) {
-                            column[index] = value as f32;
-                        }
-                        filled += 1;
                     }
                 }
             }
         }
-
-        let field = Field {
-            name: field_name,
-            components: names
-                .into_iter()
-                .zip(columns)
-                .map(|(name, values)| Component {
-                    name,
-                    values,
-                    derived: false,
-                })
-                .collect(),
-        };
         let increment = match (kind, step.mode) {
             (AnalysisKind::Frequency, Some(mode)) => mode,
             _ => step.increment,
         };
-        let target = self
-            .import
-            .increments
-            .iter_mut()
-            .find(|i| i.step == step.step && i.increment == increment && i.kind == kind);
-        match target {
-            Some(target) => target.fields.push(field),
-            None => self.import.increments.push(Increment {
-                step: step.step,
-                increment,
-                kind,
-                value,
-                fields: vec![field],
-            }),
-        }
+        let data: &'a [u8] = self.data;
+        self.blocks.push(ResultBlock {
+            step: step.step,
+            increment,
+            kind,
+            value,
+            field_name,
+            names,
+            binary,
+            body: &data[start..self.pos],
+        });
         Ok(())
     }
+
+    /// Like [`Reader::next_line`] without the text conversion, for skipping lines quickly.
+    fn next_raw_line(&mut self) -> Option<&'a [u8]> {
+        if self.pos >= self.data.len() {
+            return None;
+        }
+        let data: &'a [u8] = self.data;
+        let rest = &data[self.pos..];
+        let end = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
+        self.pos += (end + 1).min(rest.len());
+        self.line += 1;
+        Some(&rest[..end])
+    }
+}
+
+/// The values of a result block, one column per component, by node index of the mesh.
+fn block_values(block: &ResultBlock, mesh: &FeMesh) -> Vec<Vec<f32>> {
+    let names = block.names.len();
+    let mut columns = vec![vec![f32::NAN; mesh.node_count()]; names];
+    match block.binary {
+        Some(size) => {
+            for chunk in block.body.chunks_exact(4 + names * size) {
+                let id = i32_at(chunk, 0);
+                if let Some(index) = mesh.node_index(id as u32) {
+                    for (k, column) in columns.iter_mut().enumerate() {
+                        column[index] = float_at(chunk, 4 + k * size, size) as f32;
+                    }
+                }
+            }
+        }
+        None => {
+            let mut index = None;
+            let mut filled = 0;
+            let mut values = Vec::with_capacity(names);
+            for line in block.body.split(|&b| b == b'\n') {
+                let line = String::from_utf8_lossy(line.strip_suffix(b"\r").unwrap_or(line));
+                if line.starts_with(" -1") {
+                    index = int_field(&line, 3..13).and_then(|id| mesh.node_index(id as u32));
+                    filled = 0;
+                } else if !line.starts_with(" -2") {
+                    continue;
+                }
+                let Some(index) = index else { continue };
+                values.clear();
+                fixed_floats_into(&line, 13, names - filled.min(names), &mut values);
+                for &value in &values {
+                    if let Some(column) = columns.get_mut(filled) {
+                        column[index] = value as f32;
+                    }
+                    filled += 1;
+                }
+            }
+        }
+    }
+    columns
+}
+
+/// Maps the items on all cores, keeping their order.
+fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(items.len().max(1));
+    if threads <= 1 {
+        return items.iter().map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut results: Vec<(usize, R)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(item) = items.get(i) else { break };
+                        done.push((i, f(item)));
+                    }
+                    done
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|w| w.join().expect("result worker panicked"))
+            .collect()
+    });
+    results.sort_unstable_by_key(|&(i, _)| i);
+    results.into_iter().map(|(_, r)| r).collect()
 }
 
 /// `    1PSTEP   <data set> <increment> <step>`.
@@ -512,21 +605,27 @@ fn parse_float(text: &str) -> Option<f64> {
 }
 
 /// Reads up to `count` numbers of 12 columns each from `start` on. Older CalculiX builds wrote
-/// three-digit exponents, which makes negative numbers 13 columns wide; a field that does not
-/// parse at 12 columns is retried with 13.
+/// three-digit exponents, which makes negative numbers 13 columns wide; a field followed by a
+/// digit is read with 13 columns.
 fn fixed_floats(line: &str, start: usize, count: usize) -> Vec<f64> {
-    let bytes = line.as_bytes();
     let mut values = Vec::with_capacity(count);
+    fixed_floats_into(line, start, count, &mut values);
+    values
+}
+
+fn fixed_floats_into(line: &str, start: usize, count: usize, values: &mut Vec<f64>) {
+    let bytes = line.as_bytes();
+    let target = values.len() + count;
     let mut pos = start;
-    while values.len() < count && pos < bytes.len() {
+    while values.len() < target && pos < bytes.len() {
         let field = |width: usize| {
             line.get(pos..(pos + width).min(bytes.len()))
                 .and_then(|t| parse_float(t.trim()))
         };
-        let width = if field(12).is_some() && !next_starts_mid_number(bytes, pos + 12) {
-            12
-        } else {
+        let width = if next_starts_mid_number(bytes, pos + 12) {
             13
+        } else {
+            12
         };
         match field(width) {
             Some(value) => values.push(value),
@@ -534,7 +633,6 @@ fn fixed_floats(line: &str, start: usize, count: usize) -> Vec<f64> {
         }
         pos += width;
     }
-    values
 }
 
 /// True if the byte at `pos` continues a number (a digit right after the field boundary).

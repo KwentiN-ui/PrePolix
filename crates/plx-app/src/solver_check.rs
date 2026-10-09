@@ -58,6 +58,9 @@ fn check(name: &'static str, passed: bool, message: String) -> CheckResult {
 /// `ccx -v` prints e.g. "This is Version 2.21".
 fn version(executable: &Path) -> CheckResult {
     const NAME: &str = "Programm starten";
+    if let Some(message) = crate::settings::missing_executable(executable) {
+        return check(NAME, false, message);
+    }
     match Command::new(executable).arg("-v").output() {
         Ok(output) => {
             let text = String::from_utf8_lossy(&output.stdout);
@@ -228,6 +231,7 @@ fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
             region: Region::Parts(vec!["BEAM".into()]),
         }],
         steps: vec![step],
+        user_keywords: Vec::new(),
     }
 }
 

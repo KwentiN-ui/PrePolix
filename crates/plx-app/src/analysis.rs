@@ -39,14 +39,17 @@ impl Analysis {
         let input = plx_io::inp::write_inp(&model.mesh, &model.fe, &heading)
             .map_err(|e| format!("Eingabedatei nicht geschrieben: {e}"))?;
         let work_dir = solver.work_dir();
-        let job = Job::start(&solver.job_solver(), &work_dir, ANALYSIS_NAME, &input).map_err(
-            |e| {
-                format!(
-                    "CalculiX ({}) nicht gestartet: {e}. Programm unter Werkzeuge > Einstellungen > CalculiX prüfen.",
-                    solver.executable
-                )
-            },
-        )?;
+        let job_solver = solver.job_solver();
+        let hint = "Programm unter Werkzeuge > Einstellungen > CalculiX prüfen.";
+        if let Some(message) = crate::settings::missing_executable(&job_solver.executable) {
+            return Err(format!("CalculiX nicht gestartet: {message}. {hint}"));
+        }
+        let job = Job::start(&job_solver, &work_dir, ANALYSIS_NAME, &input).map_err(|e| {
+            format!(
+                "CalculiX ({}) nicht gestartet: {e}. {hint}",
+                job_solver.executable.display()
+            )
+        })?;
         Ok(Self {
             output: vec![format!(
                 "{} gestartet in {}",

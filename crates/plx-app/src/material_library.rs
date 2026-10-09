@@ -1,0 +1,795 @@
+//! PrePoMax's Material Library Editor: copies materials between the user's material library
+//! and the FE model, and keeps the library in the user's data directory.
+
+use std::path::PathBuf;
+
+use egui::{RichText, Ui, vec2};
+use plx_model::library::{LibraryNode, LibraryPath, ROOT_NAME, name_for_model};
+use plx_model::{Material, MaterialLibrary};
+
+use crate::icons::{self, Icon};
+use crate::keywords::{frame, tree_row};
+
+/// Name of the library file in prepolix's data directory.
+const FILE_NAME: &str = "materials.ron";
+
+/// The library file: in the directory where eframe keeps the settings (Linux
+/// `~/.local/share/prepolix`, Windows `%APPDATA%\prepolix\data`).
+pub fn library_file() -> Option<PathBuf> {
+    eframe::storage_dir("prepolix").map(|dir| dir.join(FILE_NAME))
+}
+
+/// Which list was used last; the move buttons and the preview follow it, as in PrePoMax.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Library,
+    Model,
+}
+
+pub enum LibraryResult {
+    Open,
+    /// Closed with OK: the model's new materials, if they changed.
+    Ok(Option<Vec<Material>>),
+    Cancel,
+}
+
+pub struct MaterialLibraryEditor {
+    library: MaterialLibrary,
+    /// Where the library is saved; `None` when it could not be read and must not be
+    /// overwritten.
+    file: Option<PathBuf>,
+    /// Why the library could not be read.
+    load_error: Option<String>,
+    library_changed: bool,
+    materials: Vec<Material>,
+    materials_changed: bool,
+    /// Selected node of the library tree; the empty path is the root.
+    library_selected: Option<LibraryPath>,
+    material_selected: Option<usize>,
+    side: Side,
+    /// Text of the rename field.
+    name: String,
+    preview: bool,
+    /// Material model selected in the preview, by its label.
+    preview_model: &'static str,
+    error: Option<String>,
+    /// Ask whether to save library changes before closing.
+    confirm_close: bool,
+}
+
+impl MaterialLibraryEditor {
+    pub fn new(materials: &[Material]) -> Self {
+        let file = library_file();
+        let (library, file, load_error) = match file.as_deref().map(plx_io::library::read_library) {
+            Some(Ok(library)) => (library, file, None),
+            Some(Err(error)) => (MaterialLibrary::default(), None, Some(error.to_string())),
+            None => (
+                MaterialLibrary::default(),
+                None,
+                Some("Kein Benutzerverzeichnis gefunden.".into()),
+            ),
+        };
+        let mut editor = Self {
+            library,
+            file,
+            load_error,
+            library_changed: false,
+            materials: materials.to_vec(),
+            materials_changed: false,
+            library_selected: None,
+            material_selected: None,
+            side: Side::Library,
+            name: String::new(),
+            preview: false,
+            preview_model: DENSITY,
+            error: None,
+            confirm_close: false,
+        };
+        // PrePoMax selects the first model material and the first library material.
+        let first = editor.library.first_material().unwrap_or_default();
+        editor.select_library(first);
+        if !editor.materials.is_empty() {
+            editor.material_selected = Some(0);
+            editor.side = Side::Model;
+        }
+        editor
+    }
+
+    fn select_library(&mut self, path: LibraryPath) {
+        self.name = match self.library.node(&path) {
+            Some(node) => node.name().to_string(),
+            None => ROOT_NAME.to_string(),
+        };
+        self.library_selected = Some(path);
+        self.side = Side::Library;
+    }
+
+    fn selected_library_material(&self) -> Option<&Material> {
+        self.library.material(self.library_selected.as_deref()?)
+    }
+
+    /// The material shown in the preview: the one selected in the list used last.
+    fn previewed(&self) -> Option<&Material> {
+        match self.side {
+            Side::Library => self.selected_library_material(),
+            Side::Model => self.materials.get(self.material_selected?),
+        }
+    }
+
+    fn copy_to_model(&mut self) {
+        let Some(material) = self.selected_library_material() else {
+            self.error = Some(
+                "Bitte in der Bibliothek ein Material wählen, das in das Modell kopiert werden soll."
+                    .into(),
+            );
+            return;
+        };
+        let mut material = material.clone();
+        material.name = name_for_model(
+            &material.name,
+            self.materials.iter().map(|m| m.name.as_str()),
+        );
+        self.materials.push(material);
+        self.material_selected = Some(self.materials.len() - 1);
+        self.side = Side::Model;
+        self.materials_changed = true;
+    }
+
+    fn copy_to_library(&mut self) {
+        let (Some(index), Some(selected)) = (self.material_selected, &self.library_selected) else {
+            self.error = Some(
+                "Bitte eine Kategorie der Bibliothek wählen, in die das Material kopiert werden soll."
+                    .into(),
+            );
+            return;
+        };
+        if let Some(path) = self.library.add_material(selected, &self.materials[index]) {
+            self.library_changed = true;
+            self.select_library(path);
+        }
+    }
+
+    fn add_category(&mut self) {
+        let selected = self.library_selected.clone().unwrap_or_default();
+        if let Some(path) = self.library.add_category(&selected) {
+            self.library_changed = true;
+            self.select_library(path);
+        }
+    }
+
+    fn delete_from_library(&mut self) {
+        if let Some(path) = &self.library_selected
+            && let Some(next) = self.library.delete(path)
+        {
+            self.library_changed = true;
+            self.select_library(next);
+        }
+    }
+
+    fn rename(&mut self) {
+        let Some(path) = self.library_selected.clone() else {
+            return;
+        };
+        if self
+            .library
+            .node(&path)
+            .is_some_and(|n| n.name() == self.name)
+        {
+            return;
+        }
+        match self.library.rename(&path, &self.name) {
+            Ok(()) => self.library_changed = true,
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    fn delete_from_model(&mut self) {
+        let Some(index) = self.material_selected else {
+            return;
+        };
+        self.materials.remove(index);
+        self.materials_changed = true;
+        self.material_selected = if self.materials.is_empty() {
+            None
+        } else {
+            Some(index.min(self.materials.len() - 1))
+        };
+    }
+
+    fn can_move(&self, up: bool) -> bool {
+        match self.side {
+            Side::Library => (self.library_selected.as_ref())
+                .is_some_and(|path| self.library.move_target(path, up).is_some()),
+            Side::Model => self.material_selected.is_some_and(|i| {
+                if up {
+                    i > 0
+                } else {
+                    i + 1 < self.materials.len()
+                }
+            }),
+        }
+    }
+
+    fn move_selected(&mut self, up: bool) {
+        match self.side {
+            Side::Library => {
+                if let Some(path) = &self.library_selected
+                    && let Some(moved) = self.library.move_material(path, up)
+                {
+                    self.library_changed = true;
+                    self.library_selected = Some(moved);
+                }
+            }
+            Side::Model => {
+                if let Some(i) = self.material_selected
+                    && self.can_move(up)
+                {
+                    let j = if up { i - 1 } else { i + 1 };
+                    self.materials.swap(i, j);
+                    self.material_selected = Some(j);
+                    self.materials_changed = true;
+                }
+            }
+        }
+    }
+
+    fn save_library(&mut self) -> bool {
+        let Some(file) = &self.file else {
+            self.error = Some("Die Bibliothek kann nicht gespeichert werden.".into());
+            return false;
+        };
+        match plx_io::library::save_library(file, &self.library) {
+            Ok(()) => {
+                self.library_changed = false;
+                true
+            }
+            Err(error) => {
+                self.error = Some(format!("Speichern fehlgeschlagen: {error}"));
+                false
+            }
+        }
+    }
+
+    /// OK: saves the library and hands the model's materials back.
+    fn accept(&mut self) -> LibraryResult {
+        if self.library_changed && !self.save_library() {
+            return LibraryResult::Open;
+        }
+        let materials = self.materials_changed.then(|| self.materials.clone());
+        LibraryResult::Ok(materials)
+    }
+
+    /// Cancel or the window's close button: asks first when the library changed.
+    fn cancel(&mut self) -> LibraryResult {
+        if self.library_changed && self.file.is_some() {
+            self.confirm_close = true;
+            LibraryResult::Open
+        } else {
+            LibraryResult::Cancel
+        }
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context) -> LibraryResult {
+        let mut open = true;
+        let mut result = LibraryResult::Open;
+        let size = vec2(600.0, 560.0);
+        let window = egui::Window::new("Materialbibliothek")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size(size)
+            // Centred together with the preview on its right.
+            .default_pos(ctx.content_rect().center() - vec2(505.0, 300.0))
+            .show(ctx, |ui| {
+                self.libraries_section(ui);
+                ui.add_space(4.0);
+                let body = size.y - 70.0;
+                // Height inside a group box, below its title.
+                let inner = body - 34.0;
+                ui.horizontal_top(|ui| {
+                    // Two group boxes with their frames and the button column between them.
+                    let column = (size.x - 80.0) / 2.0;
+                    group(ui, "Bibliotheksmaterialien", vec2(column, body), |ui| {
+                        self.library_side(ui, inner)
+                    });
+                    ui.vertical(|ui| {
+                        ui.add_space(52.0);
+                        self.copy_buttons(ui);
+                    });
+                    group(ui, "Materialien im FE-Modell", vec2(column, body), |ui| {
+                        self.model_side(ui, inner)
+                    });
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.preview, "Materialeigenschaften anzeigen");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Abbrechen").clicked() {
+                            result = self.cancel();
+                        }
+                        if ui.button("OK").clicked() {
+                            result = self.accept();
+                        }
+                    });
+                });
+            });
+        if !open {
+            result = self.cancel();
+        }
+        if self.preview
+            && let Some(window) = &window
+        {
+            let at = window.response.rect.right_top() + vec2(10.0, 0.0);
+            self.preview_window(ctx, at);
+        }
+        if let Some(error) = self.error.clone() {
+            egui::Modal::new(egui::Id::new("material library error")).show(ctx, |ui| {
+                ui.set_max_width(360.0);
+                ui.label(error);
+                ui.add_space(6.0);
+                if ui.button("OK").clicked() {
+                    self.error = None;
+                }
+            });
+        }
+        if self.confirm_close {
+            egui::Modal::new(egui::Id::new("material library close")).show(ctx, |ui| {
+                ui.label("Änderungen an der Materialbibliothek vor dem Schließen speichern?");
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Ja").clicked() {
+                        self.confirm_close = false;
+                        if self.save_library() {
+                            result = LibraryResult::Cancel;
+                        }
+                    }
+                    if ui.button("Nein").clicked() {
+                        result = LibraryResult::Cancel;
+                    }
+                    if ui.button("Abbrechen").clicked() {
+                        self.confirm_close = false;
+                    }
+                });
+            });
+        }
+        result
+    }
+
+    /// PrePoMax's collapsed "Libraries" box: here the one library file of the user.
+    fn libraries_section(&mut self, ui: &mut Ui) {
+        egui::CollapsingHeader::new("Bibliotheken")
+            .default_open(false)
+            .show(ui, |ui| {
+                match &self.file {
+                    Some(file) => {
+                        ui.label("Eigene Bibliothek:");
+                        ui.add(
+                            egui::Label::new(RichText::new(file.display().to_string()).monospace())
+                                .truncate(),
+                        );
+                    }
+                    None => {
+                        ui.label("Die Bibliothek wird nicht gespeichert.");
+                    }
+                }
+                if let Some(error) = &self.load_error {
+                    ui.colored_label(egui::Color32::from_rgb(180, 30, 30), error);
+                }
+            });
+    }
+
+    fn library_side(&mut self, ui: &mut Ui, height: f32) {
+        let selected = self.library_selected.clone();
+        let is_category = selected
+            .as_deref()
+            .is_some_and(|p| self.library.category(p).is_some());
+        let is_node = selected.as_deref().is_some_and(|p| !p.is_empty());
+        button_row(ui, |ui| {
+            if ui
+                .add_enabled(is_category, egui::Button::new("Kategorie hinzufügen"))
+                .clicked()
+            {
+                self.add_category();
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(is_node, egui::Button::new("Löschen"))
+                    .clicked()
+                {
+                    self.delete_from_library();
+                }
+            });
+        });
+        let tree_height = height - 2.0 * ROW - 10.0;
+        let mut clicked = None;
+        let mut double_clicked = false;
+        frame().show(ui, |ui| {
+            ui.set_min_size(vec2(ui.available_width(), tree_height));
+            egui::ScrollArea::both()
+                .id_salt("library tree")
+                .max_height(tree_height)
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    let root = &mut self.library.root;
+                    let response = tree_row(
+                        ui,
+                        0,
+                        Some(&mut root.expanded),
+                        selected.as_deref() == Some(&[]),
+                        category_label(ROOT_NAME, selected.as_deref() == Some(&[])),
+                    );
+                    if response.clicked() {
+                        clicked = Some(Vec::new());
+                    }
+                    if root.expanded {
+                        library_tree(
+                            ui,
+                            &mut root.items,
+                            &mut Vec::new(),
+                            selected.as_deref(),
+                            &mut clicked,
+                            &mut double_clicked,
+                        );
+                    }
+                });
+        });
+        if let Some(path) = clicked {
+            self.select_library(path);
+            if double_clicked && self.selected_library_material().is_some() {
+                self.copy_to_model();
+            }
+        }
+        button_row(ui, |ui| {
+            let field = ui.add_enabled(
+                is_node,
+                egui::TextEdit::singleline(&mut self.name)
+                    .desired_width(ui.available_width() - 90.0),
+            );
+            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui
+                .add_enabled(is_node, egui::Button::new("Umbenennen"))
+                .clicked()
+                || enter
+            {
+                self.rename();
+            }
+        });
+    }
+
+    fn copy_buttons(&mut self, ui: &mut Ui) {
+        let to_model = self.selected_library_material().is_some();
+        if icons::dialog_button(
+            ui,
+            Icon::Arrow(vec2(1.0, 0.0)),
+            "In das Modell kopieren",
+            to_model,
+        )
+        .clicked()
+        {
+            self.copy_to_model();
+        }
+        let to_library = self.material_selected.is_some() && self.library_selected.is_some();
+        if icons::dialog_button(
+            ui,
+            Icon::Arrow(vec2(-1.0, 0.0)),
+            "In die Bibliothek kopieren",
+            to_library,
+        )
+        .clicked()
+        {
+            self.copy_to_library();
+        }
+        if icons::dialog_button(
+            ui,
+            Icon::Arrow(vec2(0.0, -1.0)),
+            "Nach oben",
+            self.can_move(true),
+        )
+        .clicked()
+        {
+            self.move_selected(true);
+        }
+        if icons::dialog_button(
+            ui,
+            Icon::Arrow(vec2(0.0, 1.0)),
+            "Nach unten",
+            self.can_move(false),
+        )
+        .clicked()
+        {
+            self.move_selected(false);
+        }
+    }
+
+    fn model_side(&mut self, ui: &mut Ui, height: f32) {
+        button_row(ui, |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(
+                        self.material_selected.is_some(),
+                        egui::Button::new("Löschen"),
+                    )
+                    .clicked()
+                {
+                    self.delete_from_model();
+                }
+            });
+        });
+        let list_height = height - ROW - 6.0;
+        let mut clicked = None;
+        let mut double_clicked = false;
+        frame().show(ui, |ui| {
+            ui.set_min_size(vec2(ui.available_width(), list_height));
+            egui::ScrollArea::both()
+                .id_salt("model materials")
+                .max_height(list_height)
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    for (i, material) in self.materials.iter().enumerate() {
+                        let selected = self.material_selected == Some(i);
+                        let response =
+                            tree_row(ui, 0, None, selected, RichText::new(&material.name));
+                        if response.clicked() || response.double_clicked() {
+                            clicked = Some(i);
+                            double_clicked |= response.double_clicked();
+                        }
+                    }
+                });
+        });
+        if let Some(i) = clicked {
+            self.material_selected = Some(i);
+            self.side = Side::Model;
+            if double_clicked {
+                self.copy_to_library();
+            }
+        }
+    }
+
+    /// PrePoMax's "Preview Material Properties": the material models of the selected
+    /// material and their values, read only.
+    fn preview_window(&mut self, ctx: &egui::Context, at: egui::Pos2) {
+        let mut open = true;
+        let material = self.previewed().cloned();
+        egui::Window::new("Materialeigenschaften")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size(vec2(400.0, 470.0))
+            // Follows the editor, so that it never covers it.
+            .current_pos(at)
+            .show(ctx, |ui| {
+                let Some(material) = material else {
+                    ui.weak("Kein Material gewählt.");
+                    return;
+                };
+                ui.strong("Daten");
+                egui::Grid::new("preview data")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label("Materialname");
+                        let mut name = material.name.clone();
+                        ui.add(
+                            egui::TextEdit::singleline(&mut name)
+                                .interactive(false)
+                                .desired_width(280.0),
+                        );
+                        ui.end_row();
+                    });
+                ui.add_space(6.0);
+                ui.strong("Materialmodelle");
+                let models = material_models(&material);
+                if !models.iter().any(|(label, _)| *label == self.preview_model)
+                    && let Some((first, _)) = models.first()
+                {
+                    self.preview_model = first;
+                }
+                frame().show(ui, |ui| {
+                    ui.set_min_size(vec2(ui.available_width(), 120.0));
+                    for (label, _) in &models {
+                        let selected = self.preview_model == *label;
+                        if tree_row(ui, 0, None, selected, RichText::new(*label)).clicked() {
+                            self.preview_model = label;
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+                ui.strong("Eigenschaften");
+                frame().show(ui, |ui| {
+                    ui.set_min_size(vec2(ui.available_width(), 150.0));
+                    let rows = models
+                        .into_iter()
+                        .find(|(label, _)| *label == self.preview_model)
+                        .map(|(_, rows)| rows)
+                        .unwrap_or_default();
+                    egui::Grid::new("preview properties")
+                        .num_columns(2)
+                        .striped(true)
+                        .min_col_width(150.0)
+                        .show(ui, |ui| {
+                            for (name, value) in rows {
+                                ui.label(name);
+                                ui.label(value);
+                                ui.end_row();
+                            }
+                        });
+                });
+                ui.add_space(4.0);
+                ui.weak("Einheiten: mm, t, s");
+            });
+        if !open {
+            self.preview = false;
+        }
+    }
+}
+
+const DENSITY: &str = "Dichte";
+const ELASTIC: &str = "Elastisch";
+
+/// Material models with their property rows (name, value with unit).
+fn material_models(material: &Material) -> Vec<(&'static str, Vec<(&'static str, String)>)> {
+    let mut models = Vec::new();
+    if let Some(density) = material.density {
+        models.push((
+            DENSITY,
+            vec![("Dichte", format!("{} t/mm³", format_value(density)))],
+        ));
+    }
+    if let Some(elastic) = material.elastic {
+        models.push((
+            ELASTIC,
+            vec![
+                ("E-Modul", format!("{} MPa", format_value(elastic.young))),
+                ("Querkontraktionszahl", format_value(elastic.poisson)),
+            ],
+        ));
+    }
+    models
+}
+
+/// Number as PrePoMax shows it in property grids: very small or large values in E notation.
+fn format_value(value: f64) -> String {
+    if value != 0.0 && !(1e-3..1e7).contains(&value.abs()) {
+        format!("{value:.2E}")
+    } else {
+        format!("{value}")
+    }
+}
+
+/// Categories are blue in PrePoMax's library tree.
+fn category_label(name: &str, selected: bool) -> RichText {
+    let text = RichText::new(name);
+    if selected {
+        text
+    } else {
+        text.color(crate::style::HIGHLIGHT)
+    }
+}
+
+fn library_tree(
+    ui: &mut Ui,
+    items: &mut [LibraryNode],
+    path: &mut LibraryPath,
+    selected: Option<&[usize]>,
+    clicked: &mut Option<LibraryPath>,
+    double_clicked: &mut bool,
+) {
+    for (index, node) in items.iter_mut().enumerate() {
+        path.push(index);
+        let is_selected = selected == Some(path.as_slice());
+        let response = match node {
+            LibraryNode::Category(category) => {
+                let label = category_label(&category.name, is_selected);
+                let expandable = !category.items.is_empty();
+                let expanded = expandable.then_some(&mut category.expanded);
+                tree_row(ui, path.len(), expanded, is_selected, label)
+            }
+            LibraryNode::Material(material) => tree_row(
+                ui,
+                path.len(),
+                None,
+                is_selected,
+                RichText::new(&material.name),
+            ),
+        };
+        if response.clicked() || response.double_clicked() {
+            *clicked = Some(path.clone());
+            *double_clicked |= response.double_clicked();
+        }
+        if let LibraryNode::Category(category) = node
+            && category.expanded
+        {
+            library_tree(
+                ui,
+                &mut category.items,
+                path,
+                selected,
+                clicked,
+                double_clicked,
+            );
+        }
+        path.pop();
+    }
+}
+
+/// Group box with a title, like the WinForms group boxes of PrePoMax's dialog.
+fn group(ui: &mut Ui, title: &str, size: egui::Vec2, body: impl FnOnce(&mut Ui)) {
+    ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.set_width(size.x);
+        ui.label(title);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            body(ui);
+        });
+    });
+}
+
+/// Height of a row of buttons above or below a list.
+const ROW: f32 = 26.0;
+
+/// Row of fixed height, laid out left to right.
+fn button_row(ui: &mut Ui, body: impl FnOnce(&mut Ui)) {
+    let layout = egui::Layout::left_to_right(egui::Align::Center);
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), ROW), layout, |ui| {
+        ui.set_height(ROW);
+        body(ui);
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn editor() -> MaterialLibraryEditor {
+        let mut editor = MaterialLibraryEditor::new(&[]);
+        // Tests never touch the user's own library file.
+        editor.library = MaterialLibrary::default();
+        editor.file = None;
+        editor.select_library(editor.library.first_material().unwrap());
+        editor
+    }
+
+    #[test]
+    fn library_materials_are_copied_into_the_model_with_free_names() {
+        let mut editor = editor();
+        editor.copy_to_model();
+        editor.copy_to_model();
+        let names: Vec<&str> = editor.materials.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["S235", "S235_Library-1"]);
+        assert_eq!(editor.material_selected, Some(1));
+        let LibraryResult::Ok(Some(materials)) = editor.accept() else {
+            panic!("the model materials changed");
+        };
+        assert_eq!(materials[0].elastic.unwrap().young, 210_000.0);
+    }
+
+    #[test]
+    fn model_materials_are_copied_into_the_selected_category() {
+        let mut editor = editor();
+        editor.materials.push(Material {
+            name: "Alu".into(),
+            density: Some(2.7e-9),
+            elastic: None,
+        });
+        editor.material_selected = Some(0);
+        editor.select_library(Vec::new());
+        editor.copy_to_library();
+        assert_eq!(editor.library_selected, Some(vec![1]));
+        assert_eq!(editor.name, "Alu");
+        assert!(editor.library_changed);
+        // Without a file the changes cannot be saved, so OK keeps the dialog open.
+        assert!(matches!(editor.accept(), LibraryResult::Open));
+        assert!(editor.error.is_some());
+    }
+
+    #[test]
+    fn preview_lists_the_material_models() {
+        let editor = editor();
+        let models = material_models(editor.previewed().unwrap());
+        let labels: Vec<&str> = models.iter().map(|(label, _)| *label).collect();
+        assert_eq!(labels, [DENSITY, ELASTIC]);
+        assert_eq!(models[0].1[0].1, "7.85E-9 t/mm³");
+        assert_eq!(models[1].1[0].1, "210000 MPa");
+    }
+}

@@ -1,12 +1,13 @@
-use egui::{Color32, PointerButton, Rect, Sense, Ui, pos2};
+use egui::{Color32, PointerButton, Pos2, Rect, Sense, Ui, pos2};
 use egui_wgpu::RenderState;
-use glam::Vec3;
+use glam::{Mat4, Vec2, Vec3};
 use plx_render::wgpu::FilterMode;
 use plx_render::{Camera, DisplayOptions, RenderMesh, StandardView, ViewportRenderer};
 
 use crate::overlay::{self, LabelOffsets, Overlay};
 
 const ZOOM_PER_SCROLL_POINT: f32 = 0.002;
+const ZOOM_PER_DRAG_POINT: f32 = 0.01;
 
 /// The 3D view: owns the GPU renderer and the camera and maps mouse input to camera moves.
 ///
@@ -21,17 +22,79 @@ pub struct Viewport {
     pub overlay: Overlay,
     /// Where the user dragged the labels.
     pub labels: LabelOffsets,
+    /// A dialog picks in the 3D view: the left button selects and draws selection boxes.
+    pub selecting: bool,
+    /// What a click at the resting mouse would select, drawn in PrePoMax's orange.
+    pub preview: Preview,
+    /// Where the selection box drag started.
+    box_start: Option<Pos2>,
+    /// Pointer position and since when it rests there, for the hover preview.
+    resting: Option<(Pos2, f64)>,
+    /// The resting position last reported as hover.
+    hovered: Option<Pos2>,
     /// Where the view was drawn last, in points.
     pub rect: Rect,
 }
+
+/// Lines and points in render coordinates drawn as the hover preview.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Preview {
+    pub lines: Vec<[Vec3; 2]>,
+    pub points: Vec<Vec3>,
+}
+
+/// A selection box dragged in the 3D view, in normalised device coordinates.
+#[derive(Clone, Copy, Debug)]
+pub struct BoxSelect {
+    pub view_proj: Mat4,
+    pub min: Vec2,
+    pub max: Vec2,
+    /// Dragged from right to left: items crossing the box count, not only those inside.
+    pub crossing: bool,
+    pub shift: bool,
+    pub ctrl: bool,
+}
+
+impl BoxSelect {
+    /// Whether a point in render coordinates lies inside the box and in front of the camera.
+    pub fn contains(&self, point: Vec3) -> bool {
+        let ndc = self.view_proj.project_point3(point);
+        (0.0..=1.0).contains(&ndc.z)
+            && ndc.x >= self.min.x
+            && ndc.x <= self.max.x
+            && ndc.y >= self.min.y
+            && ndc.y <= self.max.y
+    }
+}
+
+/// How long the mouse has to rest before the hover preview is shown, as in PrePoMax.
+const HOVER_DELAY_SECONDS: f64 = 0.2;
+
+/// PrePoMax's colour of the hover preview.
+const PREVIEW_COLOR: Color32 = Color32::from_rgb(255, 175, 0);
 
 /// A click into the scene as a ray in render coordinates.
 #[derive(Clone, Copy, Debug)]
 pub struct Click {
     pub origin: Vec3,
     pub direction: Vec3,
-    /// Ctrl was held: remove from the selection instead of adding.
-    pub remove: bool,
+    /// The ray through a pixel [`PICK_PRECISION_PIXELS`] to the side, to turn the pick
+    /// tolerance into a distance in the scene.
+    pub side_origin: Vec3,
+    pub side_direction: Vec3,
+    pub shift: bool,
+    pub ctrl: bool,
+}
+
+/// How close to an edge or point a click has to be to pick it, as in PrePoMax.
+pub const PICK_PRECISION_PIXELS: f32 = 7.0;
+
+impl Click {
+    /// The pick tolerance at a point on the click ray.
+    pub fn precision_at(&self, point: Vec3) -> f32 {
+        let offset = point - self.side_origin;
+        (offset - self.side_direction * offset.dot(self.side_direction)).length()
+    }
 }
 
 /// What happened in the 3D view this frame.
@@ -39,6 +102,9 @@ pub struct Click {
 pub struct ViewportResponse {
     pub command: Option<ViewCommand>,
     pub click: Option<Click>,
+    pub box_select: Option<BoxSelect>,
+    /// The mouse came to rest over the scene (`Some(ray)`) or left it (`Some(None)`).
+    pub hover: Option<Option<Click>>,
 }
 
 /// Camera requests from toolbar, menu or tree, applied by the owner of the model bounds.
@@ -46,6 +112,37 @@ pub struct ViewportResponse {
 pub enum ViewCommand {
     Fit,
     View(StandardView),
+    /// Turns the closest global axis straight up.
+    Vertical,
+    /// Turns the given global axis straight up.
+    VerticalAxis(Axis),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axis {
+    X,
+    Y,
+    Z,
+}
+
+impl Axis {
+    pub const ALL: [Axis; 3] = [Axis::X, Axis::Y, Axis::Z];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Axis::X => "X",
+            Axis::Y => "Y",
+            Axis::Z => "Z",
+        }
+    }
+
+    fn vector(self) -> Vec3 {
+        match self {
+            Axis::X => Vec3::X,
+            Axis::Y => Vec3::Y,
+            Axis::Z => Vec3::Z,
+        }
+    }
 }
 
 impl Viewport {
@@ -64,12 +161,22 @@ impl Viewport {
             options: DisplayOptions::default(),
             overlay: Overlay::default(),
             labels: LabelOffsets::default(),
+            selecting: false,
+            preview: Preview::default(),
+            box_start: None,
+            resting: None,
+            hovered: None,
             rect: Rect::NOTHING,
         }
     }
 
     pub fn set_parts(&mut self, parts: &[RenderMesh]) {
         self.renderer.set_parts(&self.render_state.device, parts);
+    }
+
+    /// Exchanges the camera, so the FE model and the results each keep their own view.
+    pub fn swap_camera(&mut self, camera: &mut Camera) {
+        std::mem::swap(&mut self.camera, camera);
     }
 
     pub fn set_part_visible(&mut self, index: usize, visible: bool) {
@@ -84,6 +191,8 @@ impl Viewport {
                 }
             }
             ViewCommand::View(view) => self.camera.set_view(view),
+            ViewCommand::Vertical => self.camera.set_vertical_view(),
+            ViewCommand::VerticalAxis(axis) => self.camera.set_vertical_axis(axis.vector()),
         }
     }
 
@@ -93,37 +202,94 @@ impl Viewport {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         self.rect = rect;
         let delta = response.drag_delta();
-        if response.dragged_by(PointerButton::Primary) {
-            self.camera.orbit(delta.x, delta.y);
-        } else if response.dragged_by(PointerButton::Secondary)
-            || response.dragged_by(PointerButton::Middle)
-        {
-            self.camera
-                .pan(delta.x, delta.y, rect.width(), rect.height());
-        }
-        if response.hovered() {
-            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                self.camera.zoom((-scroll * ZOOM_PER_SCROLL_POINT).exp());
+        let modifiers = ui.input(|i| i.modifiers);
+        let ctrl = modifiers.ctrl || modifiers.command;
+        // PrePoMax's mouse: the middle button rotates, with Shift it pans and with Ctrl it zooms;
+        // the left button picks and draws selection boxes, the right one opens the context menu.
+        if response.dragged_by(PointerButton::Middle) {
+            if ctrl {
+                self.camera.zoom((delta.y * ZOOM_PER_DRAG_POINT).exp());
+            } else if modifiers.shift {
+                self.camera
+                    .pan(delta.x, delta.y, rect.width(), rect.height());
+            } else {
+                self.camera.orbit(delta.x, delta.y);
             }
         }
+        if self.selecting && response.drag_started_by(PointerButton::Primary) {
+            self.box_start = response.interact_pointer_pos();
+        }
+        if !self.selecting {
+            self.box_start = None;
+        }
+        if response.hovered()
+            && let Some(pointer) = ui.input(|i| i.pointer.hover_pos())
+        {
+            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                // Ctrl zooms in finer steps, as in PrePoMax.
+                let rate = if ctrl { 0.2 } else { 1.0 } * ZOOM_PER_SCROLL_POINT;
+                let offset = pointer - rect.center();
+                self.camera.zoom_at(
+                    (-scroll * rate).exp(),
+                    offset.x,
+                    offset.y,
+                    rect.width(),
+                    rect.height(),
+                );
+            }
+        }
+        response.context_menu(|ui| {
+            if ui.button("Einpassen").clicked() {
+                result.command = Some(ViewCommand::Fit);
+            }
+            if ui.button("Vertikal").clicked() {
+                result.command = Some(ViewCommand::Vertical);
+            }
+            ui.menu_button("Achse senkrecht", |ui| {
+                for axis in Axis::ALL {
+                    if ui.button(axis.label()).clicked() {
+                        result.command = Some(ViewCommand::VerticalAxis(axis));
+                    }
+                }
+            });
+        });
         if response.double_clicked() {
             result.command = Some(ViewCommand::Fit);
         } else if response.clicked()
             && let Some(pointer) = response.interact_pointer_pos()
         {
-            // Ray through the pixel from the near to the far plane.
-            let inverse = self.camera.view_proj(rect.aspect_ratio()).inverse();
-            let x = (pointer.x - rect.center().x) / (rect.width() * 0.5);
-            let y = (rect.center().y - pointer.y) / (rect.height() * 0.5);
-            let near = inverse.project_point3(Vec3::new(x, y, 0.0));
-            let far = inverse.project_point3(Vec3::new(x, y, 1.0));
-            result.click = Some(Click {
-                origin: near,
-                direction: (far - near).normalize_or_zero(),
-                remove: ui.input(|i| i.modifiers.command),
-            });
+            result.click = Some(self.click_at(rect, pointer, modifiers));
         }
+        let mut dragged_box = None;
+        if let Some(start) = self.box_start {
+            let end = ui.input(|i| i.pointer.latest_pos()).unwrap_or(start);
+            let crossing = end.x < start.x;
+            dragged_box = Some((Rect::from_two_pos(start, end), crossing));
+            if response.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+                self.box_start = None;
+                let area = Rect::from_two_pos(start, end);
+                if area.width() > 1.0 && area.height() > 1.0 {
+                    let ndc = |p: Pos2| {
+                        Vec2::new(
+                            (p.x - rect.center().x) / (rect.width() * 0.5),
+                            (rect.center().y - p.y) / (rect.height() * 0.5),
+                        )
+                    };
+                    let (a, b) = (ndc(area.left_bottom()), ndc(area.right_top()));
+                    result.box_select = Some(BoxSelect {
+                        view_proj: self.camera.view_proj(rect.aspect_ratio()),
+                        min: a.min(b),
+                        max: a.max(b),
+                        crossing,
+                        shift: modifiers.shift,
+                        ctrl: modifiers.command,
+                    });
+                }
+                dragged_box = None;
+            }
+        }
+        result.hover = self.hover(ui, rect, &response);
 
         let pixels_per_point = ui.ctx().pixels_per_point();
         let width = (rect.width() * pixels_per_point).round() as u32;
@@ -150,6 +316,102 @@ impl Viewport {
             Color32::WHITE,
         );
         overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels);
+        if self.selecting {
+            let to_screen = |p: Vec3| overlay::project(&self.camera, rect, p);
+            let stroke = egui::Stroke::new(2.0, PREVIEW_COLOR);
+            for [a, b] in &self.preview.lines {
+                painter.line_segment([to_screen(*a), to_screen(*b)], stroke);
+            }
+            for &point in &self.preview.points {
+                painter.rect_filled(
+                    Rect::from_center_size(to_screen(point), egui::vec2(7.0, 7.0)),
+                    0.0,
+                    PREVIEW_COLOR,
+                );
+            }
+        }
+        if let Some((area, crossing)) = dragged_box {
+            // PrePoMax draws a box selecting items inside blue, one selecting crossing items
+            // green.
+            let (fill, border) = if crossing {
+                (
+                    Color32::from_rgba_unmultiplied(51, 255, 128, 50),
+                    Color32::from_rgb(77, 255, 77),
+                )
+            } else {
+                (
+                    Color32::from_rgba_unmultiplied(135, 206, 250, 60),
+                    Color32::from_rgb(0, 120, 215),
+                )
+            };
+            painter.rect(
+                area,
+                0.0,
+                fill,
+                egui::Stroke::new(1.0, border),
+                egui::StrokeKind::Inside,
+            );
+            ui.ctx().request_repaint();
+        }
         result
+    }
+
+    /// The pick ray through a point of the view.
+    fn click_at(&self, rect: Rect, pointer: Pos2, modifiers: egui::Modifiers) -> Click {
+        // Ray through the pixel from the near to the far plane.
+        let inverse = self.camera.view_proj(rect.aspect_ratio()).inverse();
+        let ray = |pointer: Pos2| {
+            let x = (pointer.x - rect.center().x) / (rect.width() * 0.5);
+            let y = (rect.center().y - pointer.y) / (rect.height() * 0.5);
+            let near = inverse.project_point3(Vec3::new(x, y, 0.0));
+            let far = inverse.project_point3(Vec3::new(x, y, 1.0));
+            (near, (far - near).normalize_or_zero())
+        };
+        let (origin, direction) = ray(pointer);
+        let (side_origin, side_direction) = ray(pointer + egui::vec2(PICK_PRECISION_PIXELS, 0.0));
+        Click {
+            origin,
+            direction,
+            side_origin,
+            side_direction,
+            shift: modifiers.shift,
+            ctrl: modifiers.command,
+        }
+    }
+
+    /// Reports the pointer once it has rested over the scene, and when it leaves.
+    fn hover(&mut self, ui: &Ui, rect: Rect, response: &egui::Response) -> Option<Option<Click>> {
+        let pointer = response
+            .hover_pos()
+            .filter(|_| self.selecting && self.box_start.is_none());
+        let Some(pointer) = pointer else {
+            self.resting = None;
+            return self.hovered.take().map(|_| None);
+        };
+        let now = ui.input(|i| i.time);
+        match self.resting {
+            Some((rest, since)) if rest.distance(pointer) < 0.5 => {
+                if now - since < HOVER_DELAY_SECONDS {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_secs_f64(
+                            HOVER_DELAY_SECONDS - (now - since),
+                        ));
+                    return None;
+                }
+            }
+            _ => {
+                self.resting = Some((pointer, now));
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs_f64(HOVER_DELAY_SECONDS));
+                // Moving hides the preview until the mouse rests again.
+                return self.hovered.take().map(|_| None);
+            }
+        }
+        if self.hovered == Some(pointer) {
+            return None;
+        }
+        self.hovered = Some(pointer);
+        let modifiers = ui.input(|i| i.modifiers);
+        Some(Some(self.click_at(rect, pointer, modifiers)))
     }
 }

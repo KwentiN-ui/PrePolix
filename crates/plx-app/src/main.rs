@@ -4,11 +4,15 @@ mod analysis;
 mod animation;
 mod app;
 mod icons;
+mod keywords;
+mod material_library;
 mod model;
+mod numeric;
 mod overlay;
 mod properties;
 mod results;
 mod screenshot;
+mod selection;
 mod settings;
 mod setup;
 mod solver_check;
@@ -47,11 +51,14 @@ mod tests {
             ("animation.rs", include_str!("animation.rs")),
             ("app.rs", include_str!("app.rs")),
             ("icons.rs", include_str!("icons.rs")),
+            ("keywords.rs", include_str!("keywords.rs")),
+            ("material_library.rs", include_str!("material_library.rs")),
             ("main.rs", include_str!("main.rs")),
             ("model.rs", include_str!("model.rs")),
             ("overlay.rs", include_str!("overlay.rs")),
             ("properties.rs", include_str!("properties.rs")),
             ("results.rs", include_str!("results.rs")),
+            ("selection.rs", include_str!("selection.rs")),
             ("settings.rs", include_str!("settings.rs")),
             ("setup.rs", include_str!("setup.rs")),
             ("solver_check.rs", include_str!("solver_check.rs")),

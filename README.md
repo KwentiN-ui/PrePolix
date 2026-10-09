@@ -1,4 +1,4 @@
-# prepolix
+# PrePolix
 
 Ein FEM-Präprozessor und Postprozessor für [CalculiX](http://www.calculix.de/), geschrieben in Rust und lauffähig unter Linux und Windows.
 Vorbild für Bedienung und Funktionsumfang ist [PrePoMax](https://prepomax.fs.um.si/).
@@ -24,12 +24,18 @@ Unter Linux braucht das Programm zur Laufzeit `libxkbcommon-x11` (X11) bzw. `lib
 
 ## Bedienung der 3D-Ansicht
 
+Wie in PrePoMax:
+
 | Aktion | Maus |
 |---|---|
-| Drehen | linke Taste ziehen |
-| Verschieben | rechte oder mittlere Taste ziehen |
-| Zoomen | Mausrad |
+| Drehen | mittlere Taste ziehen |
+| Verschieben | Umschalt + mittlere Taste ziehen |
+| Zoomen | Mausrad (mit Strg feiner) oder Strg + mittlere Taste ziehen |
+| Auswählen, Auswahlrahmen | linke Taste (in Auswahldialogen) |
+| Kontextmenü | rechte Taste |
 | Einpassen | Doppelklick |
+
+Die Standardansichten folgen PrePoMax: Y zeigt nach oben. "Vertikal" stellt die Achse senkrecht, die der Bildschirm-Hochrichtung am nächsten liegt, und "Achse senkrecht" (Menü Ansicht oder Rechtsklick) stellt X, Y oder Z nach oben.
 
 ## Was schon geht
 
