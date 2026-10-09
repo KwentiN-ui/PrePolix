@@ -639,12 +639,15 @@ pub fn window(
                             ui.end_row();
                             for voice in &mut sound.voices {
                                 actions.changed |= ui.checkbox(&mut voice.enabled, "").changed();
-                                let label = ui
-                                    .selectable_label(
-                                        voice.increment == shown,
-                                        voice.mode.to_string(),
-                                    )
-                                    .on_hover_text("Diese Eigenform anzeigen");
+                                // Fixed size like the tree rows, so hovering does not make the
+                                // row taller.
+                                let label = crate::tree::row_label(
+                                    ui,
+                                    voice.increment == shown,
+                                    None,
+                                    voice.mode.to_string(),
+                                )
+                                .on_hover_text("Diese Eigenform anzeigen");
                                 if label.clicked() {
                                     actions.show = Some(voice.increment);
                                 }

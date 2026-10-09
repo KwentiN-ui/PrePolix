@@ -99,7 +99,7 @@ pub struct TreeResponse {
 
 /// Tree label with a fixed size: highlight and hover frame are painted over the same area, so
 /// that hovering never moves the rows below (egui's selectable label grows by its frame).
-fn row_label(
+pub(crate) fn row_label(
     ui: &mut Ui,
     selected: bool,
     color: Option<Color32>,
