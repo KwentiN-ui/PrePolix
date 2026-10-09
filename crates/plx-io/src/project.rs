@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use plx_mesh::FeMesh;
-use plx_model::{FeModel, PROJECT_FORMAT, Project};
+use plx_model::{FeModel, Geometry, PROJECT_FORMAT, Project};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {
@@ -20,9 +20,15 @@ pub enum ProjectError {
 }
 
 /// Writes the project; a crash while saving leaves an existing file intact.
-pub fn save_project(path: &Path, mesh: &FeMesh, model: &FeModel) -> Result<(), ProjectError> {
+pub fn save_project(
+    path: &Path,
+    geometry: Option<&Geometry>,
+    mesh: &FeMesh,
+    model: &FeModel,
+) -> Result<(), ProjectError> {
     let project = Project {
         format: PROJECT_FORMAT,
+        geometry: geometry.cloned(),
         mesh: mesh.clone(),
         model: model.clone(),
     };
@@ -59,7 +65,7 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
 
 #[cfg(test)]
 mod tests {
-    use plx_model::{Material, Step, UserKeyword};
+    use plx_model::{Extrapolation, HotSpot, Material, MeshSetup, Region, Step, UserKeyword};
 
     use super::*;
     use crate::inp::read_inp;
@@ -83,13 +89,24 @@ mod tests {
                 text: "*Amplitude, Name=A\n0, 0, 1, 1".into(),
                 active: false,
             }],
+            hot_spots: vec![HotSpot {
+                toe: Region::Nodes(vec![3, 7]),
+                extrapolation: Extrapolation::Custom(vec![2.0, 6.0]),
+                ..HotSpot::new("Hot_Spot-1")
+            }],
         };
         let dir = std::env::temp_dir().join(format!("plx-project-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("block.plx");
-        save_project(&path, &mesh, &model).unwrap();
+        let geometry = Geometry {
+            source: "block.step".into(),
+            brep: "DBRep_DrawableShape\n\"quoted\" lines\n".into(),
+            mesh_setup: MeshSetup::for_diagonal(100.0),
+        };
+        save_project(&path, Some(&geometry), &mesh, &model).unwrap();
         let project = read_project(&path).unwrap();
         assert_eq!(project.model, model);
+        assert_eq!(project.geometry, Some(geometry));
         assert_eq!(project.mesh.elements(), mesh.elements());
         assert_eq!(project.mesh.coords(), mesh.coords());
         assert_eq!(project.mesh.node_sets, mesh.node_sets);

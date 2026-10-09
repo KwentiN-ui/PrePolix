@@ -46,6 +46,7 @@ pub enum TreeIcon {
     Warning,
     Geometry,
     MeshSetup,
+    HotSpot,
     Dots,
     DotsOpen,
 }
@@ -84,6 +85,7 @@ fn pixmap(icon: TreeIcon) -> &'static Pixmap {
         TreeIcon::Step => &STEP,
         TreeIcon::FieldOutput => &FIELD_OUTPUT,
         TreeIcon::HistoryOutput => &HISTORY_OUTPUT,
+        TreeIcon::HotSpot => &HOT_SPOT,
         TreeIcon::BoundaryCondition => &BOUNDARY_CONDITION,
         TreeIcon::Load => &LOAD,
         TreeIcon::DefinedField => &DEFINED_FIELD,
@@ -968,6 +970,35 @@ const FIELD_OUTPUT: Pixmap = Pixmap {
 };
 
 /// History_output.ico
+/// Not one of PrePoMax's images: stress rising towards a weld toe with two read-out points.
+const HOT_SPOT: Pixmap = Pixmap {
+    colors: &[
+        [60, 60, 60, 255],
+        [220, 0, 0, 255],
+        [40, 40, 40, 255],
+        [150, 150, 150, 255],
+        [0, 90, 200, 255],
+    ],
+    rows: [
+        "....A...........",
+        "....AB..........",
+        "....AB..........",
+        "....A.B.........",
+        "....A.EE........",
+        "....A.EEB.......",
+        "....A....BB.....",
+        "....A......BEE..",
+        "....A.......EEBB",
+        "....A...........",
+        "....A...........",
+        "...CA...........",
+        "..CCA...........",
+        ".CCCA...........",
+        "DDDDDDDDDDDDDDDD",
+        "DDDDDDDDDDDDDDDD",
+    ],
+};
+
 const HISTORY_OUTPUT: Pixmap = Pixmap {
     colors: &[
         [254, 68, 68, 255],
@@ -1420,6 +1451,7 @@ mod tests {
             TreeIcon::Warning,
             TreeIcon::Geometry,
             TreeIcon::MeshSetup,
+            TreeIcon::HotSpot,
             TreeIcon::Dots,
             TreeIcon::DotsOpen,
         ] {

@@ -8,6 +8,7 @@ mod derived;
 pub mod equation;
 pub mod field_output;
 pub mod history_output;
+pub mod hot_spot;
 
 pub use derived::{add_derived_components, principal_values};
 pub use equation::Equation;

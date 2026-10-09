@@ -5,7 +5,7 @@
 //! As in PrePoMax a click without modifier replaces the selection, Shift adds, Ctrl removes
 //! and Shift+Ctrl keeps the intersection. A click into empty space clears the selection.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use glam::{DVec3, Vec3};
 use plx_mesh::{ElementId, NodeId, SkinFace, face_normal};
@@ -508,18 +508,20 @@ pub fn preview(model: &Model, items: &Items) -> Preview {
                 .collect();
         }
         Items::Faces(faces) => {
+            // An edge between two picked faces is drawn once.
+            let mut edges = HashSet::new();
             for (part, skin) in (0..model.parts.len()).map(|p| (p, model.skin(p))) {
                 let picker = MeshPicker::new(model, part);
                 for (index, face) in skin.faces.iter().enumerate() {
                     if faces.contains(&picker.face_id(index)) {
-                        preview
-                            .lines
-                            .extend(corner_edges(&face.corners).map(|(a, b)| {
-                                [model.render_position(a), model.render_position(b)]
-                            }));
+                        edges
+                            .extend(corner_edges(&face.corners).map(|(a, b)| (a.min(b), a.max(b))));
                     }
                 }
             }
+            preview.lines = (edges.into_iter())
+                .map(|(a, b)| [model.render_position(a), model.render_position(b)])
+                .collect();
         }
     }
     preview

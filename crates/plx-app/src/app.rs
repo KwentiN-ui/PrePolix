@@ -11,6 +11,7 @@ use crate::history_table::HistoryTable;
 use crate::icons::{self, Icon};
 use crate::keywords::KeywordEditor;
 use crate::material_library::{LibraryResult, MaterialLibraryEditor};
+use crate::meshing::{MeshSetupResult, MeshSetupWindow, MeshingJob};
 use crate::model::{self, Highlight, LoadedModel, Model};
 use crate::numeric;
 use crate::overlay::{Marker, Overlay};
@@ -21,6 +22,7 @@ use crate::section::{SectionDialog, SectionResult, SectionView};
 use crate::selection::Operation;
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::setup::{Editor, EditorResult, NewItem};
+use crate::sound::{self, ModeSound};
 use crate::symbols;
 use crate::tree::{self, TreeItem, TreeResponse, TreeState, TreeView};
 use crate::viewport::{Axis, BoxSelect, Click, ViewCommand, Viewport};
@@ -38,6 +40,11 @@ struct Workbench {
     viewport: Viewport,
     /// The FE model workspace: mesh and analysis set up from an input or project file.
     model: Option<Model>,
+    /// The CAD geometry of the FE model as shown on the Geometry tab.
+    geometry: Option<Model>,
+    /// Open meshing parameters window.
+    mesh_setup: Option<MeshSetupWindow>,
+    meshing: Option<MeshingJob>,
     /// The results workspace: every results file opened in this session, PrePoMax's results
     /// collection. One of them is shown on the Results tab.
     results: Vec<Model>,
@@ -79,6 +86,12 @@ struct Workbench {
     /// Results file the user asked to open; read by the app on a worker thread.
     open_results: Option<PathBuf>,
     screenshot: Screenshot,
+    /// Hot spot whose paths are shown in the FE model, edited or selected, with the paths.
+    hot_spot_preview: Option<(plx_model::HotSpot, Vec<Vec<glam::Vec3>>)>,
+    /// The table of hot spot values is open on the Results tab.
+    hot_spot_window: bool,
+    /// Audio output of the sound window, opened when it first plays.
+    audio: Option<sound::Player>,
     /// The section view, while it is on; it cuts whatever the 3D view shows.
     section: Option<SectionView>,
     section_dialog: Option<SectionDialog>,
@@ -110,15 +123,20 @@ impl PrepolixApp {
             adapter.name,
             adapter.backend
         )];
+        let settings: Settings = cc
+            .storage
+            .and_then(|s| eframe::get_value(s, settings::STORAGE_KEY))
+            .unwrap_or_default();
+        plx_mesher::set_library_path(settings.gmsh.library());
         let app = Self {
             workbench: Workbench {
-                settings: cc
-                    .storage
-                    .and_then(|s| eframe::get_value(s, settings::STORAGE_KEY))
-                    .unwrap_or_default(),
+                settings,
                 settings_window: None,
                 viewport: Viewport::new(render_state),
                 model: None,
+                geometry: None,
+                mesh_setup: None,
+                meshing: None,
                 results: Vec::new(),
                 current_result: 0,
                 parked_camera: None,
@@ -142,6 +160,9 @@ impl PrepolixApp {
                 analysis: None,
                 open_results: None,
                 screenshot: Screenshot::default(),
+                hot_spot_preview: None,
+                hot_spot_window: false,
+                audio: None,
                 section: None,
                 section_dialog: None,
                 section_shown: None,
@@ -173,12 +194,34 @@ impl PrepolixApp {
             let picked = rfd::FileDialog::new()
                 .set_title("Modell öffnen")
                 .add_filter(
-                    "Projekt, CalculiX-Modell oder -Ergebnisse (*.plx, *.inp, *.frd)",
-                    &["plx", "PLX", "inp", "INP", "frd", "FRD"],
+                    "Projekt, CalculiX-Modell, -Ergebnisse oder Geometrie",
+                    &[
+                        "plx", "PLX", "inp", "INP", "frd", "FRD", "step", "STEP", "stp", "STP",
+                        "iges", "IGES", "igs", "IGS", "brep", "BREP",
+                    ],
                 )
                 .add_filter("prepolix-Projekt (*.plx)", &["plx", "PLX"])
                 .add_filter("Eingabedatei (*.inp)", &["inp", "INP"])
                 .add_filter("Ergebnisdatei (*.frd)", &["frd", "FRD"])
+                .add_filter(GEOMETRY_FILTER.0, GEOMETRY_FILTER.1)
+                .pick_file();
+            if let Some(path) = picked {
+                load_in_background(path, sender, ctx);
+            }
+        });
+    }
+
+    /// PrePoMax's Geometry > Import: a STEP, IGES or BREP file.
+    fn import_dialog(&mut self, ctx: &egui::Context) {
+        if self.loading.is_some() {
+            return;
+        }
+        let sender = self.load_events.0.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let picked = rfd::FileDialog::new()
+                .set_title("Geometrie importieren")
+                .add_filter(GEOMETRY_FILTER.0, GEOMETRY_FILTER.1)
                 .pick_file();
             if let Some(path) = picked {
                 load_in_background(path, sender, ctx);
@@ -249,10 +292,10 @@ impl PrepolixApp {
                 if ui.button("Vertikal").clicked() {
                     self.workbench.view_command = Some(ViewCommand::Vertical);
                 }
-                ui.menu_button("Achse senkrecht", |ui| {
+                ui.menu_button("Ansicht senkrecht zu", |ui| {
                     for axis in Axis::ALL {
                         if ui.button(axis.label()).clicked() {
-                            self.workbench.view_command = Some(ViewCommand::VerticalAxis(axis));
+                            self.workbench.view_command = Some(ViewCommand::AxisView(axis));
                         }
                     }
                 });
@@ -285,9 +328,13 @@ impl PrepolixApp {
                     self.workbench.section_dialog = None;
                 }
             });
-            for menu in ["Geometrie", "Netz"] {
-                ui.menu_button(menu, not_implemented);
-            }
+            ui.menu_button("Geometrie", |ui| {
+                let import = egui::Button::new("Importieren …");
+                if ui.add_enabled(self.loading.is_none(), import).clicked() {
+                    self.import_dialog(ui.ctx());
+                }
+            });
+            ui.menu_button("Netz", |ui| self.workbench.mesh_menu(ui));
             ui.menu_button("Modell", |ui| self.workbench.model_menu(ui));
             ui.menu_button("Analyse", |ui| self.workbench.analysis_menu(ui));
             ui.menu_button("Ergebnisse", |ui| self.workbench.results_menu(ui));
@@ -312,6 +359,10 @@ impl PrepolixApp {
             let can_open = self.loading.is_none();
             if icons::button(ui, Icon::Open, "Öffnen (Strg+O)", can_open, false).clicked() {
                 self.open_dialog(ui.ctx());
+            }
+            let import = "Geometrie importieren (STEP, IGES, BREP)";
+            if icons::button(ui, Icon::Import, import, can_open, false).clicked() {
+                self.import_dialog(ui.ctx());
             }
             let can_save = self.workbench.setup_model().is_some();
             if icons::button(ui, Icon::Save, "Speichern (Strg+S)", can_save, false).clicked() {
@@ -365,6 +416,17 @@ impl PrepolixApp {
                 ui.spinner();
                 ui.label(format!("Lade {} …", path.display()));
             }
+            (None, _) if self.workbench.meshing.is_some() => {
+                ui.spinner();
+                ui.label("Netz wird erzeugt …");
+            }
+            (None, Some(model)) if model.is_geometry() => {
+                ui.label(format!(
+                    "{}: {} Parts",
+                    model.file_name(),
+                    model.parts.len()
+                ));
+            }
             (None, Some(model)) => {
                 ui.label(format!(
                     "{}: {} Knoten, {} Elemente, {} Parts",
@@ -396,6 +458,26 @@ fn load_in_background(path: PathBuf, sender: Sender<LoadEvent>, ctx: egui::Conte
     let _ = sender.send(LoadEvent::Finished(path, result));
     ctx.request_repaint();
 }
+
+/// Whether a region of the FE model consists of picked nodes or element faces, which a new
+/// mesh does not keep.
+fn picks_mesh_entities(fe: &plx_model::FeModel) -> bool {
+    use plx_model::Region;
+    let picked = |region: &Region| matches!(region, Region::Nodes(_) | Region::Faces(_));
+    fe.sections.iter().any(|s| picked(&s.region))
+        || fe.steps.iter().any(|step| {
+            step.boundary_conditions.iter().any(|b| picked(&b.region))
+                || step.loads.iter().any(|l| picked(&l.region))
+        })
+}
+
+/// File dialog filter of the CAD formats Gmsh imports.
+const GEOMETRY_FILTER: (&str, &[&str]) = (
+    "Geometrie (*.step, *.stp, *.iges, *.igs, *.brep)",
+    &[
+        "step", "STEP", "stp", "STP", "iges", "IGES", "igs", "IGS", "brep", "BREP",
+    ],
+);
 
 const STANDARD_VIEWS: [(StandardView, &str); 7] = [
     (StandardView::Front, "Vorne"),
@@ -448,6 +530,7 @@ impl eframe::App for PrepolixApp {
             self.workbench.results_tool_bar(ui);
         });
         self.workbench.animate(&ctx);
+        self.workbench.play_sound(&ctx);
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         // PrePoMax's fixed layout: tree on the left over the full height, 3D view with the
         // output below it; only the separators move.
@@ -513,6 +596,8 @@ impl eframe::App for PrepolixApp {
         self.workbench.section_window(&ctx);
         self.workbench.keyword_editor_window(&ctx);
         self.workbench.material_library_window(&ctx);
+        self.workbench.mesh_setup_window(&ctx);
+        self.workbench.poll_meshing();
         self.workbench.field_output_window(&ctx);
         self.workbench.history_output_window(&ctx);
         self.workbench.history_table_window(&ctx);
@@ -522,6 +607,8 @@ impl eframe::App for PrepolixApp {
         }
         self.workbench.update_highlight();
         self.workbench.update_symbols(&ctx);
+        self.workbench.update_hot_spot_preview();
+        self.workbench.hot_spot_window(&ctx);
         self.workbench.settings_window(&ctx);
         self.workbench.rebuild_if_results_changed();
         self.workbench.update_section();
@@ -540,6 +627,7 @@ impl Workbench {
                 let LoadedModel {
                     mut model,
                     render_meshes,
+                    geometry_view,
                 } = *loaded;
                 // The scene built on the worker thread is reused unless the settings change it.
                 let mut rebuild = false;
@@ -552,14 +640,24 @@ impl Workbench {
                         rebuild = true;
                     }
                 }
-                self.output.push(format!(
-                    "{} geladen: {} Knoten, {} Elemente, {} Parts ({} ms)",
-                    path.display(),
-                    model.mesh.node_count(),
-                    model.mesh.element_count(),
-                    model.parts.len(),
-                    model.load_time.as_millis()
-                ));
+                match &geometry_view {
+                    Some(view) if model.mesh.element_count() == 0 => {
+                        self.output.push(format!(
+                            "{} importiert: {} Parts ({} ms)",
+                            path.display(),
+                            view.parts.len(),
+                            model.load_time.as_millis()
+                        ));
+                    }
+                    _ => self.output.push(format!(
+                        "{} geladen: {} Knoten, {} Elemente, {} Parts ({} ms)",
+                        path.display(),
+                        model.mesh.node_count(),
+                        model.mesh.element_count(),
+                        model.parts.len(),
+                        model.load_time.as_millis()
+                    )),
+                }
                 if model.included_files > 0 {
                     self.output.push(format!(
                         "{} eingebundene Datei(en) gelesen",
@@ -606,13 +704,24 @@ impl Workbench {
                             self.current_result = self.results.len() - 1;
                         }
                     }
+                    // Results of the FE model get its hot spots evaluated right away.
+                    self.evaluate_hot_spots(true);
                 } else {
                     self.tree.selected = None;
                     self.editor = None;
                     self.highlighted = None;
-                    self.set_tree_view(TreeView::FeModel);
+                    self.mesh_setup = None;
+                    self.meshing = None;
+                    // A model without a mesh yet opens on the Geometry tab.
+                    let view = if geometry_view.is_some() && model.mesh.element_count() == 0 {
+                        TreeView::Geometry
+                    } else {
+                        TreeView::FeModel
+                    };
+                    self.set_tree_view(view);
                     self.model = Some(model);
                     self.symbols_shown = None;
+                    self.geometry = geometry_view;
                 }
                 self.frame_cache.clear();
                 self.viewport.set_parts(&render_meshes);
@@ -683,7 +792,7 @@ impl Workbench {
 
     fn model_tree(&mut self, ui: &mut egui::Ui, view: TreeView) {
         let empty = match view {
-            TreeView::Geometry => None,
+            TreeView::Geometry => self.geometry.is_none().then_some("Keine Geometrie geladen"),
             TreeView::FeModel => self.model.is_none().then_some("Kein Modell geladen"),
             TreeView::Results => self
                 .results
@@ -691,20 +800,26 @@ impl Workbench {
                 .then_some("Keine Ergebnisse geladen"),
         };
         if let Some(text) = empty {
-            ui.weak(format!("{text}.\nDatei > Öffnen (Strg+O) oder eine .plx-, .inp- oder .frd-Datei ins Fenster ziehen."));
+            let hint = if view == TreeView::Geometry {
+                "Geometrie > Importieren oder eine STEP-, IGES- oder BREP-Datei ins Fenster ziehen."
+            } else {
+                "Datei > Öffnen (Strg+O) oder eine .plx-, .inp- oder .frd-Datei ins Fenster ziehen."
+            };
+            ui.weak(format!("{text}.\n{hint}"));
             ui.separator();
         }
         let shown = match view {
             TreeView::Results => self.results.get_mut(self.current_result),
-            _ => self.model.as_mut(),
+            TreeView::Geometry => self.geometry.as_mut(),
+            TreeView::FeModel => self.model.as_mut(),
         };
         let job = self.analysis.as_ref().map(Analysis::status);
         let response = tree::show(ui, view, shown, job, &mut self.tree);
-        self.tree_response(view, response);
+        self.tree_response(ui.ctx(), view, response);
     }
 
     /// Acts on what the user picked in the tree or in a part's context menu in the 3D view.
-    fn tree_response(&mut self, view: TreeView, response: TreeResponse) {
+    fn tree_response(&mut self, ctx: &egui::Context, view: TreeView, response: TreeResponse) {
         for (index, visible) in response.visibility {
             if let Some(part) = self.shown_mut().and_then(|m| m.parts.get_mut(index)) {
                 part.visible = visible;
@@ -758,6 +873,121 @@ impl Workbench {
         if response.material_library {
             self.open_material_library();
         }
+        if response.mesh_setup {
+            self.open_mesh_setup();
+        }
+        if response.generate_mesh {
+            self.generate_mesh(ctx);
+        }
+        if response.evaluate_hot_spots {
+            self.evaluate_hot_spots(false);
+        }
+    }
+
+    /// Evaluates the hot spots of the FE model on the current results file, writes the values
+    /// next to it and opens the table. `automatic` skips the messages when there is nothing
+    /// to evaluate.
+    fn evaluate_hot_spots(&mut self, automatic: bool) {
+        let fe = self.model.as_ref().filter(|m| !m.fe.hot_spots.is_empty());
+        let results = self.results.get_mut(self.current_result);
+        let (Some(fe), Some(results)) = (fe, results) else {
+            if !automatic {
+                self.output.push(
+                    "Hot Spots: erst Hot Spots im FE-Modell definieren und Ergebnisse öffnen."
+                        .into(),
+                );
+            }
+            return;
+        };
+        match crate::hot_spots::evaluate(fe, results) {
+            Ok(reports) => {
+                let file = match crate::hot_spots::write(&results.path, &reports) {
+                    Ok(file) => {
+                        self.output
+                            .push(format!("Hot Spots ausgewertet: {}", file.display()));
+                        Some(file)
+                    }
+                    Err(error) => {
+                        self.output.push(error);
+                        None
+                    }
+                };
+                self.output.extend(crate::hot_spots::summary(&reports));
+                for report in &reports {
+                    self.output
+                        .extend(report.warnings.iter().map(|w| format!("Warnung: {w}")));
+                }
+                results.hot_spots = Some(crate::hot_spots::Evaluation { reports, file });
+                self.hot_spot_window = true;
+                self.set_tree_view(TreeView::Results);
+                self.update_contour();
+            }
+            Err(error) => {
+                if !automatic || !fe.fe.hot_spots.is_empty() {
+                    self.output
+                        .push(format!("Hot Spots nicht ausgewertet: {error}"));
+                }
+            }
+        }
+    }
+
+    /// The table of hot spot values of the shown results file.
+    fn hot_spot_window(&mut self, ctx: &egui::Context) {
+        if !self.hot_spot_window || self.tree_view != TreeView::Results {
+            return;
+        }
+        let Some(model) = self.results.get(self.current_result) else {
+            return;
+        };
+        let Some(evaluation) = &model.hot_spots else {
+            return;
+        };
+        let step = (model.results.as_ref())
+            .and_then(ResultsView::current_increment)
+            .map(|i| (i.step, i.increment));
+        if !crate::hot_spots::window(ctx, evaluation, step) {
+            self.hot_spot_window = false;
+            self.update_contour();
+        }
+    }
+
+    /// Shows the paths of the hot spot being edited or selected in the FE model.
+    fn update_hot_spot_preview(&mut self) {
+        let wanted = match (&self.editor, &self.tree.selected) {
+            _ if self.tree_view == TreeView::Results => None,
+            (Some(editor), _) => editor.hot_spot(),
+            (None, Some((TreeView::FeModel, TreeItem::HotSpot(i)))) => self
+                .model
+                .as_ref()
+                .and_then(|m| m.fe.hot_spots.get(*i).cloned()),
+            _ => None,
+        };
+        if wanted.as_ref() == self.hot_spot_preview.as_ref().map(|(h, _)| h) {
+            return;
+        }
+        let paths = match (&wanted, &self.model) {
+            (Some(hot_spot), Some(model)) => crate::hot_spots::preview(model, hot_spot),
+            _ => Vec::new(),
+        };
+        self.hot_spot_preview = wanted.map(|h| (h, paths));
+        self.viewport.overlay.paths = self.overlay_paths();
+    }
+
+    /// Hot spot paths drawn over the 3D view: of the evaluated results while their table is
+    /// open, otherwise of the hot spot edited or selected in the FE model.
+    fn overlay_paths(&self) -> Vec<Vec<glam::Vec3>> {
+        if self.tree_view == TreeView::Results {
+            let model = self.results.get(self.current_result);
+            return match model.and_then(|m| Some((m, m.hot_spots.as_ref()?))) {
+                Some((model, evaluation)) if self.hot_spot_window => {
+                    crate::hot_spots::result_paths(model, evaluation)
+                }
+                _ => Vec::new(),
+            };
+        }
+        self.hot_spot_preview
+            .as_ref()
+            .map_or_else(Vec::new, |(_, paths)| paths.clone())
     }
 
     /// The FE model, which can be set up.
@@ -773,14 +1003,16 @@ impl Workbench {
     fn shown(&self) -> Option<&Model> {
         match self.tree_view {
             TreeView::Results => self.results.get(self.current_result),
-            _ => self.model.as_ref(),
+            TreeView::Geometry => self.geometry.as_ref(),
+            TreeView::FeModel => self.model.as_ref(),
         }
     }
 
     fn shown_mut(&mut self) -> Option<&mut Model> {
         match self.tree_view {
             TreeView::Results => self.results.get_mut(self.current_result),
-            _ => self.model.as_mut(),
+            TreeView::Geometry => self.geometry.as_mut(),
+            TreeView::FeModel => self.model.as_mut(),
         }
     }
 
@@ -796,7 +1028,8 @@ impl Workbench {
                 .history_dialog
                 .as_ref()
                 .is_some_and(HistoryOutputDialog::picks),
-            _ => self.editor.as_ref().is_some_and(Editor::picks),
+            TreeView::FeModel => self.editor.as_ref().is_some_and(Editor::picks),
+            TreeView::Geometry => false,
         }
     }
 
@@ -818,7 +1051,9 @@ impl Workbench {
         }
         let was_results = self.tree_view == TreeView::Results;
         if was_results == (view == TreeView::Results) {
+            // Geometry and FE model share the camera; the scene changes.
             self.tree_view = view;
+            self.results_changed = true;
             return;
         }
         // A fit still pending, e.g. right after loading, belongs to the workspace left.
@@ -887,6 +1122,27 @@ impl Workbench {
     /// PrePoMax's Results menu.
     fn results_menu(&mut self, ui: &mut egui::Ui) {
         let any = !self.results.is_empty();
+        let hot_spots = self
+            .model
+            .as_ref()
+            .is_some_and(|m| !m.fe.hot_spots.is_empty());
+        if ui
+            .add_enabled(any && hot_spots, egui::Button::new("Hot Spots auswerten"))
+            .clicked()
+        {
+            self.evaluate_hot_spots(false);
+        }
+        let evaluated =
+            (self.results.get(self.current_result)).is_some_and(|m| m.hot_spots.is_some());
+        if ui
+            .add_enabled(evaluated, egui::Button::new("Hot-Spot-Tabelle"))
+            .clicked()
+        {
+            self.hot_spot_window = true;
+            self.set_tree_view(TreeView::Results);
+            self.update_contour();
+        }
+        ui.separator();
         if ui
             .add_enabled(any, egui::Button::new("Aktuelle Ergebnisse schließen"))
             .clicked()
@@ -963,6 +1219,108 @@ impl Workbench {
         }
     }
 
+    /// PrePoMax's Mesh menu: meshing parameters and mesh generation for the geometry.
+    fn mesh_menu(&mut self, ui: &mut egui::Ui) {
+        let has_geometry = self.model.as_ref().is_some_and(|m| m.geometry.is_some());
+        if !has_geometry {
+            ui.label("Zuerst eine Geometrie importieren");
+            return;
+        }
+        if ui.button("Netzparameter …").clicked() {
+            self.open_mesh_setup();
+        }
+        let mesh = egui::Button::new("Netz erzeugen");
+        if ui.add_enabled(self.meshing.is_none(), mesh).clicked() {
+            self.generate_mesh(ui.ctx());
+        }
+    }
+
+    fn open_mesh_setup(&mut self) {
+        if let Some(geometry) = self.model.as_ref().and_then(|m| m.geometry.as_ref()) {
+            self.mesh_setup = Some(MeshSetupWindow::new(&geometry.mesh_setup));
+        }
+    }
+
+    fn mesh_setup_window(&mut self, ctx: &egui::Context) {
+        let Some(window) = &mut self.mesh_setup else {
+            return;
+        };
+        let (setup, mesh) = match window.show(ctx) {
+            MeshSetupResult::Open => return,
+            MeshSetupResult::Cancel => (None, false),
+            MeshSetupResult::Ok(setup) => (Some(setup), false),
+            MeshSetupResult::Mesh(setup) => (Some(setup), true),
+        };
+        self.mesh_setup = None;
+        if let (Some(setup), Some(geometry)) =
+            (setup, self.model.as_mut().and_then(|m| m.geometry.as_mut()))
+        {
+            geometry.mesh_setup = setup;
+        }
+        if mesh {
+            self.generate_mesh(ctx);
+        }
+    }
+
+    /// Meshes the geometry on a worker thread; [`Self::poll_meshing`] takes the result.
+    fn generate_mesh(&mut self, ctx: &egui::Context) {
+        if self.meshing.is_some() {
+            return;
+        }
+        let Some(geometry) = self.model.as_ref().and_then(|m| m.geometry.clone()) else {
+            return;
+        };
+        let setup = &geometry.mesh_setup;
+        self.output.push(format!(
+            "Vernetze {} (Elementgröße {} bis {}, {}. Ordnung) …",
+            geometry.source,
+            setup.min_size,
+            setup.max_size,
+            if setup.second_order { 2 } else { 1 }
+        ));
+        self.meshing = Some(MeshingJob::start(geometry, ctx));
+    }
+
+    fn poll_meshing(&mut self) {
+        let Some(result) = self.meshing.as_ref().and_then(MeshingJob::poll) else {
+            return;
+        };
+        let started = self.meshing.take().map(|job| job.started);
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        match result {
+            Ok(generated) => {
+                for warning in &generated.warnings {
+                    self.output.push(format!("Gmsh: {warning}"));
+                }
+                let had_mesh = model.mesh.element_count() > 0;
+                model.set_mesh(generated.mesh);
+                if had_mesh && picks_mesh_entities(&model.fe) {
+                    self.output.push(
+                        "Hinweis: Ausgewählte Knoten und Elementflächen beziehen sich noch auf \
+                         das alte Netz und müssen neu ausgewählt werden"
+                            .into(),
+                    );
+                }
+                self.output.push(format!(
+                    "Netz erzeugt: {} Knoten, {} Elemente, {} Parts ({} ms)",
+                    model.mesh.node_count(),
+                    model.mesh.element_count(),
+                    model.parts.len(),
+                    started.map_or(0, |s| s.elapsed().as_millis())
+                ));
+                self.highlighted = None;
+                self.set_tree_view(TreeView::FeModel);
+                self.results_changed = true;
+                self.view_command = Some(ViewCommand::Fit);
+            }
+            Err(error) => self
+                .output
+                .push(format!("Vernetzung fehlgeschlagen: {error}")),
+        }
+    }
+
     /// PrePoMax's Model menu: create items of the FE model.
     fn model_menu(&mut self, ui: &mut egui::Ui) {
         if self.setup_model().is_none() {
@@ -992,6 +1350,7 @@ impl Workbench {
                 "Last erstellen …",
                 last_step.is_some(),
             ),
+            (NewItem::HotSpot, "Hot Spot erstellen …", true),
         ] {
             if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
                 kind = Some(item);
@@ -1109,6 +1468,11 @@ impl Workbench {
         let Some(model) = self.setup_model() else {
             return;
         };
+        if model.mesh.element_count() == 0 {
+            self.output
+                .push("Das Modell hat noch kein Netz: Netz > Netz erzeugen".into());
+            return;
+        }
         match Analysis::start(&self.settings.solver, model, default_solver) {
             Ok(analysis) => {
                 self.output.push(format!(
@@ -1168,7 +1532,8 @@ impl Workbench {
             }
             path
         };
-        match plx_io::project::save_project(&path, &model.mesh, &model.fe) {
+        let geometry = model.geometry.as_ref();
+        match plx_io::project::save_project(&path, geometry, &model.mesh, &model.fe) {
             Ok(()) => {
                 self.output.push(format!("{} gespeichert", path.display()));
                 model.path = path;
@@ -1218,7 +1583,8 @@ impl Workbench {
         {
             let model = match self.tree_view {
                 TreeView::Results => self.results.get(self.current_result),
-                _ => self.model.as_ref(),
+                TreeView::Geometry => self.geometry.as_ref(),
+                TreeView::FeModel => self.model.as_ref(),
             };
             if let Some(model) = model {
                 let hit = model.pick(click.origin, click.direction);
@@ -1309,7 +1675,7 @@ impl Workbench {
             self.view_command = command;
         }
         let view = self.tree_view;
-        self.tree_response(view, tree_response);
+        self.tree_response(&response.ctx, view, tree_response);
     }
 
     fn box_select(&mut self, area: &BoxSelect) {
@@ -1738,12 +2104,14 @@ impl Workbench {
             return;
         }
         // Only the model in view is cut; picking in the others sees everything.
-        for model in self.model.iter_mut().chain(&mut self.results) {
+        let models = self.model.iter_mut().chain(&mut self.geometry);
+        for model in models.chain(&mut self.results) {
             model.clip = None;
         }
         let shown = match self.tree_view {
             TreeView::Results => self.results.get_mut(self.current_result),
-            _ => self.model.as_mut(),
+            TreeView::Geometry => self.geometry.as_mut(),
+            TreeView::FeModel => self.model.as_mut(),
         };
         match (shown, &wanted) {
             (Some(model), Some((_, section))) => {
@@ -1777,6 +2145,10 @@ impl Workbench {
                 return;
             }
         };
+        if new.gmsh != self.settings.gmsh && !plx_mesher::set_library_path(new.gmsh.library()) {
+            self.output
+                .push("Die geänderte Gmsh-Bibliothek wird nach einem Neustart geladen".into());
+        }
         if new != self.settings {
             self.settings = new;
             self.update_contour();
@@ -1798,7 +2170,8 @@ impl Workbench {
         // The model by its fields, so the window can edit the typed name alongside.
         let shown = match self.tree_view {
             TreeView::Results => self.results.get(self.current_result),
-            _ => self.model.as_ref(),
+            TreeView::Geometry => self.geometry.as_ref(),
+            TreeView::FeModel => self.model.as_ref(),
         };
         egui::Window::new(properties::title(shown, &item))
             .id(egui::Id::new("properties window"))
@@ -1848,6 +2221,9 @@ impl Workbench {
             self.output
                 .push(format!("{} geschlossen", model.file_name()));
         }
+        self.geometry = None;
+        self.mesh_setup = None;
+        self.meshing = None;
         self.close_results(true);
         self.tree.selected = None;
         self.dialog = None;
@@ -1863,7 +2239,8 @@ impl Workbench {
     fn animate(&mut self, ctx: &egui::Context) {
         let model = match self.tree_view {
             TreeView::Results => self.results.get_mut(self.current_result),
-            _ => self.model.as_mut(),
+            TreeView::Geometry => self.geometry.as_mut(),
+            TreeView::FeModel => self.model.as_mut(),
         };
         let Some(view) = model.and_then(|m| m.results.as_mut()) else {
             return;
@@ -1893,6 +2270,116 @@ impl Workbench {
         }
     }
 
+    /// Shows the sound window of the shown results and drives its audio output.
+    fn play_sound(&mut self, ctx: &egui::Context) {
+        let model = match self.tree_view {
+            TreeView::Results => self.results.get_mut(self.current_result),
+            _ => self.model.as_mut(),
+        };
+        let Some(view) = model.and_then(|m| m.results.as_mut()) else {
+            self.audio = None;
+            return;
+        };
+        let shown = view.increment;
+        let Some(sound) = &mut view.sound else {
+            // Closing the window releases the audio device.
+            self.audio = None;
+            if view.superposition.take().is_some() {
+                self.results_changed = true;
+            }
+            return;
+        };
+        let playing = self.audio.as_ref().is_some_and(|a| a.synth().sounding());
+        let actions = sound::window(ctx, sound, shown, playing);
+        if actions.play {
+            if self.audio.is_none() {
+                match sound::Player::open() {
+                    Ok(player) => self.audio = Some(player),
+                    Err(error) => sound.message = Some(error),
+                }
+            }
+            if let Some(audio) = &self.audio {
+                audio.synth().start(sound.tones());
+                sound.message = None;
+            }
+        }
+        if let Some(audio) = &self.audio {
+            if actions.stop {
+                audio.synth().stop();
+            } else if actions.changed && playing {
+                audio.synth().update(sound.tones());
+            }
+        }
+        if actions.export {
+            let picked = rfd::FileDialog::new()
+                .set_title("Klang speichern")
+                .add_filter("WAV-Datei (*.wav)", &["wav"])
+                .set_file_name(format!("Moden-Step-{}.wav", sound.step))
+                .save_file();
+            if let Some(mut path) = picked {
+                if path.extension().is_none() {
+                    path.set_extension("wav");
+                }
+                let data = sound::wav(sound.tones(), sound.export_seconds());
+                match std::fs::write(&path, data) {
+                    Ok(()) => self.output.push(format!("{} gespeichert", path.display())),
+                    Err(error) => sound.message = Some(format!("Nicht gespeichert: {error}")),
+                }
+            }
+        }
+        if playing || actions.play {
+            // The play button turns back when a struck sound has died away.
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        let now = ctx.input(|i| i.time);
+        if actions.play {
+            sound.started = Some(now);
+        }
+        if actions.play || actions.changed {
+            sound.mix = None;
+        }
+        let audible = self.audio.as_ref().is_some_and(|a| a.synth().sounding());
+        let overlay = sound.show_shape && audible && !actions.close;
+        // The overlay takes the place of an animation.
+        if overlay && view.animation.is_some() {
+            view.stop_animation();
+        }
+        if overlay
+            && let Some((field, component)) =
+                (view.current()).map(|(f, c)| (f.name.clone(), c.name.clone()))
+            && let Some(sound) = &mut view.sound
+        {
+            if sound
+                .mix
+                .as_ref()
+                .is_some_and(|m| !m.shows(&field, &component))
+            {
+                sound.mix = None;
+            }
+            if sound.mix.is_none() {
+                let mix = sound::ShapeMix::new(sound, &view.increments, &field, &component);
+                sound.mix = mix;
+            }
+            let time = now - sound.started.unwrap_or(now);
+            view.superposition = sound.mix.as_ref().map(|m| m.frame(time));
+            self.results_changed = true;
+            ctx.request_repaint();
+        } else if view.superposition.take().is_some() {
+            self.results_changed = true;
+        }
+        if let Some(increment) = actions.show
+            && view.animation.is_none()
+            && increment != view.increment
+        {
+            view.select_increment(increment);
+            self.results_changed = true;
+        }
+        if actions.close {
+            view.sound = None;
+            self.audio = None;
+        }
+    }
+
     /// Rebuilds the scene after the result selection or deformation changed.
     fn rebuild_if_results_changed(&mut self) {
         let frame_only = !self.results_changed && self.frame_changed;
@@ -1901,7 +2388,8 @@ impl Workbench {
         }
         let model = match self.tree_view {
             TreeView::Results => self.results.get_mut(self.current_result),
-            _ => self.model.as_mut(),
+            TreeView::Geometry => self.geometry.as_mut(),
+            TreeView::FeModel => self.model.as_mut(),
         };
         let Some(model) = model else {
             self.frame_cache.clear();
@@ -1940,7 +2428,8 @@ impl Workbench {
     fn update_contour(&mut self) {
         let model = match self.tree_view {
             TreeView::Results => self.results.get(self.current_result),
-            _ => self.model.as_ref(),
+            TreeView::Geometry => self.geometry.as_ref(),
+            TreeView::FeModel => self.model.as_ref(),
         };
         let Some(model) = model else {
             self.viewport.options.contour_levels = None;
@@ -1982,6 +2471,7 @@ impl Workbench {
             nodes: (model.highlight.nodes.iter())
                 .filter_map(|&id| model.node_position(model.mesh.node_index(id)?))
                 .collect(),
+            paths: self.overlay_paths(),
         };
     }
 }
@@ -2068,6 +2558,18 @@ fn results_tool_bar(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
                 view.start_animation(AnimationKind::ScaleFactor);
             }
             changed = true;
+        }
+        // Only modes of a frequency step have a sound; otherwise the button is greyed out.
+        let sounding = view.sound.is_some();
+        let is_mode = view
+            .current_increment()
+            .is_some_and(|i| i.kind == plx_results::AnalysisKind::Frequency);
+        let tip = "Klang der Eigenformen";
+        if icons::button(ui, Icon::Sound, tip, sounding || is_mode, sounding).clicked() {
+            view.sound = match view.sound {
+                Some(_) => None,
+                None => ModeSound::new(&view.increments, view.increment),
+            };
         }
     });
     changed

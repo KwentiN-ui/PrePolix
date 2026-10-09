@@ -1,14 +1,17 @@
 [package]
 name = "plx-mesher"
-description = "Anbindung externer Vernetzer (Gmsh)"
+description = "Geometrie-Import und Vernetzung mit Gmsh (inklusive OpenCASCADE)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-plx-core.workspace = true
+libloading = "0.9"
+log.workspace = true
 plx-mesh.workspace = true
+plx-model.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

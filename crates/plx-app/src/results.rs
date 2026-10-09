@@ -1,6 +1,7 @@
 use plx_render::contour::DEFAULT_LEVELS;
 
 use crate::animation::{Animation, AnimationKind, ColorLimits};
+use crate::sound::ModeSound;
 use plx_mesh::FeMesh;
 use plx_results::field_output::{self, FieldOutput};
 use plx_results::history_output::{self, HistoryOutput, HistorySet};
@@ -55,6 +56,10 @@ pub struct ResultsView {
     pub time: Option<String>,
     /// Running animation, if the animation window is open.
     pub animation: Option<Animation>,
+    /// Settings of the sound window, if it is open.
+    pub sound: Option<ModeSound>,
+    /// Mode shapes overlaid while their sound plays; shown instead of the current increment.
+    pub superposition: Option<Superposition>,
     /// Field outputs the user derived from the results, in the order they are computed.
     pub field_outputs: Vec<FieldOutput>,
     /// History outputs the user derived, in the order they are computed.
@@ -64,6 +69,20 @@ pub struct ResultsView {
     /// Characteristic model size for the automatic scale (PrePoMax: cube root of the bounding
     /// box volume, square root of the area for flat models).
     model_size: f64,
+}
+
+/// Several mode shapes overlaid at one moment, each scaled by its level and swinging at its
+/// own (slowed down) frequency.
+pub struct Superposition {
+    pub displacements: Vec<[f32; 3]>,
+    /// Shown component, superposed; `None` when it could not be built.
+    pub values: Option<Vec<f32>>,
+    /// Legend range, the same for all moments so the colours stay comparable.
+    pub range: Option<(f32, f32)>,
+    /// Largest displacement for the automatic deformation scale, the same for all moments.
+    pub peak: f32,
+    /// Numbers of the overlaid modes.
+    pub modes: Vec<u32>,
 }
 
 /// What the viewport legend shows.
@@ -88,6 +107,8 @@ impl ResultsView {
             date: None,
             time: None,
             animation: None,
+            sound: None,
+            superposition: None,
             field_outputs: Vec::new(),
             history_outputs: Vec::new(),
             history: Vec::new(),
@@ -287,7 +308,14 @@ impl ResultsView {
             self.date.as_deref().unwrap_or("-"),
             self.time.as_deref().unwrap_or("-")
         )];
-        if let Some(inc) = self.current_increment() {
+        if let (Some(inc), Some(superposition)) = (self.current_increment(), &self.superposition) {
+            let modes: Vec<String> = superposition.modes.iter().map(u32::to_string).collect();
+            lines.push(format!(
+                "Step: #{}   Superposition of modes: {}",
+                inc.step,
+                modes.join(", ")
+            ));
+        } else if let Some(inc) = self.current_increment() {
             let value = format_value(inc.value as f32);
             lines.push(match inc.kind {
                 AnalysisKind::Frequency => format!(
@@ -330,6 +358,9 @@ impl ResultsView {
                     .filter(|a| a.kind == AnimationKind::Increments)
                     .map(|a| a.increments.as_slice());
                 let max = match animated.filter(|i| !i.is_empty()) {
+                    _ if self.superposition.is_some() => {
+                        self.superposition.as_ref().map(|s| s.peak)
+                    }
                     Some(indices) => indices
                         .iter()
                         .filter_map(|&i| self.increments.get(i).and_then(max_deformation))
@@ -380,6 +411,41 @@ impl ResultsView {
         self.show_animation_frame();
     }
 
+    /// Displacements as shown: those of the overlaid modes, or of the current increment.
+    pub fn shown_displacements(&self) -> Option<std::borrow::Cow<'_, [[f32; 3]]>> {
+        match &self.superposition {
+            Some(superposition) => Some(std::borrow::Cow::Borrowed(&superposition.displacements)),
+            None => self
+                .current_increment()?
+                .displacements()
+                .map(std::borrow::Cow::Owned),
+        }
+    }
+
+    /// Displacement of one node as shown.
+    pub fn shown_displacement(&self, node: usize) -> Option<[f32; 3]> {
+        if let Some(superposition) = &self.superposition {
+            return superposition.displacements.get(node).copied();
+        }
+        let field = self.current_increment()?.field("DISP")?;
+        Some(["U1", "U2", "U3"].map(|n| field.component(n).map_or(0.0, |c| c.values[node])))
+    }
+
+    /// Values of the shown component as drawn: overlaid, or scaled by the animation frame.
+    pub fn shown_values(&self) -> Option<std::borrow::Cow<'_, [f32]>> {
+        let (_, component) = self.current()?;
+        if let Some(superposition) = &self.superposition {
+            return superposition
+                .values
+                .as_deref()
+                .map(std::borrow::Cow::Borrowed);
+        }
+        let amplitude = self.value_amplitude();
+        Some(std::borrow::Cow::Owned(
+            component.values.iter().map(|v| v * amplitude).collect(),
+        ))
+    }
+
     /// Ends the animation and shows the increment from before it again.
     pub fn stop_animation(&mut self) {
         if let Some(animation) = self.animation.take() {
@@ -399,6 +465,9 @@ impl ResultsView {
     /// Value range of the legend: that of the shown values, or over all animation frames.
     fn value_range(&self) -> Option<(f32, f32)> {
         let (field, component) = self.current()?;
+        if let Some(superposition) = &self.superposition {
+            return superposition.range;
+        }
         let (min, max) = component.range()?;
         let Some(animation) = &self.animation else {
             return Some((min, max));
@@ -440,12 +509,9 @@ impl ResultsView {
     }
 
     fn extreme(&self, better: impl Fn(f32, f32) -> bool) -> Option<(usize, f32)> {
-        let (_, component) = self.current()?;
-        let amplitude = self.value_amplitude();
-        component
-            .values
+        self.shown_values()?
             .iter()
-            .map(|v| v * amplitude)
+            .copied()
             .enumerate()
             .filter(|(_, v)| v.is_finite())
             .reduce(|a, b| if better(a.1, b.1) { b } else { a })

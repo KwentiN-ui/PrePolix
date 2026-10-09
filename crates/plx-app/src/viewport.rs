@@ -130,10 +130,10 @@ pub fn view_menu(ui: &mut Ui) -> Option<ViewCommand> {
     if ui.button("Vertikal").clicked() {
         command = Some(ViewCommand::Vertical);
     }
-    ui.menu_button("Achse senkrecht", |ui| {
+    ui.menu_button("Ansicht senkrecht zu", |ui| {
         for axis in Axis::ALL {
             if ui.button(axis.label()).clicked() {
-                command = Some(ViewCommand::VerticalAxis(axis));
+                command = Some(ViewCommand::AxisView(axis));
             }
         }
     });
@@ -154,8 +154,8 @@ pub enum ViewCommand {
     View(StandardView),
     /// Turns the closest global axis straight up.
     Vertical,
-    /// Turns the given global axis straight up, looking square onto a global plane.
-    VerticalAxis(Axis),
+    /// Looks down the given global axis onto the plane it is normal to.
+    AxisView(Axis),
     /// Isometric view with the given global axis up.
     IsometricAxis(Axis),
 }
@@ -263,7 +263,7 @@ impl Viewport {
             }
             ViewCommand::View(view) => self.camera.set_view(view),
             ViewCommand::Vertical => self.camera.set_vertical_view(),
-            ViewCommand::VerticalAxis(axis) => self.camera.set_vertical_axis(axis.vector()),
+            ViewCommand::AxisView(axis) => self.camera.set_axis_view(axis.vector()),
             ViewCommand::IsometricAxis(axis) => self.camera.set_isometric_axis(axis.vector()),
         }
     }
@@ -385,16 +385,32 @@ impl Viewport {
             Color32::WHITE,
         );
         crate::symbols::draw(&painter, rect, &self.camera, &self.symbols);
-        overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels);
+        if let Some(axis) = overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels) {
+            self.camera.set_axis_view(axis);
+            ui.ctx().request_repaint();
+        }
         if let Some(gizmo) = &self.gizmo {
             self.gizmo_state.draw(&painter, gizmo, &self.camera, rect);
         }
         if self.selecting {
             let to_screen = |p: Vec3| overlay::project(&self.camera, rect, p);
-            let stroke = egui::Stroke::new(2.0, PREVIEW_COLOR);
+            // One mesh of plain quads: large patches have tens of thousands of edges, which
+            // egui's anti-aliased line segments would make slow to draw every frame.
+            let mut lines = egui::Mesh::default();
             for [a, b] in &self.preview.lines {
-                painter.line_segment([to_screen(*a), to_screen(*b)], stroke);
+                let (a, b) = (to_screen(*a), to_screen(*b));
+                if a == b {
+                    continue;
+                }
+                let side = (b - a).normalized().rot90();
+                let index = lines.vertices.len() as u32;
+                for corner in [a + side, b + side, b - side, a - side] {
+                    lines.colored_vertex(corner, PREVIEW_COLOR);
+                }
+                lines.add_triangle(index, index + 1, index + 2);
+                lines.add_triangle(index, index + 2, index + 3);
             }
+            painter.add(lines);
             for &point in &self.preview.points {
                 painter.rect_filled(
                     Rect::from_center_size(to_screen(point), egui::vec2(7.0, 7.0)),
@@ -454,9 +470,11 @@ impl Viewport {
 
     /// Reports the pointer once it has rested over the scene, and when it leaves.
     fn hover(&mut self, ui: &Ui, rect: Rect, response: &egui::Response) -> Option<Option<Click>> {
+        // No preview while a button is held, e.g. while the camera turns.
+        let pressed = ui.input(|i| i.pointer.any_down());
         let pointer = response
             .hover_pos()
-            .filter(|_| self.selecting && self.box_start.is_none());
+            .filter(|_| self.selecting && self.box_start.is_none() && !pressed);
         let Some(pointer) = pointer else {
             self.resting = None;
             return self.hovered.take().map(|_| None);

@@ -19,6 +19,7 @@ plx-job = { path = "crates/plx-job" }
 plx-render = { path = "crates/plx-render" }
 
 bytemuck = { version = "1.25", features = ["derive"] }
+cpal = "0.18"
 eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wgpu", "wayland", "x11"] }
 egui = "0.36"
 egui-wgpu = "0.36"

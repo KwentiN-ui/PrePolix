@@ -16,6 +16,8 @@ const ACCENT: Color32 = Color32::from_rgb(70, 140, 215);
 pub enum Icon {
     New,
     Open,
+    /// Import of geometry: an arrow pointing into a sheet.
+    Import,
     Save,
     Fit,
     /// Standard view; the cube face looked at is highlighted.
@@ -36,6 +38,8 @@ pub enum Icon {
     Arrow(Vec2),
     /// Camera: screenshot of the 3D view.
     Screenshot,
+    /// Loudspeaker with sound waves: the sound of eigenmodes.
+    Sound,
     /// Half a cube with its cut face, for the section view.
     SectionView,
 }
@@ -168,6 +172,33 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
                 &[p(10.0, 1.5), p(10.0, 5.0), p(13.5, 5.0)],
                 1.0,
                 OUTLINE,
+            );
+        }
+        Icon::Import => {
+            polygon(
+                shapes,
+                vec![
+                    p(5.5, 1.5),
+                    p(11.0, 1.5),
+                    p(14.5, 5.0),
+                    p(14.5, 14.5),
+                    p(5.5, 14.5),
+                ],
+                Color32::WHITE,
+                OUTLINE,
+            );
+            line(
+                shapes,
+                &[p(11.0, 1.5), p(11.0, 5.0), p(14.5, 5.0)],
+                1.0,
+                OUTLINE,
+            );
+            line(shapes, &[p(1.0, 9.0), p(7.0, 9.0)], 2.0, ACCENT);
+            polygon(
+                shapes,
+                vec![p(11.0, 9.0), p(6.5, 5.5), p(6.5, 12.5)],
+                ACCENT,
+                ACCENT,
             );
         }
         Icon::Open => {
@@ -310,6 +341,32 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
             shapes.push(Shape::circle_filled(p(8.5, 9.0), 3.8, Color32::WHITE));
             shapes.push(Shape::circle_filled(p(8.5, 9.0), 2.6, ACCENT));
             shapes.push(Shape::circle_filled(p(7.6, 8.1), 0.8, Color32::WHITE));
+        }
+        Icon::Sound => {
+            let body = Color32::from_rgb(70, 70, 75);
+            polygon(
+                shapes,
+                vec![
+                    p(1.5, 6.0),
+                    p(4.5, 6.0),
+                    p(8.5, 2.5),
+                    p(8.5, 13.5),
+                    p(4.5, 10.0),
+                    p(1.5, 10.0),
+                ],
+                body,
+                body,
+            );
+            let c = p(8.5, 8.0);
+            for radius in [3.0f32, 5.5] {
+                let arc: Vec<Pos2> = (-4..=4)
+                    .map(|i| {
+                        let angle = i as f32 * 0.22;
+                        c + vec2(angle.cos(), angle.sin()) * radius
+                    })
+                    .collect();
+                line(shapes, &arc, 1.3, ACCENT);
+            }
         }
         Icon::First | Icon::Previous | Icon::Next | Icon::Last => {
             let forward = matches!(icon, Icon::Next | Icon::Last);
