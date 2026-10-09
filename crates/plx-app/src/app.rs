@@ -1329,6 +1329,11 @@ impl Workbench {
             return;
         };
         let last_step = model.fe.steps.len().checked_sub(1);
+        let takes_loads = model
+            .fe
+            .steps
+            .last()
+            .is_some_and(|s| s.kind.supports_loads());
         let mut kind = None;
         for (item, label, enabled) in [
             (NewItem::Material, "Material erstellen …", true),
@@ -1342,7 +1347,7 @@ impl Workbench {
             (
                 NewItem::Load(last_step.unwrap_or(0)),
                 "Last erstellen …",
-                last_step.is_some(),
+                takes_loads,
             ),
             (NewItem::HotSpot, "Hot Spot erstellen …", true),
         ] {
