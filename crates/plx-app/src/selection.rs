@@ -317,7 +317,7 @@ impl Picker {
                 });
                 ui.weak("Umschalt: hinzufügen, Strg: entfernen");
                 ui.weak("Ziehen: Rahmen (nach links: auch angeschnittene)");
-                ui.weak("Mittlere Maustaste: drehen");
+                ui.weak("Mittlere Maustaste: drehen, mit Umschalt verschieben");
             });
         action
     }
