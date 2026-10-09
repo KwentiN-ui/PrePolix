@@ -82,6 +82,8 @@ struct Workbench {
     frame_cache: std::collections::HashMap<usize, Vec<RenderMesh>>,
     /// Open dialog creating or editing an item of the FE model.
     editor: Option<Editor>,
+    /// Item asked to be deleted, waiting for the user's confirmation.
+    confirm_delete: Option<(TreeView, TreeItem)>,
     /// Open CalculiX keyword editor.
     keyword_editor: Option<KeywordEditor>,
     /// Open search for contact pairs.
@@ -182,6 +184,7 @@ impl PrepolixApp {
                 frame_changed: false,
                 frame_cache: Default::default(),
                 editor: None,
+                confirm_delete: None,
                 keyword_editor: None,
                 contact_search: None,
                 material_library: None,
@@ -737,6 +740,7 @@ impl eframe::App for PrepolixApp {
             .update(&ctx, view, &mut workbench.output);
         self.workbench.properties_window(&ctx);
         self.workbench.editor_window(&ctx);
+        self.workbench.confirm_delete_window(&ctx);
         self.workbench.contact_search_window(&ctx);
         self.workbench.section_window(&ctx);
         self.workbench.exploded_window(&ctx);
@@ -1051,23 +1055,8 @@ impl Workbench {
         if let Some(kind) = response.create {
             self.create(kind);
         }
-        if let Some(TreeItem::ResultFieldOutput(field)) = response.delete {
-            self.delete_field_output(field);
-        } else if let Some(TreeItem::HistorySet(set)) = response.delete {
-            self.delete_history_output(set);
-        } else if let Some(TreeItem::MeshItem(index)) = response.delete {
-            if let Some(geometry) = self.model.as_mut().and_then(|m| m.geometry.as_mut())
-                && index < geometry.mesh_items.len()
-            {
-                geometry.mesh_items.remove(index);
-                self.tree.selected = None;
-                self.mesh_item_editor = None;
-            }
-        } else if let (Some(item), Some(model)) = (response.delete, self.model.as_mut())
-            && crate::setup::delete(&mut model.fe, &item)
-        {
-            self.tree.selected = None;
-            self.editor = None;
+        if let Some(item) = response.delete {
+            self.confirm_delete = Some((view, item));
         }
         if let (Some(item), Some(model)) = (response.toggle_active, self.model.as_mut()) {
             crate::setup::toggle_active(&mut model.fe, &item);
@@ -2437,6 +2426,66 @@ impl Workbench {
                 self.contact_search = None;
                 self.highlighted = None;
             }
+        }
+    }
+
+    /// PrePoMax's question before deleting, for the context menu and the Delete key alike.
+    fn confirm_delete_window(&mut self, ctx: &egui::Context) {
+        let Some((view, item)) = self.confirm_delete.clone() else {
+            return;
+        };
+        let mut answer = None;
+        egui::Modal::new(egui::Id::new("confirm delete")).show(ctx, |ui| {
+            ui.label("Ausgewähltes Element löschen?");
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("OK").clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Abbrechen").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        // Enter confirms and Escape cancels, as with the default buttons of a message box.
+        ctx.input(|i| {
+            if i.key_pressed(egui::Key::Enter) {
+                answer = Some(true);
+            } else if i.key_pressed(egui::Key::Escape) {
+                answer = Some(false);
+            }
+        });
+        match answer {
+            Some(true) => {
+                self.confirm_delete = None;
+                // The tree may have changed meanwhile, e.g. by another tab's selection.
+                if self.tree.selected.as_ref() == Some(&(view, item.clone())) {
+                    self.delete_item(item);
+                }
+            }
+            Some(false) => self.confirm_delete = None,
+            None => {}
+        }
+    }
+
+    fn delete_item(&mut self, item: TreeItem) {
+        if let TreeItem::ResultFieldOutput(field) = item {
+            self.delete_field_output(field);
+        } else if let TreeItem::HistorySet(set) = item {
+            self.delete_history_output(set);
+        } else if let TreeItem::MeshItem(index) = item {
+            if let Some(geometry) = self.model.as_mut().and_then(|m| m.geometry.as_mut())
+                && index < geometry.mesh_items.len()
+            {
+                geometry.mesh_items.remove(index);
+                self.tree.selected = None;
+                self.mesh_item_editor = None;
+            }
+        } else if let Some(model) = self.model.as_mut()
+            && crate::setup::delete(&mut model.fe, &item)
+        {
+            self.tree.selected = None;
+            self.editor = None;
         }
     }
 

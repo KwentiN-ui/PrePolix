@@ -89,6 +89,7 @@ pub struct TreeResponse {
     pub open: Option<TreeItem>,
     /// Create a new item from a container's context menu or by double-clicking it.
     pub create: Option<NewItem>,
+    /// Delete an item, by its context menu or the Delete key; the app asks first.
     pub delete: Option<TreeItem>,
     /// Activate a deactivated step, boundary condition or load, or deactivate an active one.
     pub toggle_active: Option<TreeItem>,
@@ -269,6 +270,15 @@ fn has_properties(item: &TreeItem) -> bool {
 }
 
 /// Items of the FE model that have an edit dialog.
+/// Items the context menu and the Delete key remove; a step's field outputs are not.
+fn deletable(item: &TreeItem) -> bool {
+    (is_fe_item(item) && !matches!(item, TreeItem::FieldOutput(..)))
+        || matches!(
+            item,
+            TreeItem::ResultFieldOutput(_) | TreeItem::HistorySet(_) | TreeItem::MeshItem(_)
+        )
+}
+
 fn is_fe_item(item: &TreeItem) -> bool {
     matches!(
         item,
@@ -546,8 +556,7 @@ impl Tree<'_> {
                         }
                         ui.separator();
                     }
-                    let deletable = !matches!(item, TreeItem::FieldOutput(..));
-                    if deletable && ui.button("Löschen").clicked() {
+                    if deletable(&item) && ui.button("Löschen").clicked() {
                         self.response.delete = Some(item.clone());
                     }
                 }
@@ -969,6 +978,16 @@ pub fn show(
         && ui.input(|i| i.key_pressed(egui::Key::Space))
     {
         tree.response.toggle_active = Some(item.clone());
+    }
+    // Like PrePoMax, the Delete key deletes the selected item, after the same question as the
+    // context menu. The selection may come from the 3D view, so the pointer can be anywhere.
+    if let Some((selected_view, item)) = &tree.state.selected
+        && *selected_view == view
+        && deletable(item)
+        && !ui.ctx().text_edit_focused()
+        && ui.input(|i| i.key_pressed(egui::Key::Delete))
+    {
+        tree.response.delete = Some(item.clone());
     }
     tree.response
 }
