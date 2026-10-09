@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 
+use plx_model::{Algorithm2d, Algorithm3d, MeshSetupItem, MeshSetupKind};
+
 use super::*;
 
 fn testdata(name: &str) -> PathBuf {
@@ -99,7 +101,7 @@ fn step_files_import_with_faces_and_edges() {
         "BREP-Text"
     );
     // 5 % of the diagonal of 100 x 40 x 10, rounded.
-    assert_eq!(geometry.mesh_setup.max_size, 5.0);
+    assert_eq!(geometry.meshing.max_size, 5.0);
 }
 
 #[test]
@@ -110,7 +112,7 @@ fn quadratic_tetrahedra_follow_calculix_numbering() {
     let mut geometry = import_cad(&testdata("platte_mit_loch.step"))
         .unwrap()
         .geometry;
-    geometry.mesh_setup.max_size = 8.0;
+    geometry.meshing.max_size = 8.0;
     let mesh = generate_mesh(&geometry).unwrap().mesh;
     assert_eq!(mesh.parts.len(), 1);
     assert!(mesh.element_count() > 100);
@@ -146,8 +148,8 @@ fn every_solid_becomes_a_part_and_size_controls_the_count() {
         return;
     }
     let mut geometry = import_cad(&testdata("zwei_bloecke.step")).unwrap().geometry;
-    geometry.mesh_setup.second_order = false;
-    geometry.mesh_setup.max_size = 5.0;
+    geometry.meshing.second_order = false;
+    geometry.meshing.max_size = 5.0;
     let coarse = generate_mesh(&geometry).unwrap().mesh;
     let names: Vec<&str> = coarse.parts.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, ["SOLID-1", "SOLID-2"]);
@@ -161,7 +163,7 @@ fn every_solid_becomes_a_part_and_size_controls_the_count() {
     };
     assert!(nodes(&coarse.parts[0]).is_disjoint(&nodes(&coarse.parts[1])));
 
-    geometry.mesh_setup.max_size = 1.25;
+    geometry.meshing.max_size = 1.25;
     let fine = generate_mesh(&geometry).unwrap().mesh;
     assert!(
         fine.element_count() > 3 * coarse.element_count(),
@@ -172,12 +174,140 @@ fn every_solid_becomes_a_part_and_size_controls_the_count() {
 }
 
 #[test]
+fn a_remeshed_part_replaces_its_old_mesh_and_leaves_the_others() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step")).unwrap().geometry;
+    geometry.meshing.second_order = false;
+    geometry.meshing.max_size = 5.0;
+    assert_eq!(part_names(&geometry).unwrap(), ["SOLID-1", "SOLID-2"]);
+    let whole = generate_mesh(&geometry).unwrap().mesh;
+    let old_first = whole.parts[0].elements.len();
+
+    geometry.mesh_items.push(MeshSetupItem {
+        name: "Meshing_Parameters-1".into(),
+        kind: MeshSetupKind::MeshingParameters {
+            parts: vec!["SOLID-1".into()],
+            parameters: MeshingParameters {
+                max_size: 1.25,
+                second_order: false,
+                ..geometry.meshing
+            },
+        },
+    });
+    let part = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
+    let names: Vec<&str> = part.parts.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["SOLID-1"]);
+    let merged = merge_part(&whole, part);
+    let names: Vec<&str> = merged.parts.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["SOLID-1", "SOLID-2"], "the part keeps its place");
+    let new_first = merged.parts[0].elements.len();
+    assert!(new_first > 3 * old_first, "{new_first} gegen {old_first}");
+    assert!(merged.missing_nodes().is_empty());
+    // The second block is untouched, with its numbers.
+    assert_eq!(merged.parts[1], whole.parts[1]);
+    for &id in &whole.parts[1].elements {
+        let element = merged.element(id).unwrap();
+        assert_eq!(element, whole.element(id).unwrap());
+        for &node in &element.nodes {
+            assert_eq!(merged.node(node), whole.node(node));
+        }
+    }
+    // The new elements are numbered after all old ones.
+    let old_max = whole.elements().iter().map(|e| e.id).max().unwrap();
+    assert!(merged.parts[0].elements.iter().all(|&e| e > old_max));
+    let used: BTreeSet<NodeId> = (merged.elements().iter())
+        .flat_map(|e| e.nodes.iter().copied())
+        .collect();
+    assert_eq!(used.len(), merged.node_count(), "no orphaned nodes");
+    assert!(generate_part_mesh(&geometry, "SOLID-9").is_err());
+}
+
+#[test]
+fn local_mesh_sizes_refine_faces_and_edges() {
+    if !gmsh_available() {
+        return;
+    }
+    let import = import_cad(&testdata("platte_mit_loch.step")).unwrap();
+    let mut geometry = import.geometry;
+    geometry.meshing.max_size = 8.0;
+    geometry.meshing.second_order = false;
+    let count = |geometry: &Geometry| {
+        (generate_part_mesh(geometry, "SOLID-1").unwrap().mesh).element_count()
+    };
+    let coarse = count(&geometry);
+    // The faces of the plate in the display; the first one is refined.
+    let face = (import.display.entities.iter())
+        .find_map(|e| match e {
+            CadEntity::Face(tag) => Some(*tag),
+            CadEntity::Edge(_) => None,
+        })
+        .unwrap();
+    let local = |faces: Vec<i32>, edges: Vec<i32>, size| MeshSetupItem {
+        name: "Local_Mesh_Size-1".into(),
+        kind: MeshSetupKind::LocalMeshSize { faces, edges, size },
+    };
+    geometry.mesh_items = vec![local(vec![face], vec![], 1.0)];
+    let on_face = count(&geometry);
+    assert!(on_face > 2 * coarse, "{on_face} gegen {coarse}");
+    let edge = (import.display.entities.iter())
+        .find_map(|e| match e {
+            CadEntity::Edge(tag) => Some(*tag),
+            CadEntity::Face(_) => None,
+        })
+        .unwrap();
+    geometry.mesh_items = vec![local(vec![], vec![edge], 0.5)];
+    let on_edge = count(&geometry);
+    assert!(on_edge > coarse, "{on_edge} gegen {coarse}");
+    // Tags of other parts or faces that do not exist change nothing.
+    geometry.mesh_items = vec![local(vec![9999], vec![], 1.0)];
+    assert_eq!(count(&geometry), coarse);
+}
+
+#[test]
+fn every_gmsh_algorithm_gives_valid_tetrahedra() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = import_cad(&testdata("platte_mit_loch.step"))
+        .unwrap()
+        .geometry;
+    geometry.meshing.max_size = 8.0;
+    let exact = 100.0 * 40.0 * 10.0 - std::f64::consts::PI * 8.0 * 8.0 * 10.0;
+    for (algorithm_2d, algorithm_3d) in [
+        (Algorithm2d::MeshAdapt, Algorithm3d::Hxt),
+        (Algorithm2d::Delaunay, Algorithm3d::Frontal),
+        (Algorithm2d::Automatic, Algorithm3d::Delaunay),
+    ] {
+        geometry.mesh_items = vec![MeshSetupItem {
+            name: "Tetrahedral_Gmsh-1".into(),
+            kind: MeshSetupKind::TetrahedralGmsh {
+                parts: vec!["SOLID-1".into()],
+                algorithm_2d,
+                algorithm_3d,
+            },
+        }];
+        let mesh = generate_mesh(&geometry).unwrap().mesh;
+        let total: f64 = mesh.elements().iter().map(|e| volume(&mesh, e)).sum();
+        assert!(
+            mesh.elements().iter().all(|e| volume(&mesh, e) > 0.0),
+            "{algorithm_2d:?} {algorithm_3d:?}"
+        );
+        assert!(
+            (total - exact).abs() / exact < 0.01,
+            "{algorithm_2d:?} {algorithm_3d:?}: {total}"
+        );
+    }
+}
+
+#[test]
 fn invalid_sizes_and_files_are_reported() {
     if !gmsh_available() {
         return;
     }
     let mut geometry = import_cad(&testdata("zwei_bloecke.step")).unwrap().geometry;
-    geometry.mesh_setup.max_size = 0.0;
+    geometry.meshing.max_size = 0.0;
     assert!(generate_mesh(&geometry).is_err());
     assert!(import_cad(&testdata("wuerfel_c3d10.inp")).is_err());
     assert!(import_cad(&testdata("gibt_es_nicht.step")).is_err());

@@ -39,6 +39,8 @@ pub enum TreeItem {
     Model,
     Mesh,
     Part(usize),
+    /// An item of the geometry's mesh setup.
+    MeshItem(usize),
     NodeSet(String),
     ElementSet(String),
     Surface(String),
@@ -89,10 +91,12 @@ pub struct TreeResponse {
     pub analysis: Option<AnalysisAction>,
     /// Open the material library.
     pub material_library: bool,
-    /// Open the meshing parameters of the geometry.
-    pub mesh_setup: bool,
-    /// Mesh the geometry.
+    /// Open the default meshing parameters of the geometry.
+    pub mesh_defaults: bool,
+    /// Mesh all parts of the geometry.
     pub generate_mesh: bool,
+    /// Mesh one part of the geometry, by index.
+    pub mesh_part: Option<usize>,
     /// Evaluate the hot spots with the current results.
     pub evaluate_hot_spots: bool,
 }
@@ -206,6 +210,7 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
         TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
         TreeItem::Group(HOT_SPOTS) => Some(NewItem::HotSpot),
+        TreeItem::Group("Mesh Setup") => Some(NewItem::MeshSetupItem),
         TreeItem::FieldOutputs => Some(NewItem::ResultFieldOutput),
         TreeItem::Group("History Outputs") => Some(NewItem::ResultHistoryOutput),
         _ => None,
@@ -322,9 +327,22 @@ fn part_icon(part: &PartInfo) -> TreeIcon {
     }
 }
 
-/// Context menu of a part, the same in the tree and in the 3D view.
-pub fn part_menu(ui: &mut Ui, index: usize, visible: bool, response: &mut TreeResponse) {
+/// Context menu of a part, the same in the tree and in the 3D view. A part of the geometry
+/// is meshed from here, as in PrePoMax.
+pub fn part_menu(
+    ui: &mut Ui,
+    index: usize,
+    visible: bool,
+    geometry: bool,
+    response: &mut TreeResponse,
+) {
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+    if geometry {
+        if ui.button("Netz erzeugen").clicked() {
+            response.mesh_part = Some(index);
+        }
+        ui.separator();
+    }
     if ui.button("Eigenschaften …").clicked() {
         response.open = Some(TreeItem::Part(index));
     }
@@ -389,21 +407,10 @@ impl Tree<'_> {
             response = response.on_hover_text(reason);
         }
         let creates = creates(&item).filter(|_| closed.is_none());
-        let meshing = self.view == TreeView::Geometry
-            && matches!(
-                item,
-                TreeItem::Group("Mesh Setup") | TreeItem::Group("Parts")
-            );
-        if response.double_clicked() && item == TreeItem::Group("Mesh Setup") {
-            self.response.mesh_setup = true;
-        }
-        if meshing {
+        if self.view == TreeView::Geometry && item == TreeItem::Group("Parts") {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                if ui.button("Netzparameter …").clicked() {
-                    self.response.mesh_setup = true;
-                }
-                if ui.button("Netz erzeugen").clicked() {
+                if ui.button("Alle Parts vernetzen").clicked() {
                     self.response.generate_mesh = true;
                 }
             });
@@ -424,7 +431,7 @@ impl Tree<'_> {
         let editable = is_fe_item(&item)
             || matches!(
                 item,
-                TreeItem::ResultFieldOutput(_) | TreeItem::HistorySet(_)
+                TreeItem::ResultFieldOutput(_) | TreeItem::HistorySet(_) | TreeItem::MeshItem(_)
             );
         if item == TreeItem::Analysis {
             response.context_menu(|ui| self.analysis_menu(ui));
@@ -441,6 +448,15 @@ impl Tree<'_> {
                     ui.separator();
                     if ui.button("Materialbibliothek …").clicked() {
                         self.response.material_library = true;
+                    }
+                }
+                if item == TreeItem::Group("Mesh Setup") {
+                    ui.separator();
+                    if ui.button("Standard-Netzparameter …").clicked() {
+                        self.response.mesh_defaults = true;
+                    }
+                    if ui.button("Alle Parts vernetzen").clicked() {
+                        self.response.generate_mesh = true;
                     }
                 }
                 if item == TreeItem::Group(HOT_SPOTS) {
@@ -701,8 +717,9 @@ impl Tree<'_> {
                 if changed {
                     tree.response.visibility.push((index, part.visible));
                 }
+                let geometry = tree.view == TreeView::Geometry;
                 response.context_menu(|ui| {
-                    part_menu(ui, index, part.visible, &mut tree.response);
+                    part_menu(ui, index, part.visible, geometry, &mut tree.response);
                 });
             }
         });
@@ -804,10 +821,12 @@ impl Tree<'_> {
     }
 }
 
+/// `mesh_items` names the items of the geometry's mesh setup, for the Geometry tree.
 pub fn show(
     ui: &mut Ui,
     view: TreeView,
     model: Option<&mut Model>,
+    mesh_items: &[String],
     job: Option<JobState>,
     state: &mut TreeState,
 ) -> TreeResponse {
@@ -838,7 +857,10 @@ pub fn show(
                             tree.leaf(ui, TreeItem::Group("Parts"), "Parts");
                         }
                     }
-                    tree.leaf(ui, TreeItem::Group("Mesh Setup"), "Mesh Setup");
+                    let items = (mesh_items.iter().enumerate())
+                        .map(|(i, name)| (TreeItem::MeshItem(i), name.as_str()))
+                        .collect();
+                    tree.container(ui, "Mesh Setup", items);
                 }
                 TreeView::FeModel => fe_model(&mut tree, ui, model),
                 TreeView::Results => results(&mut tree, ui, model),

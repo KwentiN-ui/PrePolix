@@ -61,7 +61,7 @@ Die Standardansichten folgen PrePoMax: Y zeigt nach oben. "Vertikal" stellt die 
 - Ergebnisanzeige wie in PrePoMax: Konturplot in 9 Farbstufen (Regenbogen, einstellbar), Legende, Min/Max mit Knoten, verformte Darstellung mit automatischem, echtem oder eigenem Faktor.
 - Schnittansicht (*Ansicht → Schnittansicht …*): Schnittebene als Grundebene XY/YZ/XZ an einer Koordinate oder als Punkt und Normale, beides auch per Klick ins Modell (Normale aus zwei Punkten). Im 3D-Fenster lässt sich die Ebene am Pfeil verschieben und an den Bögen kippen. Volumenelemente zeigen ihre Schnittfläche mit Netzkanten und Ergebnisfarben.
 
-- Geometrie importieren (STEP, IGES, BREP) und mit Tetraedern 1. oder 2. Ordnung vernetzen, ein Part pro Volumenkörper. Die Geometrie wird im Projekt gespeichert, das Netz lässt sich mit anderen Netzparametern neu erzeugen.
+- Geometrie importieren (STEP, IGES, BREP) und mit Tetraedern 1. oder 2. Ordnung vernetzen, ein Part pro Volumenkörper. Wie in PrePoMax wird jedes Part einzeln vernetzt (Kontextmenü des Parts: *Netz erzeugen*). Der Mesh Setup nimmt Meshing Parameters pro Part, lokale Netzgrößen auf Flächen und Kanten (Local Mesh Size) und die Gmsh-Algorithmen pro Part (Tetrahedral Gmsh) auf. Die Geometrie wird samt Mesh Setup im Projekt gespeichert.
 
 Beispielmodelle liegen in [testdata/](testdata/), erzeugt von `testdata/erzeugen.py`; die STEP-Dateien stammen aus Gmsh. Die Modelle mit Step lassen sich direkt mit `ccx` rechnen; zwei Ergebnisdateien (`*.frd`) liegen bei.
 

@@ -9,10 +9,10 @@ use std::ffi::{c_char, c_double, c_int, c_void};
 use libloading::Library;
 
 macro_rules! gmsh_api {
-    ($($field:ident = $symbol:literal: fn($($arg:ty),* $(,)?);)*) => {
+    ($($field:ident = $symbol:literal: fn($($arg:ty),* $(,)?) $(-> $ret:ty)?;)*) => {
         /// Function pointers into the loaded library, which they keep alive.
         pub(crate) struct Api {
-            $(pub $field: unsafe extern "C" fn($($arg),*),)*
+            $(pub $field: unsafe extern "C" fn($($arg),*) $(-> $ret)?,)*
             _library: Library,
         }
 
@@ -28,7 +28,7 @@ macro_rules! gmsh_api {
                     // SAFETY: the caller guarantees that the symbol has this signature; the
                     // pointer stays valid because the library is stored next to it.
                     let $field = unsafe {
-                        library.get::<unsafe extern "C" fn($($arg),*)>(
+                        library.get::<unsafe extern "C" fn($($arg),*) $(-> $ret)?>(
                             concat!($symbol, "\0").as_bytes(),
                         )
                     }
@@ -71,6 +71,12 @@ gmsh_api! {
     occ_add_box = "gmshModelOccAddBox":
         fn(c_double, c_double, c_double, c_double, c_double, c_double, c_int, Ierr);
     occ_synchronize = "gmshModelOccSynchronize": fn(Ierr);
+    occ_remove = "gmshModelOccRemove": fn(*const c_int, usize, c_int, Ierr);
+    field_add = "gmshModelMeshFieldAdd": fn(*const c_char, c_int, Ierr) -> c_int;
+    field_set_number = "gmshModelMeshFieldSetNumber": fn(c_int, *const c_char, c_double, Ierr);
+    field_set_numbers = "gmshModelMeshFieldSetNumbers":
+        fn(c_int, *const c_char, *const c_double, usize, Ierr);
+    field_set_as_background = "gmshModelMeshFieldSetAsBackgroundMesh": fn(c_int, Ierr);
     mesh_generate = "gmshModelMeshGenerate": fn(c_int, Ierr);
     mesh_set_order = "gmshModelMeshSetOrder": fn(c_int, Ierr);
     mesh_get_nodes = "gmshModelMeshGetNodes": fn(

@@ -60,6 +60,9 @@ pub struct Model {
     pub geometry: Option<Geometry>,
     /// The display of CAD geometry rather than a mesh: element edges are not drawn.
     is_geometry: bool,
+    /// For the display of CAD geometry, the CAD face or edge of each element; element ids
+    /// count from 1.
+    cad_entities: Vec<CadEntity>,
     /// Hot spot values of a results file, evaluated with the hot spots of the FE model.
     pub hot_spots: Option<crate::hot_spots::Evaluation>,
     /// Faces and parts drawn in the highlight colour.
@@ -261,6 +264,7 @@ impl Model {
             fe: FeModel::default(),
             geometry: None,
             is_geometry: false,
+            cad_entities: Vec::new(),
             hot_spots: None,
             highlight: Highlight::default(),
             clip: None,
@@ -294,7 +298,14 @@ impl Model {
             .collect();
         let mut model = Self::with_skins(path, mesh, skins);
         model.is_geometry = true;
+        model.cad_entities = display.entities;
         model
+    }
+
+    /// The CAD face or edge an element of the geometry display shows.
+    pub fn cad_entity(&self, element: ElementId) -> Option<CadEntity> {
+        let index = usize::try_from(element).ok()?.checked_sub(1)?;
+        self.cad_entities.get(index).copied()
     }
 
     /// Replaces the mesh, e.g. by a newly generated one; the FE model stays.
@@ -857,7 +868,7 @@ mod tests {
         };
         let mut model = load(&testdata("platte_mit_loch.step")).unwrap().model;
         let mut geometry = model.geometry.clone().unwrap();
-        geometry.mesh_setup.max_size = 4.0;
+        geometry.meshing.max_size = 4.0;
         model.set_mesh(plx_mesher::generate_mesh(&geometry).unwrap().mesh);
         let nodes_at = |x: f64| -> Vec<NodeId> {
             (model.mesh.node_ids().iter().zip(model.mesh.coords()))
