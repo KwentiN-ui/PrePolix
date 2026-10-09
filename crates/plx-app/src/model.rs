@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use glam::{DVec3, Vec3};
+use glam::{DAffine3, DVec3, Vec3};
 use plx_io::frd::{FrdImport, read_frd};
 use plx_io::inp::{InpImport, read_inp};
 use plx_mesh::{ElementId, FeMesh, NodeId, PartSkin, extract_part_skin};
@@ -364,9 +364,55 @@ impl Model {
         (coords, scalars, deformed)
     }
 
-    /// GPU-ready meshes of all parts, deformed and coloured by the selected result if any.
+    /// The transformed copies of the results ([`ResultsView::transformations`]): per copy
+    /// its transformation and its normalized contour values.
+    fn transformed_copies(&self) -> Vec<(DAffine3, Option<Vec<f32>>)> {
+        let Some(view) = &self.results else {
+            return Vec::new();
+        };
+        let legend = view.legend();
+        (view.instances().into_iter().skip(1))
+            .map(|instance| {
+                let scalars = (view.shown_values_on(&instance))
+                    .zip(legend.as_ref())
+                    .map(|(values, legend)| normalize(&values, legend.min, legend.max));
+                (instance, scalars)
+            })
+            .collect()
+    }
+
+    /// GPU-ready meshes of all parts, deformed and coloured by the selected result if any,
+    /// with the transformed copies of the results.
     pub fn render_meshes(&self) -> Vec<RenderMesh> {
         let (coords, scalars, deformed) = self.shown_state();
+        let mut meshes = self.part_meshes(&coords, scalars.as_deref(), deformed);
+        for (instance, scalars) in self.transformed_copies() {
+            let moved = transform_coords(&coords, &instance);
+            let undeformed = deformed.then(|| transform_coords(self.mesh.coords(), &instance));
+            for ((mesh, info), skin) in meshes.iter_mut().zip(&self.parts).zip(&self.skins) {
+                let mut copy = part_render_mesh(
+                    &moved,
+                    skin,
+                    self.origin,
+                    info.color,
+                    SMOOTH_ANGLE_DEG,
+                    scalars.as_deref(),
+                );
+                if let Some(undeformed) = &undeformed {
+                    copy.wireframe_edges = wireframe_edges(undeformed, skin, self.origin);
+                }
+                mesh.append(copy);
+            }
+        }
+        meshes
+    }
+
+    fn part_meshes(
+        &self,
+        coords: &[[f64; 3]],
+        scalars: Option<&[f32]>,
+        deformed: bool,
+    ) -> Vec<RenderMesh> {
         self.mesh
             .parts
             .iter()
@@ -375,12 +421,12 @@ impl Model {
             .enumerate()
             .map(|(index, ((_, info), skin))| {
                 let mut mesh = part_render_mesh(
-                    &coords,
+                    coords,
                     skin,
                     self.origin,
                     info.color,
                     SMOOTH_ANGLE_DEG,
-                    scalars.as_deref(),
+                    scalars,
                 );
                 self.highlight_faces(index, skin, &mut mesh);
                 if deformed {
@@ -410,15 +456,18 @@ impl Model {
                 .collect()
         });
         let (coords, scalars, _) = self.shown_state();
-        cells
+        let color = |info: &PartInfo| {
+            if lighten_colors {
+                lighten(info.color)
+            } else {
+                info.color
+            }
+        };
+        let mut meshes: Vec<RenderMesh> = cells
             .iter()
             .zip(&self.parts)
             .map(|(cells, info)| {
-                let color = if lighten_colors {
-                    lighten(info.color)
-                } else {
-                    info.color
-                };
+                let color = color(info);
                 section_mesh(
                     cells,
                     &coords,
@@ -429,7 +478,25 @@ impl Model {
                     scalars.as_deref(),
                 )
             })
-            .collect()
+            .collect();
+        // The copies are cut by the same plane.
+        for (instance, scalars) in self.transformed_copies() {
+            let moved = transform_coords(&coords, &instance);
+            for ((mesh, cells), info) in meshes.iter_mut().zip(cells).zip(&self.parts) {
+                let color = color(info);
+                let scalars = scalars.as_deref();
+                mesh.append(section_mesh(
+                    cells,
+                    &moved,
+                    self.origin,
+                    point,
+                    normal,
+                    color,
+                    scalars,
+                ));
+            }
+        }
+        meshes
     }
 
     /// The model origin in global coordinates; render positions are relative to it.
@@ -618,6 +685,17 @@ impl Model {
         Some((p - self.origin).as_vec3())
     }
 
+    /// Where a node is drawn on the given item of the results ([`ResultsView::instances`]).
+    pub fn node_position_on(&self, index: usize, item: usize) -> Option<Vec3> {
+        let position = self.node_position(index)?;
+        if item == 0 {
+            return Some(position);
+        }
+        let instance = *self.results.as_ref()?.instances().get(item)?;
+        let global = position.as_dvec3() + self.origin;
+        Some((instance.transform_point3(global) - self.origin).as_vec3())
+    }
+
     /// A point given in model coordinates, in render coordinates.
     pub fn to_render(&self, point: [f64; 3]) -> Vec3 {
         (DVec3::from(point) - self.origin).as_vec3()
@@ -651,6 +729,12 @@ impl Model {
             .filter_map(|p| p.bounds)
             .reduce(|(min_a, max_a), (min_b, max_b)| (min_a.min(min_b), max_a.max(max_b)))
     }
+}
+
+fn transform_coords(coords: &[[f64; 3]], instance: &DAffine3) -> Vec<[f64; 3]> {
+    (coords.iter())
+        .map(|&p| instance.transform_point3(DVec3::from(p)).to_array())
+        .collect()
 }
 
 /// Distance along the ray to a triangle (Möller-Trumbore), seen from either side.
@@ -760,6 +844,33 @@ mod tests {
                 .iter()
                 .all(|v| v.scalar >= 0.0)
         );
+    }
+
+    #[test]
+    fn transformed_copies_are_drawn_with_mirrored_values() {
+        use plx_results::transformation::{SymmetryPlane, Transformation};
+        let mut model = load(&testdata("kragbalken_c3d8.frd")).unwrap().model;
+        let single = model.render_meshes()[0].vertices.len();
+        let view = model.results.as_mut().unwrap();
+        let fields = &view.current_increment().unwrap().fields;
+        let field = fields.iter().position(|f| f.name == "DISP").unwrap();
+        let components = &fields[field].components;
+        let component = components.iter().position(|c| c.name == "U3").unwrap();
+        (view.field, view.component) = (field, component);
+        let (min, max) = view.legend().map(|l| (l.min, l.max)).unwrap();
+        view.transformations = vec![Transformation::symmetry(SymmetryPlane::Z)];
+        // Mirrored at z, the beam bending down shows a copy bending up.
+        let legend = view.legend().unwrap();
+        assert_eq!((legend.min, legend.max), (min.min(-max), max.max(-min)));
+        assert_eq!(view.maximum().map(|m| (m.1, m.2)), Some((-min, 1)));
+        assert_eq!(model.render_meshes()[0].vertices.len(), 2 * single);
+        let node = model.mesh.coords().len() - 1;
+        let (a, b) = (
+            model.node_position_on(node, 0).unwrap(),
+            model.node_position_on(node, 1).unwrap(),
+        );
+        let global_z = |p: Vec3| p.z as f64 + model.origin().z;
+        assert!((global_z(a) + global_z(b)).abs() < 1e-3, "{a} {b}");
     }
 
     #[test]
