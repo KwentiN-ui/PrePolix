@@ -1759,7 +1759,6 @@ impl Workbench {
         let (graphics, post) = (&self.settings.graphics, &self.settings.post);
         let marker = |label: &str, extreme: Option<(usize, f32)>| {
             let (index, value) = extreme?;
-            let value = value * view.map_or(1.0, ResultsView::amplitude);
             Some(Marker {
                 position: model.node_position(index)?,
                 text: format!(

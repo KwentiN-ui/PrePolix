@@ -44,6 +44,16 @@ pub struct Component {
 }
 
 impl Component {
+    /// A magnitude or equivalent value that never turns negative (`ALL`, `MISES`, `TRESCA`,
+    /// `EQUIVALENT`): it keeps its sign when the result is scaled by a negative factor.
+    pub fn is_invariant(&self) -> bool {
+        self.derived
+            && matches!(
+                self.name.as_str(),
+                "ALL" | "MISES" | "TRESCA" | "EQUIVALENT"
+            )
+    }
+
     /// Smallest and largest finite value, if any.
     pub fn range(&self) -> Option<(f32, f32)> {
         self.values
