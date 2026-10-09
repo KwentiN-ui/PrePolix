@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::Region;
+use crate::{Quantity, Region, UnitSystem};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HotSpot {
@@ -36,9 +36,31 @@ impl HotSpot {
         }
     }
 
-    /// Distances of the read-out points from the toe, in model length units.
+    /// Distances of the read-out points from the toe, in model length units; those of IIW's
+    /// type b in millimetres, see [`Self::distances_in`].
     pub fn distances(&self) -> Vec<f64> {
         self.extrapolation.distances(self.thickness)
+    }
+
+    /// Distances of the read-out points in the length unit of `units`: IIW's type b
+    /// distances are millimetres and converted.
+    pub fn distances_in(&self, units: UnitSystem) -> Vec<f64> {
+        let mut distances = self.distances();
+        if self.extrapolation.in_millimetres() {
+            let millimetre = UnitSystem::MmTonSC.convert(1.0, Quantity::Length, units);
+            distances.iter_mut().for_each(|d| *d *= millimetre);
+        }
+        distances
+    }
+
+    /// The definition for a model in `units`: IIW's type b read-out points become own read-out
+    /// points in the model's length unit.
+    pub fn in_units(&self, units: UnitSystem) -> HotSpot {
+        let mut hot_spot = self.clone();
+        if self.extrapolation.in_millimetres() {
+            hot_spot.extrapolation = Extrapolation::Custom(self.distances_in(units));
+        }
+        hot_spot
     }
 }
 
@@ -80,6 +102,14 @@ impl Extrapolation {
             Extrapolation::IiwTypeBCoarse => vec![5.0, 15.0],
             Extrapolation::Custom(distances) => distances.clone(),
         }
+    }
+
+    /// Whether the distances are fixed millimetres, IIW's type b.
+    pub fn in_millimetres(&self) -> bool {
+        matches!(
+            self,
+            Extrapolation::IiwTypeBFine | Extrapolation::IiwTypeBCoarse
+        )
     }
 
     /// Whether the distances scale with the plate thickness.
@@ -164,6 +194,21 @@ mod tests {
 
     fn close(a: &[f64], b: &[f64]) -> bool {
         a.len() == b.len() && a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-9)
+    }
+
+    #[test]
+    fn type_b_distances_are_millimetres_in_any_unit_system() {
+        let mut hot_spot = HotSpot::new("Hot_Spot-1");
+        hot_spot.extrapolation = Extrapolation::IiwTypeBCoarse;
+        assert_eq!(hot_spot.distances_in(UnitSystem::MmTonSC), [5.0, 15.0]);
+        let metres = hot_spot.in_units(UnitSystem::MKgSC);
+        let Extrapolation::Custom(distances) = &metres.extrapolation else {
+            panic!("own read-out points");
+        };
+        assert!((distances[0] - 0.005).abs() < 1e-15 && (distances[1] - 0.015).abs() < 1e-15);
+        // Distances in plate thicknesses stay.
+        hot_spot.extrapolation = Extrapolation::IiwCoarse;
+        assert_eq!(hot_spot.in_units(UnitSystem::MKgSC), hot_spot);
     }
 
     #[test]

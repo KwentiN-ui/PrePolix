@@ -6,14 +6,14 @@
 use egui::Ui;
 use plx_mesh::FeMesh;
 use plx_model::{
-    ContactMethod, ContactPair, FeModel, Friction, GapConductance, InteractionProperty, Region,
-    SurfaceBehavior, SurfaceInteraction, Tie,
+    ContactMethod, ContactPair, FeModel, Friction, GapConductance, InteractionProperty, Quantity,
+    Region, SurfaceBehavior, SurfaceInteraction, Tie, UnitSystem,
 };
 
 use crate::model::{Highlight, Model};
 use crate::numeric;
 use crate::selection::Target;
-use crate::setup::{FACE_SOURCES, RegionDraft, number, region_highlight};
+use crate::setup::{FACE_SOURCES, RegionDraft, region_highlight};
 
 /// Which of the two regions clicks in the 3D view pick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -109,18 +109,31 @@ fn color_row(ui: &mut Ui, label: &str, color: &mut [u8; 3]) {
 }
 
 /// A value that may be left to CalculiX: a check box and the number.
-fn optional_row(ui: &mut Ui, label: &str, value: &mut Option<f64>, default: f64) {
+fn optional_row(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut Option<f64>,
+    default: f64,
+    (units, quantity): (UnitSystem, Quantity),
+) {
     let mut set = value.is_some();
     ui.checkbox(&mut set, label);
     let mut number_value = value.unwrap_or(default);
-    ui.add_enabled(set, number(&mut number_value));
+    ui.add_enabled(set, numeric::physical(&mut number_value, units, quantity));
     *value = set.then_some(number_value);
     ui.end_row();
 }
 
 /// The properties of a tie below the constraint dialog's type list.
 pub fn tie_form(ui: &mut Ui, model: &Model, tie: &mut Tie, regions: &mut MasterSlave) {
-    optional_row(ui, "Positionstoleranz", &mut tie.position_tolerance, 0.05);
+    let length = (model.fe.properties.units, Quantity::Length);
+    optional_row(
+        ui,
+        "Positionstoleranz",
+        &mut tie.position_tolerance,
+        0.05,
+        length,
+    );
     ui.label("");
     ui.checkbox(
         &mut tie.adjust,
@@ -177,7 +190,14 @@ pub fn contact_pair_form(
     );
     ui.end_row();
     if pair.adjust {
-        optional_row(ui, "Abstand für Adjust", &mut pair.adjustment_size, 0.01);
+        let length = (model.fe.properties.units, Quantity::Length);
+        optional_row(
+            ui,
+            "Abstand für Adjust",
+            &mut pair.adjustment_size,
+            0.01,
+            length,
+        );
     }
     regions.ui(ui, model);
     color_row(ui, "Farbe Master", &mut pair.master_color);
@@ -196,7 +216,12 @@ pub fn validate_contact_pair(pair: &ContactPair, fe: &FeModel) -> Result<(), Str
 
 /// The interaction models of a surface interaction: PrePoMax's lists of available and
 /// selected models, and the properties of the selected one below.
-pub fn interaction_form(ui: &mut Ui, interaction: &mut SurfaceInteraction, selected: &mut usize) {
+pub fn interaction_form(
+    ui: &mut Ui,
+    interaction: &mut SurfaceInteraction,
+    selected: &mut usize,
+    units: UnitSystem,
+) {
     ui.label("Interaction Models");
     ui.horizontal_top(|ui| {
         let list = |ui: &mut Ui, title: &str, body: &mut dyn FnMut(&mut Ui)| {
@@ -271,13 +296,18 @@ pub fn interaction_form(ui: &mut Ui, interaction: &mut SurfaceInteraction, selec
     ui.strong(property.name());
     ui.end_row();
     match property {
-        InteractionProperty::SurfaceBehavior(behavior) => surface_behavior_form(ui, behavior),
-        InteractionProperty::Friction(friction) => friction_form(ui, friction),
-        InteractionProperty::GapConductance(conductance) => gap_conductance_form(ui, conductance),
+        InteractionProperty::SurfaceBehavior(behavior) => {
+            surface_behavior_form(ui, behavior, units)
+        }
+        InteractionProperty::Friction(friction) => friction_form(ui, friction, units),
+        InteractionProperty::GapConductance(conductance) => {
+            gap_conductance_form(ui, conductance, units)
+        }
     }
 }
 
-fn surface_behavior_form(ui: &mut Ui, behavior: &mut SurfaceBehavior) {
+fn surface_behavior_form(ui: &mut Ui, behavior: &mut SurfaceBehavior, units: UnitSystem) {
+    let of = |quantity| (units, quantity);
     ui.label("Druck-Eindringung");
     egui::ComboBox::from_id_salt("pressure overclosure")
         .selected_text(behavior.keyword())
@@ -298,39 +328,62 @@ fn surface_behavior_form(ui: &mut Ui, behavior: &mut SurfaceBehavior) {
             ui.end_row();
         }
         SurfaceBehavior::Linear { k, sigma_inf, c0 } => {
-            value_row(ui, "K", k, "Steigung, etwa 5- bis 50-mal der E-Modul");
+            value_row(
+                ui,
+                "K",
+                k,
+                of(Quantity::ForcePerVolume),
+                "Steigung, etwa 5- bis 50-mal der E-Modul je Länge",
+            );
             value_row(
                 ui,
                 "Sigma unendlich",
                 sigma_inf,
+                of(Quantity::Pressure),
                 "Zugspannung bei großem Spalt, etwa 0,25 % der größten Vergleichsspannung",
             );
-            optional_row(ui, "c0", c0, 1.0);
+            optional_row(ui, "c0", c0, 1.0, of(Quantity::Length));
         }
         SurfaceBehavior::Exponential { c0, p0 } => {
             value_row(
                 ui,
                 "c0",
                 c0,
+                of(Quantity::Length),
                 "Spalt, bei dem der Druck auf 1 % von p0 fällt",
             );
-            value_row(ui, "p0", p0, "Kontaktdruck bei Spalt null");
+            value_row(
+                ui,
+                "p0",
+                p0,
+                of(Quantity::Pressure),
+                "Kontaktdruck bei Spalt null",
+            );
         }
         SurfaceBehavior::Tabular(rows) => {
             table(
                 ui,
                 rows,
-                ["Druck", "Eindringung"],
+                [
+                    ("Druck", of(Quantity::Pressure)),
+                    ("Eindringung", of(Quantity::Length)),
+                ],
                 "pressure overclosure table",
             );
         }
         SurfaceBehavior::Tied { k } => {
-            value_row(ui, "K", k, "Steifigkeit der Verbindung");
+            value_row(
+                ui,
+                "K",
+                k,
+                of(Quantity::ForcePerVolume),
+                "Steifigkeit der Verbindung",
+            );
         }
     }
 }
 
-fn friction_form(ui: &mut Ui, friction: &mut Friction) {
+fn friction_form(ui: &mut Ui, friction: &mut Friction, units: UnitSystem) {
     ui.label("Reibungskoeffizient");
     ui.add(
         numeric::drag_value(&mut friction.coefficient)
@@ -338,10 +391,17 @@ fn friction_form(ui: &mut Ui, friction: &mut Friction) {
             .speed(0.01),
     );
     ui.end_row();
-    optional_row(ui, "Haftsteigung", &mut friction.stick_slope, 1e5);
+    optional_row(
+        ui,
+        "Haftsteigung",
+        &mut friction.stick_slope,
+        1e5,
+        (units, Quantity::ForcePerVolume),
+    );
 }
 
-fn gap_conductance_form(ui: &mut Ui, conductance: &mut GapConductance) {
+fn gap_conductance_form(ui: &mut Ui, conductance: &mut GapConductance, units: UnitSystem) {
+    let of = |quantity| (units, quantity);
     ui.label("Art");
     ui.horizontal(|ui| {
         let constant = matches!(conductance, GapConductance::Constant(_));
@@ -355,39 +415,71 @@ fn gap_conductance_form(ui: &mut Ui, conductance: &mut GapConductance) {
     ui.end_row();
     match conductance {
         GapConductance::Constant(value) => {
-            value_row(ui, "Leitwert", value, "Wärmestrom je Temperaturdifferenz");
+            value_row(
+                ui,
+                "Leitwert",
+                value,
+                of(Quantity::HeatTransferCoefficient),
+                "Wärmestrom je Fläche und Temperaturdifferenz",
+            );
         }
         GapConductance::Tabular(rows) => {
             table(
                 ui,
                 rows,
-                ["Leitwert", "Druck", "Temperatur"],
+                [
+                    ("Leitwert", of(Quantity::HeatTransferCoefficient)),
+                    ("Druck", of(Quantity::Pressure)),
+                    ("Temperatur", of(Quantity::Temperature)),
+                ],
                 "conductance table",
             );
         }
     }
 }
 
-fn value_row(ui: &mut Ui, label: &str, value: &mut f64, hint: &str) {
+fn value_row(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut f64,
+    (units, quantity): (UnitSystem, Quantity),
+    hint: &str,
+) {
     ui.label(label).on_hover_text(hint);
-    ui.add(number(value)).on_hover_text(hint);
+    ui.add(numeric::physical(value, units, quantity))
+        .on_hover_text(hint);
     ui.end_row();
 }
 
 /// A small editable table with a row to add and buttons to remove rows.
-fn table<const N: usize>(ui: &mut Ui, rows: &mut Vec<[f64; N]>, header: [&str; N], id: &str) {
+/// Each column has a title and the units of its values, shown in the title.
+fn table<const N: usize>(
+    ui: &mut Ui,
+    rows: &mut Vec<[f64; N]>,
+    columns: [(&str, (UnitSystem, Quantity)); N],
+    id: &str,
+) {
     ui.label("Tabelle");
     ui.vertical(|ui| {
         egui::Grid::new(id).striped(true).show(ui, |ui| {
-            for title in header {
-                ui.strong(title);
+            for (title, (units, quantity)) in columns {
+                let unit = units.unit(quantity);
+                if unit.is_empty() {
+                    ui.strong(title);
+                } else {
+                    ui.strong(format!("{title} [{unit}]"));
+                }
             }
             ui.label("");
             ui.end_row();
             let mut remove = None;
             for (i, row) in rows.iter_mut().enumerate() {
-                for value in row.iter_mut() {
-                    ui.add(number(value));
+                for (value, (_, (units, quantity))) in row.iter_mut().zip(columns) {
+                    // The unit stands in the column title.
+                    let field = numeric::without_unit(value, units, quantity)
+                        .speed(0.0)
+                        .custom_formatter(|v, _| numeric::format_physical(v));
+                    ui.add(field);
                 }
                 if ui.small_button("Entfernen").clicked() {
                     remove = Some(i);

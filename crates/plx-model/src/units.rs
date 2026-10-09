@@ -1,0 +1,782 @@
+//! Units of the model's values, PrePoMax's unit system with its typed property converters.
+//!
+//! Values are stored as plain numbers in the units of the model's [`UnitSystem`]. What a
+//! number means is told by its [`Quantity`]: the GUI shows the unit next to it, takes values
+//! typed in other units ("3 cm" becomes 30 in a millimetre model) and converts the model when
+//! the unit system changes.
+
+use serde::{Deserialize, Serialize};
+
+/// The units the model's values are given in, PrePoMax's unit system types.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnitSystem {
+    Unitless,
+    MKgSC,
+    #[default]
+    MmTonSC,
+    MTonSC,
+    InLbSF,
+}
+
+/// Kinds of quantities the unit system names a unit for, PrePoMax's base and derived units.
+pub const BASE_QUANTITIES: [Quantity; 5] = [
+    Quantity::Length,
+    Quantity::Angle,
+    Quantity::Mass,
+    Quantity::Time,
+    Quantity::Temperature,
+];
+pub const DERIVED_QUANTITIES: [Quantity; 13] = [
+    Quantity::Area,
+    Quantity::Volume,
+    Quantity::Velocity,
+    Quantity::RotationalSpeed,
+    Quantity::Acceleration,
+    Quantity::Force,
+    Quantity::ForcePerLength,
+    Quantity::Moment,
+    Quantity::Pressure,
+    Quantity::Density,
+    Quantity::Energy,
+    Quantity::Power,
+    Quantity::Frequency,
+];
+
+/// What a value of the model measures; decides its unit in every unit system.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Quantity {
+    Length,
+    Angle,
+    Mass,
+    Time,
+    /// Absolute temperature, converted with the offset of its scale.
+    Temperature,
+    Area,
+    Volume,
+    Velocity,
+    RotationalSpeed,
+    Acceleration,
+    Force,
+    /// Also the stiffness of a spring.
+    ForcePerLength,
+    Moment,
+    /// Also stress and the elastic modulus.
+    Pressure,
+    Density,
+    Energy,
+    Power,
+    Frequency,
+    /// Stiffness per area of a spring or of a contact, pressure per length.
+    ForcePerVolume,
+    /// Heat flow per area and temperature difference, the gap conductance.
+    HeatTransferCoefficient,
+}
+
+impl Quantity {
+    /// Name in the GUI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Quantity::Length => "Länge",
+            Quantity::Angle => "Winkel",
+            Quantity::Mass => "Masse",
+            Quantity::Time => "Zeit",
+            Quantity::Temperature => "Temperatur",
+            Quantity::Area => "Fläche",
+            Quantity::Volume => "Volumen",
+            Quantity::Velocity => "Geschwindigkeit",
+            Quantity::RotationalSpeed => "Winkelgeschwindigkeit",
+            Quantity::Acceleration => "Beschleunigung",
+            Quantity::Force => "Kraft",
+            Quantity::ForcePerLength => "Kraft pro Länge",
+            Quantity::Moment => "Moment",
+            Quantity::Pressure => "Druck",
+            Quantity::Density => "Dichte",
+            Quantity::Energy => "Energie",
+            Quantity::Power => "Leistung",
+            Quantity::Frequency => "Frequenz",
+            Quantity::ForcePerVolume => "Kraft pro Volumen",
+            Quantity::HeatTransferCoefficient => "Wärmeübergangskoeffizient",
+        }
+    }
+
+    pub fn dimension(self) -> Dimension {
+        let d = Dimension::new;
+        match self {
+            Quantity::Length => d(1, 0, 0, 0, 0),
+            Quantity::Angle => d(0, 0, 0, 0, 1),
+            Quantity::Mass => d(0, 1, 0, 0, 0),
+            Quantity::Time => d(0, 0, 1, 0, 0),
+            Quantity::Temperature => d(0, 0, 0, 1, 0),
+            Quantity::Area => d(2, 0, 0, 0, 0),
+            Quantity::Volume => d(3, 0, 0, 0, 0),
+            Quantity::Velocity => d(1, 0, -1, 0, 0),
+            Quantity::RotationalSpeed => d(0, 0, -1, 0, 1),
+            Quantity::Acceleration => d(1, 0, -2, 0, 0),
+            Quantity::Force => d(1, 1, -2, 0, 0),
+            Quantity::ForcePerLength => d(0, 1, -2, 0, 0),
+            Quantity::Moment | Quantity::Energy => d(2, 1, -2, 0, 0),
+            Quantity::Pressure => d(-1, 1, -2, 0, 0),
+            Quantity::Density => d(-3, 1, 0, 0, 0),
+            Quantity::Power => d(2, 1, -3, 0, 0),
+            Quantity::Frequency => d(0, 0, -1, 0, 0),
+            Quantity::ForcePerVolume => d(-2, 1, -2, 0, 0),
+            Quantity::HeatTransferCoefficient => d(0, 1, -3, -1, 0),
+        }
+    }
+}
+
+/// Powers of length, mass, time, temperature and angle a quantity is made of.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Dimension {
+    pub length: i8,
+    pub mass: i8,
+    pub time: i8,
+    pub temperature: i8,
+    pub angle: i8,
+}
+
+impl Dimension {
+    pub const fn new(length: i8, mass: i8, time: i8, temperature: i8, angle: i8) -> Self {
+        Self {
+            length,
+            mass,
+            time,
+            temperature,
+            angle,
+        }
+    }
+
+    fn powi(self, n: i8) -> Self {
+        Self::new(
+            self.length * n,
+            self.mass * n,
+            self.time * n,
+            self.temperature * n,
+            self.angle * n,
+        )
+    }
+
+    fn times(self, other: Self) -> Self {
+        Self::new(
+            self.length + other.length,
+            self.mass + other.mass,
+            self.time + other.time,
+            self.temperature + other.temperature,
+            self.angle + other.angle,
+        )
+    }
+}
+
+/// Pound-force in newton.
+const POUND_FORCE: f64 = 4.448_221_615_260_5;
+const INCH: f64 = 0.0254;
+
+impl UnitSystem {
+    /// In PrePoMax's order of the list.
+    pub const ALL: [UnitSystem; 5] = [
+        UnitSystem::Unitless,
+        UnitSystem::MKgSC,
+        UnitSystem::MmTonSC,
+        UnitSystem::MTonSC,
+        UnitSystem::InLbSF,
+    ];
+
+    /// PrePoMax's name of the unit system.
+    pub fn label(self) -> &'static str {
+        match self {
+            UnitSystem::Unitless => "Ohne Einheiten",
+            UnitSystem::MKgSC => "m, kg, s, °C",
+            UnitSystem::MmTonSC => "mm, ton, s, °C",
+            UnitSystem::MTonSC => "m, ton, s, °C",
+            UnitSystem::InLbSF => "in, lbf·s²/in, s, °F",
+        }
+    }
+
+    pub fn has_units(self) -> bool {
+        self != UnitSystem::Unitless
+    }
+
+    /// Units of [`BASE_QUANTITIES`], empty without units.
+    pub fn base_units(self) -> [&'static str; 5] {
+        BASE_QUANTITIES.map(|q| self.unit(q))
+    }
+
+    /// Units of [`DERIVED_QUANTITIES`], empty without units.
+    pub fn derived_units(self) -> [&'static str; 13] {
+        DERIVED_QUANTITIES.map(|q| self.unit(q))
+    }
+
+    /// The unit of a quantity, as shown next to values; empty without units.
+    pub fn unit(self, quantity: Quantity) -> &'static str {
+        use Quantity::*;
+        // Units of m-kg, mm-t, m-t and in-lbf.
+        let [si, mm, m_t, inch] = match quantity {
+            Length => ["m", "mm", "m", "in"],
+            Angle => ["rad"; 4],
+            Mass => ["kg", "t", "t", "lbf·s²/in"],
+            Time => ["s"; 4],
+            Temperature => ["°C", "°C", "°C", "°F"],
+            Area => ["m²", "mm²", "m²", "in²"],
+            Volume => ["m³", "mm³", "m³", "in³"],
+            Velocity => ["m/s", "mm/s", "m/s", "in/s"],
+            RotationalSpeed => ["rad/s"; 4],
+            Acceleration => ["m/s²", "mm/s²", "m/s²", "in/s²"],
+            Force => ["N", "N", "kN", "lbf"],
+            ForcePerLength => ["N/m", "N/mm", "kN/m", "lbf/in"],
+            Moment => ["N·m", "N·mm", "kN·m", "lbf·in"],
+            Pressure => ["Pa", "MPa", "kPa", "psi"],
+            // The fourth power has no Latin-1 character, which the GUI font sticks to.
+            Density => ["kg/m³", "t/mm³", "t/m³", "lbf·s²/in^4"],
+            Energy => ["J", "mJ", "kJ", "lbf·in"],
+            Power => ["W", "mW", "kW", "lbf·in/s"],
+            Frequency => ["Hz"; 4],
+            ForcePerVolume => ["N/m³", "N/mm³", "kN/m³", "lbf/in³"],
+            HeatTransferCoefficient => ["W/(m²·°C)", "mW/(mm²·°C)", "kW/(m²·°C)", "lbf/(in·s·°F)"],
+        };
+        match self {
+            UnitSystem::Unitless => "",
+            UnitSystem::MKgSC => si,
+            UnitSystem::MmTonSC => mm,
+            UnitSystem::MTonSC => m_t,
+            UnitSystem::InLbSF => inch,
+        }
+    }
+
+    /// Length, mass, time and temperature difference of the system's units in SI units;
+    /// `None` without units.
+    fn base(self) -> Option<[f64; 4]> {
+        match self {
+            UnitSystem::Unitless => None,
+            UnitSystem::MKgSC => Some([1.0, 1.0, 1.0, 1.0]),
+            UnitSystem::MmTonSC => Some([1e-3, 1e3, 1.0, 1.0]),
+            UnitSystem::MTonSC => Some([1.0, 1e3, 1.0, 1.0]),
+            UnitSystem::InLbSF => Some([INCH, POUND_FORCE / INCH, 1.0, 5.0 / 9.0]),
+        }
+    }
+
+    /// Kelvin at zero of the system's temperature scale.
+    fn temperature_zero(self) -> f64 {
+        match self {
+            UnitSystem::InLbSF => 459.67 * 5.0 / 9.0,
+            _ => 273.15,
+        }
+    }
+
+    /// One unit of the quantity in SI units (angles in radian, temperature differences in
+    /// kelvin); `None` without units.
+    pub fn si_factor(self, quantity: Quantity) -> Option<f64> {
+        let [length, mass, time, temperature] = self.base()?;
+        let d = quantity.dimension();
+        Some(
+            length.powi(d.length.into())
+                * mass.powi(d.mass.into())
+                * time.powi(d.time.into())
+                * temperature.powi(d.temperature.into()),
+        )
+    }
+
+    /// A value of this system in SI units; temperatures in kelvin.
+    fn in_si(self, value: f64, quantity: Quantity) -> Option<f64> {
+        let si = value * self.si_factor(quantity)?;
+        Some(if quantity == Quantity::Temperature {
+            si + self.temperature_zero()
+        } else {
+            si
+        })
+    }
+
+    fn of_si(self, si: f64, quantity: Quantity) -> Option<f64> {
+        let si = if quantity == Quantity::Temperature {
+            si - self.temperature_zero()
+        } else {
+            si
+        };
+        Some(si / self.si_factor(quantity)?)
+    }
+
+    /// The value in the units of `target`. Without units on either side, it stays.
+    pub fn convert(self, value: f64, quantity: Quantity, target: UnitSystem) -> f64 {
+        self.in_si(value, quantity)
+            .and_then(|si| target.of_si(si, quantity))
+            .unwrap_or(value)
+    }
+
+    /// Factor that turns values of this system into values of `target`, 1 without units
+    /// on either side. Absolute temperatures also shift; [`Self::convert`] handles them.
+    pub fn factor_to(self, quantity: Quantity, target: UnitSystem) -> f64 {
+        match (self.si_factor(quantity), target.si_factor(quantity)) {
+            (Some(from), Some(to)) => from / to,
+            _ => 1.0,
+        }
+    }
+
+    /// Reads a value typed by the user, in this system's units unless the text names other
+    /// ones: "3 cm", "3cm" and "30" all give 30 in a millimetre model. The number takes `.`
+    /// or `,` as decimal separator and e-notation ([`parse_number`]); the unit may combine
+    /// units with prefixes, products, quotients and powers, e.g. "kN·m", "Nmm", "N/mm²",
+    /// "200 GPa", "7,85 g/cm³", "5°".
+    pub fn parse_value(self, text: &str, quantity: Quantity) -> Result<f64, String> {
+        let (number, unit) = split_number(text).ok_or_else(|| format!("Keine Zahl: {text}"))?;
+        if unit.is_empty() {
+            return Ok(number);
+        }
+        if !self.has_units() {
+            return Err("Das Modell hat kein Einheitensystem; bitte nur die Zahl angeben.".into());
+        }
+        let parsed = parse_unit(unit)?;
+        if parsed.dimension != quantity.dimension() {
+            return Err(format!(
+                "{unit} ist keine Einheit für {} ({})",
+                quantity.label(),
+                self.unit(quantity)
+            ));
+        }
+        // A temperature in °C or °F counts from its scale's zero; one in K is absolute.
+        let si = number * parsed.factor + parsed.zero.unwrap_or(0.0);
+        let value = if quantity == Quantity::Temperature {
+            self.of_si(si, quantity)
+        } else {
+            self.si_factor(quantity).map(|f| si / f)
+        };
+        value
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| format!("Wert außerhalb des Zahlenbereichs: {text}"))
+    }
+}
+
+/// Parses a number typed by the user.
+///
+/// Both `.` and `,` are accepted as decimal separator, as is e-notation
+/// (`2,1e5`, `2.1E-3`). There are no thousands separators, so `1.000,5` and
+/// `1 000` are rejected. Non-finite values are rejected as well.
+pub fn parse_number(text: &str) -> Option<f64> {
+    let text: String = text
+        .trim()
+        .chars()
+        .map(|c| match c {
+            ',' => '.',
+            // Typographic minus, as egui's own parser accepts it.
+            '\u{2212}' => '-',
+            c => c,
+        })
+        .collect();
+    if !text
+        .chars()
+        .all(|c| c.is_ascii_digit() || "+-.eE".contains(c))
+    {
+        return None;
+    }
+    text.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// The number at the start of the text and the unit after it: the longest start that is a
+/// number, so that "2e5Pa" is 2e5 Pa.
+fn split_number(text: &str) -> Option<(f64, &str)> {
+    let text = text.trim();
+    let ends: Vec<usize> = (text.char_indices().map(|(i, _)| i))
+        .skip(1)
+        .chain([text.len()])
+        .collect();
+    ends.into_iter()
+        .rev()
+        .find_map(|end| Some((parse_number(&text[..end])?, text[end..].trim())))
+}
+
+/// A unit read from text: its size in SI units and what it measures.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ParsedUnit {
+    pub factor: f64,
+    pub dimension: Dimension,
+    /// Kelvin at zero of a temperature scale, when the text is just that scale's unit
+    /// (°C, °F); a temperature in it is absolute.
+    pub zero: Option<f64>,
+}
+
+/// Units that can be typed. The bool marks units that take an SI prefix.
+const UNITS: &[(&str, f64, Dimension, bool)] = {
+    const L: Dimension = Dimension::new(1, 0, 0, 0, 0);
+    const M: Dimension = Dimension::new(0, 1, 0, 0, 0);
+    const T: Dimension = Dimension::new(0, 0, 1, 0, 0);
+    const K: Dimension = Dimension::new(0, 0, 0, 1, 0);
+    const A: Dimension = Dimension::new(0, 0, 0, 0, 1);
+    const F: Dimension = Dimension::new(1, 1, -2, 0, 0);
+    const P: Dimension = Dimension::new(-1, 1, -2, 0, 0);
+    const E: Dimension = Dimension::new(2, 1, -2, 0, 0);
+    const W: Dimension = Dimension::new(2, 1, -3, 0, 0);
+    const HZ: Dimension = Dimension::new(0, 0, -1, 0, 0);
+    const RPM: Dimension = Dimension::new(0, 0, -1, 0, 1);
+    const DEG: f64 = std::f64::consts::PI / 180.0;
+    &[
+        ("m", 1.0, L, true),
+        ("in", INCH, L, false),
+        ("inch", INCH, L, false),
+        ("ft", 0.3048, L, false),
+        ("g", 1e-3, M, true),
+        ("t", 1e3, M, false),
+        ("ton", 1e3, M, false),
+        ("lb", 0.453_592_37, M, false),
+        ("lbm", 0.453_592_37, M, false),
+        ("s", 1.0, T, true),
+        ("min", 60.0, T, false),
+        ("h", 3600.0, T, false),
+        ("K", 1.0, K, false),
+        ("°C", 1.0, K, false),
+        ("degC", 1.0, K, false),
+        ("°F", 5.0 / 9.0, K, false),
+        ("degF", 5.0 / 9.0, K, false),
+        ("rad", 1.0, A, true),
+        ("°", DEG, A, false),
+        ("deg", DEG, A, false),
+        ("N", 1.0, F, true),
+        ("lbf", POUND_FORCE, F, false),
+        ("kip", 1e3 * POUND_FORCE, F, false),
+        ("Pa", 1.0, P, true),
+        ("bar", 1e5, P, true),
+        ("psi", POUND_FORCE / (INCH * INCH), P, false),
+        ("ksi", 1e3 * POUND_FORCE / (INCH * INCH), P, false),
+        ("J", 1.0, E, true),
+        ("W", 1.0, W, true),
+        ("Hz", 1.0, HZ, true),
+        ("rpm", 2.0 * std::f64::consts::PI / 60.0, RPM, false),
+    ]
+};
+
+const PREFIXES: &[(&str, f64)] = &[
+    ("p", 1e-12),
+    ("n", 1e-9),
+    ("µ", 1e-6),
+    ("u", 1e-6),
+    ("m", 1e-3),
+    ("c", 1e-2),
+    ("d", 1e-1),
+    ("k", 1e3),
+    ("M", 1e6),
+    ("G", 1e9),
+    ("T", 1e12),
+];
+
+/// A unit symbol read: its size in SI units, what it measures and its name without prefix.
+type Symbol = (f64, Dimension, &'static str);
+
+/// One unit symbol, possibly with a prefix: "mm", "kN", "°C".
+fn symbol(text: &str) -> Option<Symbol> {
+    if let Some(&(name, factor, dimension, _)) = UNITS.iter().find(|u| u.0 == text) {
+        return Some((factor, dimension, name));
+    }
+    PREFIXES.iter().find_map(|&(prefix, scale)| {
+        let rest = text.strip_prefix(prefix)?;
+        let &(name, factor, dimension, _) = UNITS.iter().find(|u| u.0 == rest && u.3)?;
+        Some((scale * factor, dimension, name))
+    })
+}
+
+/// A run of letters as a product of unit symbols, with as few symbols as possible, so that
+/// "Nmm" is N·mm and "kNm" is kN·m.
+fn word(text: &str) -> Option<Vec<Symbol>> {
+    let ends: Vec<usize> = (text.char_indices().map(|(i, _)| i))
+        .skip(1)
+        .chain([text.len()])
+        .collect();
+    let starts: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+    // best[k]: the fewest symbols that make up the text up to the k-th end.
+    let mut best: Vec<Option<Vec<Symbol>>> = vec![None; ends.len()];
+    for (k, &end) in ends.iter().enumerate() {
+        for (j, &start) in starts.iter().enumerate().take(k + 1) {
+            let before = if j == 0 {
+                Some(Vec::new())
+            } else {
+                best[j - 1].clone()
+            };
+            let (Some(mut before), Some(unit)) = (before, symbol(&text[start..end])) else {
+                continue;
+            };
+            before.push(unit);
+            if best[k].as_ref().is_none_or(|b| before.len() < b.len()) {
+                best[k] = Some(before);
+            }
+        }
+    }
+    best.pop().flatten()
+}
+
+/// Reads a unit such as "N/mm²", "kN·m", "W/(m²·K)" or "mm^-1".
+pub fn parse_unit(text: &str) -> Result<ParsedUnit, String> {
+    let text = text.trim();
+    let mut parser = UnitParser {
+        chars: text.chars().collect(),
+        at: 0,
+    };
+    let (factor, dimension, symbols) = parser
+        .product()
+        .filter(|_| parser.at == parser.chars.len())
+        .ok_or_else(|| format!("Unbekannte Einheit: {text}"))?;
+    let zero = match symbols.as_slice() {
+        ["°C" | "degC"] => Some(273.15),
+        ["°F" | "degF"] => Some(459.67 * 5.0 / 9.0),
+        _ => None,
+    };
+    Ok(ParsedUnit {
+        factor,
+        dimension,
+        zero,
+    })
+}
+
+struct UnitParser {
+    chars: Vec<char>,
+    at: usize,
+}
+
+type Term = (f64, Dimension, Vec<&'static str>);
+
+impl UnitParser {
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.at).copied()
+    }
+
+    fn skip_blanks(&mut self) {
+        while self.peek().is_some_and(char::is_whitespace) {
+            self.at += 1;
+        }
+    }
+
+    /// Factors joined by `*`, `·`, blanks or `/`.
+    fn product(&mut self) -> Option<Term> {
+        self.skip_blanks();
+        let (mut factor, mut dimension, mut symbols) = self.power()?;
+        loop {
+            self.skip_blanks();
+            let divide = match self.peek() {
+                Some('/') => true,
+                Some('*' | '·' | '×') => false,
+                Some(c) if is_unit_char(c) || c == '(' || c == '1' => {
+                    // Juxtaposed: "N m".
+                    let (f, d, s) = self.power()?;
+                    factor *= f;
+                    dimension = dimension.times(d);
+                    symbols.extend(s);
+                    continue;
+                }
+                _ => return Some((factor, dimension, symbols)),
+            };
+            self.at += 1;
+            self.skip_blanks();
+            let (f, d, s) = self.power()?;
+            if divide {
+                factor /= f;
+                dimension = dimension.times(d.powi(-1));
+            } else {
+                factor *= f;
+                dimension = dimension.times(d);
+            }
+            symbols.extend(s);
+        }
+    }
+
+    /// A unit or a bracketed product with an optional exponent: `mm²`, `mm2`, `s^-1`.
+    fn power(&mut self) -> Option<Term> {
+        let (factor, dimension, symbols) = self.atom()?;
+        let exponent = self.exponent()?;
+        Some((
+            factor.powi(exponent.into()),
+            dimension.powi(exponent),
+            symbols,
+        ))
+    }
+
+    fn atom(&mut self) -> Option<Term> {
+        match self.peek()? {
+            '(' => {
+                self.at += 1;
+                let term = self.product()?;
+                self.skip_blanks();
+                (self.peek()? == ')').then(|| self.at += 1)?;
+                Some(term)
+            }
+            // "1/s"
+            '1' => {
+                self.at += 1;
+                Some((1.0, Dimension::default(), Vec::new()))
+            }
+            c if is_unit_char(c) => {
+                let start = self.at;
+                while self.peek().is_some_and(is_unit_char) {
+                    self.at += 1;
+                }
+                let text: String = self.chars[start..self.at].iter().collect();
+                let units = word(&text)?;
+                let factor = units.iter().map(|u| u.0).product();
+                let dimension = (units.iter()).fold(Dimension::default(), |d, u| d.times(u.1));
+                Some((factor, dimension, units.iter().map(|u| u.2).collect()))
+            }
+            _ => None,
+        }
+    }
+
+    /// The exponent after a unit, 1 if there is none.
+    fn exponent(&mut self) -> Option<i8> {
+        match self.peek() {
+            Some('²') => {
+                self.at += 1;
+                Some(2)
+            }
+            Some('³') => {
+                self.at += 1;
+                Some(3)
+            }
+            Some('^') => {
+                self.at += 1;
+                let negative = self.peek() == Some('-');
+                if negative {
+                    self.at += 1;
+                }
+                let n = self.digits()?;
+                Some(if negative { -n } else { n })
+            }
+            Some(c) if c.is_ascii_digit() => self.digits(),
+            _ => Some(1),
+        }
+    }
+
+    fn digits(&mut self) -> Option<i8> {
+        let start = self.at;
+        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+            self.at += 1;
+        }
+        let text: String = self.chars[start..self.at].iter().collect();
+        text.parse().ok().filter(|&n: &i8| n.abs() <= 9)
+    }
+}
+
+fn is_unit_char(c: char) -> bool {
+    c.is_alphabetic() || c == '°'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use Quantity::*;
+    use UnitSystem::*;
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1e-300)
+    }
+
+    #[track_caller]
+    fn parses(units: UnitSystem, text: &str, quantity: Quantity, expected: f64) {
+        let value = units.parse_value(text, quantity).unwrap();
+        assert!(close(value, expected), "{text}: {value} != {expected}");
+    }
+
+    #[test]
+    fn lengths_in_other_units_are_converted() {
+        parses(MmTonSC, "3cm", Length, 30.0);
+        parses(MmTonSC, "3 cm", Length, 30.0);
+        parses(MmTonSC, "30", Length, 30.0);
+        parses(MmTonSC, "2,5 m", Length, 2500.0);
+        parses(MmTonSC, "1in", Length, 25.4);
+        parses(MKgSC, "3cm", Length, 0.03);
+        parses(InLbSF, "25.4mm", Length, 1.0);
+        parses(MmTonSC, "-1e-3 m", Length, -1.0);
+        parses(MmTonSC, "5 µm", Length, 0.005);
+    }
+
+    #[test]
+    fn derived_units_are_converted() {
+        parses(MmTonSC, "210 GPa", Pressure, 210_000.0);
+        parses(MmTonSC, "2,1e5MPa", Pressure, 2.1e5);
+        parses(MKgSC, "1 MPa", Pressure, 1e6);
+        parses(MTonSC, "1 MPa", Pressure, 1e3);
+        parses(MmTonSC, "1 N/mm²", Pressure, 1.0);
+        parses(MmTonSC, "1 N/mm2", Pressure, 1.0);
+        parses(MmTonSC, "1 bar", Pressure, 0.1);
+        parses(MmTonSC, "7850 kg/m³", Density, 7.85e-9);
+        parses(MmTonSC, "7,85 g/cm^3", Density, 7.85e-9);
+        parses(MmTonSC, "1 kN", Force, 1000.0);
+        parses(MTonSC, "1 kN", Force, 1.0);
+        parses(InLbSF, "1 lbf", Force, 1.0);
+        parses(MmTonSC, "1 Nm", Moment, 1000.0);
+        parses(MmTonSC, "1 kNm", Moment, 1e6);
+        parses(MmTonSC, "1 N·m", Moment, 1000.0);
+        parses(MmTonSC, "1 N*m", Moment, 1000.0);
+        parses(MmTonSC, "1 kN/m", ForcePerLength, 1.0);
+        parses(MmTonSC, "1 N/m³", ForcePerVolume, 1e-9);
+        parses(MmTonSC, "1 W/(m²·K)", HeatTransferCoefficient, 1e-3);
+        parses(MmTonSC, "1 kHz", Frequency, 1000.0);
+        parses(MmTonSC, "1 min", Time, 60.0);
+        parses(MmTonSC, "2 ms", Time, 0.002);
+        parses(
+            MmTonSC,
+            "60 rpm",
+            RotationalSpeed,
+            2.0 * std::f64::consts::PI,
+        );
+        parses(InLbSF, "1 psi", Pressure, 1.0);
+    }
+
+    #[test]
+    fn angles_and_temperatures() {
+        parses(MmTonSC, "180°", Angle, std::f64::consts::PI);
+        parses(MmTonSC, "90 deg", Angle, std::f64::consts::FRAC_PI_2);
+        parses(MmTonSC, "0.5 rad", Angle, 0.5);
+        parses(MmTonSC, "20 °C", Temperature, 20.0);
+        parses(MmTonSC, "300 K", Temperature, 300.0 - 273.15);
+        parses(MmTonSC, "212 °F", Temperature, 100.0);
+        parses(InLbSF, "100 °C", Temperature, 212.0);
+    }
+
+    #[test]
+    fn wrong_or_unknown_units_are_refused() {
+        assert!(MmTonSC.parse_value("3 kg", Length).is_err());
+        assert!(MmTonSC.parse_value("3 xyz", Length).is_err());
+        assert!(MmTonSC.parse_value("3 Hz", RotationalSpeed).is_err());
+        assert!(MmTonSC.parse_value("cm", Length).is_err());
+        assert!(MmTonSC.parse_value("", Length).is_err());
+        // Without a unit system only plain numbers are taken.
+        assert!(Unitless.parse_value("3 cm", Length).is_err());
+        assert_eq!(Unitless.parse_value("3", Length), Ok(3.0));
+    }
+
+    #[test]
+    fn units_with_prefixes_and_products_are_told_apart() {
+        // "mN" is a millinewton, "Nm" a newton metre, "min" a minute, "nm" a nanometre.
+        assert_eq!(parse_unit("mN").unwrap().dimension, Force.dimension());
+        assert_eq!(parse_unit("Nm").unwrap().dimension, Moment.dimension());
+        assert_eq!(parse_unit("min").unwrap().factor, 60.0);
+        assert!(close(parse_unit("nm").unwrap().factor, 1e-9));
+        assert!(close(parse_unit("Nmm").unwrap().factor, 1e-3));
+    }
+
+    #[test]
+    fn systems_convert_into_each_other() {
+        assert!(close(MmTonSC.convert(1.0, Length, MKgSC), 1e-3));
+        assert!(close(MmTonSC.convert(210_000.0, Pressure, MKgSC), 2.1e11));
+        assert!(close(MmTonSC.convert(7.85e-9, Density, MKgSC), 7850.0));
+        assert!(close(MKgSC.convert(1.0, Force, MTonSC), 1e-3));
+        assert!(close(MmTonSC.convert(1.0, Energy, MKgSC), 1e-3));
+        assert!(close(MmTonSC.convert(25.4, Length, InLbSF), 1.0));
+        assert!(close(MmTonSC.convert(100.0, Temperature, InLbSF), 212.0));
+        assert!(close(
+            InLbSF.convert(1.0, Pressure, MKgSC),
+            6_894.757_293_168
+        ));
+        assert_eq!(MmTonSC.convert(5.0, Length, Unitless), 5.0);
+        assert_eq!(MmTonSC.factor_to(Pressure, MKgSC), 1e6);
+    }
+
+    #[test]
+    fn derived_units_match_the_base_units() {
+        // The named unit of each quantity is the system's unit: one of it parses to 1.
+        for units in [MKgSC, MmTonSC, MTonSC, InLbSF] {
+            for quantity in BASE_QUANTITIES
+                .into_iter()
+                .chain(DERIVED_QUANTITIES)
+                .chain([ForcePerVolume, HeatTransferCoefficient])
+            {
+                let unit = units.unit(quantity);
+                let text = format!("1 {unit}");
+                parses(units, &text, quantity, 1.0);
+            }
+        }
+    }
+}
