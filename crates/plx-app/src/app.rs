@@ -39,6 +39,8 @@ use plx_render::RenderMesh;
 enum LoadEvent {
     Started(PathBuf),
     Finished(PathBuf, Result<Box<LoadedModel>, String>),
+    /// CAD files added to the geometry of the open model.
+    Added(Vec<PathBuf>, Result<Box<plx_mesher::CadAddition>, String>),
 }
 
 struct Workbench {
@@ -286,7 +288,8 @@ impl PrepolixApp {
     }
 
     /// PrePoMax's Geometry > Import: one or several STEP, IGES or BREP files, read into
-    /// one geometry.
+    /// one geometry. A model that already has geometry or a mesh keeps it; the new parts
+    /// are added.
     fn import_dialog(&mut self, ctx: &egui::Context) {
         if self.loading.is_some() {
             return;
@@ -294,13 +297,34 @@ impl PrepolixApp {
         let sender = self.load_events.0.clone();
         let ctx = ctx.clone();
         let units = self.workbench.import_units();
+        // What the new parts are added to: the geometry, if any, and the names of the
+        // mesh parts they must not take.
+        let base = (self.workbench.model.as_ref())
+            .filter(|m| m.geometry.is_some() || m.mesh.element_count() > 0)
+            .map(|m| {
+                let taken: Vec<String> = m.parts.iter().map(|p| p.name.clone()).collect();
+                (m.geometry.clone(), taken, m.fe.properties.units)
+            });
         std::thread::spawn(move || {
             let picked = rfd::FileDialog::new()
                 .set_title("Geometrie importieren")
                 .add_filter(GEOMETRY_FILTER.0, GEOMETRY_FILTER.1)
                 .pick_files();
-            if let Some(paths) = picked.filter(|p| !p.is_empty()) {
-                load_geometry_in_background(paths, units, sender, ctx);
+            let Some(paths) = picked.filter(|p| !p.is_empty()) else {
+                return;
+            };
+            match base {
+                Some((geometry, taken, units)) => {
+                    let _ = sender.send(LoadEvent::Started(paths[0].clone()));
+                    ctx.request_repaint();
+                    let result =
+                        plx_mesher::add_cad_files(geometry.as_ref(), &paths, units, &taken)
+                            .map(Box::new)
+                            .map_err(|e| e.to_string());
+                    let _ = sender.send(LoadEvent::Added(paths, result));
+                    ctx.request_repaint();
+                }
+                None => load_geometry_in_background(paths, units, sender, ctx),
             }
         });
     }
@@ -328,6 +352,10 @@ impl PrepolixApp {
                 LoadEvent::Finished(path, result) => {
                     self.loading = None;
                     self.workbench.model_loaded(path, result);
+                }
+                LoadEvent::Added(paths, result) => {
+                    self.loading = None;
+                    self.workbench.geometry_added(&paths, result);
                 }
             }
         }
@@ -2734,6 +2762,79 @@ impl Workbench {
         }
     }
 
+    /// PrePoMax's import into a model with geometry or a mesh: the new parts join the
+    /// geometry. The parts already there keep their names, and the selections on the
+    /// geometry and the mesh follow Gmsh's new numbering of the faces, edges and vertices.
+    fn geometry_added(
+        &mut self,
+        paths: &[PathBuf],
+        result: Result<Box<plx_mesher::CadAddition>, String>,
+    ) {
+        let files: Vec<String> = (paths.iter())
+            .map(|p| {
+                p.file_name().map_or_else(
+                    || p.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        let files = files.join(", ");
+        let addition = match result {
+            Ok(addition) => *addition,
+            Err(error) => {
+                self.output
+                    .push(format!("Fehler beim Import von {files}: {error}"));
+                return;
+            }
+        };
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        let plx_mesher::CadAddition {
+            import,
+            renumbered,
+            added,
+        } = addition;
+        let view = Model::geometry_view(&model.path, import.display);
+        match geometry_check(model.fe.properties.space, &view) {
+            Ok(faces) if !faces.is_empty() => {
+                let faces: Vec<String> = faces.iter().map(i32::to_string).collect();
+                self.output.push(format!(
+                    "Hinweis: Normale von Fläche {} zeigt in -z; die Elemente werden beim \
+                     Vernetzen umgedreht.",
+                    faces.join(", ")
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.output
+                    .push(format!("Fehler beim Import von {files}: {error}"));
+                return;
+            }
+        }
+        if model.geometry.is_some() {
+            model.fe.renumber_cad(&renumbered);
+            if model.has_cad() {
+                let mut mesh = model.mesh.clone();
+                mesh.cad = mesh.cad.renumbered(&renumbered);
+                model.set_mesh(mesh);
+            }
+        }
+        model.geometry = Some(import.geometry);
+        for warning in &import.warnings {
+            self.output.push(format!("Warnung: {warning}"));
+        }
+        self.output.push(format!(
+            "{files} importiert: {} Part(s) hinzugefügt ({})",
+            added.len(),
+            added.join(", ")
+        ));
+        self.geometry = Some(view);
+        self.after_parts_changed();
+        self.set_tree_view(TreeView::Geometry);
+        self.view_command = Some(ViewCommand::Fit);
+    }
+
     /// PrePoMax's Delete of a geometry part: the geometry loses the solid or face; a mesh
     /// already generated from it stays, as a part of the FE model.
     fn delete_geometry_part(&mut self, index: usize) {
@@ -2777,7 +2878,7 @@ impl Workbench {
         };
         model.geometry = smaller;
         self.output.push(format!("Part {name} gelöscht"));
-        self.after_part_deleted();
+        self.after_parts_changed();
     }
 
     /// PrePoMax's Delete of a mesh part: its elements go, with the nodes no other part has.
@@ -2791,10 +2892,10 @@ impl Workbench {
         let smaller = plx_mesher::delete_mesh_part(&model.mesh, &name);
         model.set_mesh(smaller);
         self.output.push(format!("Part {name} gelöscht"));
-        self.after_part_deleted();
+        self.after_parts_changed();
     }
 
-    fn after_part_deleted(&mut self) {
+    fn after_parts_changed(&mut self) {
         self.tree.selected = None;
         self.menu_part = None;
         self.dialog = None;
