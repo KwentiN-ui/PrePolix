@@ -17,7 +17,11 @@ import hashlib
 import io
 import json
 import pathlib
+import shutil
+import ssl
+import subprocess
 import sys
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -30,9 +34,29 @@ WHEEL_TAGS = {
 }
 
 
+def download(url):
+    """Fetches a URL. Python builds without CA certificates (e.g. the one bundled with
+    Inkscape on Windows) cannot check HTTPS certificates; then the system's curl, which uses
+    the system's certificate store, fetches instead. The wheel's SHA-256 is checked anyway."""
+    try:
+        with urllib.request.urlopen(url) as response:
+            return response.read()
+    except urllib.error.URLError as error:
+        if not isinstance(error.reason, ssl.SSLError):
+            raise
+        curl = shutil.which("curl")
+        if curl is None:
+            sys.exit(f"HTTPS-Zertifikate nicht prüfbar ({error.reason}) und kein curl gefunden")
+        print("Python kann das Zertifikat nicht prüfen, lade mit curl")
+        return subprocess.run(
+            [curl, "--fail", "--silent", "--show-error", "--location", url],
+            check=True,
+            stdout=subprocess.PIPE,
+        ).stdout
+
+
 def wheel_url(platform):
-    with urllib.request.urlopen(f"https://pypi.org/pypi/gmsh/{VERSION}/json") as response:
-        release = json.load(response)
+    release = json.loads(download(f"https://pypi.org/pypi/gmsh/{VERSION}/json"))
     for file in release["urls"]:
         if file["filename"].endswith(f"{WHEEL_TAGS[platform]}.whl"):
             return file["url"], file["digests"]["sha256"]
@@ -49,8 +73,7 @@ def main():
 
     url, sha256 = wheel_url(args.platform)
     print(f"Lade {url}")
-    with urllib.request.urlopen(url) as response:
-        data = response.read()
+    data = download(url)
     if hashlib.sha256(data).hexdigest() != sha256:
         sys.exit("Prüfsumme stimmt nicht, Download verworfen")
 
