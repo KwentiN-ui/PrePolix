@@ -289,6 +289,8 @@ impl ContactSearchDialog {
             .inner_margin(4.0)
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
+                // Solid scroll bars take their own space instead of covering the last row.
+                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
                 egui::ScrollArea::both().show(ui, |ui| {
                     ui.vertical(|ui| self.rows_grid(ui));
                 });

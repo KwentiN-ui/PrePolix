@@ -3,13 +3,15 @@
 //! as in PrePoMax; the master shows in the primary, the slave in the secondary highlight
 //! colour.
 
-use egui::Ui;
+use egui::{RichText, Ui};
 use plx_mesh::FeMesh;
 use plx_model::{
     ContactMethod, ContactPair, FeModel, Friction, GapConductance, InteractionProperty, Region,
     SurfaceBehavior, SurfaceInteraction, Tie,
 };
 
+use crate::icons::{self, Icon};
+use crate::keywords::{frame, tree_row};
 use crate::model::{Highlight, Model};
 use crate::numeric;
 use crate::selection::Target;
@@ -194,216 +196,416 @@ pub fn validate_contact_pair(pair: &ContactPair, fe: &FeModel) -> Result<(), Str
     Ok(())
 }
 
-/// The interaction models of a surface interaction: PrePoMax's lists of available and
-/// selected models, and the properties of the selected one below.
-pub fn interaction_form(ui: &mut Ui, interaction: &mut SurfaceInteraction, selected: &mut usize) {
-    ui.label("Interaction Models");
-    ui.horizontal_top(|ui| {
-        let list = |ui: &mut Ui, title: &str, body: &mut dyn FnMut(&mut Ui)| {
-            ui.vertical(|ui| {
-                ui.label(title);
-                egui::Frame::new()
-                    .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-                    .fill(ui.visuals().extreme_bg_color)
-                    .inner_margin(4.0)
-                    .show(ui, |ui| {
-                        ui.set_min_size(egui::vec2(140.0, 70.0));
-                        body(ui);
-                    });
-            });
-        };
-        let mut add = None;
-        list(ui, "Verfügbar", &mut |ui| {
-            for model in InteractionProperty::all() {
-                let taken = (interaction.properties.iter())
-                    .any(|p| std::mem::discriminant(p) == std::mem::discriminant(&model));
-                let response = ui.add_enabled(!taken, egui::Button::new(model.name()).frame(false));
-                if response
-                    .on_hover_text("Doppelklick fügt hinzu")
-                    .double_clicked()
-                {
-                    add = Some(model);
+/// A row's title and description, shown below the property grid like in PrePoMax.
+type Description = (&'static str, &'static str);
+
+/// What the surface interaction dialog shows: the model selected in each list and the
+/// focused property.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InteractionView {
+    /// The model selected in the Selected list, whose properties are shown.
+    selected: Option<usize>,
+    /// The model selected in the Available list, added by the arrow button.
+    available: Option<usize>,
+    focus: Option<Description>,
+}
+
+impl InteractionView {
+    pub fn new(interaction: &SurfaceInteraction) -> Self {
+        Self {
+            selected: (!interaction.properties.is_empty()).then_some(0),
+            ..Self::default()
+        }
+    }
+}
+
+/// PrePoMax's "Create surface interaction" dialog: the name, the lists of available and
+/// selected interaction models, the properties of the selected model and their description.
+pub fn interaction_dialog(
+    ui: &mut Ui,
+    interaction: &mut SurfaceInteraction,
+    view: &mut InteractionView,
+) {
+    // As wide as the title, which grows with the name.
+    ui.set_min_width(420.0);
+    group(ui, "Daten", |ui| {
+        let mut focus = None;
+        egui::Grid::new("interaction data")
+            .num_columns(2)
+            .min_col_width(110.0)
+            .show(ui, |ui| {
+                let label = ui.add(egui::Label::new("Name").sense(egui::Sense::click()));
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut interaction.name)
+                        .desired_width(ui.available_width()),
+                );
+                if label.clicked() || edit.has_focus() {
+                    focus = Some(("Name", "Name der Surface Interaction."));
                 }
+            });
+        if focus.is_some() {
+            view.focus = focus;
+        }
+    });
+    group(ui, "Interaction Models", |ui| {
+        model_lists(ui, interaction, view)
+    });
+    ui.add_space(4.0);
+    ui.strong("Eigenschaften");
+    frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.set_min_height(150.0);
+        match view
+            .selected
+            .and_then(|i| interaction.properties.get_mut(i))
+        {
+            Some(property) => {
+                category(ui, property.name());
+                let mut rows = Rows {
+                    focus: &mut view.focus,
+                };
+                egui::Grid::new(("interaction properties", property.name()))
+                    .num_columns(2)
+                    .striped(true)
+                    .min_col_width(110.0)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| match property {
+                        InteractionProperty::SurfaceBehavior(b) => rows.surface_behavior(ui, b),
+                        InteractionProperty::Friction(f) => rows.friction(ui, f),
+                        InteractionProperty::GapConductance(g) => rows.gap_conductance(ui, g),
+                    });
             }
+            None => {
+                ui.weak("Ein Modell aus der Liste Gewählt zeigt hier seine Eigenschaften.");
+            }
+        }
+    });
+    ui.add_space(4.0);
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.set_height(60.0);
+        let selected = view.selected.and_then(|i| interaction.properties.get(i));
+        if let Some((title, text)) = view.focus.or_else(|| selected.map(model_description)) {
+            ui.strong(title);
+            ui.label(text);
+        }
+    });
+}
+
+/// The Available list, the add and remove buttons and the Selected list.
+fn model_lists(ui: &mut Ui, interaction: &mut SurfaceInteraction, view: &mut InteractionView) {
+    let height = 72.0;
+    let all = InteractionProperty::all();
+    let taken = |interaction: &SurfaceInteraction, model: &InteractionProperty| {
+        (interaction.properties.iter())
+            .any(|p| std::mem::discriminant(p) == std::mem::discriminant(model))
+    };
+    let mut add = false;
+    ui.horizontal_top(|ui| {
+        ui.vertical(|ui| {
+            ui.label("Verfügbar");
+            frame().show(ui, |ui| {
+                ui.set_width(140.0);
+                ui.set_height(height);
+                for (i, model) in all.iter().enumerate() {
+                    let used = taken(interaction, model);
+                    let selected = view.available == Some(i);
+                    let row = ui
+                        .add_enabled_ui(!used, |ui| {
+                            tree_row(ui, 0, None, selected, RichText::new(model.name()))
+                        })
+                        .inner;
+                    if row.clicked() {
+                        view.available = Some(i);
+                        view.focus = None;
+                    }
+                    if row.double_clicked() {
+                        add = true;
+                    }
+                }
+            });
         });
         ui.vertical(|ui| {
-            ui.add_space(18.0);
-            let next = InteractionProperty::all().into_iter().find(|model| {
-                !(interaction.properties.iter())
-                    .any(|p| std::mem::discriminant(p) == std::mem::discriminant(model))
+            ui.add_space(22.0);
+            let can_add = view
+                .available
+                .and_then(|i| all.get(i))
+                .is_some_and(|model| !taken(interaction, model));
+            let arrow = Icon::Arrow(egui::vec2(1.0, 0.0));
+            if icons::dialog_button(ui, arrow, "Hinzufügen", can_add).clicked() {
+                add = true;
+            }
+            let can_remove = view.selected.is_some();
+            if icons::dialog_button(ui, Icon::Remove, "Entfernen", can_remove).clicked()
+                && let Some(index) = view.selected
+            {
+                interaction.properties.remove(index);
+                let len = interaction.properties.len();
+                view.selected = (len > 0).then(|| index.min(len - 1));
+                view.focus = None;
+            }
+        });
+        if add
+            && let Some(model) = view.available.and_then(|i| all.get(i))
+            && !taken(interaction, model)
+        {
+            interaction.properties.push(model.clone());
+            view.selected = Some(interaction.properties.len() - 1);
+            // The next model still available is ready for the next click on the arrow.
+            view.available = (all.iter()).position(|model| !taken(interaction, model));
+            view.focus = None;
+        }
+        ui.vertical(|ui| {
+            ui.label("Gewählt");
+            frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_height(height);
+                for (i, property) in interaction.properties.iter().enumerate() {
+                    let selected = view.selected == Some(i);
+                    if tree_row(ui, 0, None, selected, RichText::new(property.name())).clicked() {
+                        view.selected = Some(i);
+                        view.focus = None;
+                    }
+                }
             });
-            if ui
-                .add_enabled(next.is_some(), egui::Button::new("Hinzufügen >"))
-                .on_hover_text("Fügt das nächste verfügbare Modell hinzu")
-                .clicked()
-            {
-                add = next;
-            }
-            let can_remove = *selected < interaction.properties.len();
-            if ui
-                .add_enabled(can_remove, egui::Button::new("< Entfernen"))
-                .clicked()
-            {
-                interaction.properties.remove(*selected);
-                *selected = selected.saturating_sub(1);
-            }
-        });
-        if let Some(model) = add {
-            interaction.properties.push(model);
-            *selected = interaction.properties.len() - 1;
-        }
-        list(ui, "Gewählt", &mut |ui| {
-            for (i, property) in interaction.properties.iter().enumerate() {
-                if ui
-                    .selectable_label(*selected == i, property.name())
-                    .clicked()
-                {
-                    *selected = i;
-                }
-            }
         });
     });
-    ui.end_row();
-    let Some(property) = interaction.properties.get_mut(*selected) else {
-        return;
-    };
-    ui.label("");
-    ui.strong(property.name());
-    ui.end_row();
+}
+
+fn model_description(property: &InteractionProperty) -> Description {
     match property {
-        InteractionProperty::SurfaceBehavior(behavior) => surface_behavior_form(ui, behavior),
-        InteractionProperty::Friction(friction) => friction_form(ui, friction),
-        InteractionProperty::GapConductance(conductance) => gap_conductance_form(ui, conductance),
+        InteractionProperty::SurfaceBehavior(_) => (
+            "Surface Behavior",
+            "Kontaktdruck in Abhängigkeit von der Eindringung der Flächen.",
+        ),
+        InteractionProperty::Friction(_) => (
+            "Friction",
+            "Reibung zwischen den Kontaktflächen nach Coulomb.",
+        ),
+        InteractionProperty::GapConductance(_) => (
+            "Gap Conductance",
+            "Wärmeleitung über den Spalt zwischen den Kontaktflächen.",
+        ),
     }
 }
 
-fn surface_behavior_form(ui: &mut Ui, behavior: &mut SurfaceBehavior) {
-    ui.label("Druck-Eindringung");
-    egui::ComboBox::from_id_salt("pressure overclosure")
-        .selected_text(behavior.keyword())
-        .show_ui(ui, |ui| {
-            for kind in SurfaceBehavior::kinds() {
-                let same = std::mem::discriminant(&kind) == std::mem::discriminant(behavior);
-                if ui.selectable_label(same, kind.keyword()).clicked() && !same {
-                    // Switching the kind starts with its default values, as in PrePoMax.
-                    *behavior = kind;
-                }
-            }
-        });
-    ui.end_row();
-    match behavior {
-        SurfaceBehavior::Hard => {
-            ui.label("");
-            ui.weak("Keine Durchdringung der Flächen.");
-            ui.end_row();
-        }
-        SurfaceBehavior::Linear { k, sigma_inf, c0 } => {
-            value_row(ui, "K", k, "Steigung, etwa 5- bis 50-mal der E-Modul");
-            value_row(
-                ui,
-                "Sigma unendlich",
-                sigma_inf,
-                "Zugspannung bei großem Spalt, etwa 0,25 % der größten Vergleichsspannung",
-            );
-            optional_row(ui, "c0", c0, 1.0);
-        }
-        SurfaceBehavior::Exponential { c0, p0 } => {
-            value_row(
-                ui,
-                "c0",
-                c0,
-                "Spalt, bei dem der Druck auf 1 % von p0 fällt",
-            );
-            value_row(ui, "p0", p0, "Kontaktdruck bei Spalt null");
-        }
-        SurfaceBehavior::Tabular(rows) => {
-            table(
-                ui,
-                rows,
-                ["Druck", "Eindringung"],
-                "pressure overclosure table",
-            );
-        }
-        SurfaceBehavior::Tied { k } => {
-            value_row(ui, "K", k, "Steifigkeit der Verbindung");
-        }
-    }
+/// Width of the number fields of the property grid.
+fn field_size(ui: &Ui) -> egui::Vec2 {
+    egui::vec2(120.0, ui.spacing().interact_size.y)
 }
 
-fn friction_form(ui: &mut Ui, friction: &mut Friction) {
-    ui.label("Reibungskoeffizient");
-    ui.add(
-        numeric::drag_value(&mut friction.coefficient)
-            .range(0.0..=f64::MAX)
-            .speed(0.01),
-    );
-    ui.end_row();
-    optional_row(ui, "Haftsteigung", &mut friction.stick_slope, 1e5);
-}
-
-fn gap_conductance_form(ui: &mut Ui, conductance: &mut GapConductance) {
-    ui.label("Art");
-    ui.horizontal(|ui| {
-        let constant = matches!(conductance, GapConductance::Constant(_));
-        if ui.radio(constant, "Konstant").clicked() && !constant {
-            *conductance = GapConductance::Constant(0.0);
-        }
-        if ui.radio(!constant, "Tabelle").clicked() && constant {
-            *conductance = GapConductance::Tabular(vec![[0.0; 3]]);
-        }
+/// Category header like PrePoMax's property grid.
+fn category(ui: &mut Ui, title: &str) {
+    let header = egui::Frame::new()
+        .fill(crate::style::CONTROL)
+        .inner_margin(egui::Margin::symmetric(4, 1));
+    header.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.strong(title);
     });
-    ui.end_row();
-    match conductance {
-        GapConductance::Constant(value) => {
-            value_row(ui, "Leitwert", value, "Wärmestrom je Temperaturdifferenz");
+}
+
+/// A titled frame like a Windows group box.
+fn group(ui: &mut Ui, title: &str, contents: impl FnOnce(&mut Ui)) {
+    ui.add_space(4.0);
+    ui.strong(title);
+    egui::Frame::new()
+        .stroke(egui::Stroke::new(1.0, crate::style::BORDER))
+        .inner_margin(6)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            contents(ui);
+        });
+}
+
+/// Rows of the property grid; a click on a row or its editor shows its description.
+struct Rows<'a> {
+    focus: &'a mut Option<Description>,
+}
+
+impl Rows<'_> {
+    fn row(
+        &mut self,
+        ui: &mut Ui,
+        description: Description,
+        editor: impl FnOnce(&mut Ui) -> egui::Response,
+    ) {
+        let label = ui.add(egui::Label::new(description.0).sense(egui::Sense::click()));
+        let response = editor(ui);
+        if label.clicked() || response.clicked() || response.has_focus() || response.changed() {
+            *self.focus = Some(description);
         }
-        GapConductance::Tabular(rows) => {
-            table(
-                ui,
-                rows,
-                ["Leitwert", "Druck", "Temperatur"],
-                "conductance table",
-            );
+        ui.end_row();
+    }
+
+    fn value(&mut self, ui: &mut Ui, description: Description, value: &mut f64) {
+        self.row(ui, description, |ui| {
+            ui.add_sized(field_size(ui), number(value))
+        });
+    }
+
+    /// A value CalculiX may leave out; the checkbox writes it.
+    fn optional(
+        &mut self,
+        ui: &mut Ui,
+        description: Description,
+        value: &mut Option<f64>,
+        default: f64,
+    ) {
+        let mut set = value.is_some();
+        let mut number_value = value.unwrap_or(default);
+        let label = ui.checkbox(&mut set, description.0);
+        let size = field_size(ui);
+        let response = ui
+            .add_enabled_ui(set, |ui| ui.add_sized(size, number(&mut number_value)))
+            .inner;
+        if label.changed() || response.has_focus() || response.changed() {
+            *self.focus = Some(description);
+        }
+        *value = set.then_some(number_value);
+        ui.end_row();
+    }
+
+    fn surface_behavior(&mut self, ui: &mut Ui, behavior: &mut SurfaceBehavior) {
+        let description = (
+            "Druck-Eindringung",
+            "Kennlinie des Kontaktdrucks über der Eindringung (Pressure-overclosure).",
+        );
+        self.row(ui, description, |ui| {
+            egui::ComboBox::from_id_salt("pressure overclosure")
+                .selected_text(behavior.keyword())
+                .show_ui(ui, |ui| {
+                    for kind in SurfaceBehavior::kinds() {
+                        let same =
+                            std::mem::discriminant(&kind) == std::mem::discriminant(behavior);
+                        if ui.selectable_label(same, kind.keyword()).clicked() && !same {
+                            // Switching the kind starts with its default values, as in PrePoMax.
+                            *behavior = kind;
+                        }
+                    }
+                })
+                .response
+        });
+        match behavior {
+            SurfaceBehavior::Hard => {}
+            SurfaceBehavior::Linear { k, sigma_inf, c0 } => {
+                let k_text = "Steigung der Kennlinie, etwa 5- bis 50-mal der E-Modul.";
+                self.value(ui, ("K", k_text), k);
+                let sigma_text = "Zugspannung bei großem Spalt, etwa 0,25 % der größten \
+                                  erwarteten Vergleichsspannung.";
+                self.value(ui, ("Sigma unendlich", sigma_text), sigma_inf);
+                let c0_text = "Optionaler Parameter c0 der linearen Kennlinie, siehe \
+                               *SURFACE BEHAVIOR im CalculiX-Handbuch.";
+                self.optional(ui, ("c0", c0_text), c0, 1.0);
+            }
+            SurfaceBehavior::Exponential { c0, p0 } => {
+                let c0_text = "Spalt, bei dem der Kontaktdruck auf 1 % von p0 gefallen ist.";
+                self.value(ui, ("c0", c0_text), c0);
+                self.value(ui, ("p0", "Kontaktdruck bei Spalt null."), p0);
+            }
+            SurfaceBehavior::Tabular(rows) => {
+                let text = "Je Zeile ein Kontaktdruck und die zugehörige Eindringung.";
+                self.table(ui, ("Tabelle", text), rows, ["Druck", "Eindringung"]);
+            }
+            SurfaceBehavior::Tied { k } => {
+                self.value(ui, ("K", "Steifigkeit der Verbindung."), k);
+            }
         }
     }
-}
 
-fn value_row(ui: &mut Ui, label: &str, value: &mut f64, hint: &str) {
-    ui.label(label).on_hover_text(hint);
-    ui.add(number(value)).on_hover_text(hint);
-    ui.end_row();
-}
-
-/// A small editable table with a row to add and buttons to remove rows.
-fn table<const N: usize>(ui: &mut Ui, rows: &mut Vec<[f64; N]>, header: [&str; N], id: &str) {
-    ui.label("Tabelle");
-    ui.vertical(|ui| {
-        egui::Grid::new(id).striped(true).show(ui, |ui| {
-            for title in header {
-                ui.strong(title);
-            }
-            ui.label("");
-            ui.end_row();
-            let mut remove = None;
-            for (i, row) in rows.iter_mut().enumerate() {
-                for value in row.iter_mut() {
-                    ui.add(number(value));
-                }
-                if ui.small_button("Entfernen").clicked() {
-                    remove = Some(i);
-                }
-                ui.end_row();
-            }
-            if let Some(i) = remove.filter(|_| rows.len() > 1) {
-                rows.remove(i);
-            }
+    fn friction(&mut self, ui: &mut Ui, friction: &mut Friction) {
+        let text = "Reibungskoeffizient mu, größer als null.";
+        self.row(ui, ("Reibungskoeffizient", text), |ui| {
+            let value = numeric::drag_value(&mut friction.coefficient)
+                .range(0.0..=f64::MAX)
+                .speed(0.01);
+            ui.add_sized(field_size(ui), value)
         });
-        if ui.button("Zeile hinzufügen").clicked() {
-            let last = rows.last().copied().unwrap_or([0.0; N]);
-            rows.push(last);
+        let text = "Steigung lambda der Schubspannung über dem Schlupf im Haftbereich; \
+                    ohne Angabe wählt CalculiX sie selbst.";
+        self.optional(ui, ("Haftsteigung", text), &mut friction.stick_slope, 1e5);
+    }
+
+    fn gap_conductance(&mut self, ui: &mut Ui, conductance: &mut GapConductance) {
+        let text = "Konstanter Leitwert oder Tabelle über Druck und Temperatur.";
+        self.row(ui, ("Art", text), |ui| {
+            ui.horizontal(|ui| {
+                let constant = matches!(conductance, GapConductance::Constant(_));
+                let mut response = ui.radio(constant, "Konstant");
+                if response.clicked() && !constant {
+                    *conductance = GapConductance::Constant(0.0);
+                }
+                let table = ui.radio(!constant, "Tabelle");
+                if table.clicked() && constant {
+                    *conductance = GapConductance::Tabular(vec![[0.0; 3]]);
+                }
+                response |= table;
+                response
+            })
+            .inner
+        });
+        match conductance {
+            GapConductance::Constant(value) => {
+                let text = "Wärmestrom je Fläche und Temperaturdifferenz über den Spalt.";
+                self.value(ui, ("Leitwert", text), value);
+            }
+            GapConductance::Tabular(rows) => {
+                let text = "Je Zeile ein Leitwert mit dem Kontaktdruck und der Temperatur, \
+                            für die er gilt.";
+                self.table(
+                    ui,
+                    ("Tabelle", text),
+                    rows,
+                    ["Leitwert", "Druck", "Temperatur"],
+                );
+            }
         }
-    });
-    ui.end_row();
+    }
+
+    /// A small editable table with a row to add and buttons to remove rows.
+    fn table<const N: usize>(
+        &mut self,
+        ui: &mut Ui,
+        description: Description,
+        rows: &mut Vec<[f64; N]>,
+        header: [&str; N],
+    ) {
+        self.row(ui, description, |ui| {
+            ui.vertical(|ui| {
+                let mut response = ui.response();
+                egui::Grid::new(("interaction table", description.1)).show(ui, |ui| {
+                    for title in header {
+                        ui.strong(title);
+                    }
+                    ui.end_row();
+                    let mut remove = None;
+                    let rows_len = rows.len();
+                    for (i, row) in rows.iter_mut().enumerate() {
+                        for value in row.iter_mut() {
+                            response |= ui.add(number(value).min_decimals(1));
+                        }
+                        if ui
+                            .add_enabled(rows_len > 1, egui::Button::new("x").small())
+                            .on_hover_text("Zeile entfernen")
+                            .clicked()
+                        {
+                            remove = Some(i);
+                        }
+                        ui.end_row();
+                    }
+                    if let Some(i) = remove.filter(|_| rows.len() > 1) {
+                        rows.remove(i);
+                    }
+                });
+                if ui.small_button("Zeile hinzufügen").clicked() {
+                    let last = rows.last().copied().unwrap_or([0.0; N]);
+                    rows.push(last);
+                }
+                response
+            })
+            .inner
+        });
+    }
 }
 
 pub fn validate_interaction(interaction: &SurfaceInteraction) -> Result<(), String> {
