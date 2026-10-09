@@ -89,6 +89,12 @@ const TABLE_WIDTH: f32 = 640.0;
 const PROPERTIES_WIDTH: f32 = 290.0;
 /// Width of the value column of the properties.
 const PROPERTY_VALUE_WIDTH: f32 = 150.0;
+/// Width of the window's content: the table, the gap and the properties. Fixed, because egui
+/// never shrinks a window by itself and keeps its size in the saved settings, so a window
+/// that once grew would stay wide for good.
+const CONTENT_WIDTH: f32 = TABLE_WIDTH + PROPERTY_GAP + PROPERTIES_WIDTH;
+/// Space between the table and the properties, item spacing included.
+const PROPERTY_GAP: f32 = 24.0;
 
 pub struct ContactSearchDialog {
     distance: f64,
@@ -240,6 +246,8 @@ impl ContactSearchDialog {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
+            .min_width(CONTENT_WIDTH)
+            .max_width(CONTENT_WIDTH)
             .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
             .show(ctx, |ui| {
                 self.parameters(ui, model);
@@ -250,7 +258,7 @@ impl ContactSearchDialog {
                 ui.horizontal_top(|ui| {
                     let size = egui::vec2(TABLE_WIDTH, 340.0);
                     ui.allocate_ui(size, |ui| self.table(ui));
-                    ui.add_space(8.0);
+                    ui.add_space(PROPERTY_GAP - 2.0 * ui.spacing().item_spacing.x);
                     ui.vertical(|ui| {
                         ui.set_width(PROPERTIES_WIDTH);
                         self.properties(ui, model);
