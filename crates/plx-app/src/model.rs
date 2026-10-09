@@ -172,25 +172,33 @@ pub struct LoadedModel {
     pub geometry_view: Option<Model>,
 }
 
+/// Imports one or several CAD files into one geometry, in the length unit of `units`. The
+/// model takes the path of the first file.
+pub fn load_geometry(paths: &[PathBuf], units: UnitSystem) -> Result<LoadedModel, String> {
+    let start = Instant::now();
+    let path = paths.first().ok_or("Keine Datei gewählt")?;
+    let import = plx_mesher::import_cad_files(paths, units).map_err(|e| e.to_string())?;
+    let mut model = Model::new(path, FeMesh::default());
+    model.fe.properties.units = units;
+    model.geometry = Some(import.geometry);
+    model.warnings = import.warnings;
+    let view = Model::geometry_view(path, import.display);
+    let render_meshes = view.render_meshes();
+    model.load_time = start.elapsed();
+    Ok(LoadedModel {
+        model,
+        render_meshes,
+        geometry_view: Some(view),
+    })
+}
+
 /// Loads a project, input, results or CAD file. CAD geometry is read in the length unit of
 /// `units`, the unit system of the model it goes into.
 pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     let start = Instant::now();
     let extension = |e: &str| path.extension().is_some_and(|x| x.eq_ignore_ascii_case(e));
     if plx_mesher::is_cad_file(path) {
-        let import = plx_mesher::import_cad(path, units).map_err(|e| e.to_string())?;
-        let mut model = Model::new(path, FeMesh::default());
-        model.fe.properties.units = units;
-        model.geometry = Some(import.geometry);
-        model.warnings = import.warnings;
-        let view = Model::geometry_view(path, import.display);
-        let render_meshes = view.render_meshes();
-        model.load_time = start.elapsed();
-        return Ok(LoadedModel {
-            model,
-            render_meshes,
-            geometry_view: Some(view),
-        });
+        return load_geometry(&[path.to_path_buf()], units);
     }
     let mut fe = FeModel::default();
     let mut geometry = None;
