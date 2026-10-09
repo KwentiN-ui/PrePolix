@@ -1,7 +1,9 @@
 //! Symbols of boundary conditions and loads drawn over the 3D view, as PrePoMax draws them
 //! for the step chosen to show: arrows for forces at the loaded nodes, pressure arrows
 //! pointing onto the faces, one arrow of the resultant force for a surface traction, and
-//! cones (translations) and plates (rotations) for held degrees of freedom.
+//! cones (translations) and plates (rotations) for held degrees of freedom. Heat loads and
+//! temperatures, which have no direction, are balls at the nodes; heat flowing through a
+//! surface is an arrow onto it (into the part) or off it.
 //!
 //! Symbols keep their size on screen like PrePoMax's glyphs (PrePoMax symbol size 50) and lie
 //! on top of the model. They are 3D shapes in pixel units, drawn as the outlines of their
@@ -68,6 +70,8 @@ pub enum SymbolShape {
     Cone,
     /// Rod with a plate: a held rotation.
     RotationLock,
+    /// Ball around the point: a temperature or heat at a node.
+    Ball,
 }
 
 /// Symbols of the items, on the visible parts of the model.
@@ -114,10 +118,33 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     add(center, DVec3::from(force), SymbolShape::Arrow);
                 }
             }
+            Kind::Load(
+                LoadKind::SurfaceFlux(_) | LoadKind::Film { .. } | LoadKind::Radiation { .. },
+            ) => {
+                let faces = face_geometry(model, &item.region, &visible);
+                let centers: Vec<DVec3> = faces.iter().map(|f| f.center).collect();
+                let into = matches!(item.kind, Kind::Load(LoadKind::SurfaceFlux(q)) if q >= 0.0);
+                for index in sample(&centers) {
+                    let face = &faces[index];
+                    if into {
+                        add(face.center, -face.normal, SymbolShape::ArrowOnto);
+                    } else {
+                        add(face.center, face.normal, SymbolShape::Arrow);
+                    }
+                }
+            }
+            Kind::Load(LoadKind::ConcentratedFlux(_) | LoadKind::BodyFlux(_))
+            | Kind::Boundary(BoundaryKind::Temperature(_)) => {
+                let points = node_points(model, &item.region, &visible);
+                for index in sample(&points) {
+                    add(points[index], DVec3::Z, SymbolShape::Ball);
+                }
+            }
             Kind::Boundary(kind) => {
                 let held: [bool; 6] = match kind {
                     BoundaryKind::Fixed => [true; 6],
                     BoundaryKind::Displacement(values) => values.map(|v| v.is_some()),
+                    BoundaryKind::Temperature(_) => [false; 6],
                 };
                 if let Some(center) = region_center(model, &item.region, &visible) {
                     for (axis, &held) in held.iter().enumerate() {
@@ -366,7 +393,7 @@ struct Solid {
 fn solids(shape: SymbolShape, direction: Vec3) -> Vec<Solid> {
     let size = match shape {
         SymbolShape::Arrow | SymbolShape::ArrowOnto => ARROW_SIZE,
-        SymbolShape::Cone | SymbolShape::RotationLock => SUPPORT_SIZE,
+        SymbolShape::Cone | SymbolShape::RotationLock | SymbolShape::Ball => SUPPORT_SIZE,
     };
     let axis = direction * size;
     let (u, v) = direction.any_orthonormal_pair();
@@ -399,6 +426,22 @@ fn solids(shape: SymbolShape, direction: Vec3) -> Vec<Solid> {
             ]
         }
         SymbolShape::Cone => vec![cone(-1.0, 0.0, 0.5)],
+        SymbolShape::Ball => {
+            // Three great circles; their outline is round from every side.
+            let radius = 0.3 * size;
+            let circle = |a: Vec3, b: Vec3| -> Vec<Vec3> {
+                (0..CIRCLE_SEGMENTS)
+                    .map(|i| {
+                        let angle = i as f32 / CIRCLE_SEGMENTS as f32 * std::f32::consts::TAU;
+                        (a * angle.cos() + b * angle.sin()) * radius
+                    })
+                    .collect()
+            };
+            vec![Solid {
+                points: [circle(u, v), circle(v, direction), circle(direction, u)].concat(),
+                depth: Vec3::ZERO,
+            }]
+        }
         SymbolShape::RotationLock => {
             let mut plate = Vec::new();
             for along in [-1.35, -1.75] {

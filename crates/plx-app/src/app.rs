@@ -1802,6 +1802,11 @@ impl Workbench {
         for (item, label, enabled) in [
             (NewItem::Material, "Material erstellen …", true),
             (NewItem::Section, "Section erstellen …", true),
+            (
+                NewItem::InitialCondition,
+                "Anfangsbedingung erstellen …",
+                true,
+            ),
             (NewItem::Step, "Step erstellen …", true),
             (
                 NewItem::BoundaryCondition(last_step.unwrap_or(0)),

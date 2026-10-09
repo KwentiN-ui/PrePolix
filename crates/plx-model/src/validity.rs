@@ -4,7 +4,7 @@
 
 use plx_mesh::FeMesh;
 
-use crate::{FeModel, Region};
+use crate::{FeModel, LoadKind, Region};
 
 /// An item of the model that can refer to something else.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -16,6 +16,7 @@ pub enum ModelItem {
     BoundaryCondition(usize, usize),
     /// Load by step and index.
     Load(usize, usize),
+    InitialCondition(usize),
 }
 
 /// An item with a missing reference and why it is invalid.
@@ -82,12 +83,32 @@ impl FeModel {
                 }
             }
             for (i, load) in step.loads.iter().enumerate() {
-                if let Some(reason) = load.region.missing_reference(mesh) {
+                let radiation = matches!(load.kind, LoadKind::Radiation { .. });
+                let constants = self.properties.absolute_zero.is_some()
+                    && self.properties.stefan_boltzmann.is_some();
+                let reason = if radiation && !constants {
+                    Some(
+                        "Strahlung braucht den absoluten Nullpunkt und die \
+                         Stefan-Boltzmann-Konstante (Modelleigenschaften)"
+                            .into(),
+                    )
+                } else {
+                    load.region.missing_reference(mesh)
+                };
+                if let Some(reason) = reason {
                     invalid.push(Invalid {
                         item: ModelItem::Load(s, i),
                         reason,
                     });
                 }
+            }
+        }
+        for (i, condition) in self.initial_conditions.iter().enumerate() {
+            if let Some(reason) = condition.region.missing_reference(mesh) {
+                invalid.push(Invalid {
+                    item: ModelItem::InitialCondition(i),
+                    reason,
+                });
             }
         }
         invalid
@@ -193,6 +214,7 @@ mod tests {
                 name: "Steel".into(),
                 density: None,
                 elastic: None,
+                ..Default::default()
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
