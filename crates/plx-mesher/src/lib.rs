@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use plx_mesh::{Element, ElementId, ElementShape, FeMesh, NodeId, Part, SurfaceDefinition};
-use plx_model::{Algorithm2d, Algorithm3d, Geometry, MeshingParameters};
+use plx_model::{Algorithm2d, Algorithm3d, Geometry, MeshingParameters, UnitSystem};
 
 use gmsh::{Gmsh, with_gmsh};
 pub use gmsh::{GmshError, LibraryInfo, loaded_library, set_library_path};
@@ -82,12 +82,21 @@ pub struct GeneratedMesh {
     pub warnings: Vec<String>,
 }
 
-/// Reads a STEP, IGES or BREP file. The mesh setup starts with PrePoMax's sizes for the
-/// geometry's extent.
-pub fn import_cad(path: &Path) -> Result<CadImport, GmshError> {
+/// Reads a STEP, IGES or BREP file. STEP and IGES files are converted to the length unit of
+/// the model's unit system, millimetres without one; BREP files have no unit. The mesh setup
+/// starts with PrePoMax's sizes for the geometry's extent.
+pub fn import_cad(path: &Path, units: UnitSystem) -> Result<CadImport, GmshError> {
     let brep_file = TempFile::new("brep");
     let (diagonal, warnings) = with_gmsh(|gmsh| {
-        let shapes = gmsh.import_shapes(path)?;
+        let unit = match units {
+            UnitSystem::MKgSC | UnitSystem::MTonSC => "M",
+            UnitSystem::InLbSF => "INCH",
+            UnitSystem::MmTonSC | UnitSystem::Unitless => "MM",
+        };
+        gmsh.set_string("Geometry.OCCTargetUnit", unit)?;
+        let shapes = gmsh.import_shapes(path);
+        gmsh.set_string("Geometry.OCCTargetUnit", "MM")?;
+        let shapes = shapes?;
         if shapes.is_empty() {
             return Err(GmshError::Other(format!(
                 "{} enthält keine Geometrie",
@@ -118,6 +127,26 @@ pub fn import_cad(path: &Path) -> Result<CadImport, GmshError> {
         geometry,
         display,
         warnings,
+    })
+}
+
+/// The geometry enlarged by `factor` about the origin, for a model whose length unit
+/// changes. Faces and edges keep their tags.
+pub fn scale_geometry(geometry: &Geometry, factor: f64) -> Result<Geometry, GmshError> {
+    let file = TempFile::with_contents("brep", &geometry.brep)?;
+    let scaled = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        gmsh.set_number("Geometry.OCCScaling", factor)?;
+        let imported = gmsh.import_shapes(&file.0);
+        gmsh.set_number("Geometry.OCCScaling", 1.0)?;
+        imported?;
+        gmsh.write(&scaled.0)
+    })?;
+    let brep = std::fs::read_to_string(&scaled.0)
+        .map_err(|e| GmshError::Other(format!("{}: {e}", scaled.0.display())))?;
+    Ok(Geometry {
+        brep,
+        ..geometry.clone()
     })
 }
 

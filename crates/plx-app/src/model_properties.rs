@@ -15,6 +15,11 @@ pub struct ModelPropertiesDialog {
     pub draft: ModelProperties,
     /// Editing the properties of the open model rather than starting a new one.
     pub editing: bool,
+    /// The properties of the open model being edited.
+    original: ModelProperties,
+    /// Convert the model's values when its unit system changes, so that it stays the same
+    /// physically; otherwise its numbers are taken in the new units.
+    pub convert: bool,
     /// Open the geometry import once the new model is created.
     pub then_import: bool,
 }
@@ -30,6 +35,8 @@ impl ModelPropertiesDialog {
         Self {
             draft: properties,
             editing: false,
+            original: properties,
+            convert: true,
             then_import,
         }
     }
@@ -38,6 +45,8 @@ impl ModelPropertiesDialog {
         Self {
             draft: properties,
             editing: true,
+            original: properties,
+            convert: true,
             then_import: false,
         }
     }
@@ -94,16 +103,19 @@ impl ModelPropertiesDialog {
                         });
                 });
                 group(ui, "Einheiten", |ui| units_table(ui, draft.units));
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(
-                            "Das Einheitensystem wird noch nicht umgerechnet; Werte gelten in \
-                             den gewählten Einheiten.",
-                        )
-                        .weak(),
-                    )
-                    .wrap(),
-                );
+                let (from, to) = (self.original.units, draft.units);
+                if self.editing && from != to {
+                    if from.has_units() && to.has_units() {
+                        ui.checkbox(&mut self.convert, "Werte des Modells umrechnen");
+                    }
+                    let note = if self.convert && from.has_units() && to.has_units() {
+                        "Netz, Geometrie, Materialien, Lasten und alle anderen Werte werden \
+                         umgerechnet; das Modell bleibt physikalisch gleich."
+                    } else {
+                        "Die Zahlenwerte bleiben und gelten in den neuen Einheiten."
+                    };
+                    ui.add(egui::Label::new(egui::RichText::new(note).weak()).wrap());
+                }
                 if let Some(error) = &error {
                     ui.add(egui::Label::new(egui::RichText::new(error).color(ERROR)).wrap());
                 }
@@ -241,7 +253,7 @@ fn units_table(ui: &mut egui::Ui, units: UnitSystem) {
                             .spacing([24.0, 2.0])
                             .show(ui, |ui| {
                                 for (quantity, unit) in quantities.iter().zip(values) {
-                                    ui.label(*quantity);
+                                    ui.label(quantity.label());
                                     ui.label(*unit);
                                     ui.end_row();
                                 }

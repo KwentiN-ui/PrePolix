@@ -7,7 +7,9 @@ use std::collections::BTreeSet;
 
 use egui::Ui;
 use plx_mesh::{GroupBy, MasterSlaveItem, SearchParameters, find_contact_pairs, surface_faces};
-use plx_model::{Constraint, ContactMethod, ContactPair, FeModel, Region, Tie, next_name};
+use plx_model::{
+    Constraint, ContactMethod, ContactPair, FeModel, Quantity, Region, Tie, UnitSystem, next_name,
+};
 
 use crate::model::{Highlight, Model};
 use crate::numeric;
@@ -84,7 +86,8 @@ pub enum SearchResult {
 impl ContactSearchDialog {
     pub fn new(fe: &FeModel) -> Self {
         Self {
-            distance: 0.01,
+            // PrePoMax's 0.01 mm.
+            distance: UnitSystem::MmTonSC.convert(0.01, Quantity::Length, fe.properties.units),
             angle: 35.0,
             group_by: GroupBy::Parts,
             ignore_hidden: true,
@@ -201,11 +204,11 @@ impl ContactSearchDialog {
             group(ui, "Suchparameter", |ui| {
                 egui::Grid::new("search parameters").show(ui, |ui| {
                     ui.label("Abstand");
+                    let units = model.fe.properties.units;
                     ui.add(
-                        numeric::drag_value(&mut self.distance)
+                        numeric::quantity(&mut self.distance, units, Quantity::Length)
                             .range(0.0..=f64::MAX)
-                            .speed(0.001)
-                            .suffix(" mm"),
+                            .speed(0.001),
                     );
                     ui.end_row();
                     ui.label("Winkel");
@@ -499,9 +502,13 @@ impl ContactSearchDialog {
                 ui.end_row();
                 ui.label("Abstand");
                 ui.add(
-                    numeric::drag_value(&mut row.distance)
-                        .range(0.0..=f64::MAX)
-                        .speed(0.001),
+                    numeric::quantity(
+                        &mut row.distance,
+                        model.fe.properties.units,
+                        Quantity::Length,
+                    )
+                    .range(0.0..=f64::MAX)
+                    .speed(0.001),
                 );
                 ui.end_row();
             });

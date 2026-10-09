@@ -134,6 +134,13 @@ impl FeMesh {
         &self.coords
     }
 
+    /// Enlarges the mesh by `factor` about the origin, e.g. when its length unit changes.
+    pub fn scale(&mut self, factor: f64) {
+        for point in &mut self.coords {
+            *point = point.map(|c| c * factor);
+        }
+    }
+
     pub fn node_index(&self, id: NodeId) -> Option<usize> {
         self.node_lookup.get(&id).copied()
     }
