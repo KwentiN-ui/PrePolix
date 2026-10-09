@@ -38,6 +38,12 @@ pub enum WriteError {
     /// A section that does not fit its elements, see [`Section::kind_problem`].
     #[error("{item}: {reason}")]
     InvalidSection { item: String, reason: String },
+    /// A submodel boundary condition in a model that names no global results file.
+    #[error(
+        "{item}: the submodel has no global results file (Model > Model Properties: model \
+         type Submodel)"
+    )]
+    NoGlobalResults { item: String },
 }
 
 /// One entry of the keyword tree of an input file, the structure PrePoMax's keyword editor
@@ -329,8 +335,11 @@ pub fn model_keywords(
         .collect();
     let heading = format!("*Heading\n{}\n", heading.lines().next().unwrap_or_default());
     let empty = |name| Keyword::title(name, Vec::new());
-    Ok(vec![
-        Keyword::title("Heading", vec![Keyword::generated(heading)]),
+    let mut tree = vec![Keyword::title("Heading", vec![Keyword::generated(heading)])];
+    if let Some(submodel) = submodel(model, &sets.submodel_sets)? {
+        tree.push(Keyword::title("Submodel", vec![submodel]));
+    }
+    tree.extend([
         Keyword::title("Nodes", vec![Keyword::generated(nodes)]),
         Keyword::title("Elements", element_blocks),
         Keyword::title("Node sets", node_sets),
@@ -347,7 +356,33 @@ pub fn model_keywords(
         Keyword::title("Amplitudes", amplitudes),
         Keyword::title("Initial conditions", initial_conditions),
         Keyword::title("Steps", steps),
-    ])
+    ]);
+    Ok(tree)
+}
+
+/// `*SUBMODEL` with the node sets of the submodel boundary conditions, as PrePoMax writes it
+/// after the heading. The global results file is named without its directory; it has to be
+/// next to the input file, where the analysis and the export put it.
+fn submodel(
+    model: &FeModel,
+    node_sets: &[(String, String)],
+) -> Result<Option<Keyword>, WriteError> {
+    let Some((_, first)) = node_sets.first() else {
+        return Ok(None);
+    };
+    let input = (model.properties.submodel_input())
+        .and_then(|path| path.file_name())
+        .ok_or_else(|| WriteError::NoGlobalResults {
+            item: first.clone(),
+        })?;
+    let mut out = format!(
+        "*Submodel, Type=Node, Input=\"{}\"\n",
+        input.to_string_lossy()
+    );
+    for (set, _) in node_sets {
+        let _ = writeln!(out, "{set}");
+    }
+    Ok(Some(Keyword::generated(out)))
 }
 
 /// The line elements of beam and truss sections: the CalculiX type each one is written
@@ -509,6 +544,9 @@ struct Sets<'a> {
     used: BTreeSet<String>,
     /// Face element sets and node set of each element surface.
     surface_sets: BTreeMap<String, (Vec<(String, u8)>, String)>,
+    /// Node sets of submodel boundary conditions, with the first boundary condition naming
+    /// each; `*SUBMODEL` lists them.
+    submodel_sets: Vec<(String, String)>,
 }
 
 impl<'a> Sets<'a> {
@@ -527,6 +565,7 @@ impl<'a> Sets<'a> {
                 .chain(mesh.surfaces.keys().map(|n| n.to_ascii_uppercase()))
                 .collect(),
             surface_sets: BTreeMap::new(),
+            submodel_sets: Vec::new(),
         };
         for (name, ids) in &mesh.node_sets {
             sets.node_sets.push((name.clone(), ids.clone()));
@@ -1216,7 +1255,11 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         let reference = bc.amplitude.as_ref().filter(|_| bc.kind.takes_amplitude());
         let amplitude =
             amplitude_parameter(amplitudes, &bc.name, "Amplitude", &reference.cloned())?;
-        let mut out = format!("** Name: {}\n*Boundary{amplitude}\n", bc.name);
+        let options = match bc.kind {
+            BoundaryKind::Submodel { step, .. } => format!(", Submodel, Step={}", step.max(1)),
+            _ => amplitude,
+        };
+        let mut out = format!("** Name: {}\n*Boundary{options}\n", bc.name);
         match bc.kind {
             BoundaryKind::Fixed => {
                 let _ = writeln!(out, "{set}, 1, {dofs}, 0");
@@ -1230,6 +1273,14 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
             }
             BoundaryKind::Temperature(t) => {
                 let _ = writeln!(out, "{set}, 11, 11, {}", number(t));
+            }
+            BoundaryKind::Submodel { dofs: held, .. } => {
+                for dof in (1..=dofs).filter(|&d| held[d - 1]) {
+                    let _ = writeln!(out, "{set}, {dof}, {dof}");
+                }
+                if !sets.submodel_sets.iter().any(|(s, _)| *s == set) {
+                    sets.submodel_sets.push((set, bc.name.clone()));
+                }
             }
         }
         boundaries.push(Keyword::generated(out));

@@ -44,6 +44,8 @@ pub enum Problem {
     ConflictingBoundaries,
     LoadOnFixedNodes,
     RotationsIgnored,
+    /// A submodel boundary condition in a model without a global results file.
+    NoGlobalResults,
     IncrementExceedsStep,
     NoLoad,
     /// Found in the solver output only.
@@ -85,6 +87,7 @@ impl Problem {
             Problem::ConflictingBoundaries => "Widersprüchliche Randbedingungen",
             Problem::LoadOnFixedNodes => "Last auf festgehaltenen Knoten",
             Problem::RotationsIgnored => "Rotationen ohne Wirkung",
+            Problem::NoGlobalResults => "No global results",
             Problem::IncrementExceedsStep => "Inkrement größer als der Step",
             Problem::NoLoad => "Keine Last",
             Problem::NoConvergence => "Keine Konvergenz",
@@ -182,6 +185,11 @@ impl Problem {
                  2D-Elemente haben nur Verschiebungen; vorgegebene Drehungen werden \
                  ignoriert oder führen in 2D-Modellen zum Abbruch (\"mpc of type is \
                  unknown\")."
+            }
+            Problem::NoGlobalResults => {
+                "A submodel boundary condition takes its displacements from the results \
+                 of a global model (*SUBMODEL). Without the global results file the input \
+                 file cannot be written."
             }
             Problem::IncrementExceedsStep => {
                 "Das Anfangsinkrement ist größer als die Dauer des Steps. CalculiX lehnt \
@@ -281,6 +289,10 @@ impl Problem {
             Problem::RotationsIgnored => {
                 "UR1 bis UR3 in der Randbedingung frei lassen. Drehungen von Volumenkörpern \
                  über Verschiebungen mehrerer Knoten vorgeben."
+            }
+            Problem::NoGlobalResults => {
+                "Open Model > Model Properties, set the model type to Submodel and pick the results \
+                 file (.frd) of the global model."
             }
             Problem::IncrementExceedsStep => {
                 "Im Step das Anfangsinkrement höchstens so groß wie die Step-Dauer wählen."
@@ -596,7 +608,25 @@ impl FeModel {
                     .collect(),
                 // Degree of freedom 11.
                 BoundaryKind::Temperature(t) => vec![(10, t)],
+                // The values come from the global model; NaN stands for them.
+                BoundaryKind::Submodel { dofs: held, .. } => (0..dofs)
+                    .filter(|&d| held[d])
+                    .map(|d| (d, f64::NAN))
+                    .collect(),
             };
+            if let BoundaryKind::Submodel { .. } = bc.kind
+                && self.properties.submodel_input().is_none()
+            {
+                findings.push(Finding::new(
+                    ModelItem::BoundaryCondition(s, i),
+                    Problem::NoGlobalResults,
+                    format!(
+                        "{} needs the results of a global model (Model > Model Properties: model type \
+                         Submodel and global results file)",
+                        bc.name
+                    ),
+                ));
+            }
             if let BoundaryKind::Displacement(values) = bc.kind
                 && values[3..].iter().any(Option::is_some)
                 && (space.is_2d() || !trusses.rotational.iter().any(|&r| r))
@@ -1108,6 +1138,10 @@ fn describe_directions(free: &[[f64; 6]]) -> String {
 
 /// Whether two prescribed values are the same up to rounding.
 fn same(a: f64, b: f64) -> bool {
+    // Values read from the global model of a submodel.
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= 1e-12 * a.abs().max(b.abs())
 }
 
@@ -1535,6 +1569,34 @@ mod tests {
     fn a_held_and_loaded_model_has_no_findings() {
         let mesh = cubes(2, true);
         assert_eq!(check(&model(&mesh), &mesh), []);
+    }
+
+    #[test]
+    fn submodel_boundaries_load_the_step_and_need_the_global_results() {
+        let mesh = cubes(1, false);
+        let mut model = model(&mesh);
+        let step = &mut model.steps[0];
+        step.loads.clear();
+        step.boundary_conditions.push(BoundaryCondition {
+            name: "Submodel-1".into(),
+            active: true,
+            region: Region::Nodes(vec![2, 3, 6, 7]),
+            kind: BoundaryKind::Submodel {
+                step: 1,
+                dofs: [true, true, true, false, false, false],
+            },
+            amplitude: None,
+        });
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::BoundaryCondition(0, 1), Problem::NoGlobalResults)]
+        );
+        model.properties.kind = crate::ModelKind::Submodel;
+        model.properties.global_results = Some("global.frd".into());
+        assert_eq!(check(&model, &mesh), []);
+        assert!(model.uses_global_results());
+        model.steps[0].kind = StepKind::Frequency(Default::default());
+        assert!(!model.uses_global_results());
     }
 
     #[test]

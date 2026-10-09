@@ -663,6 +663,7 @@ fn names<'a, T: 'a>(items: &'a [T], name: impl Fn(&T) -> &str + 'a) -> Vec<&'a s
 const FIXED: &str = "Fixed";
 const DISPLACEMENT: &str = "Displacement_Rotation";
 const TEMPERATURE: &str = "Temperature";
+const SUBMODEL: &str = "Submodel";
 const FORCE: &str = "Concentrated_Force";
 const PRESSURE: &str = "Pressure";
 const TRACTION: &str = "Surface_Traction";
@@ -673,7 +674,7 @@ const FILM: &str = "Convective_Film";
 const RADIATION: &str = "Radiation";
 
 /// The boundary condition kinds of the dialog: label, default name and the kind.
-fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 3] {
+fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 4] {
     [
         ("Fest eingespannt", FIXED, BoundaryKind::Fixed),
         (
@@ -682,6 +683,14 @@ fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 3] {
             BoundaryKind::Displacement([Some(0.0), None, None, None, None, None]),
         ),
         ("Temperatur", TEMPERATURE, BoundaryKind::Temperature(0.0)),
+        (
+            "Submodel",
+            SUBMODEL,
+            BoundaryKind::Submodel {
+                step: 1,
+                dofs: [true, true, true, false, false, false],
+            },
+        ),
     ]
 }
 
@@ -690,8 +699,42 @@ fn boundary_kind_name(kind: &BoundaryKind) -> &'static str {
         BoundaryKind::Fixed => FIXED,
         BoundaryKind::Displacement(_) => DISPLACEMENT,
         BoundaryKind::Temperature(_) => TEMPERATURE,
+        BoundaryKind::Submodel { .. } => SUBMODEL,
     }
 }
+
+/// Rows of a submodel boundary condition, PrePoMax's `ViewSubmodelBC`: the step of the
+/// global model to read and the degrees of freedom that follow it.
+fn submodel_rows(
+    ui: &mut egui::Ui,
+    step: &mut u32,
+    dofs: &mut [bool; 6],
+    two_d: bool,
+    fe: &FeModel,
+) {
+    ui.label("Global step");
+    ui.add(egui::DragValue::new(step).range(1..=u32::MAX).speed(0.1))
+        .on_hover_text("Step of the global model whose displacements are read");
+    ui.end_row();
+    // Nodes of 2D models only move in the x-y plane.
+    let count = if two_d { 2 } else { 6 };
+    for (held, label) in dofs.iter_mut().zip(DOF_LABELS).take(count) {
+        ui.label("");
+        ui.checkbox(held, label);
+        ui.end_row();
+    }
+    let note = match fe.properties.submodel_input() {
+        Some(path) => format!("Global results: {}", path.display()),
+        None => "No global results file yet: set the model type to Submodel in Model > \
+                 Model Properties and pick the global .frd file."
+            .into(),
+    };
+    ui.label("");
+    ui.add(egui::Label::new(egui::RichText::new(note).weak()).wrap());
+    ui.end_row();
+}
+
+const DOF_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
 
 /// The load kinds of the dialog in PrePoMax's order: label, default name and the kind with
 /// zero values.
@@ -1218,11 +1261,8 @@ impl Editor {
                 if let BoundaryKind::Displacement(values) = &mut bc.kind {
                     // Nodes of 2D models only move in the x-y plane.
                     let dofs = if two_d { 2 } else { 6 };
-                    for (i, (value, label)) in values
-                        .iter_mut()
-                        .zip(["U1", "U2", "U3", "UR1", "UR2", "UR3"])
-                        .take(dofs)
-                        .enumerate()
+                    for (i, (value, label)) in
+                        values.iter_mut().zip(DOF_LABELS).take(dofs).enumerate()
                     {
                         let mut set = value.is_some();
                         ui.checkbox(&mut set, label);
@@ -1238,6 +1278,9 @@ impl Editor {
                         *value = set.then_some(number);
                         ui.end_row();
                     }
+                }
+                if let BoundaryKind::Submodel { step, dofs } = &mut bc.kind {
+                    submodel_rows(ui, step, dofs, two_d, &model.fe);
                 }
                 if bc.kind.takes_amplitude() {
                     amplitude_row(
@@ -1545,6 +1588,14 @@ impl Editor {
                 if self.region().is_some_and(RegionDraft::is_empty) {
                     return Err("Die Region ist leer.".into());
                 }
+            }
+        }
+        if let Draft::BoundaryCondition(_, bc, _) = &self.draft
+            && let BoundaryKind::Submodel { dofs, .. } = bc.kind
+        {
+            let count = if fe.properties.space.is_2d() { 2 } else { 6 };
+            if !dofs[..count].iter().any(|&d| d) {
+                return Err("Select at least one degree of freedom.".into());
             }
         }
         if let Draft::Step(step) = &self.draft {

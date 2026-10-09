@@ -2725,3 +2725,111 @@ fn calculix_prints_the_contact_force_of_a_pair() {
     assert!(all.field("CONTACT_STRESS").is_some());
     assert!(all.field("TOTAL_NUMBER_OF_CONTACT_ELEMENTS").is_some());
 }
+
+/// The half x <= 50 of the cantilever as a submodel: held at x = 0, its cut at x = 50
+/// driven by the global results with `dofs`.
+fn cantilever_submodel(dofs: [bool; 6]) -> (FeMesh, FeModel) {
+    let text = std::fs::read_to_string(testdata("kragbalken_c3d8.inp")).unwrap();
+    let mesh = read_inp_str(&text, None).unwrap().mesh;
+    let x = |id: NodeId| mesh.node(id).unwrap()[0];
+    let mut sub = String::new();
+    let mut block = "";
+    for line in text.lines() {
+        if line.starts_with('*') {
+            let kept = ["*NODE,", "*ELEMENT,", "*NSET, NSET=FIX"];
+            block = if kept.iter().any(|k| line.starts_with(k)) {
+                line
+            } else {
+                ""
+            };
+            if !block.is_empty() {
+                sub.push_str(line);
+                sub.push('\n');
+            }
+            continue;
+        }
+        let ids: Vec<NodeId> = (line.split(',').map(str::trim))
+            .filter_map(|v| v.parse().ok())
+            .collect();
+        let keep = if block.starts_with("*NODE") {
+            x(ids[0]) <= 50.0
+        } else if block.starts_with("*ELEMENT") {
+            ids[1..].iter().all(|&n| x(n) <= 50.0)
+        } else {
+            !block.is_empty()
+        };
+        if keep {
+            sub.push_str(line);
+            sub.push('\n');
+        }
+    }
+    let mesh = read_inp_str(&sub, None).unwrap().mesh;
+    let cut: Vec<NodeId> = (mesh.node_ids().iter().copied())
+        .filter(|&n| (mesh.node(n).unwrap()[0] - 50.0).abs() < 1e-9)
+        .collect();
+    let (_, mut model) = cantilever(tip_force());
+    let step = &mut model.steps[0];
+    step.loads.clear();
+    step.boundary_conditions.push(BoundaryCondition {
+        name: "Submodel-1".into(),
+        active: true,
+        region: Region::Nodes(cut),
+        kind: BoundaryKind::Submodel { step: 1, dofs },
+        amplitude: None,
+    });
+    model.properties.kind = plx_model::ModelKind::Submodel;
+    model.properties.global_results = Some(PathBuf::from("/somewhere/global.frd"));
+    (mesh, model)
+}
+
+#[test]
+fn submodels_read_the_cut_displacements_of_the_global_results() {
+    let (mesh, mut model) = cantilever_submodel([true, false, true, false, false, false]);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let heading = text.find("*Heading").unwrap();
+    let submodel = text
+        .find("*Submodel, Type=Node, Input=\"global.frd\"\nInternal_Selection-1_Submodel-1\n")
+        .expect(&text);
+    assert!(heading < submodel && submodel < text.find("*Node").unwrap());
+    assert!(text.contains(
+        "** Name: Submodel-1\n*Boundary, Submodel, Step=1\nInternal_Selection-1_Submodel-1, 1, 1\n\
+         Internal_Selection-1_Submodel-1, 3, 3\n"
+    ));
+
+    // A general model has no global results, as in PrePoMax.
+    model.properties.kind = plx_model::ModelKind::General;
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::NoGlobalResults { item }) if item == "Submodel-1"
+    ));
+    // Without an active submodel boundary condition nothing is read.
+    model.steps[0].boundary_conditions[1].active = false;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Submodel"));
+}
+
+#[test]
+fn calculix_submodel_follows_the_global_cantilever() {
+    let (mesh, mut model) = cantilever_submodel([true, true, true, false, false, false]);
+    let name = "submodel";
+    let dir = std::env::temp_dir().join(format!("plx-write-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(testdata("kragbalken_c3d8.frd"), dir.join("global.frd")).unwrap();
+    model.properties.global_results = Some(dir.join("global.frd"));
+    let Some(frd) = run_ccx(name, &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let global = read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
+    // The submodel has the global mesh of its half, so it reproduces the global solution
+    // inside, not only at the cut.
+    for node in mesh.node_ids().iter().copied() {
+        for component in ["U1", "U2", "U3"] {
+            let ours = node_value(&frd, "DISP", component, node);
+            let expected = node_value(&global, "DISP", component, node);
+            assert!(
+                (ours - expected).abs() <= 1e-4 * expected.abs().max(1e-3),
+                "node {node} {component}: {ours} != {expected}"
+            );
+        }
+    }
+}
