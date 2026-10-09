@@ -1,0 +1,43 @@
+prepolix - Lizenzen und Quelltext
+=================================
+
+prepolix steht unter der GNU General Public License, Version 3 oder neuer
+(LICENSE.txt). Der Quelltext liegt unter
+
+    https://github.com/KwentiN-ui/prepolix
+
+Welcher Stand dieser Installation zugrunde liegt, steht in SOURCE.txt.
+
+Mitgelieferte Bestandteile
+--------------------------
+
+Gmsh 4.15.2 (gmsh-4.15.dll)
+    Geometrie-Import und Vernetzung. Copyright (C) 1997-2025 Christophe
+    Geuzaine und Jean-Francois Remacle. GNU GPL Version 2 oder neuer mit
+    Ausnahme für Netgen, METIS und OpenCASCADE, siehe
+    licenses\GMSH-LICENSE.txt und licenses\GMSH-CREDITS.txt.
+    Die Bibliothek ist unverändert das offizielle Windows-Paket von PyPI
+    (https://pypi.org/project/gmsh/4.15.2/).
+    Quelltext: https://gitlab.onelab.info/gmsh/gmsh/-/tree/gmsh_4_15_2
+
+    In Gmsh enthalten sind unter anderem:
+
+    Open CASCADE Technology (OCCT)
+        prepolix nutzt über Gmsh Funktionen von Open CASCADE Technology.
+        GNU LGPL Version 2.1 mit der Open-CASCADE-Ausnahme, siehe
+        licenses\OCCT-LGPL-2.1.txt und licenses\OCCT-LGPL-EXCEPTION.txt.
+        Quelltext: https://github.com/Open-Cascade-SAS/OCCT
+
+    Netgen, TetGen/BR, HXT und weitere, siehe licenses\GMSH-CREDITS.txt.
+
+Noto Sans (in prepolix.exe eingebettet)
+    SIL Open Font License 1.1, siehe licenses\NotoSans-OFL.txt.
+
+Rust-Bibliotheken (in prepolix.exe einkompiliert)
+    egui, eframe, wgpu, glam, cpal, rfd und weitere unter MIT- oder
+    Apache-2.0-Lizenz. Die vollständige Liste mit Versionen steht in
+    Cargo.lock im Quelltext von prepolix; die Lizenztexte liegen bei den
+    jeweiligen Paketen auf https://crates.io.
+
+CalculiX wird nicht mitgeliefert. Den Solver ccx bitte selbst installieren
+und unter Werkzeuge > Einstellungen > CalculiX angeben.

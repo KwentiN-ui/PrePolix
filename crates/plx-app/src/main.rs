@@ -41,7 +41,8 @@ fn main() -> eframe::Result {
             .with_title("prepolix")
             .with_app_id("prepolix")
             .with_inner_size([1400.0, 900.0])
-            .with_min_inner_size([640.0, 400.0]),
+            .with_min_inner_size([640.0, 400.0])
+            .with_icon(window_icon()),
         renderer: eframe::Renderer::Wgpu,
         persist_window: true,
         ..Default::default()
@@ -53,8 +54,43 @@ fn main() -> eframe::Result {
     )
 }
 
+/// The program icon for the window and the task bar, drawn by `scripts/make_icon.py`.
+fn window_icon() -> egui::IconData {
+    let decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!(
+        "../assets/icon/prepolix.png"
+    )));
+    let mut reader = decoder.read_info().expect("Icon ist ein gültiges PNG");
+    let mut rgba = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .expect("Icon passt in den Speicher")
+    ];
+    let info = reader
+        .next_frame(&mut rgba)
+        .expect("Icon ist ein gültiges PNG");
+    assert_eq!(
+        info.color_type,
+        png::ColorType::Rgba,
+        "Icon braucht einen Alphakanal"
+    );
+    rgba.truncate(info.buffer_size());
+    egui::IconData {
+        rgba,
+        width: info.width,
+        height: info.height,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn window_icon_decodes() {
+        let icon = super::window_icon();
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+    }
+
     /// The bundled Noto Sans subset and egui's fallback fonts lack emoji and many symbols,
     /// which then show up as empty boxes. The GUI sources stick to Latin-1 plus a few checked
     /// typographic signs.
