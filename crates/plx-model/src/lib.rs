@@ -23,7 +23,7 @@ mod validity;
 pub use amplitude::{Amplitude, AmplitudeTime};
 pub use checks::{Finding, MeshCheck, Problem, Severity, diagnose_solver_output};
 pub use constraint::{
-    CompressionOnly, NodeTie, PointSpring, SurfaceSpring, SurfaceToSurfaceSpring,
+    CompressionOnly, NodeTie, PointSpring, RigidBody, SurfaceSpring, SurfaceToSurfaceSpring,
 };
 pub use contact::{
     Constraint, ContactMethod, ContactPair, DEFAULT_SURFACE_COLOR, Friction, GapConductance,
@@ -1214,6 +1214,10 @@ pub struct Load {
 pub enum LoadKind {
     /// Force applied at every node of the region, as CalculiX's `*CLOAD` on a node set.
     ConcentratedForce([f64; 3]),
+    /// Moment applied at every node of the region (`*CLOAD` on degrees of freedom 4 to 6):
+    /// at a reference point of a rigid body, or at nodes of beams and shells, which have
+    /// rotations.
+    Moment([f64; 3]),
     /// Pressure on a surface region; positive pushes into the material.
     Pressure(f64),
     /// Total force on a surface region, spread over its nodes by area when the input file is
@@ -1267,6 +1271,7 @@ impl LoadKind {
         !matches!(
             self,
             LoadKind::ConcentratedForce(_)
+                | LoadKind::Moment(_)
                 | LoadKind::Pressure(_)
                 | LoadKind::SurfaceTraction(_)
                 | LoadKind::PreTension { .. }
