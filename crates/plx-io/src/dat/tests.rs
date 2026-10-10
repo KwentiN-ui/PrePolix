@@ -259,6 +259,33 @@ fn frequency_steps_have_a_row_per_mode() {
     assert_eq!(u1.entries[0].values, [-1.653821E+01, -1.418389E+01]);
 }
 
+/// The `.dat` file of the buckle step of the cantilever, from CalculiX 2.21.
+const BUCKLING: &str = "
+
+                        S T E P       1
+
+
+     B U C K L I N G   F A C T O R   O U T P U T
+
+ MODE NO       BUCKLING
+                FACTOR
+
+      1   0.2051835E+04
+      2   0.2051835E+04
+
+";
+
+#[test]
+fn buckle_steps_list_the_factor_of_each_mode() {
+    let import = parse_dat(BUCKLING);
+    assert!(import.warnings.is_empty(), "{:?}", import.warnings);
+    let step = import.sets.iter().find(|s| s.name == "STEP_1").unwrap();
+    assert_eq!(step.rows, [(1, 1, 2051.835), (1, 2, 2051.835)]);
+    let factors = step.field("BUCKLING_FACTOR_OUTPUT").unwrap();
+    let factor = factors.component("BUCKLING_FACTOR").unwrap();
+    assert_eq!(factor.entries[0].values, [2051.835, 2051.835]);
+}
+
 #[test]
 fn numbers_without_exponent_letter() {
     assert_eq!(parse_number("1.5-282"), 1.5e-282);
