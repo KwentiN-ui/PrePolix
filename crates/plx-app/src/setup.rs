@@ -695,6 +695,8 @@ const SURFACE_FLUX: &str = "Surface_Flux";
 const BODY_FLUX: &str = "Body_Flux";
 const FILM: &str = "Convective_Film";
 const RADIATION: &str = "Radiation";
+const GRAVITY: &str = "Gravity";
+const CENTRIFUGAL: &str = "Centrifugal_Load";
 
 /// The boundary condition kinds of the dialog: label, default name and the kind.
 fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 4] {
@@ -761,12 +763,22 @@ const DOF_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
 
 /// The load kinds of the dialog in PrePoMax's order: label, default name and the kind with
 /// zero values.
-fn load_kinds() -> [(&'static str, &'static str, LoadKind); 9] {
+fn load_kinds() -> [(&'static str, &'static str, LoadKind); 11] {
     [
         ("Einzelkraft", FORCE, LoadKind::ConcentratedForce([0.0; 3])),
         ("Moment", MOMENT, LoadKind::Moment([0.0; 3])),
         ("Druck", PRESSURE, LoadKind::Pressure(0.0)),
         ("Flächenlast", TRACTION, LoadKind::SurfaceTraction([0.0; 3])),
+        ("Gravity", GRAVITY, LoadKind::Gravity([0.0, 0.0, -9.81])),
+        (
+            "Centrifugal load",
+            CENTRIFUGAL,
+            LoadKind::Centrifugal {
+                point: [0.0; 3],
+                axis: [0.0, 0.0, 1.0],
+                speed: 0.0,
+            },
+        ),
         (
             "Wärmestrom (Knoten)",
             CFLUX,
@@ -808,6 +820,8 @@ fn load_kind_name(kind: &LoadKind) -> &'static str {
         LoadKind::BodyFlux(_) => BODY_FLUX,
         LoadKind::Film { .. } => FILM,
         LoadKind::Radiation { .. } => RADIATION,
+        LoadKind::Gravity(_) => GRAVITY,
+        LoadKind::Centrifugal { .. } => CENTRIFUGAL,
     }
 }
 
@@ -824,7 +838,9 @@ fn load_target(kind: &LoadKind) -> LoadTarget {
         LoadKind::ConcentratedForce(_) | LoadKind::Moment(_) | LoadKind::ConcentratedFlux(_) => {
             LoadTarget::Nodes
         }
-        LoadKind::BodyFlux(_) => LoadTarget::Elements,
+        LoadKind::BodyFlux(_) | LoadKind::Gravity(_) | LoadKind::Centrifugal { .. } => {
+            LoadTarget::Elements
+        }
         _ => LoadTarget::Faces,
     }
 }
@@ -1428,6 +1444,57 @@ impl Editor {
                                 Quantity::HeatTransferCoefficient,
                             )
                             .range(0.0..=f64::MAX),
+                        );
+                        ui.end_row();
+                    }
+                    LoadKind::Gravity(acceleration) => {
+                        let count = if two_d { 2 } else { 3 };
+                        for (value, label) in
+                            acceleration.iter_mut().zip(["g1", "g2", "g3"]).take(count)
+                        {
+                            ui.label(label);
+                            ui.add(
+                                numeric::quantity(value, units, Quantity::Acceleration).speed(0.1),
+                            );
+                            ui.end_row();
+                        }
+                        ui.label("");
+                        ui.weak("Acceleration vector; the materials need a density.");
+                        ui.end_row();
+                    }
+                    LoadKind::Centrifugal { point, axis, speed } => {
+                        ui.label("Rotational speed");
+                        ui.add(
+                            numeric::quantity(speed, units, Quantity::RotationalSpeed).speed(1.0),
+                        );
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak(format!(
+                            "= {} rpm",
+                            numeric::format_physical(*speed * 60.0 / std::f64::consts::TAU)
+                        ));
+                        ui.end_row();
+                        for (value, label) in
+                            point
+                                .iter_mut()
+                                .zip(["Axis point X", "Axis point Y", "Axis point Z"])
+                        {
+                            ui.label(label);
+                            ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.1));
+                            ui.end_row();
+                        }
+                        for (value, label) in axis.iter_mut().zip([
+                            "Axis direction X",
+                            "Axis direction Y",
+                            "Axis direction Z",
+                        ]) {
+                            ui.label(label);
+                            ui.add(numeric::drag_value(value).speed(0.01));
+                            ui.end_row();
+                        }
+                        ui.label("");
+                        ui.weak(
+                            "CalculiX takes the square of the speed; the materials need a density.",
                         );
                         ui.end_row();
                     }

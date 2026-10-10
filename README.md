@@ -48,6 +48,10 @@ scripts/build_windows_installer.sh     # -> target/windows-installer/
 
 Ein Tag `v*` baut den Installer über den Workflow *Release* und hängt ihn an das GitHub-Release; per *Run workflow* entsteht er als Artefakt. Unter `C:\Program Files` darf prepolix ohne Administratorrechte nicht schreiben, das Arbeitsverzeichnis für CalculiX liegt dann in `%TEMP%\prepolix`.
 
+## Benutzerhandbuch
+
+Das Benutzerhandbuch (Englisch, Typst) liegt in [docs/user-guide/](docs/user-guide/). Jedes Release enthält es als PDF; selbst bauen mit `typst compile --ignore-system-fonts docs/user-guide/main.typ`. Neue Features werden dort im PR mitbeschrieben, siehe [docs/user-guide/README.md](docs/user-guide/README.md).
+
 ## Bedienung der 3D-Ansicht
 
 Wie in PrePoMax:
