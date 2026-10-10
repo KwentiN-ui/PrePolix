@@ -96,10 +96,7 @@ mod tests {
                 text: "*Amplitude, Name=A\n0, 0, 1, 1".into(),
                 active: false,
             }],
-            reference_points: vec![plx_model::ReferencePoint {
-                name: "RP-1".into(),
-                position: [1.0, 2.0, 3.0],
-            }],
+            reference_points: vec![plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])],
             coordinate_systems: vec![plx_model::CoordinateSystem {
                 kind: plx_model::CoordinateSystemKind::Cylindrical,
                 ..plx_model::CoordinateSystem::new("Coordinate_System-1")

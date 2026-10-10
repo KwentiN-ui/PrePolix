@@ -2703,6 +2703,7 @@ impl Workbench {
                 dialog.click(
                     model,
                     hit.as_ref().map(|h| (h, click.precision_at(h.point))),
+                    Operation::from_modifiers(click.shift, click.ctrl),
                 );
             }
             return;
@@ -2843,6 +2844,18 @@ impl Workbench {
             return;
         }
         let operation = Operation::from_modifiers(area.shift, area.ctrl);
+        if self.feature_picks()
+            && let Some(dialog) = &mut self.feature_dialog
+        {
+            let model = match dialog.results {
+                Some(index) => self.results.get(index),
+                None => self.model.as_ref(),
+            };
+            if let Some(model) = model {
+                dialog.box_select(model, area, operation);
+            }
+            return;
+        }
         if self.tree_view == TreeView::Results {
             if let Some(model) = self.results.get(self.current_result) {
                 if let Some(dialog) = &mut self.hot_spot_dialog {
@@ -3543,7 +3556,7 @@ impl Workbench {
             let feature = (self.feature_dialog.as_ref())
                 .filter(|d| on_results && d.results == Some(index) && index == current);
             let highlight = match (dialog, &self.tree.selected) {
-                _ if feature.is_some() => feature.map(FeatureDialog::highlight).unwrap_or_default(),
+                _ if feature.is_some() => feature.map(|d| d.highlight(model)).unwrap_or_default(),
                 _ if transformation.is_some() => transformation
                     .map(TransformationDialog::highlight)
                     .unwrap_or_default(),
@@ -3569,7 +3582,7 @@ impl Workbench {
             dialog.highlight()
         } else if let Some(dialog) = feature {
             self.highlighted = None;
-            dialog.highlight()
+            dialog.highlight(model)
         } else if let Some(dialog) = &self.contact_search {
             self.highlighted = None;
             dialog.highlight(model)
@@ -3929,7 +3942,7 @@ impl Workbench {
         match dialog.show(ctx, model, cut) {
             FeatureResult::Open => self.feature_dialog = Some(dialog),
             FeatureResult::Ok => {
-                dialog.apply(&mut model.fe);
+                dialog.apply(&mut model.fe, &model.mesh);
                 self.viewport.preview = Default::default();
             }
             FeatureResult::Cancel => self.viewport.preview = Default::default(),

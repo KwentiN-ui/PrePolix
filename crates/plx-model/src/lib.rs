@@ -30,8 +30,8 @@ pub use contact::{
     InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
 };
 pub use features::{
-    CoordinatePlane, CoordinateSystem, CoordinateSystemKind, GLOBAL, Plane, PlaneSource, PointRef,
-    ReferencePoint, ResultPath, ResultPlane,
+    CoordinatePlane, CoordinateSystem, CoordinateSystemKind, GLOBAL, Plane, PlaneSource,
+    PointDefinition, PointRef, ReferencePoint, ResultPath, ResultPlane,
 };
 pub use geometry::{
     Algorithm2d, Algorithm3d, Geometry, MeshSetupItem, MeshSetupKind, MeshingParameters,
