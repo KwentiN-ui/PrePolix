@@ -118,6 +118,23 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     add(center, DVec3::from(force), SymbolShape::Arrow);
                 }
             }
+            Kind::Load(LoadKind::PreTension {
+                value, direction, ..
+            }) => {
+                // The preload pulls the cut together: arrows onto the faces, out of them
+                // for a negative value.
+                let faces = face_geometry(model, &item.region, &visible);
+                let centers: Vec<DVec3> = faces.iter().map(|f| f.center).collect();
+                for index in sample(&centers) {
+                    let face = &faces[index];
+                    let along = direction.map_or(face.normal, DVec3::from);
+                    if value >= 0.0 {
+                        add(face.center, -along, SymbolShape::ArrowOnto);
+                    } else {
+                        add(face.center, along, SymbolShape::Arrow);
+                    }
+                }
+            }
             // Gravity as an arrow at the centre of the loaded elements, as in PrePoMax.
             Kind::Load(LoadKind::Gravity(acceleration)) => {
                 if let Some(center) = region_center(model, &item.region, &visible) {
