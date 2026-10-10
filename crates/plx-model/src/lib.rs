@@ -1082,6 +1082,15 @@ pub enum LoadKind {
     /// Total force on a surface region, spread over its nodes by area when the input file is
     /// written (PrePoMax's surface traction).
     SurfaceTraction([f64; 3]),
+    /// Bolt preload across a cut through the shank (`*PRE-TENSION SECTION`), PrePoMax's
+    /// pre-tension load: the region is the element faces on one side of the cut, the value
+    /// the force pulling the two sides together, or the shortening when `by_displacement`.
+    PreTension {
+        value: f64,
+        by_displacement: bool,
+        /// Direction of the preload; `None` lets CalculiX take the surface normal.
+        direction: Option<[f64; 3]>,
+    },
     /// Heat flow into every node of the region (`*CFLUX`), PrePoMax's concentrated flux.
     ConcentratedFlux(f64),
     /// Heat flow per area into a surface (`*DFLUX`, `S`), PrePoMax's surface flux.
@@ -1123,6 +1132,7 @@ impl LoadKind {
             LoadKind::ConcentratedForce(_)
                 | LoadKind::Pressure(_)
                 | LoadKind::SurfaceTraction(_)
+                | LoadKind::PreTension { .. }
                 | LoadKind::Gravity(_)
                 | LoadKind::Centrifugal { .. }
         )
