@@ -12,23 +12,23 @@ use crate::results::ResultsView;
 
 /// The types of the list, in PrePoMax's order, with the prefix of their default names.
 const TYPES: [(&str, &str); 4] = [
-    ("Grenzwert (Limit)", "Limit"),
-    ("Einhüllende (Envelope)", "Envelope"),
-    ("Gleichung (Equation)", "Equation"),
-    ("Koordinatensystem-Transformation", "Transform"),
+    ("Limit", "Limit"),
+    ("Envelope", "Envelope"),
+    ("Equation", "Equation"),
+    ("Coordinate System Transformation", "Transform"),
 ];
 const LIMIT: usize = 0;
 const ENVELOPE: usize = 1;
 const EQUATION: usize = 2;
 const TRANSFORM: usize = 3;
 
-const NO_FIELDS: &str = "Es gibt keine Feldausgaben oder Komponenten, aus denen eine Feldausgabe \
-                         erstellt werden kann.";
-const NO_COORDINATE_SYSTEM: &str = "Es ist kein Koordinatensystem definiert, in das die \
-                                    Feldausgabe transformiert werden kann.";
+const NO_FIELDS: &str = "There are no field outputs or components from which a field output \
+                         can be created.";
+const NO_COORDINATE_SYSTEM: &str = "No coordinate system is defined into which the \
+                                    field output can be transformed.";
 
-const LIMIT_VALUES: &str = "Grenzwert jedes Parts oder Elementsets, z. B. die Streckgrenze. \
-                            Er muss ungleich 0 sein.";
+const LIMIT_VALUES: &str = "Limit value of each part or element set, e.g. the yield strength. \
+                            It must not be 0.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tab {
@@ -52,36 +52,36 @@ impl Row {
     fn label(self) -> &'static str {
         match self {
             Row::Name => "Name",
-            Row::Field => "Feld",
-            Row::Component => "Komponente",
-            Row::Basis => "Grenzwert bezogen auf",
-            Row::Equation => "Gleichung",
-            Row::Unit => "Einheit",
-            Row::CoordinateSystem => "Koordinatensystem",
+            Row::Field => "Field",
+            Row::Component => "Component",
+            Row::Basis => "Limit plot based on",
+            Row::Equation => "Equation",
+            Row::Unit => "Unit",
+            Row::CoordinateSystem => "Coordinate system",
         }
     }
 
     fn description(self) -> &'static str {
         match self {
-            Row::Name => "Name der Feldausgabe.",
-            Row::Field => "Feld, aus dem die Feldausgabe berechnet wird.",
-            Row::Component => "Komponente, aus der die Feldausgabe berechnet wird.",
+            Row::Name => "Name of the field output.",
+            Row::Field => "Field from which the field output is computed.",
+            Row::Component => "Component from which the field output is computed.",
             Row::Basis => {
-                "Wofür die Grenzwerte angegeben werden: je Part, je Elementset oder einer für \
-                 alle Elemente. Liegt ein Knoten in mehreren, gilt der kleinste Grenzwert. \
-                 Berechnet werden RATIO = Wert / Grenzwert und SAFETY_FACTOR = Grenzwert / Wert."
+                "What the limit values are given for: per part, per element set or one for \
+                 all elements. If a node lies in several, the smallest limit applies. \
+                 Computed are RATIO = value / limit and SAFETY_FACTOR = limit / value."
             }
             Row::Equation => {
-                "Beispiel: =DISP.ALL\nEine Komponente wird mit ihrem vollen Namen \
-                 Feldname.Komponente angegeben, Namen mit Bindestrich in eckigen Klammern: \
-                 [Limit-1.RATIO]. Groß- und Kleinschreibung zählt. Funktionen wie Sqrt, Abs, \
-                 Max, Min, Pow und If stehen zur Verfügung."
+                "Example: =DISP.ALL\nA component is given by its full name \
+                 FieldName.Component, names with a hyphen in square brackets: \
+                 [Limit-1.RATIO]. The names are case-sensitive. Functions such as Sqrt, Abs, \
+                 Max, Min, Pow and If are available."
             }
-            Row::Unit => "Benutzerdefinierte Einheit der Feldausgabe, in der Legende angezeigt.",
+            Row::Unit => "User-defined unit of the field output, shown in the legend.",
             Row::CoordinateSystem => {
-                "Koordinatensystem aus den Features der Ergebnisse, in dessen Richtungen die \
-                 Komponenten eines Vektor- oder Tensorfelds umgerechnet werden; bei einem \
-                 zylindrischen in r, theta, z an jedem Knoten."
+                "Coordinate system from the features of the results into whose directions the \
+                 components of a vector or tensor field are transformed; for a \
+                 cylindrical one into r, theta, z at every node."
             }
         }
     }
@@ -91,7 +91,7 @@ impl Row {
 pub enum DialogAction<T> {
     Open,
     Cancel,
-    /// Create or replace the output; `next` keeps the dialog open for another one (OK - Neu).
+    /// Create or replace the output; `next` keeps the dialog open for another one (OK - New).
     Ok {
         output: T,
         next: bool,
@@ -259,9 +259,9 @@ impl FieldOutputDialog {
 
     pub fn title(&self) -> &'static str {
         if self.edit.is_some() {
-            "Feldausgabe bearbeiten"
+            "Edit Field Output"
         } else {
-            "Feldausgabe erstellen"
+            "Create Field Output"
         }
     }
 
@@ -284,17 +284,17 @@ impl FieldOutputDialog {
         let mut output = self.drafts[self.kind].clone();
         output.name = output.name.trim().to_string();
         if output.name.is_empty() {
-            return Err("Bitte einen Namen eingeben.".into());
+            return Err("Please enter a name.".into());
         }
         if self
             .taken
             .iter()
             .any(|t| t.eq_ignore_ascii_case(&output.name))
         {
-            return Err(format!("Der Name {} ist schon vergeben.", output.name));
+            return Err(format!("The name {} is already used.", output.name));
         }
         if output.name.contains('.') {
-            return Err("Der Name darf keinen Punkt enthalten.".into());
+            return Err("The name must not contain a dot.".into());
         }
         if let FieldOutputKind::Limit { basis, limits, .. } = &mut output.kind {
             *limits = match basis {
@@ -305,18 +305,18 @@ impl FieldOutputDialog {
                 }
             };
             if limits.is_empty() {
-                return Err("Es gibt keine Elementsets, für die Grenzwerte gelten könnten.".into());
+                return Err("There are no element sets the limit values could apply to.".into());
             }
             if let Some((item, _)) = limits.iter().find(|(_, l)| *l == 0.0) {
                 return Err(format!(
-                    "Bitte unter Grenzwerte einen Grenzwert ungleich 0 für {item} eingeben."
+                    "Please enter a limit value other than 0 for {item} under Limit Values."
                 ));
             }
         }
         Ok(output)
     }
 
-    /// Prepares the dialog for the next output after OK - Neu: the created name is taken
+    /// Prepares the dialog for the next output after OK - New: the created name is taken
     /// and every type proposes its next free name.
     pub fn next(&mut self, created: &str) {
         self.taken.push(created.to_string());
@@ -338,7 +338,7 @@ impl FieldOutputDialog {
             .default_pos(ctx.content_rect().center() - egui::vec2(175.0, 290.0))
             .show(ctx, |ui| {
                 ui.set_width(340.0);
-                ui.label("Typ");
+                ui.label("Type");
                 frame().show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.set_min_height(76.0);
@@ -379,11 +379,11 @@ impl FieldOutputDialog {
                 }
                 ui.add_space(4.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Abbrechen").clicked() {
+                    if ui.button("Cancel").clicked() {
                         action = DialogAction::Cancel;
                     }
                     let ok = ui.button("OK").clicked();
-                    let next = self.edit.is_none() && ui.button("OK - Neu").clicked();
+                    let next = self.edit.is_none() && ui.button("OK - New").clicked();
                     if ok || next {
                         match self.output() {
                             Ok(output) => action = DialogAction::Ok { output, next },
@@ -404,7 +404,7 @@ impl FieldOutputDialog {
             return;
         }
         if self.tab == Tab::LimitValues {
-            ui.strong("Grenzwerte");
+            ui.strong("Limit Values");
             ui.label(LIMIT_VALUES);
         } else {
             ui.strong(self.focus.label());
@@ -415,9 +415,9 @@ impl FieldOutputDialog {
     fn tabs(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            let mut tabs = vec![(Tab::Properties, "Eigenschaften")];
+            let mut tabs = vec![(Tab::Properties, "Properties")];
             if self.kind == LIMIT && self.unavailable().is_none() {
-                tabs.push((Tab::LimitValues, "Grenzwerte"));
+                tabs.push((Tab::LimitValues, "Limit Values"));
             }
             for (tab, label) in tabs {
                 // Framed also when inactive, so hovering a tab does not widen it and push the
@@ -442,7 +442,7 @@ impl FieldOutputDialog {
             .inner_margin(egui::Margin::symmetric(4, 1));
         header.show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.strong("Daten");
+            ui.strong("Data");
         });
         let fields = &self.fields;
         let systems = &self.systems;
@@ -522,7 +522,7 @@ impl FieldOutputDialog {
             });
         if let FieldOutputKind::Equation { equation, .. } = &mut draft.kind {
             ui.add_space(4.0);
-            ui.menu_button("Komponente einfügen …", |ui| {
+            ui.menu_button("Insert Component…", |ui| {
                 insert_menu(ui, fields, equation);
             });
         }
@@ -540,13 +540,13 @@ impl FieldOutputDialog {
                     .collect(),
             ),
             LimitBasis::ElementSets => (
-                "Elementset",
+                "Element set",
                 (self.set_limits.iter_mut())
                     .map(|(n, l)| (n.clone(), l))
                     .collect(),
             ),
             LimitBasis::AllElements => (
-                "Elemente",
+                "Elements",
                 vec![(
                     basis_label(LimitBasis::AllElements).into(),
                     &mut self.all_limit,
@@ -554,7 +554,7 @@ impl FieldOutputDialog {
             ),
         };
         if limits.is_empty() {
-            ui.weak("Das Ergebnis enthält keine Elementsets.");
+            ui.weak("The results contain no element sets.");
             return;
         }
         egui::ScrollArea::vertical()
@@ -566,7 +566,7 @@ impl FieldOutputDialog {
                     .min_col_width(150.0)
                     .show(ui, |ui| {
                         ui.strong(header);
-                        ui.strong("Grenzwert");
+                        ui.strong("Limit value");
                         ui.end_row();
                         for (name, limit) in limits {
                             ui.label(name);
@@ -582,8 +582,8 @@ impl FieldOutputDialog {
 fn basis_label(basis: LimitBasis) -> &'static str {
     match basis {
         LimitBasis::Parts => "Parts",
-        LimitBasis::ElementSets => "Elementsets",
-        LimitBasis::AllElements => "Alle Elemente",
+        LimitBasis::ElementSets => "Element sets",
+        LimitBasis::AllElements => "All elements",
     }
 }
 
@@ -691,7 +691,7 @@ mod tests {
         let field = view.current_increment().unwrap().field("Limit-1").unwrap();
         assert_eq!(field.components[0].name, "RATIO");
 
-        // OK - Neu proposes the next free name; editing keeps the type and values.
+        // OK - New proposes the next free name; editing keeps the type and values.
         dialog.next("Limit-1");
         assert_eq!(dialog.drafts[LIMIT].name, "Limit-2");
         let index = view.field_output_index(view.current_increment().unwrap().fields.len() - 1);

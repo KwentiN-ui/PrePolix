@@ -280,16 +280,16 @@ impl FeatureDialog {
         let (kind, name) = match &self.draft {
             Draft::ReferencePoint(r) => ("Reference Point", &r.name),
             Draft::CoordinateSystem(c) => ("Coordinate System", &c.name),
-            Draft::Path(p) => ("Pfad", &p.name),
+            Draft::Path(p) => ("Path", &p.name),
             Draft::Plane(p) => ("Plane", &p.name),
-            Draft::ResultPlane(p) => ("Ergebnisse in der Ebene", &p.name),
+            Draft::ResultPlane(p) => ("Results in Plane", &p.name),
         };
         let action = if self.index.is_some() {
-            "bearbeiten"
+            "Edit"
         } else {
-            "erstellen"
+            "Create"
         };
-        format!("{kind} {action}: {name}")
+        format!("{action} {kind}: {name}")
     }
 
     /// `cut` holds the values on the plane of an edited plane result, on the undeformed mesh.
@@ -328,7 +328,7 @@ impl FeatureDialog {
                 }
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Abbrechen").clicked() {
+                    if ui.button("Cancel").clicked() {
                         result = FeatureResult::Cancel;
                     }
                     if ui.button("OK").clicked() {
@@ -364,7 +364,7 @@ impl FeatureDialog {
                 name_row(ui, &mut point.name);
                 point_rows(
                     ui,
-                    "Punkt",
+                    "Point",
                     Slot::Position,
                     &mut point.position,
                     picking,
@@ -373,7 +373,7 @@ impl FeatureDialog {
             }
             Draft::CoordinateSystem(system) => {
                 name_row(ui, &mut system.name);
-                ui.label("Typ");
+                ui.label("Type");
                 ui.horizontal(|ui| {
                     for kind in CoordinateSystemKind::ALL {
                         ui.radio_value(&mut system.kind, kind, kind.label());
@@ -382,7 +382,7 @@ impl FeatureDialog {
                 ui.end_row();
                 point_rows(
                     ui,
-                    "Ursprung",
+                    "Origin",
                     Slot::Origin,
                     &mut system.origin,
                     picking,
@@ -390,7 +390,7 @@ impl FeatureDialog {
                 );
                 point_rows(
                     ui,
-                    "Punkt auf x-Achse",
+                    "Point on x axis",
                     Slot::PointX,
                     &mut system.point_x,
                     picking,
@@ -398,7 +398,7 @@ impl FeatureDialog {
                 );
                 point_rows(
                     ui,
-                    "Punkt in xy-Ebene",
+                    "Point in xy plane",
                     Slot::PointXy,
                     &mut system.point_xy,
                     picking,
@@ -406,7 +406,7 @@ impl FeatureDialog {
                 );
                 if system.kind == CoordinateSystemKind::Cylindrical {
                     ui.label("");
-                    ui.weak("Die z-Achse ist die Zylinderachse; lokale Richtungen r, theta, z.");
+                    ui.weak("The z axis is the cylinder axis; local directions r, theta, z.");
                     ui.end_row();
                 }
             }
@@ -414,15 +414,15 @@ impl FeatureDialog {
                 name_row(ui, &mut path.name);
                 point_ref_rows(
                     ui,
-                    "Anfang",
+                    "Start",
                     Slot::Start,
                     &mut path.start,
                     fe,
                     picking,
                     speed,
                 );
-                point_ref_rows(ui, "Ende", Slot::End, &mut path.end, fe, picking, speed);
-                ui.label("Punkte");
+                point_ref_rows(ui, "End", Slot::End, &mut path.end, fe, picking, speed);
+                ui.label("Points");
                 ui.add(numeric::drag_value(&mut path.points).range(2..=10_000));
                 ui.end_row();
             }
@@ -436,7 +436,7 @@ impl FeatureDialog {
                 if fe.planes.is_empty() {
                     ui.colored_label(
                         Color32::from_rgb(200, 0, 0),
-                        "Zuerst unter Features eine Plane anlegen.",
+                        "Create a Plane under Features first.",
                     );
                 } else {
                     egui::ComboBox::from_id_salt("result plane")
@@ -463,11 +463,11 @@ impl FeatureDialog {
             return;
         };
         let Some(view) = &model.results else {
-            ui.weak("Keine Ergebnisse geladen.");
+            ui.weak("No results loaded.");
             return;
         };
         let Some((field, component)) = view.current() else {
-            ui.weak("Im Results-Baum eine Komponente wählen.");
+            ui.weak("Select a component in the Results tree.");
             return;
         };
         let plane = model.fe.plane(&result.plane);
@@ -479,7 +479,7 @@ impl FeatureDialog {
         ui.horizontal(|ui| {
             ui.strong(&header);
             ui.label(format!(
-                "Inkrement {}",
+                "Increment {}",
                 crate::results::ResultsView::increment_label(
                     view.current_increment().unwrap_or(&view.increments[0])
                 )
@@ -488,13 +488,13 @@ impl FeatureDialog {
         let Some((cut, [min, max])) = cut.and_then(|c| Some((c, c.extremes?))) else {
             ui.colored_label(
                 Color32::from_rgb(200, 0, 0),
-                "Die Ebene schneidet keinen sichtbaren Part.",
+                "The plane does not cut any visible part.",
             );
             return;
         };
         let at = |p: glam::DVec3| {
             format!(
-                "bei ({}, {}, {})",
+                "at ({}, {}, {})",
                 format_value(p.x as f32),
                 format_value(p.y as f32),
                 format_value(p.z as f32)
@@ -514,31 +514,31 @@ impl FeatureDialog {
                 ui.end_row();
                 if let Some(mean) = cut.mean() {
                     let (label, measure, name) = if cut.area > 0.0 {
-                        ("Mittelwert", cut.area, "Schnittfläche")
+                        ("Mean", cut.area, "Cut area")
                     } else {
-                        ("Mittelwert", cut.length, "Schnittlänge")
+                        ("Mean", cut.length, "Cut length")
                     };
                     ui.label(label);
                     ui.strong(format_value(mean as f32));
                     ui.weak(if cut.area > 0.0 {
-                        "flächengewichtet"
+                        "area-weighted"
                     } else {
-                        "längengewichtet"
+                        "length-weighted"
                     });
                     ui.end_row();
                     ui.label(name);
                     ui.label(format_value(measure as f32));
                     ui.end_row();
                 }
-                ui.label("Schnittpunkte");
+                ui.label("Cut points");
                 ui.label(cut.points.len().to_string());
                 ui.end_row();
             });
         ui.horizontal(|ui| {
-            if ui.button("In Zwischenablage kopieren").clicked() {
+            if ui.button("Copy to Clipboard").clicked() {
                 ui.ctx().copy_text(cut_csv(cut, &header, '\t'));
             }
-            if ui.button("Als CSV speichern …").clicked() {
+            if ui.button("Save as CSV…").clicked() {
                 let name = format!("{}.csv", result.name);
                 if let Some(file) = rfd::FileDialog::new()
                     .add_filter("CSV", &["csv"])
@@ -553,8 +553,8 @@ impl FeatureDialog {
             }
         });
         ui.weak(
-            "Werte am unverformten Netz. Der Haken im Results-Baum zeigt nur die \
-             Schnittfläche im 3D-Fenster.",
+            "Values on the undeformed mesh. The check box in the Results tree only shows the \
+             cut surface in the 3D view.",
         );
     }
 
@@ -564,7 +564,7 @@ impl FeatureDialog {
             return;
         };
         let Some(view) = &model.results else {
-            ui.weak("Keine Ergebnisse geladen.");
+            ui.weak("No results loaded.");
             return;
         };
         if self.located.as_ref().is_none_or(|l| l.path != *path) {
@@ -587,7 +587,7 @@ impl FeatureDialog {
             }
         };
         let Some((field, component)) = view.current() else {
-            ui.weak("Im Results-Baum eine Komponente wählen.");
+            ui.weak("Select a component in the Results tree.");
             return;
         };
         let values = path::interpolate(points, &component.values);
@@ -596,7 +596,7 @@ impl FeatureDialog {
         ui.horizontal(|ui| {
             ui.strong(&header);
             ui.label(format!(
-                "Inkrement {}",
+                "Increment {}",
                 crate::results::ResultsView::increment_label(
                     view.current_increment().unwrap_or(&view.increments[0])
                 )
@@ -605,7 +605,7 @@ impl FeatureDialog {
         if inside == 0 {
             ui.colored_label(
                 Color32::from_rgb(200, 0, 0),
-                "Der Pfad verläuft nirgends durch das Netz.",
+                "The path does not pass through the mesh anywhere.",
             );
             return;
         }
@@ -616,19 +616,19 @@ impl FeatureDialog {
                 (a.min(v), b.max(v))
             });
         ui.label(format!(
-            "Min {}   Max {}   ({inside} von {} Punkten im Netz)",
+            "Min {}   Max {}   ({inside} of {} points in the mesh)",
             format_value(min as f32),
             format_value(max as f32),
             values.len()
         ));
         let distances: Vec<f64> = points.iter().map(|p| p.distance).collect();
-        plot(ui, &distances, &values, "Abstand", false);
+        plot(ui, &distances, &values, "Distance", false);
         ui.horizontal(|ui| {
-            if ui.button("In Zwischenablage kopieren").clicked() {
+            if ui.button("Copy to Clipboard").clicked() {
                 ui.ctx()
                     .copy_text(path::to_csv(points, &values, &header, '\t'));
             }
-            if ui.button("Als CSV speichern …").clicked() {
+            if ui.button("Save as CSV…").clicked() {
                 let name = format!("{}.csv", located.path.name);
                 if let Some(file) = rfd::FileDialog::new()
                     .add_filter("CSV", &["csv"])
@@ -642,7 +642,7 @@ impl FeatureDialog {
                 }
             }
         });
-        egui::CollapsingHeader::new("Tabelle")
+        egui::CollapsingHeader::new("Table")
             .id_salt("path table")
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
@@ -652,7 +652,7 @@ impl FeatureDialog {
                             .striped(true)
                             .spacing([16.0, 2.0])
                             .show(ui, |ui| {
-                                for title in ["Abstand", "X", "Y", "Z", component.name.as_str()] {
+                                for title in ["Distance", "X", "Y", "Z", component.name.as_str()] {
                                     ui.strong(title);
                                 }
                                 ui.end_row();
@@ -682,23 +682,23 @@ impl FeatureDialog {
             Draft::ResultPlane(p) => (&p.name, names(&fe.result_planes, |p| &p.name)),
         };
         if name.trim().is_empty() {
-            return Err("Bitte einen Namen eingeben.".into());
+            return Err("Please enter a name.".into());
         }
         let duplicate = (taken.iter().enumerate())
             .any(|(i, other)| Some(i) != self.index && other.eq_ignore_ascii_case(name));
         if duplicate {
-            return Err(format!("Der Name {name} ist schon vergeben."));
+            return Err(format!("The name {name} is already in use."));
         }
         match &self.draft {
             Draft::CoordinateSystem(c) if c.name.eq_ignore_ascii_case("Global") => {
-                Err("Der Name Global steht für das globale Koordinatensystem.".into())
+                Err("The name Global stands for the global coordinate system.".into())
             }
             Draft::CoordinateSystem(c) => c.axes().map(|_| ()),
             Draft::Path(p) => p.samples(fe).map(|_| ()),
             Draft::Plane(p) => p.resolve(fe).map(|_| ()),
             Draft::ResultPlane(p) => match fe.plane(&p.plane) {
                 Some(plane) => plane.resolve(fe).map(|_| ()),
-                None => Err("Bitte eine Plane wählen.".into()),
+                None => Err("Please select a Plane.".into()),
             },
             Draft::ReferencePoint(_) => Ok(()),
         }
@@ -871,12 +871,12 @@ fn plane_rows(
         PlaneSource::ThreePoints { .. } => 1,
         PlaneSource::PointNormal { .. } => 2,
     };
-    ui.label("Typ");
+    ui.label("Type");
     let mut chosen = kind;
     ui.horizontal(|ui| {
-        ui.radio_value(&mut chosen, 0, "Koordinatensystem");
-        ui.radio_value(&mut chosen, 1, "Drei Punkte");
-        ui.radio_value(&mut chosen, 2, "Punkt und Normale");
+        ui.radio_value(&mut chosen, 0, "Coordinate system");
+        ui.radio_value(&mut chosen, 1, "Three points");
+        ui.radio_value(&mut chosen, 2, "Point and normal");
     });
     ui.end_row();
     if chosen != kind {
@@ -910,7 +910,7 @@ fn plane_rows(
             plane,
             offset,
         } => {
-            ui.label("Koordinatensystem");
+            ui.label("Coordinate system");
             egui::ComboBox::from_id_salt("plane system")
                 .selected_text(system.as_str())
                 .width(200.0)
@@ -922,7 +922,7 @@ fn plane_rows(
                     }
                 });
             ui.end_row();
-            ui.label("Ebene");
+            ui.label("Plane");
             ui.horizontal(|ui| {
                 for candidate in CoordinatePlane::ALL {
                     let button = egui::Button::selectable(*plane == candidate, candidate.label())
@@ -933,27 +933,27 @@ fn plane_rows(
                 }
             });
             ui.end_row();
-            ui.label("Abstand");
+            ui.label("Distance");
             ui.add(numeric::drag_value(offset).speed(speed).max_decimals(6));
             ui.end_row();
         }
         PlaneSource::ThreePoints { points } => {
             for (k, point) in points.iter_mut().enumerate() {
-                let label = ["Punkt 1", "Punkt 2", "Punkt 3"][k];
+                let label = ["Point 1", "Point 2", "Point 3"][k];
                 point_ref_rows(ui, label, Slot::PlanePoint(k), point, fe, picking, speed);
             }
             ui.label("");
-            ui.weak("Die Normale folgt der Rechte-Hand-Regel von 1 über 2 nach 3.");
+            ui.weak("The normal follows the right-hand rule from 1 via 2 to 3.");
             ui.end_row();
         }
         PlaneSource::PointNormal { point, normal } => {
-            point_ref_rows(ui, "Punkt", Slot::PlanePoint(0), point, fe, picking, speed);
-            ui.label(RichText::new("Normale").strong());
+            point_ref_rows(ui, "Point", Slot::PlanePoint(0), point, fe, picking, speed);
+            ui.label(RichText::new("Normal").strong());
             ui.horizontal(|ui| {
                 for (axis, label) in ["X", "Y", "Z"].into_iter().enumerate() {
                     if ui
                         .button(label)
-                        .on_hover_text("Normale entlang der Achse")
+                        .on_hover_text("Normal along the axis")
                         .clicked()
                     {
                         *normal = [0.0; 3];
@@ -1046,7 +1046,7 @@ fn point_ref_rows(
 ) {
     ui.label(RichText::new(label).strong());
     let shown = match point {
-        PointRef::Coordinates(_) => "Koordinaten".to_string(),
+        PointRef::Coordinates(_) => "Coordinates".to_string(),
         PointRef::ReferencePoint(name) => name.clone(),
     };
     egui::ComboBox::from_id_salt(("point source", label))
@@ -1054,7 +1054,7 @@ fn point_ref_rows(
         .width(200.0)
         .show_ui(ui, |ui| {
             let coordinates = matches!(point, PointRef::Coordinates(_));
-            if ui.selectable_label(coordinates, "Koordinaten").clicked() && !coordinates {
+            if ui.selectable_label(coordinates, "Coordinates").clicked() && !coordinates {
                 let at = point.resolve(fe).unwrap_or([0.0; 3]);
                 *point = PointRef::Coordinates(at);
             }
@@ -1082,7 +1082,7 @@ fn point_ref_rows(
                     format_value(r.position[1] as f32),
                     format_value(r.position[2] as f32)
                 )),
-                None => ui.colored_label(Color32::from_rgb(200, 0, 0), "existiert nicht"),
+                None => ui.colored_label(Color32::from_rgb(200, 0, 0), "does not exist"),
             };
             ui.end_row();
         }

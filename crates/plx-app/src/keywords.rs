@@ -55,7 +55,7 @@ impl Node {
                 .text
                 .lines()
                 .find(|line| !line.trim().is_empty())
-                .unwrap_or("(leer)")
+                .unwrap_or("(empty)")
                 .trim()
                 .to_owned(),
         }
@@ -342,7 +342,7 @@ impl KeywordEditor {
         let mut result = EditorResult::Open;
         let screen = ctx.content_rect().size();
         let size = egui::vec2((screen.x * 0.9).min(1150.0), (screen.y * 0.85).min(760.0));
-        egui::Window::new("CalculiX-Keyword-Editor")
+        egui::Window::new("CalculiX Keyword Editor")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -370,12 +370,12 @@ impl KeywordEditor {
                 ui.horizontal(|ui| {
                     if !self.unplaced.is_empty() {
                         ui.label(format!(
-                            "{} Keyword(s) ohne gültigen Platz im geänderten Modell werden nicht geschrieben.",
+                            "{} keyword(s) without a valid place in the changed model will not be written.",
                             self.unplaced.len()
                         ));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Abbrechen").clicked() {
+                        if ui.button("Cancel").clicked() {
                             result = EditorResult::Cancel;
                         }
                         if ui.button("OK").clicked() {
@@ -391,7 +391,7 @@ impl KeywordEditor {
     }
 
     fn tree_side(&mut self, ui: &mut egui::Ui, height: f32) {
-        ui.strong("CalculiX-Keyword-Baum");
+        ui.strong("CalculiX Keyword Tree");
         let tree_height = height - 64.0;
         frame().show(ui, |ui| {
             ui.set_min_size(egui::vec2(ui.available_width(), tree_height));
@@ -426,21 +426,26 @@ impl KeywordEditor {
         let user = self.selected_node().is_some_and(Node::is_user);
         ui.horizontal_wrapped(|ui| {
             if ui
-                .add_enabled(self.selected.is_some(), egui::Button::new("Hinzufügen"))
-                .on_hover_text("Neues Keyword unter dem gewählten Eintrag oder nach dem gewählten eigenen Keyword")
+                .add_enabled(self.selected.is_some(), egui::Button::new("Add"))
+                .on_hover_text(
+                    "New keyword below the selected item or after the selected user keyword",
+                )
                 .clicked()
             {
                 self.add();
             }
             let up = self.move_target(true).is_some();
-            if ui.add_enabled(up, egui::Button::new("Nach oben")).clicked() {
+            if ui.add_enabled(up, egui::Button::new("Move Up")).clicked() {
                 self.move_selected(true);
             }
             let down = self.move_target(false).is_some();
-            if ui.add_enabled(down, egui::Button::new("Nach unten")).clicked() {
+            if ui
+                .add_enabled(down, egui::Button::new("Move Down"))
+                .clicked()
+            {
                 self.move_selected(false);
             }
-            if ui.add_enabled(user, egui::Button::new("Löschen")).clicked() {
+            if ui.add_enabled(user, egui::Button::new("Delete")).clicked() {
                 self.delete();
             }
         });
@@ -449,13 +454,13 @@ impl KeywordEditor {
     fn text_side(&mut self, ui: &mut egui::Ui, height: f32) {
         let editor_height = (height * 0.38).max(120.0);
         ui.horizontal(|ui| {
-            ui.strong("Gewähltes Keyword bearbeiten");
+            ui.strong("Edit Selected Keyword");
             let path = self.selected.clone().unwrap_or_default();
             if let Some(node) = node_mut(&mut self.nodes, &path)
                 && let KeywordKind::User { active } = &mut node.keyword.kind
             {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.checkbox(active, "Aktiv").changed() {
+                    if ui.checkbox(active, "Active").changed() {
                         self.preview_dirty = true;
                     }
                 });
@@ -484,9 +489,9 @@ impl KeywordEditor {
                         None => String::new(),
                     };
                     let hint = if has_selection {
-                        "Erzeugte Keywords werden aus dem Modell geschrieben und sind hier nicht änderbar."
+                        "Generated keywords are written from the model and cannot be edited here."
                     } else {
-                        "Einen Eintrag im Baum wählen. Eigene Keywords mit \"Hinzufügen\" einfügen."
+                        "Select an item in the tree. Insert user keywords with \"Add\"."
                     };
                     ui.add(
                         egui::TextEdit::multiline(&mut text)
@@ -500,10 +505,10 @@ impl KeywordEditor {
             });
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.strong("Eingabedatei (schreibgeschützt)");
+            ui.strong("Input file (read-only)");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .checkbox(&mut self.hide_data, "Daten ausblenden (schneller)")
+                    .checkbox(&mut self.hide_data, "Hide data (faster)")
                     .changed()
                 {
                     self.preview_dirty = true;

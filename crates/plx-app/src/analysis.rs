@@ -82,12 +82,11 @@ impl Analysis {
     ) -> Result<Self, String> {
         if model.fe.steps.is_empty() && !check_model {
             return Err(
-                "Analyse nicht gestartet: Das Modell hat keinen Step (Modell > Step erstellen)."
-                    .into(),
+                "Analysis not started: the model has no step (Model > Create Step …).".into(),
             );
         }
         if !check_model && !model.fe.steps.iter().any(|s| s.active) {
-            return Err("Analyse nicht gestartet: Alle Steps sind deaktiviert.".into());
+            return Err("Analysis not started: all steps are deactivated.".into());
         }
         let heading = format!("prepolix: {}", model.file_name());
         let mut fe = model.fe.clone();
@@ -100,16 +99,16 @@ impl Analysis {
             plx_io::inp::write_inp
         };
         let input = write(&model.mesh, &fe, &heading)
-            .map_err(|e| format!("Eingabedatei nicht geschrieben: {e}"))?;
+            .map_err(|e| format!("Input file not written: {e}"))?;
         let copied = copy_result_files(&fe, &work_dir);
         let job_solver = solver.job_solver();
-        let hint = "Programm unter Werkzeuge > Einstellungen > CalculiX prüfen.";
+        let hint = "Check the executable under Tools > Settings > CalculiX.";
         if let Some(message) = crate::settings::missing_executable(&job_solver.executable) {
-            return Err(format!("CalculiX nicht gestartet: {message}. {hint}"));
+            return Err(format!("CalculiX not started: {message}. {hint}"));
         }
         let job = Job::start(&job_solver, &work_dir, ANALYSIS_NAME, &input).map_err(|e| {
             format!(
-                "CalculiX ({}) nicht gestartet: {e}. {hint}",
+                "CalculiX ({}) not started: {e}. {hint}",
                 job_solver.executable.display()
             )
         })?;
@@ -117,9 +116,9 @@ impl Analysis {
             "{} {} in {}",
             ANALYSIS_NAME,
             if check_model {
-                "Modellprüfung gestartet"
+                "model check started"
             } else {
-                "gestartet"
+                "started"
             },
             work_dir.display()
         )];
@@ -178,11 +177,11 @@ impl Analysis {
 
     pub fn status_text(status: JobStatus) -> &'static str {
         match status {
-            JobStatus::Running => "läuft",
-            JobStatus::Completed => "abgeschlossen",
-            JobStatus::FailedWithResults => "mit Fehlern beendet, Ergebnisse vorhanden",
-            JobStatus::Failed => "fehlgeschlagen",
-            JobStatus::Killed => "abgebrochen",
+            JobStatus::Running => "running",
+            JobStatus::Completed => "completed",
+            JobStatus::FailedWithResults => "finished with errors, results available",
+            JobStatus::Failed => "failed",
+            JobStatus::Killed => "killed",
         }
     }
 
@@ -212,7 +211,7 @@ impl Analysis {
                     if let Some(progress) = self.job.progress() {
                         ui.separator();
                         ui.label(format!(
-                            "Step {}, Inkrement {}, Iterationen {}, Zeit {}",
+                            "Step {}, increment {}, iterations {}, time {}",
                             progress.step,
                             progress.increment,
                             progress.iterations,
@@ -234,14 +233,14 @@ impl Analysis {
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(status == JobStatus::Running, egui::Button::new("Abbrechen"))
+                        .add_enabled(status == JobStatus::Running, egui::Button::new("Kill"))
                         .clicked()
                     {
                         self.kill();
                     }
                     let results = self.job.results().filter(|_| status != JobStatus::Running);
                     if ui
-                        .add_enabled(results.is_some(), egui::Button::new("Ergebnisse"))
+                        .add_enabled(results.is_some(), egui::Button::new("Results"))
                         .clicked()
                         && let Some(path) = results
                     {

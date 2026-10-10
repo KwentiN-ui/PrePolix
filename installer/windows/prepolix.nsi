@@ -33,36 +33,36 @@ ManifestDPIAware true
 BrandingText "${APP} ${VERSION}"
 
 VIProductVersion "${VERSION}.0"
-VIAddVersionKey /LANG=1031 "ProductName" "${APP}"
-VIAddVersionKey /LANG=1031 "ProductVersion" "${VERSION}"
-VIAddVersionKey /LANG=1031 "FileVersion" "${VERSION}"
-VIAddVersionKey /LANG=1031 "FileDescription" "${APP} Installer"
-VIAddVersionKey /LANG=1031 "LegalCopyright" "GNU GPL 3.0 oder neuer"
+VIAddVersionKey /LANG=1033 "ProductName" "${APP}"
+VIAddVersionKey /LANG=1033 "ProductVersion" "${VERSION}"
+VIAddVersionKey /LANG=1033 "FileVersion" "${VERSION}"
+VIAddVersionKey /LANG=1033 "FileDescription" "${APP} Installer"
+VIAddVersionKey /LANG=1033 "LegalCopyright" "GNU GPL 3.0 or later"
 
 !define MUI_ICON "${STAGE}\prepolix.ico"
 !define MUI_UNICON "${STAGE}\prepolix.ico"
 !define MUI_ABORTWARNING
 !define MUI_COMPONENTSPAGE_SMALLDESC
 
-!define MUI_WELCOMEPAGE_TEXT "Dieser Assistent installiert ${APP} ${VERSION}, einen Prä- und Postprozessor für CalculiX.$\r$\n$\r$\nDer Solver CalculiX (ccx) gehört nicht dazu. Seinen Pfad trägst du nach der Installation unter Werkzeuge > Einstellungen ein.$\r$\n$\r$\n$_CLICK"
+!define MUI_WELCOMEPAGE_TEXT "This wizard installs ${APP} ${VERSION}, a pre- and postprocessor for CalculiX.$\r$\n$\r$\nThe CalculiX solver (ccx) is not included. Set its path after installation under Tools > Settings.$\r$\n$\r$\n$_CLICK"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${STAGE}\LICENSE.txt"
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_RUN
-!define MUI_FINISHPAGE_RUN_TEXT "${APP} starten"
+!define MUI_FINISHPAGE_RUN_TEXT "Run ${APP}"
 !define MUI_FINISHPAGE_RUN_FUNCTION StartWithoutAdminRights
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 
-!insertmacro MUI_LANGUAGE "German"
+!insertmacro MUI_LANGUAGE "English"
 
 Function .onInit
   ${IfNot} ${RunningX64}
-    MessageBox MB_OK|MB_ICONSTOP "${APP} läuft nur auf 64-Bit-Windows."
+    MessageBox MB_OK|MB_ICONSTOP "${APP} requires 64-bit Windows."
     Abort
   ${EndIf}
   SetRegView 64
@@ -74,7 +74,7 @@ Function StartWithoutAdminRights
   Exec '"$WINDIR\explorer.exe" "$INSTDIR\prepolix.exe"'
 FunctionEnd
 
-Section "${APP} (erforderlich)" SecApp
+Section "${APP} (required)" SecApp
   SectionIn RO
   SetShellVarContext all
   SetOutPath "$INSTDIR"
@@ -119,20 +119,20 @@ Section "${APP} (erforderlich)" SecApp
   !insertmacro SUPPORTED ".brep"
 SectionEnd
 
-Section "Verknüpfung im Startmenü" SecStartMenu
+Section "Start Menu Shortcut" SecStartMenu
   SetShellVarContext all
   CreateShortCut "$SMPROGRAMS\${APP}.lnk" "$INSTDIR\prepolix.exe" "" "$INSTDIR\prepolix.ico"
 SectionEnd
 
-Section /o "Verknüpfung auf dem Desktop" SecDesktop
+Section /o "Desktop Shortcut" SecDesktop
   SetShellVarContext all
   CreateShortCut "$DESKTOP\${APP}.lnk" "$INSTDIR\prepolix.exe" "" "$INSTDIR\prepolix.ico"
 SectionEnd
 
-Section ".plx-Projekte mit ${APP} öffnen" SecAssociation
+Section "Open .plx projects with ${APP}" SecAssociation
   WriteRegStr HKLM "Software\Classes\.plx" "" "${PROGID}"
   WriteRegStr HKLM "Software\Classes\.plx\OpenWithProgids" "${PROGID}" ""
-  WriteRegStr HKLM "Software\Classes\${PROGID}" "" "${APP}-Projekt"
+  WriteRegStr HKLM "Software\Classes\${PROGID}" "" "${APP} project"
   WriteRegStr HKLM "Software\Classes\${PROGID}\DefaultIcon" "" "$INSTDIR\prepolix.ico"
   WriteRegStr HKLM "Software\Classes\${PROGID}\shell\open\command" "" '"$INSTDIR\prepolix.exe" "%1"'
   ; SHCNE_ASSOCCHANGED: Explorer picks up the new icon and program right away.
@@ -140,10 +140,10 @@ Section ".plx-Projekte mit ${APP} öffnen" SecAssociation
 SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecApp} "Das Programm mit der Gmsh-Bibliothek für Geometrie-Import und Vernetzung."
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecStartMenu} "Eintrag im Startmenü für alle Benutzer."
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecDesktop} "Symbol auf dem Desktop für alle Benutzer."
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecAssociation} "Doppelklick auf eine .plx-Datei öffnet sie in ${APP}."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecApp} "The program with the Gmsh library for geometry import and meshing."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecStartMenu} "Start menu entry for all users."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecDesktop} "Desktop icon for all users."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecAssociation} "Double-clicking a .plx file opens it in ${APP}."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 Function un.onInit

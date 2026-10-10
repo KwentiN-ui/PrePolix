@@ -350,17 +350,17 @@ impl Player {
                         frame.fill(value);
                     }
                 },
-                |error| log::warn!("Audioausgabe: {error}"),
+                |error| log::warn!("Audio output: {error}"),
                 None,
             )
         }
 
         let device = cpal::default_host()
             .default_output_device()
-            .ok_or("Kein Audioausgabegerät gefunden")?;
+            .ok_or("No audio output device found")?;
         let config = device
             .default_output_config()
-            .map_err(|e| format!("Audiogerät nicht nutzbar: {e}"))?;
+            .map_err(|e| format!("Audio device not usable: {e}"))?;
         let synth = Arc::new(Mutex::new(Synth::default()));
         let shared = Arc::clone(&synth);
         let stream = match config.sample_format() {
@@ -371,12 +371,12 @@ impl Player {
             SampleFormat::U16 => build::<u16>(&device, config.into(), shared),
             SampleFormat::U8 => build::<u8>(&device, config.into(), shared),
             SampleFormat::I8 => build::<i8>(&device, config.into(), shared),
-            other => return Err(format!("Nicht unterstütztes Audioformat {other}")),
+            other => return Err(format!("Unsupported audio format {other}")),
         }
-        .map_err(|e| format!("Audioausgabe konnte nicht geöffnet werden: {e}"))?;
+        .map_err(|e| format!("Audio output could not be opened: {e}"))?;
         stream
             .play()
-            .map_err(|e| format!("Audioausgabe konnte nicht gestartet werden: {e}"))?;
+            .map_err(|e| format!("Audio output could not be started: {e}"))?;
         Ok(Self {
             synth,
             _stream: stream,
@@ -632,7 +632,7 @@ pub fn window(
 
     let mut actions = WindowActions::default();
     let mut open = true;
-    egui::Window::new("Klang der Eigenformen")
+    egui::Window::new("Sound of the Mode Shapes")
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
@@ -640,7 +640,7 @@ pub fn window(
         .default_pos(ctx.content_rect().right_bottom() + egui::vec2(-130.0, -60.0))
         .show(ctx, |ui| {
             ui.label(format!(
-                "Step {}: Moden ankreuzen, um sie zusammen zu hören",
+                "Step {}: check modes to hear them together",
                 sound.step
             ));
             let shift = sound.shift();
@@ -655,9 +655,9 @@ pub fn window(
                         .show(ui, |ui| {
                             ui.label("");
                             ui.strong("Mode");
-                            ui.strong("Frequenz");
-                            ui.strong("Gespielt");
-                            ui.strong("Pegel");
+                            ui.strong("Frequency");
+                            ui.strong("Played");
+                            ui.strong("Level");
                             ui.end_row();
                             for voice in &mut sound.voices {
                                 actions.changed |= ui.checkbox(&mut voice.enabled, "").changed();
@@ -669,7 +669,7 @@ pub fn window(
                                     None,
                                     voice.mode.to_string(),
                                 )
-                                .on_hover_text("Diese Eigenform anzeigen");
+                                .on_hover_text("Show this mode shape");
                                 if label.clicked() {
                                     actions.show = Some(voice.increment);
                                 }
@@ -678,7 +678,7 @@ pub fn window(
                                 if is_audible(played) {
                                     ui.label(format_hz(played));
                                 } else {
-                                    ui.weak("unhörbar");
+                                    ui.weak("inaudible");
                                 }
                                 actions.changed |= ui
                                     .add(
@@ -691,7 +691,7 @@ pub fn window(
                         });
                 });
             ui.horizontal(|ui| {
-                for (label, enabled) in [("Alle", true), ("Keine", false)] {
+                for (label, enabled) in [("All", true), ("None", false)] {
                     if ui.button(label).clicked() {
                         sound.voices.iter_mut().for_each(|v| v.enabled = enabled);
                         actions.changed = true;
@@ -703,21 +703,17 @@ pub fn window(
                 .num_columns(2)
                 .spacing([12.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label("Hörbar machen");
+                    ui.label("Make audible");
                     ui.horizontal(|ui| {
                         for (transpose, label, tip) in [
                             (
                                 Transpose::Automatic,
-                                "Automatisch",
-                                "Um ganze Oktaven verschieben, wenn eine Mode außerhalb von \
-                                 40 Hz bis 16 kHz liegt; die Intervalle bleiben erhalten",
+                                "Automatic",
+                                "Shift by whole octaves when a mode lies outside \
+                                 40 Hz to 16 kHz; the intervals are kept",
                             ),
-                            (
-                                Transpose::Octaves,
-                                "Oktaven",
-                                "Um feste Oktaven verschieben",
-                            ),
-                            (Transpose::Off, "Original", "Die berechneten Frequenzen"),
+                            (Transpose::Octaves, "Octaves", "Shift by fixed octaves"),
+                            (Transpose::Off, "Original", "The computed frequencies"),
                         ] {
                             actions.changed |= ui
                                 .radio_value(&mut sound.transpose, transpose, label)
@@ -726,24 +722,24 @@ pub fn window(
                         }
                     });
                     ui.end_row();
-                    ui.label("Verschiebung");
+                    ui.label("Shift");
                     ui.horizontal(|ui| {
                         if sound.transpose == Transpose::Octaves {
                             actions.changed |= ui
                                 .add(numeric::drag_value(&mut sound.octaves).range(-16..=16))
                                 .changed();
-                            ui.label("Oktaven");
+                            ui.label("Octaves");
                         } else {
-                            ui.label(format!("{shift:+} Oktaven"));
+                            ui.label(format!("{shift:+} octaves"));
                         }
-                        ui.weak(format!("(Faktor {})", format_factor(shift)));
+                        ui.weak(format!("(factor {})", format_factor(shift)));
                     });
                     ui.end_row();
-                    ui.label("Klang");
+                    ui.label("Sound");
                     ui.horizontal(|ui| {
                         for (envelope, label) in [
-                            (Envelope::Sustained, "Dauerton"),
-                            (Envelope::Struck, "Angeschlagen"),
+                            (Envelope::Sustained, "Sustained"),
+                            (Envelope::Struck, "Struck"),
                         ] {
                             actions.changed |= ui
                                 .radio_value(&mut sound.envelope, envelope, label)
@@ -752,7 +748,7 @@ pub fn window(
                     });
                     ui.end_row();
                     if sound.envelope == Envelope::Struck {
-                        ui.label("Abklingzeit");
+                        ui.label("Decay time");
                         ui.horizontal(|ui| {
                             actions.changed |= ui
                                 .add(numeric::drag_value(&mut sound.decay).range(0.1..=10.0))
@@ -760,24 +756,24 @@ pub fn window(
                             ui.label("s");
                         });
                     } else {
-                        ui.label("Dauer der WAV-Datei");
+                        ui.label("WAV file duration");
                         ui.horizontal(|ui| {
                             ui.add(numeric::drag_value(&mut sound.duration).range(0.5..=60.0));
                             ui.label("s");
                         });
                     }
                     ui.end_row();
-                    ui.label("Schwingform");
+                    ui.label("Mode shape");
                     actions.changed |= ui
-                        .checkbox(&mut sound.show_shape, "Beim Abspielen überlagert zeigen")
+                        .checkbox(&mut sound.show_shape, "Show superposed while playing")
                         .on_hover_text(
-                            "Die gewählten Eigenformen nach Pegel skaliert überlagern; sie \
-                             schwingen im Verhältnis ihrer Frequenzen, verlangsamt",
+                            "Superposes the selected mode shapes scaled by level; they \
+                             oscillate in the ratio of their frequencies, slowed down",
                         )
                         .changed();
                     ui.end_row();
                     if sound.show_shape {
-                        ui.label("Geschwindigkeit");
+                        ui.label("Speed");
                         ui.horizontal(|ui| {
                             ui.add(
                                 numeric::drag_value(&mut sound.shape_speed)
@@ -785,17 +781,17 @@ pub fn window(
                                     .speed(0.01),
                             )
                             .on_hover_text(
-                                "Schwingungen pro Sekunde der tiefsten Mode im Bild; die \
-                                 anderen schwingen im Verhältnis ihrer Frequenzen schneller",
+                                "Oscillations per second of the lowest mode in the view; the \
+                                 others oscillate faster in the ratio of their frequencies",
                             );
-                            ui.label("Hz (tiefste Mode)");
+                            ui.label("Hz (lowest mode)");
                         });
                         ui.end_row();
-                        ui.label("Bilder pro Sekunde");
+                        ui.label("Frames per second");
                         ui.add(numeric::drag_value(&mut sound.shape_fps).range(1.0..=60.0));
                         ui.end_row();
                     }
-                    ui.label("Lautstärke");
+                    ui.label("Volume");
                     actions.changed |= ui
                         .add(egui::Slider::new(&mut sound.volume, 0.0..=1.0).show_value(false))
                         .changed();
@@ -805,9 +801,9 @@ pub fn window(
             ui.horizontal(|ui| {
                 let audible = !sound.tones().is_empty();
                 let (icon, tip) = if playing {
-                    (Icon::Pause, "Anhalten")
+                    (Icon::Pause, "Stop")
                 } else {
-                    (Icon::Animate, "Abspielen")
+                    (Icon::Animate, "Play")
                 };
                 if icons::button(ui, icon, tip, playing || audible, false).clicked() {
                     if playing {
@@ -817,19 +813,19 @@ pub fn window(
                     }
                 }
                 if sound.envelope == Envelope::Struck
-                    && icons::button(ui, Icon::Sound, "Erneut anschlagen", audible, false).clicked()
+                    && icons::button(ui, Icon::Sound, "Strike Again", audible, false).clicked()
                 {
                     actions.play = true;
                 }
                 ui.add_space(8.0);
                 if ui
-                    .add_enabled(audible, egui::Button::new("Als WAV speichern..."))
+                    .add_enabled(audible, egui::Button::new("Save as WAV..."))
                     .clicked()
                 {
                     actions.export = true;
                 }
                 if !audible {
-                    ui.weak("Keine hörbare Mode gewählt");
+                    ui.weak("No audible mode selected");
                 }
             });
             if let Some(message) = &sound.message {

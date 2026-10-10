@@ -1282,8 +1282,8 @@ impl LoadKind {
     /// What the second amplitude of a film or radiation scales, if the load has one.
     pub fn factor_amplitude_label(&self) -> Option<&'static str> {
         match self {
-            LoadKind::Film { .. } => Some("Wärmeübergangskoeffizient"),
-            LoadKind::Radiation { .. } => Some("Emissionsgrad"),
+            LoadKind::Film { .. } => Some("Film coefficient"),
+            LoadKind::Radiation { .. } => Some("Emissivity"),
             _ => None,
         }
     }

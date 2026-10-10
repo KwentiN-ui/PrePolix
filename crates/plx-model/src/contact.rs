@@ -369,9 +369,9 @@ mod tests {
         assert_eq!(pair.name, "DISC_to_BEAM");
         assert_eq!(pair.master, Region::Surface("BOTTOM".into()));
         assert_eq!(pair.slave, Region::Surface("TOP".into()));
-        let mut tie = Constraint::Tie(Tie::new("Lager"));
+        let mut tie = Constraint::Tie(Tie::new("Bearing"));
         assert!(tie.swap_master_slave());
-        assert_eq!(tie.name(), "Lager");
+        assert_eq!(tie.name(), "Bearing");
         assert_eq!(swapped_name("A_to_B_to_C"), "A_to_B_to_C");
     }
 }

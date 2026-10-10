@@ -71,9 +71,9 @@ impl HotSpotDialog {
 
     pub fn title(&self) -> &'static str {
         if self.edit.is_some() {
-            "Hot Spot bearbeiten"
+            "Edit Hot Spot"
         } else {
-            "Hot Spot erstellen"
+            "Create Hot Spot"
         }
     }
 
@@ -111,13 +111,13 @@ impl HotSpotDialog {
         let hot_spot = self.hot_spot();
         let name = hot_spot.name.trim();
         if name.is_empty() {
-            return Err("Bitte einen Namen eingeben.".into());
+            return Err("Please enter a name.".into());
         }
         if self.taken.iter().any(|t| t.eq_ignore_ascii_case(name)) {
-            return Err(format!("Der Name {name} ist schon vergeben."));
+            return Err(format!("The name {name} is already used."));
         }
         if self.toe.is_empty() {
-            return Err("Bitte Knoten am Nahtübergang wählen.".into());
+            return Err("Please select nodes at the weld toe.".into());
         }
         validate(&hot_spot)?;
         Ok(HotSpot {
@@ -126,7 +126,7 @@ impl HotSpotDialog {
         })
     }
 
-    /// Prepares the dialog for the next definition after OK - Neu: same settings, new toe.
+    /// Prepares the dialog for the next definition after OK - New: same settings, new toe.
     pub fn next(&mut self, created: &HotSpot) {
         self.taken.push(created.name.clone());
         self.hot_spot.name =
@@ -165,11 +165,11 @@ impl HotSpotDialog {
                 }
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Abbrechen").clicked() {
+                    if ui.button("Cancel").clicked() {
                         action = DialogAction::Cancel;
                     }
                     let ok = ui.button("OK").clicked();
-                    let next = self.edit.is_none() && ui.button("OK - Neu").clicked();
+                    let next = self.edit.is_none() && ui.button("OK - New").clicked();
                     if ok || next {
                         match self.output() {
                             Ok(output) => action = DialogAction::Ok { output, next },
@@ -206,9 +206,9 @@ fn form(
     ui.label("Name");
     ui.add(egui::TextEdit::singleline(&mut hot_spot.name).desired_width(200.0));
     ui.end_row();
-    toe.ui_labeled(ui, model, "Nahtübergang", "toe", true);
+    toe.ui_labeled(ui, model, "Weld toe", "toe", true);
     ui.label("");
-    ui.weak("Knoten am Nahtübergang, z. B. als Kante.");
+    ui.weak("Nodes at the weld toe, e.g. as an edge.");
     ui.end_row();
     let units = crate::hot_spots::units(model);
     ui.label("Extrapolation");
@@ -221,7 +221,11 @@ fn form(
                 let label = method.label();
                 ui.selectable_value(&mut hot_spot.extrapolation, method, label);
             }
-            if ui.selectable_label(custom, "Eigene Lesepunkte").clicked() && !custom {
+            if ui
+                .selectable_label(custom, "Custom read-out points")
+                .clicked()
+                && !custom
+            {
                 let distances = hot_spot.distances_in(units);
                 *text = format_distances(&distances);
                 hot_spot.extrapolation = Extrapolation::Custom(distances);
@@ -231,19 +235,19 @@ fn form(
     if let Extrapolation::Custom(distances) = &mut hot_spot.extrapolation {
         let unit = units.unit(Quantity::Length);
         ui.label(if unit.is_empty() {
-            "Abstände".to_string()
+            "Distances".to_string()
         } else {
-            format!("Abstände [{unit}]")
+            format!("Distances [{unit}]")
         });
         let edit = egui::TextEdit::singleline(text)
-            .hint_text("z. B. 2, 6, 10")
+            .hint_text("e.g. 2, 6, 10")
             .desired_width(200.0);
         if ui.add(edit).changed() {
             *distances = parse_distances(text);
         }
         ui.end_row();
     }
-    ui.label("Blechdicke t");
+    ui.label("Plate thickness t");
     ui.add_enabled(
         hot_spot.extrapolation.uses_thickness(),
         numeric::quantity(&mut hot_spot.thickness, units, Quantity::Length)
@@ -251,7 +255,7 @@ fn form(
             .speed(0.1),
     );
     ui.end_row();
-    ui.label("Lesepunkte");
+    ui.label("Read-out points");
     let distances = hot_spot.distances();
     let weights = extrapolation_weights(&distances);
     let mut formula = String::from("S_hs =");
@@ -266,7 +270,7 @@ fn form(
     }
     ui.label(formula);
     ui.end_row();
-    ui.label("Spannung");
+    ui.label("Stress");
     egui::ComboBox::from_id_salt("hot spot component")
         .selected_text(hot_spot.component.label())
         .width(240.0)
@@ -276,7 +280,7 @@ fn form(
             }
         });
     ui.end_row();
-    ui.label("Pfadrichtung");
+    ui.label("Path direction");
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
             for (value, label) in hot_spot.direction.iter_mut().zip(["X", "Y", "Z"]) {
@@ -284,7 +288,7 @@ fn form(
                 ui.add(numeric::drag_value(value).speed(0.05));
             }
         });
-        ui.weak("Vom Nahtübergang weg; wird quer zur Naht in die Blechoberfläche gedreht.");
+        ui.weak("Away from the weld toe; rotated into the plate surface across the weld.");
     });
     ui.end_row();
 }
@@ -294,18 +298,18 @@ fn validate(hot_spot: &HotSpot) -> Result<(), String> {
     if hot_spot.extrapolation.uses_thickness()
         && hot_spot.thickness.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
     {
-        return Err("Die Blechdicke muss größer als null sein.".into());
+        return Err("The plate thickness must be greater than zero.".into());
     }
     if distances.len() < 2 {
-        return Err("Mindestens zwei Lesepunkte angeben.".into());
+        return Err("Enter at least two read-out points.".into());
     }
     let mut sorted = distances.clone();
     sorted.sort_by(f64::total_cmp);
     if sorted[0] <= 0.0 || sorted.windows(2).any(|w| w[0] == w[1]) {
-        return Err("Die Abstände müssen positiv und verschieden sein.".into());
+        return Err("The distances must be positive and different.".into());
     }
     if hot_spot.direction.iter().all(|&v| v == 0.0) {
-        return Err("Bitte eine Pfadrichtung angeben.".into());
+        return Err("Please enter a path direction.".into());
     }
     Ok(())
 }
@@ -346,7 +350,7 @@ mod tests {
         dialog.hot_spot.extrapolation = Extrapolation::IiwTypeBCoarse;
         let created = dialog.output().unwrap();
         assert_eq!(created.toe, plx_model::Region::Nodes(vec![7]));
-        // OK - Neu keeps the settings for the next weld.
+        // OK - New keeps the settings for the next weld.
         dialog.next(&created);
         assert_eq!(dialog.hot_spot.name, "Hot_Spot-2");
         assert_eq!(dialog.hot_spot.extrapolation, Extrapolation::IiwTypeBCoarse);

@@ -158,8 +158,8 @@ impl Gmsh {
 
 fn solvers_text(solvers: Option<&[EquationSolver]>) -> String {
     match solvers {
-        None => "noch nicht geprüft".into(),
-        Some([]) => "kein direkter Löser gefunden".into(),
+        None => "not checked yet".into(),
+        Some([]) => "no direct solver found".into(),
         Some(solvers) => {
             let names: Vec<_> = solvers.iter().filter_map(|s| s.keyword()).collect();
             names.join(", ")
@@ -181,8 +181,7 @@ pub fn clean_path(text: &str) -> &str {
 /// a bare name is left to the `PATH` lookup.
 pub fn missing_executable(executable: &std::path::Path) -> Option<String> {
     let is_path = executable.components().count() > 1 || executable.is_absolute();
-    (is_path && !executable.is_file())
-        .then(|| format!("Datei nicht gefunden: {}", executable.display()))
+    (is_path && !executable.is_file()).then(|| format!("File not found: {}", executable.display()))
 }
 
 /// PrePoMax's default work directory: a `Temp` folder next to the program. Where that is
@@ -198,7 +197,7 @@ pub fn default_work_dir() -> std::path::PathBuf {
 
 /// Creates the directory if needed and checks that files can be written into it.
 fn is_writable(dir: &std::path::Path) -> bool {
-    let probe = dir.join(".prepolix-schreibtest");
+    let probe = dir.join(".prepolix-write-test");
     let writable = std::fs::create_dir_all(dir).is_ok() && std::fs::write(&probe, b"").is_ok();
     let _ = std::fs::remove_file(probe);
     writable
@@ -223,8 +222,8 @@ impl Page {
 
     fn title(self) -> &'static str {
         match self {
-            Page::Graphics => "Grafik",
-            Page::PostProcessing => "Postprocessing",
+            Page::Graphics => "Graphics",
+            Page::PostProcessing => "Post-processing",
             Page::Solver => "CalculiX",
             Page::Gmsh => "Gmsh",
         }
@@ -290,7 +289,7 @@ impl SettingsWindow {
     pub fn show(&mut self, ctx: &egui::Context) -> WindowResult {
         let mut open = true;
         let mut result = WindowResult::Open;
-        egui::Window::new("Einstellungen")
+        egui::Window::new("Settings")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -325,14 +324,14 @@ impl SettingsWindow {
                 });
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("Standardwerte").clicked() {
+                    if ui.button("Defaults").clicked() {
                         self.draft = Settings::default();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Übernehmen").clicked() {
+                        if ui.button("Apply").clicked() {
                             result = WindowResult::Apply(self.draft.clone());
                         }
-                        if ui.button("Abbrechen").clicked() {
+                        if ui.button("Cancel").clicked() {
                             result = WindowResult::Cancel;
                         }
                         if ui.button("OK").clicked() {
@@ -351,21 +350,24 @@ impl SettingsWindow {
         match self.page {
             Page::Graphics => {
                 let g = &mut self.draft.graphics;
-                ui.checkbox(&mut g.global_axes, "Achsenkreuz am globalen Ursprung");
-                ui.checkbox(&mut g.view_triad, "Achsenkreuz in der Ecke (Blickrichtung)");
-                ui.checkbox(&mut g.scale_bar, "Maßstab");
+                ui.checkbox(&mut g.global_axes, "Global axes at the origin");
+                ui.checkbox(
+                    &mut g.view_triad,
+                    "Coordinate triad in the corner (view direction)",
+                );
+                ui.checkbox(&mut g.scale_bar, "Scale bar");
             }
             Page::PostProcessing => {
                 let p = &mut self.draft.post;
-                ui.checkbox(&mut p.max_label, "Label am Maximum anzeigen");
-                ui.checkbox(&mut p.min_label, "Label am Minimum anzeigen");
-                ui.checkbox(&mut p.status_block, "Infoblock anzeigen");
+                ui.checkbox(&mut p.max_label, "Show label at maximum");
+                ui.checkbox(&mut p.min_label, "Show label at minimum");
+                ui.checkbox(&mut p.status_block, "Show status block");
                 ui.checkbox(
                     &mut p.undeformed_outline,
-                    "Unverformte Kontur zeigen (neu geöffnete Ergebnisse)",
+                    "Show undeformed outline (newly opened results)",
                 );
                 ui.horizontal(|ui| {
-                    ui.label("Farbstufen (neu geöffnete Ergebnisse)");
+                    ui.label("Color levels (newly opened results)");
                     ui.add(
                         numeric::drag_value(&mut p.levels)
                             .range(2..=plx_render::contour::MAX_LEVELS),
@@ -378,21 +380,21 @@ impl SettingsWindow {
                     .num_columns(2)
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| {
-                        ui.label("Programm");
+                        ui.label("Executable");
                         ui.text_edit_singleline(&mut solver.executable);
                         ui.end_row();
                         ui.label("Threads");
                         ui.add(numeric::drag_value(&mut solver.threads).range(1..=256));
                         ui.end_row();
-                        ui.label("Arbeitsverzeichnis");
+                        ui.label("Work directory");
                         ui.add(
                             egui::TextEdit::singleline(&mut solver.work_dir)
                                 .hint_text(self.default_work_dir.as_str()),
                         );
                         ui.end_row();
-                        ui.label("Gleichungslöser");
+                        ui.label("Equation solvers");
                         ui.label(solvers_text(solver.solvers()))
-                            .on_hover_text("Steps mit Standard-Löser rechnen mit Pardiso, wenn CalculiX es enthält. Geprüft beim ersten Rechnen und mit \"CalculiX testen\".");
+                            .on_hover_text("Steps with the default solver use Pardiso if CalculiX includes it. Checked at the first analysis and by \"Test CalculiX\".");
                         ui.end_row();
                     });
                 ui.add_space(8.0);
@@ -409,27 +411,27 @@ impl SettingsWindow {
             .num_columns(2)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
-                ui.label("Bibliothek");
+                ui.label("Library");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.draft.gmsh.library)
-                        .hint_text("automatisch suchen")
+                        .hint_text("search automatically")
                         .desired_width(260.0),
                 );
                 ui.end_row();
-                ui.label("Geladen");
+                ui.label("Loaded");
                 match &loaded {
                     Some(info) => {
                         ui.label(format!("Gmsh {}\n{}", info.version, info.path.display()))
                     }
-                    None => ui.weak("noch nicht"),
+                    None => ui.weak("not yet"),
                 };
                 ui.end_row();
             });
         ui.add(
             egui::Label::new(
-                "Ohne Angabe wird die Bibliothek neben dem Programm gesucht (libgmsh.so bzw. \
-                 gmsh-4.15.dll), dann im Suchpfad des Systems. Eine andere Bibliothek wird erst \
-                 nach einem Neustart geladen.",
+                "If empty, the library is searched next to the executable (libgmsh.so or \
+                 gmsh-4.15.dll), then in the system search path. Another library is only \
+                 loaded after a restart.",
             )
             .wrap(),
         );
@@ -442,8 +444,8 @@ impl SettingsWindow {
         let running = matches!(self.gmsh_check, GmshCheck::Running(_));
         ui.horizontal(|ui| {
             let button = ui
-                .add_enabled(!running, egui::Button::new("Gmsh testen"))
-                .on_hover_text("Lädt Gmsh und vernetzt einen Würfel.");
+                .add_enabled(!running, egui::Button::new("Test Gmsh"))
+                .on_hover_text("Loads Gmsh and meshes a cube.");
             if button.clicked() {
                 if loaded.is_none() {
                     plx_mesher::set_library_path(self.draft.gmsh.library());
@@ -454,14 +456,12 @@ impl SettingsWindow {
                     let result = plx_mesher::self_test()
                         .map(|(info, elements)| {
                             let mut text = format!(
-                                "Gmsh {} arbeitet korrekt, Würfel mit {elements} Elementen vernetzt.",
+                                "Gmsh {} works correctly, cube meshed with {elements} elements.",
                                 info.version
                             );
                             if info.untested {
                                 let (major, minor) = plx_mesher::gmsh::TESTED_VERSION;
-                                text += &format!(
-                                    " Getestet ist prepolix mit Gmsh {major}.{minor}."
-                                );
+                                text += &format!(" prepolix is tested with Gmsh {major}.{minor}.");
                             }
                             text
                         })
@@ -473,7 +473,7 @@ impl SettingsWindow {
             }
             if running {
                 ui.spinner();
-                ui.label("Test läuft …");
+                ui.label("Test running …");
             }
         });
         match &self.gmsh_check {
@@ -508,9 +508,9 @@ impl SettingsWindow {
         let running = matches!(self.solver_check, SolverCheck::Running(_));
         ui.horizontal(|ui| {
             let button = ui
-                .add_enabled(!running, egui::Button::new("CalculiX testen"))
+                .add_enabled(!running, egui::Button::new("Test CalculiX"))
                 .on_hover_text(
-                    "Startet das Programm und rechnet kleine Kragbalken, deren Ergebnisse mit der Balkentheorie verglichen werden, und prüft, welche Gleichungslöser vorhanden sind.",
+                    "Starts the executable, solves small cantilevers whose results are compared with beam theory, and checks which equation solvers are available.",
                 );
             if button.clicked() {
                 let (sender, receiver) = std::sync::mpsc::channel();
@@ -524,7 +524,7 @@ impl SettingsWindow {
             }
             if running {
                 ui.spinner();
-                ui.label("Test läuft …");
+                ui.label("Test running …");
             }
         });
         if let SolverCheck::Done(results) = &self.solver_check {
@@ -536,7 +536,7 @@ impl SettingsWindow {
                         if result.passed {
                             ui.colored_label(egui::Color32::from_rgb(0, 128, 0), "OK");
                         } else {
-                            ui.colored_label(egui::Color32::from_rgb(200, 0, 0), "Fehler");
+                            ui.colored_label(egui::Color32::from_rgb(200, 0, 0), "Error");
                         }
                         ui.vertical(|ui| {
                             ui.strong(result.name);
@@ -546,7 +546,7 @@ impl SettingsWindow {
                     }
                 });
             if results.iter().all(|r| r.passed) {
-                ui.label("CalculiX arbeitet korrekt.");
+                ui.label("CalculiX works correctly.");
             }
         }
     }
@@ -589,9 +589,9 @@ mod tests {
     #[test]
     fn missing_files_are_reported_but_names_are_looked_up() {
         assert!(missing_executable(std::path::Path::new("ccx")).is_none());
-        let missing = std::env::temp_dir().join("plx-gibt-es-nicht").join("ccx");
+        let missing = std::env::temp_dir().join("plx-does-not-exist").join("ccx");
         let message = missing_executable(&missing).unwrap();
-        assert!(message.starts_with("Datei nicht gefunden"), "{message}");
+        assert!(message.starts_with("File not found"), "{message}");
         let exe = std::env::current_exe().unwrap();
         assert!(missing_executable(&exe).is_none());
     }

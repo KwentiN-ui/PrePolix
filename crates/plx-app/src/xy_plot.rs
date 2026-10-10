@@ -80,7 +80,7 @@ pub fn show(ui: &mut Ui, data: &XyData) {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "Keine darstellbaren Werte",
+            "No plottable values",
             font,
             text,
         );
@@ -238,7 +238,7 @@ fn legend(painter: &egui::Painter, area: Rect, data: &XyData, font: &egui::FontI
         painter.text(
             pos2(frame.left() + 26.0, y),
             egui::Align2::LEFT_CENTER,
-            format!("… {} weitere", data.curves.len() - shown),
+            format!("… {} more", data.curves.len() - shown),
             font.clone(),
             Color32::from_gray(80),
         );
@@ -248,7 +248,7 @@ fn legend(painter: &egui::Painter, area: Rect, data: &XyData, font: &egui::FontI
 /// The diagram in its own window, PrePoMax's diagram view; returns false when it is closed.
 pub fn window(ctx: &egui::Context, data: &XyData) -> bool {
     let mut open = true;
-    egui::Window::new(format!("Diagramm: {}", data.title))
+    egui::Window::new(format!("Plot: {}", data.title))
         .id(egui::Id::new("history plot"))
         .open(&mut open)
         .collapsible(false)

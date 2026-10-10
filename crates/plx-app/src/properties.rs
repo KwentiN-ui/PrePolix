@@ -36,7 +36,7 @@ pub fn title(model: Option<&Model>, item: &TreeItem) -> String {
         }
         _ => String::new(),
     };
-    format!("Eigenschaften: {name}")
+    format!("Properties: {name}")
 }
 
 fn field_name(model: &Model, field: usize) -> String {
@@ -54,10 +54,10 @@ pub fn show(ui: &mut egui::Ui, model: Option<&Model>, item: &TreeItem, name: Opt
     let mut rows: Vec<(&'static str, String)> = Vec::new();
     match model {
         Some(model) => rows_of(model, item, &mut rows),
-        None => rows.push(("", "Kein Modell geladen".into())),
+        None => rows.push(("", "No model loaded".into())),
     }
     if rows.is_empty() {
-        rows.push(("", "Noch nicht implementiert".into()));
+        rows.push(("", "Not implemented yet".into()));
     }
     egui::Grid::new("properties")
         .num_columns(2)
@@ -113,10 +113,10 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
         | TreeItem::HistoryComponent(..)
         | TreeItem::Analysis => {}
         TreeItem::Model => {
-            rows.push(("Datei", model.path.display().to_string()));
-            rows.push(("Ladezeit", format!("{} ms", model.load_time.as_millis())));
-            rows.push(("Knoten", mesh.node_count().to_string()));
-            rows.push(("Elemente", mesh.element_count().to_string()));
+            rows.push(("File", model.path.display().to_string()));
+            rows.push(("Load time", format!("{} ms", model.load_time.as_millis())));
+            rows.push(("Nodes", mesh.node_count().to_string()));
+            rows.push(("Elements", mesh.element_count().to_string()));
             rows.push(("Parts", model.parts.len().to_string()));
             let mut types = std::collections::BTreeMap::<&str, usize>::new();
             for part in &model.parts {
@@ -125,14 +125,14 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
                 }
             }
             for (name, count) in types {
-                rows.push(("Elementtyp", format!("{name} ({count})")));
+                rows.push(("Element type", format!("{name} ({count})")));
             }
             if let Some((min, max)) = mesh.bounds() {
                 let size = [0, 1, 2].map(|k| format_value((max[k] - min[k]) as f32));
-                rows.push(("Abmessungen", size.join(" × ")));
+                rows.push(("Dimensions", size.join(" × ")));
             }
-            rows.push(("Knotensets", mesh.node_sets.len().to_string()));
-            rows.push(("Elementsets", mesh.element_sets.len().to_string()));
+            rows.push(("Node Sets", mesh.node_sets.len().to_string()));
+            rows.push(("Element Sets", mesh.element_sets.len().to_string()));
             rows.push(("Surfaces", mesh.surfaces.len().to_string()));
         }
         TreeItem::Part(index) => {
@@ -140,35 +140,35 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
                 return;
             };
             rows.push(("Name", part.name.clone()));
-            rows.push(("Elemente", part.element_count.to_string()));
-            rows.push(("Knoten", part.node_count.to_string()));
+            rows.push(("Elements", part.element_count.to_string()));
+            rows.push(("Nodes", part.node_count.to_string()));
             for (type_name, count) in &part.element_types {
-                rows.push(("Elementtyp", format!("{type_name} ({count})")));
+                rows.push(("Element type", format!("{type_name} ({count})")));
             }
             let [r, g, b] = part.color.map(|c| (c * 255.0).round() as u8);
-            rows.push(("Farbe", format!("RGB {r}, {g}, {b}")));
-            rows.push(("Sichtbar", if part.visible { "ja" } else { "nein" }.into()));
+            rows.push(("Color", format!("RGB {r}, {g}, {b}")));
+            rows.push(("Visible", if part.visible { "yes" } else { "no" }.into()));
         }
         TreeItem::NodeSet(name) => {
             rows.push(("Name", name.clone()));
             let count = mesh.node_sets.get(name).map_or(0, Vec::len);
-            rows.push(("Knoten", count.to_string()));
+            rows.push(("Nodes", count.to_string()));
         }
         TreeItem::ElementSet(name) => {
             rows.push(("Name", name.clone()));
             let count = mesh.element_sets.get(name).map_or(0, Vec::len);
-            rows.push(("Elemente", count.to_string()));
+            rows.push(("Elements", count.to_string()));
         }
         TreeItem::Surface(name) => {
             rows.push(("Name", name.clone()));
             match mesh.surfaces.get(name) {
                 Some(SurfaceDefinition::ElementFaces(faces)) => {
-                    rows.push(("Typ", "Elementflächen".into()));
-                    rows.push(("Flächen", faces.len().to_string()));
+                    rows.push(("Type", "Element faces".into()));
+                    rows.push(("Faces", faces.len().to_string()));
                 }
                 Some(SurfaceDefinition::Nodes(nodes)) => {
-                    rows.push(("Typ", "Knoten".into()));
-                    rows.push(("Knoten", nodes.len().to_string()));
+                    rows.push(("Type", "Nodes".into()));
+                    rows.push(("Nodes", nodes.len().to_string()));
                 }
                 None => {}
             }
@@ -180,7 +180,7 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
             };
             rows.push(("Name", field.name.clone()));
             let names: Vec<&str> = field.components.iter().map(|c| c.name.as_str()).collect();
-            rows.push(("Komponenten", names.join(", ")));
+            rows.push(("Components", names.join(", ")));
         }
         TreeItem::Component(f, c) => {
             let Some(view) = &model.results else { return };
@@ -195,11 +195,11 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
                 return;
             };
             rows.push((
-                "Feld",
+                "Field",
                 format!("{}: {}", inc.fields[*f].name, component.name),
             ));
             rows.push((
-                "Schritt, Inkrement",
+                "Step, increment",
                 format!("{}, {}", inc.step, inc.increment),
             ));
             let extreme = |pick_max: bool| {
@@ -216,15 +216,15 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
             for (label, pick_max) in [("Maximum", true), ("Minimum", false)] {
                 if let Some((index, value)) = extreme(pick_max) {
                     let node = mesh.node_ids()[index];
-                    rows.push((label, format!("{} (Knoten {node})", format_value(*value))));
+                    rows.push((label, format!("{} (node {node})", format_value(*value))));
                 }
             }
             rows.push((
-                "Berechnet",
+                "Computed",
                 if component.derived {
-                    "ja, von prepolix"
+                    "yes, by prepolix"
                 } else {
-                    "nein, aus der Datei"
+                    "no, from the file"
                 }
                 .into(),
             ));

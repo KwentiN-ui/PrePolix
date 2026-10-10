@@ -118,7 +118,7 @@ pub fn import_cad(path: &Path, units: UnitSystem) -> Result<CadImport, GmshError
 /// several selected files: their parts sit side by side, numbered on from file to file.
 pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImport, GmshError> {
     if paths.is_empty() {
-        return Err(GmshError::Other("Keine Datei gewählt".into()));
+        return Err(GmshError::Other("No file selected".into()));
     }
     let brep_file = TempFile::new("brep");
     let (diagonal, warnings) = with_gmsh(|gmsh| {
@@ -160,7 +160,7 @@ fn read_files(gmsh: &Gmsh, paths: &[PathBuf], units: UnitSystem) -> Result<(), G
         let shapes = gmsh.import_shapes(path)?;
         if shapes.is_empty() {
             return Err(GmshError::Other(format!(
-                "{} enthält keine Geometrie",
+                "{} contains no geometry",
                 path.display()
             )));
         }
@@ -217,7 +217,7 @@ pub fn add_cad_files(
         });
     };
     if paths.is_empty() {
-        return Err(GmshError::Other("Keine Datei gewählt".into()));
+        return Err(GmshError::Other("No file selected".into()));
     }
     let file = TempFile::with_contents("brep", &geometry.brep)?;
     let combined = TempFile::new("brep");
@@ -320,7 +320,7 @@ pub fn tessellate(geometry: &Geometry) -> Result<GeometryDisplay, GmshError> {
         options.apply(gmsh)?;
         // A face Gmsh cannot mesh is left out of the display rather than failing the import.
         if let Err(error) = gmsh.generate(2) {
-            log::warn!("Darstellung der Geometrie unvollständig: {error}");
+            log::warn!("Geometry display incomplete: {error}");
         }
         display_mesh(gmsh, geometry)
     })
@@ -419,9 +419,7 @@ pub fn delete_parts_renumbered(
         gmsh.import_shapes(&file.0)?;
         let parts = parts(gmsh, geometry)?;
         if let Some(part) = (deleted.iter()).find(|d| !parts.iter().any(|(_, n)| n == *d)) {
-            return Err(GmshError::Other(format!(
-                "Die Geometrie hat kein Part {part}"
-            )));
+            return Err(GmshError::Other(format!("The geometry has no part {part}")));
         }
         let boxes = entity_boxes(gmsh)?;
         let (gone, kept): (Vec<_>, Vec<_>) =
@@ -582,7 +580,7 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
     let setup = geometry.parameters(part);
     if !(setup.max_size > 0.0 && setup.min_size >= 0.0) {
         return Err(GmshError::Other(format!(
-            "{part}: Die maximale Elementgröße muss größer als 0 sein"
+            "{part}: The max element size must be greater than 0"
         )));
     }
     let file = TempFile::with_contents("brep", &geometry.brep)?;
@@ -593,9 +591,7 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
             .find(|(_, n)| n == part)
             .map(|(entity, _)| entity)
         else {
-            return Err(GmshError::Other(format!(
-                "Die Geometrie hat kein Part {part}"
-            )));
+            return Err(GmshError::Other(format!("The geometry has no part {part}")));
         };
         let volume = match dim {
             3 => tag,
@@ -671,13 +667,13 @@ fn shell_part_mesh(
             for &tag in element {
                 let position = coords
                     .get(&tag)
-                    .ok_or_else(|| GmshError::Other(format!("Knoten {tag} fehlt")))?;
+                    .ok_or_else(|| GmshError::Other(format!("Node {tag} is missing")))?;
                 let id = node_id(tag)?;
                 mesh.set_node(id, *position);
                 ids.push(id);
             }
             let id = ElementId::try_from(mesh.element_count() + 1)
-                .map_err(|_| GmshError::Other("zu viele Elemente".into()))?;
+                .map_err(|_| GmshError::Other("too many elements".into()))?;
             mesh.add_element(Element {
                 id,
                 type_name: type_name.into(),
@@ -689,7 +685,7 @@ fn shell_part_mesh(
         }
     }
     if part_elements.elements.is_empty() {
-        return Err(GmshError::Other("Gmsh hat keine Elemente erzeugt".into()));
+        return Err(GmshError::Other("Gmsh created no elements".into()));
     }
     mesh.parts.push(part_elements);
     mesh.cad = cad_map(gmsh, &mesh, &[face], options.order, true)?;
@@ -755,13 +751,13 @@ fn line_part_mesh(
             let tag = element[k];
             let position = coords
                 .get(&tag)
-                .ok_or_else(|| GmshError::Other(format!("Knoten {tag} fehlt")))?;
+                .ok_or_else(|| GmshError::Other(format!("Node {tag} is missing")))?;
             let id = node_id(tag)?;
             mesh.set_node(id, *position);
             ids.push(id);
         }
         let id = ElementId::try_from(mesh.element_count() + 1)
-            .map_err(|_| GmshError::Other("zu viele Elemente".into()))?;
+            .map_err(|_| GmshError::Other("too many elements".into()))?;
         mesh.add_element(Element {
             id,
             type_name: type_name.into(),
@@ -772,7 +768,7 @@ fn line_part_mesh(
         part_elements.elements.push(id);
     }
     if part_elements.elements.is_empty() {
-        return Err(GmshError::Other("Gmsh hat keine Elemente erzeugt".into()));
+        return Err(GmshError::Other("Gmsh created no elements".into()));
     }
     mesh.parts.push(part_elements);
     mesh.cad = line_cad_map(gmsh, &mesh, edge)?;
@@ -1075,15 +1071,13 @@ fn node_coords(gmsh: &Gmsh) -> Result<HashMap<usize, [f64; 3]>, GmshError> {
 }
 
 fn node_id(tag: usize) -> Result<NodeId, GmshError> {
-    NodeId::try_from(tag).map_err(|_| GmshError::Other("zu viele Knoten".into()))
+    NodeId::try_from(tag).map_err(|_| GmshError::Other("too many nodes".into()))
 }
 
 /// The tetrahedra of the solids given with their part names, one part per solid.
 fn solid_mesh(gmsh: &Gmsh, order: i32, volumes: &[(i32, String)]) -> Result<FeMesh, GmshError> {
     if volumes.is_empty() {
-        return Err(GmshError::Other(
-            "Die Geometrie enthält keine Volumenkörper".into(),
-        ));
+        return Err(GmshError::Other("The geometry contains no solids".into()));
     }
     let coords = node_coords(gmsh)?;
     let (gmsh_type, shape, type_name) = if order == 2 {
@@ -1109,7 +1103,7 @@ fn solid_mesh(gmsh: &Gmsh, order: i32, volumes: &[(i32, String)]) -> Result<FeMe
                 };
                 let position = coords
                     .get(&tag)
-                    .ok_or_else(|| GmshError::Other(format!("Knoten {tag} fehlt")))?;
+                    .ok_or_else(|| GmshError::Other(format!("Node {tag} is missing")))?;
                 let id = node_id(tag)?;
                 mesh.set_node(id, *position);
                 ids.push(id);
@@ -1129,7 +1123,7 @@ fn solid_mesh(gmsh: &Gmsh, order: i32, volumes: &[(i32, String)]) -> Result<FeMe
         }
     }
     if mesh.element_count() == 0 {
-        return Err(GmshError::Other("Gmsh hat keine Elemente erzeugt".into()));
+        return Err(GmshError::Other("Gmsh created no elements".into()));
     }
     let mut faces = BTreeSet::new();
     for (volume, _) in volumes {
@@ -1369,7 +1363,7 @@ fn display_mesh(gmsh: &Gmsh, geometry: &Geometry) -> Result<GeometryDisplay, Gms
             ids.push(id);
         }
         let id = ElementId::try_from(entities.len() + 1)
-            .map_err(|_| GmshError::Other("zu viele Elemente".into()))?;
+            .map_err(|_| GmshError::Other("too many elements".into()))?;
         entities.push(entity);
         part.elements.push(id);
         mesh.add_element(Element {

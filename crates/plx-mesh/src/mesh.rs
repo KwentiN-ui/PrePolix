@@ -55,14 +55,14 @@ pub struct Part {
 
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
 pub enum MeshError {
-    #[error("Element {id} vom Typ {type_name} braucht {expected} Knoten, hat aber {actual}")]
+    #[error("Element {id} of type {type_name} needs {expected} nodes, but has {actual}")]
     WrongNodeCount {
         id: ElementId,
         type_name: String,
         expected: usize,
         actual: usize,
     },
-    #[error("Element {0} ist doppelt definiert")]
+    #[error("Element {0} is defined twice")]
     DuplicateElement(ElementId),
 }
 
@@ -347,7 +347,7 @@ impl TryFrom<MeshFile> for FeMesh {
 
     fn try_from(file: MeshFile) -> Result<Self, String> {
         if file.node_ids.len() != file.coords.len() {
-            return Err("Knotennummern und Koordinaten passen nicht zusammen".into());
+            return Err("Node numbers and coordinates do not match".into());
         }
         let mut mesh = FeMesh::default();
         for (id, coords) in file.node_ids.into_iter().zip(file.coords) {
@@ -355,7 +355,7 @@ impl TryFrom<MeshFile> for FeMesh {
         }
         for (id, type_name, nodes) in file.elements {
             let shape = ElementShape::from_type_name(&type_name)
-                .ok_or_else(|| format!("Element {id}: unbekannter Typ {type_name}"))?;
+                .ok_or_else(|| format!("Element {id}: unknown type {type_name}"))?;
             mesh.add_element(Element {
                 id,
                 type_name,

@@ -32,7 +32,7 @@ pub fn amplitude_form(
             ui.label("Name");
             ui.add(egui::TextEdit::singleline(&mut amplitude.name).desired_width(200.0));
             ui.end_row();
-            ui.label("Zeitbezug");
+            ui.label("Time span");
             egui::ComboBox::from_id_salt("amplitude time span")
                 .selected_text(time_span_label(amplitude.time_span))
                 .width(200.0)
@@ -42,19 +42,19 @@ pub fn amplitude_form(
                     }
                 });
             ui.end_row();
-            ui.label("Zeit verschieben");
+            ui.label("Shift time");
             ui.add(numeric::quantity(&mut amplitude.shift_time, units, Quantity::Time).speed(0.01));
             ui.end_row();
-            ui.label("Amplitude verschieben");
+            ui.label("Shift amplitude");
             ui.add(numeric::drag_value(&mut amplitude.shift_amplitude).speed(0.01));
             ui.end_row();
         });
     ui.add_space(6.0);
-    ui.strong("Datenpunkte");
+    ui.strong("Data Points");
     let time_header = if time_unit.is_empty() {
-        "Zeit".to_string()
+        "Time".to_string()
     } else {
-        format!("Zeit [{time_unit}]")
+        format!("Time [{time_unit}]")
     };
     let mut remove = None;
     let table = egui::ScrollArea::vertical()
@@ -82,7 +82,7 @@ pub fn amplitude_form(
                         );
                         ui.add(numeric::drag_value(factor).speed(0.01).min_decimals(1));
                         if ui
-                            .add_enabled(removable, egui::Button::new("Entfernen").small())
+                            .add_enabled(removable, egui::Button::new("Remove").small())
                             .clicked()
                         {
                             remove = Some(i);
@@ -96,7 +96,7 @@ pub fn amplitude_form(
     }
     let table_hovered = ui.rect_contains_pointer(table.inner_rect);
     ui.horizontal(|ui| {
-        if ui.button("Zeile hinzufügen").clicked() {
+        if ui.button("Add Row").clicked() {
             // Continues the last step in time, as a new row in PrePoMax's table starts empty.
             let next = match amplitude.points.as_slice() {
                 [.., a, b] => [b[0] + (b[0] - a[0]).max(0.0), b[1]],
@@ -106,11 +106,11 @@ pub fn amplitude_form(
             amplitude.points.push(next);
         }
         if ui
-            .button("Aus Zwischenablage einfügen")
+            .button("Paste from Clipboard")
             .on_hover_text(
-                "Ersetzt die Tabelle durch zwei Spalten Zeit und Amplitude aus der \
-                 Zwischenablage, z. B. aus einer Tabellenkalkulation. Strg+V über der \
-                 Tabelle tut dasselbe.",
+                "Replaces the table with two columns time and amplitude from the \
+                 clipboard, e.g. from a spreadsheet. Ctrl+V over the \
+                 table does the same.",
             )
             .clicked()
         {
@@ -118,7 +118,7 @@ pub fn amplitude_form(
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
         }
-        if ui.button("Nach Zeit sortieren").clicked() {
+        if ui.button("Sort by Time").clicked() {
             amplitude.points.sort_by(|a, b| a[0].total_cmp(&b[0]));
         }
     });
@@ -136,9 +136,9 @@ pub fn amplitude_form(
         view.awaiting_paste = false;
         let points = parse_points(&text, units);
         view.paste_note = Some(if points.is_empty() {
-            "Die Zwischenablage enthält keine Zahlenpaare.".into()
+            "The clipboard contains no number pairs.".into()
         } else {
-            format!("{} Punkte eingefügt.", points.len())
+            format!("{} points pasted.", points.len())
         });
         if !points.is_empty() {
             amplitude.points = points;
@@ -154,8 +154,8 @@ pub fn amplitude_form(
         amplitude.points.iter().map(|[t, a]| (*t, *a)).unzip();
     crate::features::plot(ui, &times, &factors, &time_header, true);
     ui.weak(
-        "Zwischen den Punkten linear, vor dem ersten und nach dem letzten konstant.\n\
-         Ohne Amplitude steigt eine Last im statischen Step linear an.",
+        "Linear between the points, constant before the first and after the last.\n\
+         Without an amplitude a load ramps up linearly in a static step.",
     );
 }
 
@@ -169,8 +169,8 @@ pub fn validate(amplitude: &Amplitude) -> Result<(), String> {
 
 fn time_span_label(span: AmplitudeTime) -> &'static str {
     match span {
-        AmplitudeTime::Step => "Step-Zeit",
-        AmplitudeTime::Total => "Gesamtzeit",
+        AmplitudeTime::Step => "Step time",
+        AmplitudeTime::Total => "Total time",
     }
 }
 
@@ -231,7 +231,7 @@ pub fn amplitude_row(
         ui.label("");
         ui.colored_label(
             Color32::from_rgb(200, 0, 0),
-            format!("Amplitude {name} existiert nicht"),
+            format!("Amplitude {name} does not exist"),
         );
         ui.end_row();
     }
@@ -248,13 +248,13 @@ mod tests {
     #[test]
     fn pastes_spreadsheet_columns() {
         let units = UnitSystem::default();
-        let text = "Zeit\tAmplitude\n0\t0\n0,5\t1,5\n1\t1\n";
+        let text = "Time\tAmplitude\n0\t0\n0,5\t1,5\n1\t1\n";
         assert_eq!(
             parse_points(text, units),
             [[0.0, 0.0], [0.5, 1.5], [1.0, 1.0]]
         );
         assert_eq!(parse_points("0, 0\n2, 1", units), [[0.0, 0.0], [2.0, 1.0]]);
         assert_eq!(parse_points("1 2\n3;4", units), [[1.0, 2.0], [3.0, 4.0]]);
-        assert!(parse_points("Hallo", units).is_empty());
+        assert!(parse_points("Hello", units).is_empty());
     }
 }

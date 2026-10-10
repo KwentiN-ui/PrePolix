@@ -22,20 +22,20 @@ use plx_model::{
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum WriteError {
-    #[error("{item}: Bereich enthält keine {what}")]
+    #[error("{item}: Region contains no {what}")]
     EmptyRegion { item: String, what: &'static str },
-    #[error("{item}: Material {material} existiert nicht")]
+    #[error("{item}: Material {material} does not exist")]
     UnknownMaterial { item: String, material: String },
-    #[error("{item}: Surface Interaction {interaction} existiert nicht")]
+    #[error("{item}: Surface Interaction {interaction} does not exist")]
     UnknownInteraction { item: String, interaction: String },
-    #[error("{item}: Amplitude {amplitude} existiert nicht")]
+    #[error("{item}: Amplitude {amplitude} does not exist")]
     UnknownAmplitude { item: String, amplitude: String },
     #[error("{item}: {reason}")]
     InvalidAmplitude { item: String, reason: String },
-    #[error("{item}: Surface {surface} existiert nicht")]
+    #[error("{item}: Surface {surface} does not exist")]
     UnknownSurface { item: String, surface: String },
     /// Contact forces need the surfaces of an active contact pair.
-    #[error("{item}: Contact Pair {pair} existiert nicht oder ist deaktiviert")]
+    #[error("{item}: Contact Pair {pair} does not exist or is deactivated")]
     UnknownContactPair { item: String, pair: String },
     /// A section that does not fit its elements, see [`Section::kind_problem`].
     #[error("{item}: {reason}")]
@@ -704,7 +704,7 @@ impl<'a> Sets<'a> {
             _ => {
                 let ids = region.elements(self.mesh);
                 if ids.is_empty() {
-                    return Err(empty(item, "Elemente"));
+                    return Err(empty(item, "elements"));
                 }
                 Members::Ids(ids)
             }
@@ -746,7 +746,7 @@ impl<'a> Sets<'a> {
         }
         let ids = region.nodes(self.mesh);
         if ids.is_empty() {
-            return Err(empty(item, "Knoten"));
+            return Err(empty(item, "nodes"));
         }
         let set = self.free_name("Internal_Selection", &name(item));
         self.node_sets.push((set.clone(), ids));
@@ -767,14 +767,14 @@ impl<'a> Sets<'a> {
             Region::Faces(_) | Region::Geometry(_) => {
                 let faces = region.faces(self.mesh);
                 if faces.is_empty() {
-                    return Err(empty(item, "Elementflächen"));
+                    return Err(empty(item, "element faces"));
                 }
                 let postfix = format!("{}_{side}", name(item));
                 let surface = self.free_name("Internal_Selection", &postfix);
                 self.add_face_surface(&surface, &faces);
                 Ok(surface)
             }
-            _ => Err(empty(item, "Elementflächen")),
+            _ => Err(empty(item, "element faces")),
         }
     }
 
@@ -796,7 +796,7 @@ impl<'a> Sets<'a> {
             }
             _ => {}
         }
-        Err(empty(item, "Elementflächen"))
+        Err(empty(item, "element faces"))
     }
 }
 
@@ -964,7 +964,7 @@ fn initial_conditions(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, 
             InitialConditionKind::AngularVelocity { .. } => {
                 let nodes = condition.region.nodes(sets.mesh);
                 if nodes.is_empty() {
-                    return Err(empty(&condition.name, "Knoten"));
+                    return Err(empty(&condition.name, "nodes"));
                 }
                 out.push_str("*Initial conditions, Type=Velocity\n");
                 for id in nodes {
@@ -1067,7 +1067,7 @@ fn beam_groups(sets: &mut Sets, section: &Section) -> Result<Vec<([f64; 3], Stri
                 WriteError::InvalidSection {
                     item: section.name.clone(),
                     reason: format!(
-                        "Die Normale ist parallel zur Achse von Element {}",
+                        "The normal is parallel to the axis of element {}",
                         element.id
                     ),
                 }
@@ -1078,7 +1078,7 @@ fn beam_groups(sets: &mut Sets, section: &Section) -> Result<Vec<([f64; 3], Stri
         }
     }
     if groups.is_empty() {
-        return Err(empty(&section.name, "Linienelemente"));
+        return Err(empty(&section.name, "line elements"));
     }
     // CalculiX 2.21 reads the element set of a pipe or box section 20 characters wide and
     // fails on longer names, so those get short sets of their own.
@@ -1273,12 +1273,12 @@ fn node_tie(sets: &mut Sets, tie: &NodeTie, lines: &LineElements) -> Result<Keyw
     let Some((&first, rest)) = nodes.split_first() else {
         return Err(WriteError::EmptyRegion {
             item: tie.name.clone(),
-            what: "Knoten",
+            what: "nodes",
         });
     };
     let mut out = format!("** Name: {}\n", tie.name);
     if !hinge_between_beams(tie, &nodes, lines) {
-        let _ = writeln!(out, "** Knoten {first} (zusammengelegt)");
+        let _ = writeln!(out, "** Node {first} (merged)");
         return Ok(Keyword::generated(out));
     }
     for &node in rest {
@@ -1624,7 +1624,7 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
                 let axisymmetric = space == ModelSpace::Axisymmetric;
                 let nodal = traction_forces(sets.mesh, &faces, force, axisymmetric);
                 if nodal.is_empty() {
-                    return Err(empty(&load.name, "Elementflächen"));
+                    return Err(empty(&load.name, "element faces"));
                 }
                 let _ = writeln!(out, "*Cload{amplitude}");
                 for (node, values) in nodal {
@@ -1669,7 +1669,7 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
                 let Some((size, direction)) = unit_vector(acceleration) else {
                     return Err(WriteError::InvalidLoad {
                         item: load.name.clone(),
-                        reason: "die Erdbeschleunigung ist null".into(),
+                        reason: "the gravitational acceleration is zero".into(),
                     });
                 };
                 let _ = writeln!(out, "*Dload{amplitude}");
@@ -1683,7 +1683,7 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
                 let Some((_, direction)) = unit_vector(axis) else {
                     return Err(WriteError::InvalidLoad {
                         item: load.name.clone(),
-                        reason: "die Drehachse hat keine Richtung".into(),
+                        reason: "the rotation axis has no direction".into(),
                     });
                 };
                 let _ = writeln!(out, "*Dload{amplitude}");

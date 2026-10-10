@@ -106,7 +106,7 @@ impl Equation {
         let text = text.trim();
         let text = text.strip_prefix('=').unwrap_or(text);
         if text.trim().is_empty() {
-            return Err("Die Gleichung ist leer.".into());
+            return Err("The equation is empty.".into());
         }
         let mut parser = Parser {
             chars: text.chars().collect(),
@@ -117,7 +117,7 @@ impl Equation {
         parser.skip_blanks();
         if parser.pos < parser.chars.len() {
             return Err(format!(
-                "Unerwartetes Zeichen '{}' an Position {}.",
+                "Unexpected character '{}' at position {}.",
                 parser.chars[parser.pos],
                 parser.pos + 1
             ));
@@ -276,7 +276,7 @@ impl Parser {
         }
         let a = self.conditional()?;
         if !self.eat(":") {
-            return Err("':' fehlt im Ausdruck 'Bedingung ? a : b'.".into());
+            return Err("':' is missing in the expression 'condition ? a : b'.".into());
         }
         let b = self.conditional()?;
         Ok(Expr::Conditional(
@@ -382,12 +382,12 @@ impl Parser {
 
     fn primary(&mut self) -> Result<Expr, String> {
         let Some(c) = self.peek() else {
-            return Err("Die Gleichung endet unerwartet.".into());
+            return Err("The equation ends unexpectedly.".into());
         };
         if self.eat("(") {
             let inner = self.conditional()?;
             if !self.eat(")") {
-                return Err("Schließende Klammer ')' fehlt.".into());
+                return Err("Closing bracket ')' is missing.".into());
             }
             return Ok(inner);
         }
@@ -397,7 +397,7 @@ impl Parser {
                 self.pos += 1;
             }
             if self.pos >= self.chars.len() {
-                return Err("Schließende Klammer ']' fehlt.".into());
+                return Err("Closing bracket ']' is missing.".into());
             }
             let name: String = self.chars[start..self.pos].iter().collect();
             self.pos += 1;
@@ -427,7 +427,7 @@ impl Parser {
             });
         }
         Err(format!(
-            "Unerwartetes Zeichen '{c}' an Position {}.",
+            "Unexpected character '{c}' at position {}.",
             self.pos + 1
         ))
     }
@@ -467,7 +467,7 @@ impl Parser {
         let text: String = self.chars[start..self.pos].iter().collect();
         text.parse()
             .map(Expr::Number)
-            .map_err(|_| format!("Ungültige Zahl '{text}'."))
+            .map_err(|_| format!("Invalid number '{text}'."))
     }
 
     fn call(&mut self, name: &str) -> Result<Expr, String> {
@@ -475,7 +475,7 @@ impl Parser {
             .iter()
             .find(|(n, ..)| n.eq_ignore_ascii_case(name))
         else {
-            return Err(format!("Unbekannte Funktion '{name}'."));
+            return Err(format!("Unknown function '{name}'."));
         };
         let mut args = Vec::new();
         if !self.eat(")") {
@@ -485,13 +485,13 @@ impl Parser {
                     break;
                 }
                 if !self.eat(",") {
-                    return Err(format!("',' oder ')' fehlt im Aufruf von {canonical}."));
+                    return Err(format!("',' or ')' is missing in the call of {canonical}."));
                 }
             }
         }
         if !arity.contains(&args.len()) {
             return Err(format!(
-                "{canonical} erwartet {} Argument(e), nicht {}.",
+                "{canonical} expects {} argument(s), not {}.",
                 arity.start(),
                 args.len()
             ));

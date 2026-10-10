@@ -211,21 +211,21 @@ impl MaterialLibrary {
         let name = name.trim();
         let (&last, parent) = path
             .split_last()
-            .ok_or("Die Wurzel der Bibliothek kann nicht umbenannt werden.")?;
+            .ok_or("The root of the library cannot be renamed.")?;
         if name.is_empty() {
-            return Err("Bitte einen Namen eingeben.".into());
+            return Err("Please enter a name.".into());
         }
-        let category = self.category(parent).ok_or("Eintrag nicht gefunden.")?;
+        let category = self.category(parent).ok_or("Entry not found.")?;
         let taken = (category.items.iter().enumerate())
             .any(|(i, n)| i != last && n.name().eq_ignore_ascii_case(name));
         if taken {
             return Err(format!(
-                "{} enthält schon einen Eintrag namens {name}.",
+                "{} already contains an entry named {name}.",
                 category.name
             ));
         }
         self.node_mut(path)
-            .ok_or("Eintrag nicht gefunden.")?
+            .ok_or("Entry not found.")?
             .set_name(name.into());
         Ok(())
     }
@@ -346,8 +346,8 @@ mod tests {
         assert!(library.rename(&new, "s235").is_err());
         assert!(library.rename(&new, " ").is_err());
         assert!(library.rename(&[], "Root").is_err());
-        library.rename(&new, "Eigene").unwrap();
-        assert_eq!(library.node(&new).unwrap().name(), "Eigene");
+        library.rename(&new, "Custom").unwrap();
+        assert_eq!(library.node(&new).unwrap().name(), "Custom");
     }
 
     #[test]

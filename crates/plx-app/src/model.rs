@@ -187,7 +187,7 @@ pub struct LoadedModel {
 /// model takes the path of the first file.
 pub fn load_geometry(paths: &[PathBuf], units: UnitSystem) -> Result<LoadedModel, String> {
     let start = Instant::now();
-    let path = paths.first().ok_or("Keine Datei gewählt")?;
+    let path = paths.first().ok_or("No file selected")?;
     let import = plx_mesher::import_cad_files(paths, units).map_err(|e| e.to_string())?;
     let mut model = Model::new(path, FeMesh::default());
     model.fe.properties.units = units;
@@ -249,7 +249,7 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
         };
     if mesh.element_count() == 0 && geometry.is_none() {
         return Err(format!(
-            "{} enthält keine darstellbaren Elemente",
+            "{} contains no elements that can be displayed",
             path.display()
         ));
     }
@@ -258,7 +258,7 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
         Some(geometry) => match plx_mesher::tessellate(geometry) {
             Ok(display) => Some(Model::geometry_view(path, display)),
             Err(error) => {
-                warnings.push(format!("Geometrie kann nicht angezeigt werden: {error}"));
+                warnings.push(format!("Geometry cannot be displayed: {error}"));
                 None
             }
         },
@@ -901,23 +901,20 @@ impl Model {
     pub fn rename_part(&mut self, index: usize, name: &str) -> Result<(), String> {
         let name = name.trim().to_ascii_uppercase();
         if name.is_empty() {
-            return Err("Der Name darf nicht leer sein.".into());
+            return Err("The name must not be empty.".into());
         }
         if name.len() > 80 {
-            return Err("Der Name darf höchstens 80 Zeichen lang sein.".into());
+            return Err("The name must be at most 80 characters long.".into());
         }
         if !(name.chars()).all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-            return Err("Erlaubt sind Buchstaben ohne Umlaute, Ziffern, _ und -.".into());
+            return Err("Allowed are letters without accents, digits, _ and -.".into());
         }
-        let current = self
-            .parts
-            .get(index)
-            .ok_or("Das Part gibt es nicht mehr.")?;
+        let current = self.parts.get(index).ok_or("The part no longer exists.")?;
         if current.name == name {
             return Ok(());
         }
         if self.mesh.name_in_use(&name) {
-            return Err(format!("Der Name {name} ist bereits vergeben."));
+            return Err(format!("The name {name} is already used."));
         }
         if let Some(old) = self.mesh.rename_part(index, &name) {
             self.fe.rename_part(&old, &name);
@@ -1413,10 +1410,10 @@ mod tests {
         match plx_mesher::self_test() {
             Ok(_) => true,
             Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
-                eprintln!("Gmsh nicht verfügbar, Test übersprungen: {error}");
+                eprintln!("Gmsh not available, test skipped: {error}");
                 false
             }
-            Err(error) => panic!("Gmsh wird verlangt: {error}"),
+            Err(error) => panic!("Gmsh is required: {error}"),
         }
     }
 
@@ -1473,7 +1470,7 @@ mod tests {
                 .output()
                 .is_err()
         {
-            eprintln!("Gmsh oder ccx fehlt, Test übersprungen");
+            eprintln!("Gmsh or ccx missing, test skipped");
             return;
         }
         use plx_model::{
@@ -1546,7 +1543,7 @@ mod tests {
         let stress = results.increments.last().unwrap().field("STRESS").unwrap();
         let sxx = &stress.component("S11").unwrap().values;
         let max = sxx.iter().copied().fold(f32::MIN, f32::max);
-        assert!(max > 300.0 && max < 1500.0, "größte Spannung {max}");
+        assert!(max > 300.0 && max < 1500.0, "largest stress {max}");
     }
 
     #[test]

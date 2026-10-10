@@ -29,8 +29,8 @@ impl CoordinateSystemKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Rectangular => "Kartesisch",
-            Self::Cylindrical => "Zylindrisch",
+            Self::Rectangular => "Rectangular",
+            Self::Cylindrical => "Cylindrical",
         }
     }
 }
@@ -94,14 +94,14 @@ impl CoordinateSystem {
         let scale = norm(x).max(norm(xy));
         let Some(x) = normalize(x) else {
             return Err(format!(
-                "{}: Der Punkt auf der x-Achse liegt im Ursprung.",
+                "{}: The point on the x axis lies at the origin.",
                 self.name
             ));
         };
         let z = cross(x, xy);
         if norm(z) <= 1e-9 * scale * scale {
             return Err(format!(
-                "{}: Der Punkt in der xy-Ebene liegt auf der x-Achse.",
+                "{}: The point in the xy plane lies on the x axis.",
                 self.name
             ));
         }
@@ -162,7 +162,7 @@ impl PointRef {
             PointRef::ReferencePoint(name) => model
                 .reference_point(name)
                 .map(|r| r.position)
-                .ok_or_else(|| format!("Reference Point {name} existiert nicht")),
+                .ok_or_else(|| format!("Reference Point {name} does not exist")),
         }
     }
 }
@@ -213,7 +213,7 @@ impl Plane {
             PlaneSource::PointNormal { point, normal } => {
                 let point = point.resolve(model)?;
                 let normal = normalize(*normal)
-                    .ok_or_else(|| format!("{}: Die Normale ist null.", self.name))?;
+                    .ok_or_else(|| format!("{}: The normal is zero.", self.name))?;
                 Ok((point, normal))
             }
             PlaneSource::ThreePoints { points } => {
@@ -224,7 +224,7 @@ impl Plane {
                 let scale = norm(u).max(norm(v));
                 if norm(n) <= 1e-9 * scale * scale {
                     return Err(format!(
-                        "{}: Die drei Punkte liegen auf einer Geraden.",
+                        "{}: The three points lie on a straight line.",
                         self.name
                     ));
                 }
@@ -237,7 +237,7 @@ impl Plane {
             } => {
                 let system = model
                     .coordinate_system_or_global(system)
-                    .ok_or_else(|| format!("Coordinate System {system} existiert nicht"))?;
+                    .ok_or_else(|| format!("Coordinate System {system} does not exist"))?;
                 system.plane(*plane, *offset)
             }
         }
@@ -292,7 +292,7 @@ impl ResultPath {
         let (start, end) = self.ends(model)?;
         let length = norm(sub(end, start));
         if length == 0.0 {
-            return Err(format!("{}: Anfang und Ende fallen zusammen.", self.name));
+            return Err(format!("{}: Start and end coincide.", self.name));
         }
         let n = self.points.max(2);
         Ok((0..n)

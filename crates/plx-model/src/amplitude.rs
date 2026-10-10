@@ -58,14 +58,14 @@ impl Amplitude {
     /// times that do not decrease.
     pub fn points_problem(&self) -> Option<String> {
         if self.points.is_empty() {
-            return Some("Die Amplitude braucht mindestens einen Punkt".into());
+            return Some("The amplitude needs at least one point".into());
         }
         if self.points.iter().flatten().any(|v| !v.is_finite()) {
-            return Some("Die Tabelle enthält ungültige Zahlen".into());
+            return Some("The table contains invalid numbers".into());
         }
         (self.points.windows(2))
             .position(|w| w[1][0] < w[0][0])
-            .map(|i| format!("Die Zeit in Zeile {} ist kleiner als davor", i + 2))
+            .map(|i| format!("The time in row {} is smaller than before", i + 2))
     }
 }
 
@@ -101,7 +101,7 @@ mod tests {
         let mut amplitude = Amplitude::new("A");
         assert_eq!(amplitude.points_problem(), None);
         amplitude.points = vec![[0.0, 0.0], [2.0, 1.0], [1.0, 1.0]];
-        assert!(amplitude.points_problem().unwrap().contains("Zeile 3"));
+        assert!(amplitude.points_problem().unwrap().contains("row 3"));
         amplitude.points.clear();
         assert!(amplitude.points_problem().is_some());
     }

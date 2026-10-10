@@ -34,11 +34,11 @@ impl Deformation {
 
     pub fn label(self) -> String {
         match self {
-            Deformation::Undeformed => "Unverformt".into(),
-            Deformation::TrueScale => "Echter Maßstab".into(),
-            Deformation::Automatic(1.0) => "Automatisch".into(),
-            Deformation::Automatic(f) => format!("Automatisch × {f}"),
-            Deformation::UserDefined => "Benutzerdefiniert".into(),
+            Deformation::Undeformed => "Undeformed".into(),
+            Deformation::TrueScale => "True scale".into(),
+            Deformation::Automatic(1.0) => "Automatic".into(),
+            Deformation::Automatic(f) => format!("Automatic × {f}"),
+            Deformation::UserDefined => "User defined".into(),
         }
     }
 }

@@ -73,8 +73,8 @@ impl SectionKind {
     pub fn label(&self) -> &'static str {
         match self {
             SectionKind::Solid => "Solid",
-            SectionKind::Truss { .. } => "Stab (Truss)",
-            SectionKind::Beam(_) => "Balken (Beam)",
+            SectionKind::Truss { .. } => "Truss",
+            SectionKind::Beam(_) => "Beam",
             SectionKind::Shell { .. } => "Shell",
         }
     }
@@ -108,7 +108,7 @@ impl SectionKind {
         let line = element.shape.family() == ElementFamily::Line;
         match self {
             SectionKind::Solid if line => Some(format!(
-                "Element {} ist ein Linienelement; Linien brauchen eine Beam oder Truss \
+                "Element {} is a line element; lines need a Beam or Truss \
                  Section",
                 element.id
             )),
@@ -121,14 +121,14 @@ impl SectionKind {
                 ))
             }
             SectionKind::Shell { .. } => None,
-            _ if !line => Some(format!("Element {} ist kein Linienelement", element.id)),
+            _ if !line => Some(format!("Element {} is not a line element", element.id)),
             SectionKind::Beam(beam)
                 if beam.profile.needs_reduced_integration()
                     && element.shape != ElementShape::Line3 =>
             {
                 Some(format!(
-                    "Element {} hat 2 Knoten; Rohr- und Kastenprofile brauchen Linien mit 3 \
-                     Knoten (B32R)",
+                    "Element {} has 2 nodes; pipe and box profiles need lines with 3 \
+                     nodes (B32R)",
                     element.id
                 ))
             }
@@ -205,10 +205,10 @@ impl BeamProfile {
 
     pub fn label(&self) -> &'static str {
         match self {
-            BeamProfile::Rect { .. } => "Rechteck",
-            BeamProfile::Circ { .. } => "Kreis",
-            BeamProfile::Pipe { .. } => "Rohr",
-            BeamProfile::Box { .. } => "Kasten",
+            BeamProfile::Rect { .. } => "Rectangular",
+            BeamProfile::Circ { .. } => "Circular",
+            BeamProfile::Pipe { .. } => "Pipe",
+            BeamProfile::Box { .. } => "Box",
         }
     }
 

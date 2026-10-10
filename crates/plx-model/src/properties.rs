@@ -101,9 +101,9 @@ impl ModelSpace {
     pub fn label(self) -> &'static str {
         match self {
             ModelSpace::ThreeD => "3D",
-            ModelSpace::PlaneStress => "2D ebener Spannungszustand",
-            ModelSpace::PlaneStrain => "2D ebener Verzerrungszustand",
-            ModelSpace::Axisymmetric => "2D rotationssymmetrisch",
+            ModelSpace::PlaneStress => "2D plane stress",
+            ModelSpace::PlaneStrain => "2D plane strain",
+            ModelSpace::Axisymmetric => "2D axisymmetric",
         }
     }
 
@@ -180,34 +180,31 @@ impl ModelSpace {
         if !self.is_2d() {
             if family(ElementFamily::Surface) {
                 return Err(
-                    "Flächen lassen sich nur in 2D-Modellen vernetzen; der Modellraum ist 3D"
-                        .into(),
+                    "Surfaces can only be meshed in 2D models; the model space is 3D".into(),
                 );
             }
             return Ok(());
         }
         if family(ElementFamily::Solid) {
             return Err(format!(
-                "Ein Modell im Modellraum \"{}\" kann keine Volumenkörper vernetzen",
+                "A model in the model space \"{}\" cannot mesh solids",
                 self.label()
             ));
         }
         if family(ElementFamily::Line) {
-            return Err("Linien (Balken, Stäbe) lassen sich nur in 3D-Modellen vernetzen".into());
+            return Err("Lines (beams, trusses) can only be meshed in 3D models".into());
         }
         let Some((min, max)) = mesh.bounds() else {
             return Ok(());
         };
         let tolerance = 1e-6 * (0..3).map(|k| max[k] - min[k]).fold(0.0, f64::max);
         if min[2] < -tolerance || max[2] > tolerance {
-            return Err("2D-Modelle müssen in der x-y-Ebene liegen (z = 0)".into());
+            return Err("2D models must lie in the x-y plane (z = 0)".into());
         }
         if self == ModelSpace::Axisymmetric && min[0] < -tolerance {
-            return Err(
-                "Rotationssymmetrische Modelle müssen bei x >= 0 liegen; die y-Achse ist die \
-                 Drehachse"
-                    .into(),
-            );
+            return Err("Axisymmetric models must lie at x >= 0; the y axis is the \
+                 axis of rotation"
+                .into());
         }
         self.convert_mesh(mesh);
         let coords: Vec<[f64; 3]> = mesh.coords().to_vec();

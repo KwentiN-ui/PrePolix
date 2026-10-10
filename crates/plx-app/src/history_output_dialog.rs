@@ -15,12 +15,9 @@ use crate::viewport::{BoxSelect, Preview};
 
 /// The types of the list, in PrePoMax's order, with the prefix of their default names.
 const TYPES: [(&str, &str); 3] = [
-    ("Aus Feldausgabe (From Field Output)", "From_Field"),
-    (
-        "Per Gleichung (From History Output by Equation)",
-        "From_Equation",
-    ),
-    ("Elementgröße (From Element Size)", "From_Element_Size"),
+    ("From Field Output", "From_Field"),
+    ("From History Output by Equation", "From_Equation"),
+    ("From Element Size", "From_Element_Size"),
 ];
 const FROM_FIELD: usize = 0;
 const EQUATION: usize = 1;
@@ -28,31 +25,31 @@ const SIZE: usize = 2;
 
 const NAME: &str = "Name";
 const REGION: &str = "Region";
-const FIELD: &str = "Feld";
-const COMPONENTS: &str = "Komponenten";
-const EQUATION_ROW: &str = "Gleichung";
-const UNIT: &str = "Einheit";
-const SIZE_ROW: &str = "Größe";
+const FIELD: &str = "Field";
+const COMPONENTS: &str = "Components";
+const EQUATION_ROW: &str = "Equation";
+const UNIT: &str = "Unit";
+const SIZE_ROW: &str = "Size";
 
 fn description(row: &str) -> &'static str {
     match row {
-        NAME => "Name der History-Ausgabe.",
+        NAME => "Name of the history output.",
         REGION => {
-            "Knoten, deren Werte über alle Inkremente ausgegeben werden. Bei \"Auswahl im \
-             3D-Fenster\" wird im verformten Modell gewählt."
+            "Nodes whose values are output over all increments. With \"Selection in the \
+             3D view\" the nodes are picked on the deformed model."
         }
-        FIELD => "Feld, aus dem die Werte stammen.",
-        COMPONENTS => "Komponenten des Feldes, die ausgegeben werden.",
+        FIELD => "Field the values are taken from.",
+        COMPONENTS => "Components of the field that are output.",
         EQUATION_ROW => {
-            "Beispiel: =[From_Field-1.DISP.U3] * 2\nEine Komponente wird mit \
-             History-Ausgabe.Feld.Komponente angegeben, Namen mit Bindestrich in eckigen \
-             Klammern. Die Gleichung wird für jeden Eintrag und jedes Inkrement ausgewertet; \
-             alle Komponenten brauchen gleich viele Einträge."
+            "Example: =[From_Field-1.DISP.U3] * 2\nA component is given as \
+             HistoryOutput.Field.Component, names with a hyphen in square \
+             brackets. The equation is evaluated for every entry and every increment; \
+             all components need the same number of entries."
         }
-        UNIT => "Benutzerdefinierte Einheit der History-Ausgabe.",
+        UNIT => "User-defined unit of the history output.",
         SIZE_ROW => {
-            "Volumen der Elemente oder Fläche der Elementflächen, je Inkrement am verformten \
-             Netz (echter Maßstab)."
+            "Volume of the elements or area of the element faces, per increment on the \
+             deformed mesh (true scale)."
         }
         _ => "",
     }
@@ -180,9 +177,9 @@ impl HistoryOutputDialog {
 
     pub fn title(&self) -> &'static str {
         if self.edit.is_some() {
-            "History-Ausgabe bearbeiten"
+            "Edit History Output"
         } else {
-            "History-Ausgabe erstellen"
+            "Create History Output"
         }
     }
 
@@ -239,23 +236,21 @@ impl HistoryOutputDialog {
     pub fn output(&self) -> Result<HistoryOutput, String> {
         let name = self.names[self.kind].trim().to_string();
         if name.is_empty() {
-            return Err("Bitte einen Namen eingeben.".into());
+            return Err("Please enter a name.".into());
         }
         if self.taken.iter().any(|t| t.eq_ignore_ascii_case(&name)) {
-            return Err(format!("Der Name {name} ist schon vergeben."));
+            return Err(format!("The name {name} is already used."));
         }
         if name.contains('.') {
-            return Err("Der Name darf keinen Punkt enthalten.".into());
+            return Err("The name must not contain a dot.".into());
         }
         if self.region().is_some_and(RegionDraft::is_empty) {
-            return Err("Die Region ist leer.".into());
+            return Err("The region is empty.".into());
         }
         let kind = match self.kind {
             FROM_FIELD => {
                 if self.fields.is_empty() {
-                    return Err(
-                        "Es gibt keine Feldausgaben, aus denen Werte stammen könnten.".into(),
-                    );
+                    return Err("There are no field outputs to take values from.".into());
                 }
                 HistoryOutputKind::FromField {
                     region: self.nodes.region(),
@@ -275,7 +270,7 @@ impl HistoryOutputDialog {
         Ok(HistoryOutput { name, kind })
     }
 
-    /// Prepares the dialog for the next output after OK - Neu.
+    /// Prepares the dialog for the next output after OK - New.
     pub fn next(&mut self, created: &HistoryOutput, view: &ResultsView) {
         self.taken.push(created.name.clone());
         self.names =
@@ -303,7 +298,7 @@ impl HistoryOutputDialog {
             .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
             .show(ctx, |ui| {
                 ui.set_width(500.0);
-                ui.label("Typ");
+                ui.label("Type");
                 frame().show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.set_min_height(58.0);
@@ -320,7 +315,7 @@ impl HistoryOutputDialog {
                     }
                 });
                 ui.add_space(6.0);
-                ui.label("Eigenschaften");
+                ui.label("Properties");
                 frame().show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.set_min_height(240.0);
@@ -341,11 +336,11 @@ impl HistoryOutputDialog {
                 }
                 ui.add_space(4.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Abbrechen").clicked() {
+                    if ui.button("Cancel").clicked() {
                         action = DialogAction::Cancel;
                     }
                     let ok = ui.button("OK").clicked();
-                    let next = self.edit.is_none() && ui.button("OK - Neu").clicked();
+                    let next = self.edit.is_none() && ui.button("OK - New").clicked();
                     if ok || next {
                         match self.output() {
                             Ok(output) => action = DialogAction::Ok { output, next },
@@ -373,7 +368,7 @@ impl HistoryOutputDialog {
             .inner_margin(egui::Margin::symmetric(4, 1));
         header.show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.strong("Daten");
+            ui.strong("Data");
         });
         let focus = &mut self.focus;
         egui::Grid::new("history output properties")
@@ -462,7 +457,7 @@ impl HistoryOutputDialog {
                             let mut clicked = false;
                             ui.horizontal(|ui| {
                                 for (kind, label) in
-                                    [(SizeKind::Volume, "Volumen"), (SizeKind::Area, "Fläche")]
+                                    [(SizeKind::Volume, "Volume"), (SizeKind::Area, "Area")]
                                 {
                                     if ui.radio(*size == kind, label).clicked() && *size != kind {
                                         *size = kind;
@@ -485,7 +480,7 @@ impl HistoryOutputDialog {
             ui.add_space(4.0);
             let equation = &mut self.equation;
             ui.add_enabled_ui(!self.history.is_empty(), |ui| {
-                ui.menu_button("Komponente einfügen …", |ui| {
+                ui.menu_button("Insert Component…", |ui| {
                     for name in &self.history {
                         if ui.button(name).clicked() {
                             equation.push_str(&format!("[{name}]"));
@@ -495,7 +490,7 @@ impl HistoryOutputDialog {
                 });
             });
             if self.history.is_empty() {
-                ui.weak("Es gibt noch keine History-Ausgaben, die die Gleichung verwenden kann.");
+                ui.weak("There are no history outputs yet that the equation can use.");
             }
         }
     }

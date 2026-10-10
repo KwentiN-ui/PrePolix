@@ -179,7 +179,7 @@ impl MeshToolDialog {
                 }
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Abbrechen").clicked() {
+                    if ui.button("Cancel").clicked() {
                         result = MeshToolResult::Cancel;
                     }
                     if ui.button("OK").clicked() {

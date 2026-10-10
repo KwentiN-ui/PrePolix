@@ -361,7 +361,7 @@ impl SectionDialog {
     pub fn show(&mut self, ctx: &egui::Context, model: &Model) -> SectionResult {
         let mut result = SectionResult::Open;
         let mut open = true;
-        let window = egui::Window::new("Schnittansicht")
+        let window = egui::Window::new("Section View")
             .id(egui::Id::new("section view"))
             .open(&mut open)
             .collapsible(false)
@@ -372,10 +372,10 @@ impl SectionDialog {
                 self.form(ui, &model.fe);
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Abbrechen").clicked() {
+                    if ui.button("Cancel").clicked() {
                         result = SectionResult::Cancel;
                     }
-                    if ui.button("Deaktivieren").clicked() {
+                    if ui.button("Deactivate").clicked() {
                         result = SectionResult::Disable;
                     }
                     if ui.button("OK").clicked() {
@@ -408,8 +408,8 @@ impl SectionDialog {
             PlaneDefinition::PointNormal { .. } => 2,
         };
         ui.horizontal(|ui| {
-            ui.label("Ebene:");
-            if ui.radio(kind == 0, "Grundebene").clicked() && kind != 0 {
+            ui.label("Plane:");
+            if ui.radio(kind == 0, "Base plane").clicked() && kind != 0 {
                 let visible = self.draft.normal();
                 let plane = closest_principal(visible);
                 let offset = self.draft.anchor(self.center)[plane.axis()];
@@ -420,9 +420,9 @@ impl SectionDialog {
             let radio = ui
                 .add_enabled(
                     !fe.planes.is_empty(),
-                    egui::RadioButton::new(kind == 1, "Plane-Feature"),
+                    egui::RadioButton::new(kind == 1, "Plane feature"),
                 )
-                .on_disabled_hover_text("Zuerst unter Features eine Plane anlegen.");
+                .on_disabled_hover_text("Create a Plane under Features first.");
             if radio.clicked() && kind != 1 {
                 self.draft.definition = PlaneDefinition::Feature {
                     plane: fe.planes[0].name.clone(),
@@ -433,7 +433,7 @@ impl SectionDialog {
                 self.draft.resolve(fe);
                 self.picking = None;
             }
-            if ui.radio(kind == 2, "Punkt und Normale").clicked() && kind != 2 {
+            if ui.radio(kind == 2, "Point and normal").clicked() && kind != 2 {
                 let (point, normal) = self.draft.as_point_normal(self.center);
                 self.draft.set_point_normal(point, normal);
             }
@@ -444,7 +444,7 @@ impl SectionDialog {
             .spacing([12.0, 6.0])
             .show(ui, |ui| match &mut self.draft.definition {
                 PlaneDefinition::Principal { plane, offset } => {
-                    ui.label("Grundebene");
+                    ui.label("Base plane");
                     ui.horizontal(|ui| {
                         for candidate in PrincipalPlane::ALL {
                             // Framed also when inactive, so hovering does not widen a button
@@ -459,7 +459,7 @@ impl SectionDialog {
                         }
                     });
                     ui.end_row();
-                    ui.label(format!("Lage {}", plane.axis_label()));
+                    ui.label(format!("Position {}", plane.axis_label()));
                     ui.add(numeric::drag_value(offset).speed(speed));
                     ui.end_row();
                 }
@@ -477,23 +477,23 @@ impl SectionDialog {
                             }
                         });
                     ui.end_row();
-                    ui.label("Abstand");
+                    ui.label("Distance");
                     ui.add(numeric::drag_value(offset).speed(speed));
                     ui.end_row();
                     if frame.is_none() {
                         ui.label("");
                         ui.colored_label(
                             egui::Color32::from_rgb(200, 0, 0),
-                            "Die Plane fehlt oder ist ungültig.",
+                            "The plane is missing or invalid.",
                         );
                         ui.end_row();
                     }
                 }
                 PlaneDefinition::PointNormal { point, normal } => {
-                    ui.label("Punkt");
+                    ui.label("Point");
                     vector_row(ui, point, speed);
                     ui.end_row();
-                    ui.label("Aus Auswahl");
+                    ui.label("From selection");
                     if crate::setup::pick_button(ui, self.picking == Some(Picking::Point)) {
                         self.picking = match self.picking {
                             Some(Picking::Point) => None,
@@ -502,15 +502,15 @@ impl SectionDialog {
                         self.marked.clear();
                     }
                     ui.end_row();
-                    ui.label("Normale");
+                    ui.label("Normal");
                     vector_row(ui, normal, 0.01);
                     ui.end_row();
                     ui.label("");
                     let normal_picking = matches!(self.picking, Some(Picking::Normal(_)));
                     let label = match self.picking {
-                        Some(Picking::Normal(None)) => "Ersten Punkt wählen …",
-                        Some(Picking::Normal(Some(_))) => "Zweiten Punkt wählen …",
-                        _ => "Aus zwei Punkten",
+                        Some(Picking::Normal(None)) => "Select first point…",
+                        Some(Picking::Normal(Some(_))) => "Select second point…",
+                        _ => "From two points",
                     };
                     if ui.selectable_label(normal_picking, label).clicked() {
                         self.picking = if normal_picking {
@@ -526,7 +526,7 @@ impl SectionDialog {
                         for (axis, label) in ["X", "Y", "Z"].into_iter().enumerate() {
                             if ui
                                 .button(label)
-                                .on_hover_text("Normale entlang der Achse")
+                                .on_hover_text("Normal along the axis")
                                 .clicked()
                             {
                                 *normal = DVec3::ZERO;
@@ -557,17 +557,17 @@ impl SectionDialog {
         }
         ui.horizontal(|ui| {
             if ui
-                .button("Umkehren")
-                .on_hover_text("Die andere Seite des Schnitts zeigen")
+                .button("Flip")
+                .on_hover_text("Show the other side of the section")
                 .clicked()
             {
                 self.draft.flip();
             }
-            ui.checkbox(&mut self.draft.lighten, "Schnittflächen aufhellen");
+            ui.checkbox(&mut self.draft.lighten, "Lighten cut surfaces");
         });
         // A changed plane takes effect at once.
         self.draft.resolve(fe);
-        ui.weak("Pfeil ziehen: verschieben, Bögen ziehen: kippen");
+        ui.weak("Drag arrow: move, drag arcs: tilt");
     }
 }
 

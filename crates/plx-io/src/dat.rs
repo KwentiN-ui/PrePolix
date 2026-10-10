@@ -488,7 +488,7 @@ pub fn parse_dat(text: &str) -> DatImport {
                 Ids::IdPoint => 2,
             };
             if values.len() < offset + kind.components.len() {
-                warnings.push(format!("Zeile {line_number}: zu wenige Werte"));
+                warnings.push(format!("Line {line_number}: too few values"));
                 continue;
             }
             let entry = match kind.ids {
@@ -504,7 +504,7 @@ pub fn parse_dat(text: &str) -> DatImport {
     }
     if !unknown.is_empty() {
         warnings.push(format!(
-            "Nicht unterstützte History-Ausgaben übersprungen: {}",
+            "Unsupported history outputs skipped: {}",
             unknown.join(", ")
         ));
     }

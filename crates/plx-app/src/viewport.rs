@@ -124,20 +124,20 @@ pub struct ViewportResponse {
 /// The view entries of the 3D view's context menu.
 pub fn view_menu(ui: &mut Ui) -> Option<ViewCommand> {
     let mut command = None;
-    if ui.button("Einpassen").clicked() {
+    if ui.button("Zoom to Fit").clicked() {
         command = Some(ViewCommand::Fit);
     }
-    if ui.button("Vertikal").clicked() {
+    if ui.button("Vertical View").clicked() {
         command = Some(ViewCommand::Vertical);
     }
-    ui.menu_button("Ansicht senkrecht zu", |ui| {
+    ui.menu_button("View Normal to Axis", |ui| {
         for axis in Axis::ALL {
             if ui.button(axis.label()).clicked() {
                 command = Some(ViewCommand::AxisView(axis));
             }
         }
     });
-    ui.menu_button("Isometrisch, Achse oben", |ui| {
+    ui.menu_button("Isometric, Axis Up", |ui| {
         for axis in Axis::ALL {
             if ui.button(axis.label()).clicked() {
                 command = Some(ViewCommand::IsometricAxis(axis));

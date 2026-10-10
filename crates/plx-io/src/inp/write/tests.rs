@@ -164,7 +164,7 @@ fn empty_regions_and_unknown_materials_are_errors() {
         write_inp(&mesh, &model, ""),
         Err(WriteError::EmptyRegion {
             item: "Force-1".into(),
-            what: "Knoten"
+            what: "nodes"
         })
     );
     model.sections[0].material = "Alu".into();
@@ -185,7 +185,7 @@ fn run_ccx(name: &str, text: &str) -> Option<FrdImport> {
 /// A fresh directory for a CalculiX run, `None` without CalculiX.
 fn ccx_dir(name: &str) -> Option<PathBuf> {
     if Command::new("ccx").arg("-v").output().is_err() {
-        eprintln!("ccx nicht gefunden, Test übersprungen");
+        eprintln!("ccx not found, test skipped");
         return None;
     }
     let dir = std::env::temp_dir().join(format!("plx-write-{name}-{}", std::process::id()));
@@ -807,7 +807,7 @@ fn user_keywords_are_written_at_their_place_and_read_back() {
 /// Runs CalculiX like [`run_ccx`] and returns the `.dat` file.
 fn run_ccx_dat(name: &str, text: &str) -> Option<String> {
     if Command::new("ccx").arg("-v").output().is_err() {
-        eprintln!("ccx nicht gefunden, Test übersprungen");
+        eprintln!("ccx not found, test skipped");
         return None;
     }
     let dir = std::env::temp_dir().join(format!("plx-write-{name}-{}", std::process::id()));
@@ -1578,7 +1578,7 @@ fn two_d_models_write_their_element_types_thickness_and_dofs() {
         ", 1, 2, 0\n",
         "*Cload\nInternal_Selection-1_Load-1, 1, 1\nInternal_Selection-1_Load-1, 2, 2\n**\n",
     ] {
-        assert!(text.contains(line), "{line:?} fehlt in\n{text}");
+        assert!(text.contains(line), "{line:?} missing in\n{text}");
     }
     model.properties.space = ModelSpace::Axisymmetric;
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -1826,7 +1826,7 @@ fn a_tie_writes_its_surfaces_slave_first() {
         "*Tie, Name=Tie-1, Position tolerance=0.5\n\
          Internal_Selection-1_Tie-1_Slave, Internal_Selection-1_Tie-1_Master\n",
     ] {
-        assert!(text.contains(line), "{line:?} fehlt in\n{text}");
+        assert!(text.contains(line), "{line:?} missing in\n{text}");
     }
     let constraints = top_title(&model_keywords(&mesh, &model, "").unwrap(), "Constraints");
     assert_eq!(constraints, 11);
@@ -1867,7 +1867,7 @@ fn surface_interactions_and_contact_pairs_are_written_like_prepomax() {
          Small sliding, Adjust=0\n\
          Internal_Selection-1_Contact_Pair-1_Slave, Internal_Selection-1_Contact_Pair-1_Master\n",
     ] {
-        assert!(text.contains(line), "{line:?} fehlt in\n{text}");
+        assert!(text.contains(line), "{line:?} missing in\n{text}");
     }
     // Deactivated, the pair keeps its place as a comment and gets no surfaces.
     model.contact_pairs[0].active = false;
@@ -2358,7 +2358,7 @@ fn beam_sections_type_their_elements_and_write_the_normal() {
          10, 5\n0, 1, 0\n",
         "*Boundary\nInternal_Selection-1_Fixed-1, 1, 6, 0\n",
     ] {
-        assert!(text.contains(line), "{line} fehlt in\n{text}");
+        assert!(text.contains(line), "{line} missing in\n{text}");
     }
     // Pipes and boxes need B32R and carry the offsets.
     let mut model = model;
@@ -2421,7 +2421,7 @@ fn automatic_normals_split_a_frame_into_groups() {
          *Beam section, Elset=Internal_Selection-2_Beam-1, Material=Steel, Section=RECT\n\
          10, 5\n1, 0, 0\n",
     ] {
-        assert!(text.contains(line), "{line} fehlt in\n{text}");
+        assert!(text.contains(line), "{line} missing in\n{text}");
     }
     // A given normal parallel to the columns is refused.
     let mut model = model;
@@ -2431,7 +2431,7 @@ fn automatic_normals_split_a_frame_into_groups() {
         error,
         WriteError::InvalidSection {
             item: "Beam-1".into(),
-            reason: "Die Normale ist parallel zur Achse von Element 3".into()
+            reason: "The normal is parallel to the axis of element 3".into()
         }
     );
 }
@@ -2447,7 +2447,7 @@ fn sections_must_fit_their_elements() {
     let error = write_inp(&mesh, &model, "").unwrap_err();
     assert!(
         matches!(&error, WriteError::InvalidSection { item, reason }
-            if item == "Beam-1" && reason.contains("Linienelement")),
+            if item == "Beam-1" && reason.contains("line element")),
         "{error}"
     );
     model.sections[0].kind = SectionKind::Beam(BeamSection {
@@ -2464,7 +2464,7 @@ fn sections_must_fit_their_elements() {
     let error = write_inp(&solid_mesh, &solid_model, "").unwrap_err();
     assert!(
         matches!(&error, WriteError::InvalidSection { reason, .. }
-            if reason.contains("kein Linienelement")),
+            if reason.contains("not a line element")),
         "{error}"
     );
 }
@@ -2484,7 +2484,7 @@ fn trusses_are_written_as_t3d2_with_translations_only() {
         "*Solid section, Elset=Internal_Selection-1_Beam-1, Material=Steel\n50\n",
         "*Boundary\nInternal_Selection-1_Fixed-1, 1, 3, 0\n",
     ] {
-        assert!(text.contains(line), "{line} fehlt in\n{text}");
+        assert!(text.contains(line), "{line} missing in\n{text}");
     }
 }
 
@@ -2560,10 +2560,10 @@ fn node_ties_merge_the_nodes_or_hinge_beams_with_equations() {
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
         "*Element, Type=B31, Elset=BEAM2\n101, 3, 102\n102, 102, 103\n",
-        "** Name: Node_Tie-1\n** Knoten 3 (zusammengelegt)\n",
+        "** Name: Node_Tie-1\n** Node 3 (merged)\n",
         "*Nset, Nset=Internal_Selection-1_Held\n3\n",
     ] {
-        assert!(text.contains(line), "{line} fehlt in\n{text}");
+        assert!(text.contains(line), "{line} missing in\n{text}");
     }
     assert!(!text.contains("*Node\n101,") && !text.contains("\n101, 50, 0, 0\n"));
     assert!(!text.contains("*Equation"));
@@ -2614,7 +2614,7 @@ fn calculix_bends_two_beams_tied_at_a_node_like_one() {
     let deflection = -min_u2(&frd);
     assert!(
         (deflection - expected).abs() < 0.005 * expected,
-        "{deflection} statt {expected}"
+        "{deflection} instead of {expected}"
     );
 }
 
@@ -2692,7 +2692,7 @@ fn calculix_stretches_two_trusses_tied_at_a_node_like_one() {
     let stretch = node_value(&frd, "DISP", "U1", 111);
     assert!(
         (stretch - expected).abs() < 1e-6 * expected,
-        "{stretch} statt {expected}"
+        "{stretch} instead of {expected}"
     );
 }
 
@@ -2732,7 +2732,7 @@ fn calculix_bends_a_rectangular_beam_like_beam_theory() {
         let deflection = -min_u2(&frd);
         assert!(
             (deflection - expected).abs() < tolerance * expected,
-            "{name}: {deflection} statt {expected}"
+            "{name}: {deflection} instead of {expected}"
         );
     }
 }
@@ -2760,7 +2760,7 @@ fn calculix_bends_a_pipe_like_beam_theory() {
     let deflection = -min_u2(&frd);
     assert!(
         (deflection - expected).abs() < 0.01 * expected,
-        "{deflection} statt {expected}"
+        "{deflection} instead of {expected}"
     );
 }
 
@@ -2793,7 +2793,7 @@ fn calculix_stretches_a_truss_by_f_l_over_e_a() {
     let stretch = node_value(&frd, "DISP", "U1", 11);
     assert!(
         (stretch - expected).abs() < 1e-6 * expected,
-        "{stretch} statt {expected}"
+        "{stretch} instead of {expected}"
     );
 }
 
@@ -3531,7 +3531,7 @@ fn calculix_scales_a_load_by_its_amplitude() {
     for (value, factor) in u3.iter().zip([0.5, 1.0, 0.75, 0.5]) {
         assert!(
             (value - factor * full).abs() < 1e-2 * full.abs(),
-            "{u3:?} statt {factor} * {full}"
+            "{u3:?} instead of {factor} * {full}"
         );
     }
 }
@@ -3575,7 +3575,7 @@ fn calculix_holds_an_amplitude_after_its_last_point() {
     let held = node_value(&frd, "DISP", "U3", 99);
     assert!(
         (held - full).abs() < 1e-6 * full.abs(),
-        "{held} statt {full}"
+        "{held} instead of {full}"
     );
 }
 
@@ -3606,7 +3606,7 @@ fn history_outputs_become_print_keywords_with_their_sets() {
          *El print, Elset=Internal_Selection-1_EH_Output-1\nS, EVOL\n\
          ** Name: NH_Output-2: Deactivated\n**\n",
     ] {
-        assert!(text.contains(expected), "{expected}\nfehlt in\n{text}");
+        assert!(text.contains(expected), "{expected}\nmissing in\n{text}");
     }
     assert!(!text.contains("NH_Output-3"));
     // A deactivated step lists its history outputs as comments.

@@ -76,7 +76,7 @@ pub(crate) enum Source {
 impl Source {
     fn label(self) -> &'static str {
         match self {
-            Source::Selection => "Auswahl im 3D-Fenster",
+            Source::Selection => "Selection in the 3D view",
             Source::Parts => "Parts",
             Source::NodeSet => "Node Set",
             Source::ElementSet => "Element Set",
@@ -433,23 +433,23 @@ impl RegionDraft {
                         let count = self.count();
                         let geometry = self.geometry.items();
                         let what = match self.target {
-                            Target::Nodes => "Knoten",
-                            Target::Faces => "Elementflächen",
-                            Target::Edges => "Elementkanten",
+                            Target::Nodes => "Nodes",
+                            Target::Faces => "Element faces",
+                            Target::Edges => "Element edges",
                         };
                         if !geometry.is_empty() {
                             let entities: Vec<CadEntity> = geometry.into_iter().collect();
                             ui.label(plx_model::describe_entities(&entities));
                         } else if count == 0 {
-                            ui.label("Leer");
+                            ui.label("Empty");
                         } else {
                             ui.label(format!("{count} {what}"));
                         }
-                        if ui.button("Auswahl löschen").clicked() {
+                        if ui.button("Clear Selection").clicked() {
                             self.clear();
                         }
                     });
-                    ui.weak("Im Fenster \"Auswahl\" wählen, was ein Klick auswählt.");
+                    ui.weak("Choose in the \"Selection\" window what a click selects.");
                 }
                 Source::Parts => wanted |= self.parts.ui(ui, active),
                 Source::NodeSet | Source::ElementSet | Source::Surface | Source::ReferencePoint => {
@@ -464,7 +464,7 @@ impl RegionDraft {
                     if names.is_empty() && self.source == Source::ReferencePoint {
                         ui.weak("The model has no reference points (Features).");
                     } else if names.is_empty() {
-                        ui.weak("Das Netz enthält keine solchen Sets.");
+                        ui.weak("The mesh contains no such sets.");
                     }
                     egui::ComboBox::from_id_salt("region set")
                         .selected_text(self.set.as_str())
@@ -524,9 +524,9 @@ impl RegionDraft {
 /// is the field they fill. Returns whether it was clicked.
 pub(crate) fn pick_button(ui: &mut Ui, active: bool) -> bool {
     let hint = if active {
-        "Klicks im 3D-Fenster wählen in dieses Feld."
+        "Clicks in the 3D view select into this field."
     } else {
-        "In dieses Feld im 3D-Fenster wählen"
+        "Select into this field in the 3D view"
     };
     let button = egui::Button::new("...").selected(active);
     ui.add(button).on_hover_text(hint).clicked()
@@ -563,7 +563,7 @@ fn force_rows(ui: &mut Ui, force: &mut [f64; 3], two_d: bool, units: UnitSystem)
 fn revolution_hint(ui: &mut Ui, axisymmetric: bool) {
     if axisymmetric {
         ui.label("");
-        ui.weak("Rotationssymmetrisch: Kraft auf den ganzen Umfang (360°).");
+        ui.weak("Axisymmetric: force on the whole circumference (360°).");
         ui.end_row();
     }
 }
@@ -712,13 +712,13 @@ const CENTRIFUGAL: &str = "Centrifugal_Load";
 /// The boundary condition kinds of the dialog: label, default name and the kind.
 fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 4] {
     [
-        ("Fest eingespannt", FIXED, BoundaryKind::Fixed),
+        ("Fixed", FIXED, BoundaryKind::Fixed),
         (
-            "Verschiebung/Rotation",
+            "Displacement/Rotation",
             DISPLACEMENT,
             BoundaryKind::Displacement([Some(0.0), None, None, None, None, None]),
         ),
-        ("Temperatur", TEMPERATURE, BoundaryKind::Temperature(0.0)),
+        ("Temperature", TEMPERATURE, BoundaryKind::Temperature(0.0)),
         (
             "Submodel",
             SUBMODEL,
@@ -776,10 +776,18 @@ const DOF_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
 /// zero values.
 fn load_kinds() -> [(&'static str, &'static str, LoadKind); 12] {
     [
-        ("Einzelkraft", FORCE, LoadKind::ConcentratedForce([0.0; 3])),
+        (
+            "Concentrated Force",
+            FORCE,
+            LoadKind::ConcentratedForce([0.0; 3]),
+        ),
         ("Moment", MOMENT, LoadKind::Moment([0.0; 3])),
-        ("Druck", PRESSURE, LoadKind::Pressure(0.0)),
-        ("Flächenlast", TRACTION, LoadKind::SurfaceTraction([0.0; 3])),
+        ("Pressure", PRESSURE, LoadKind::Pressure(0.0)),
+        (
+            "Surface Traction",
+            TRACTION,
+            LoadKind::SurfaceTraction([0.0; 3]),
+        ),
         ("Gravity", GRAVITY, LoadKind::Gravity([0.0, 0.0, -9.81])),
         (
             "Centrifugal load",
@@ -799,19 +807,11 @@ fn load_kinds() -> [(&'static str, &'static str, LoadKind); 12] {
                 direction: None,
             },
         ),
+        ("Concentrated Flux", CFLUX, LoadKind::ConcentratedFlux(0.0)),
+        ("Surface Flux", SURFACE_FLUX, LoadKind::SurfaceFlux(0.0)),
+        ("Body Flux", BODY_FLUX, LoadKind::BodyFlux(0.0)),
         (
-            "Wärmestrom (Knoten)",
-            CFLUX,
-            LoadKind::ConcentratedFlux(0.0),
-        ),
-        (
-            "Wärmestromdichte (Fläche)",
-            SURFACE_FLUX,
-            LoadKind::SurfaceFlux(0.0),
-        ),
-        ("Wärmequelle (Volumen)", BODY_FLUX, LoadKind::BodyFlux(0.0)),
-        (
-            "Konvektion (Film)",
+            "Film (Convection)",
             FILM,
             LoadKind::Film {
                 sink: 20.0,
@@ -819,7 +819,7 @@ fn load_kinds() -> [(&'static str, &'static str, LoadKind); 12] {
             },
         ),
         (
-            "Strahlung",
+            "Radiation",
             RADIATION,
             LoadKind::Radiation {
                 sink: 20.0,
@@ -1181,9 +1181,9 @@ impl Editor {
             Draft::Material(m) => ("Material", &m.name),
             Draft::Section(s, _) => ("Section", &s.name),
             Draft::Step(s) => ("Step", &s.name),
-            Draft::BoundaryCondition(_, b, _) => ("Randbedingung", &b.name),
-            Draft::Load(_, l, _) => ("Last", &l.name),
-            Draft::InitialCondition(c, _) => ("Anfangsbedingung", &c.name),
+            Draft::BoundaryCondition(_, b, _) => ("Boundary Condition", &b.name),
+            Draft::Load(_, l, _) => ("Load", &l.name),
+            Draft::InitialCondition(c, _) => ("Initial Condition", &c.name),
             Draft::FieldOutput(_, f) => ("Field Output", &f.name),
             Draft::HistoryOutput(_, h, _) => ("History Output", &h.name),
             Draft::DefinedField(_, f, _) => ("Defined Field", &f.name),
@@ -1194,11 +1194,11 @@ impl Editor {
             Draft::Amplitude(a, _) => ("Amplitude", &a.name),
         };
         let action = if self.index.is_some() {
-            "bearbeiten"
+            "Edit"
         } else {
-            "erstellen"
+            "Create"
         };
-        format!("{kind} {action}: {name}")
+        format!("{action} {kind}: {name}")
     }
 
     /// The boundary condition or load being edited as it would be applied: its step, its
@@ -1286,7 +1286,7 @@ impl Editor {
                 }
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.button("Abbrechen").clicked() {
+                    if ui.button("Cancel").clicked() {
                         result = EditorResult::Cancel;
                     }
                     if ui.button("OK").clicked() {
@@ -1317,7 +1317,7 @@ impl Editor {
             Draft::Material(material) => material_form(ui, material, units),
             Draft::Section(section, region) => {
                 name_row(ui, &mut section.name);
-                ui.label("Art");
+                ui.label("Type");
                 let before = section.kind.prefix();
                 egui::ComboBox::from_id_salt("section kind")
                     .selected_text(section.kind.label())
@@ -1359,7 +1359,7 @@ impl Editor {
                         // Plane stress and plane strain sections have a thickness, as in
                         // PrePoMax.
                         if model.fe.properties.space.has_thickness() {
-                            ui.label("Dicke");
+                            ui.label("Thickness");
                             ui.add(
                                 numeric::quantity(&mut section.thickness, units, Quantity::Length)
                                     .range(0.0..=f64::MAX),
@@ -1368,7 +1368,7 @@ impl Editor {
                         }
                     }
                     SectionKind::Truss { area } => {
-                        ui.label("Querschnittsfläche");
+                        ui.label("Cross-section area");
                         ui.add(
                             numeric::quantity(area, units, Quantity::Area).range(0.0..=f64::MAX),
                         );
@@ -1398,7 +1398,7 @@ impl Editor {
             Draft::Step(step) => step_form(ui, step, self.index.is_none(), &model.fe),
             Draft::BoundaryCondition(step, bc, region) => {
                 name_row(ui, &mut bc.name);
-                ui.label("Art");
+                ui.label("Type");
                 let step_kind = model.fe.steps.get(*step).map(|s| &s.kind);
                 ui.horizontal(|ui| {
                     let current = boundary_kind_name(&bc.kind);
@@ -1415,7 +1415,7 @@ impl Editor {
                 });
                 ui.end_row();
                 if let BoundaryKind::Temperature(t) = &mut bc.kind {
-                    ui.label("Temperatur");
+                    ui.label("Temperature");
                     ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0));
                     ui.end_row();
                 }
@@ -1456,7 +1456,7 @@ impl Editor {
             }
             Draft::Load(step, load, region) => {
                 name_row(ui, &mut load.name);
-                ui.label("Art");
+                ui.label("Type");
                 let step_kind = model.fe.steps.get(*step).map(|s| &s.kind);
                 let current = load_kind_name(&load.kind);
                 let label = (load_kinds().into_iter())
@@ -1488,7 +1488,7 @@ impl Editor {
                     LoadKind::ConcentratedForce(force) => {
                         force_rows(ui, force, two_d, units);
                         ui.label("");
-                        ui.weak("Die Kraft wirkt an jedem Knoten der Region.");
+                        ui.weak("The force acts on every node of the region.");
                         ui.end_row();
                         revolution_hint(ui, axisymmetric);
                     }
@@ -1514,16 +1514,14 @@ impl Editor {
                         ui.end_row();
                     }
                     LoadKind::Pressure(pressure) => {
-                        ui.label("Druck");
+                        ui.label("Pressure");
                         ui.add(numeric::quantity(pressure, units, Quantity::Pressure).speed(0.1));
                         ui.end_row();
                     }
                     LoadKind::SurfaceTraction(force) => {
                         force_rows(ui, force, two_d, units);
                         ui.label("");
-                        ui.weak(
-                            "Gesamtkraft, beim Export flächengewichtet auf die Knoten verteilt.",
-                        );
+                        ui.weak("Total force, distributed to the nodes by area on export.");
                         ui.end_row();
                         revolution_hint(ui, axisymmetric);
                     }
@@ -1568,31 +1566,31 @@ impl Editor {
                         }
                     }
                     LoadKind::ConcentratedFlux(flux) => {
-                        ui.label("Wärmestrom");
+                        ui.label("Heat flux");
                         ui.add(numeric::physical(flux, units, Quantity::Power));
                         ui.end_row();
                         ui.label("");
-                        ui.weak("Der Wärmestrom fließt an jedem Knoten der Region zu.");
+                        ui.weak("The heat flux flows into every node of the region.");
                         ui.end_row();
                     }
                     LoadKind::SurfaceFlux(flux) => {
-                        ui.label("Wärmestromdichte");
+                        ui.label("Heat flux density");
                         ui.add(numeric::physical(flux, units, Quantity::HeatFlux));
                         ui.end_row();
                         ui.label("");
-                        ui.weak("Positiv: Wärme fließt in das Bauteil.");
+                        ui.weak("Positive: heat flows into the part.");
                         ui.end_row();
                     }
                     LoadKind::BodyFlux(flux) => {
-                        ui.label("Wärmequelle");
+                        ui.label("Heat source");
                         ui.add(numeric::physical(flux, units, Quantity::PowerPerVolume));
                         ui.end_row();
                     }
                     LoadKind::Film { sink, coefficient } => {
-                        ui.label("Umgebungstemperatur");
+                        ui.label("Sink temperature");
                         ui.add(numeric::quantity(sink, units, Quantity::Temperature).speed(1.0));
                         ui.end_row();
-                        ui.label("Wärmeübergangskoeffizient");
+                        ui.label("Film coefficient");
                         ui.add(
                             numeric::physical(
                                 coefficient,
@@ -1655,10 +1653,10 @@ impl Editor {
                         ui.end_row();
                     }
                     LoadKind::Radiation { sink, emissivity } => {
-                        ui.label("Umgebungstemperatur");
+                        ui.label("Sink temperature");
                         ui.add(numeric::quantity(sink, units, Quantity::Temperature).speed(1.0));
                         ui.end_row();
-                        ui.label("Emissionsgrad");
+                        ui.label("Emissivity");
                         ui.add(
                             numeric::drag_value(emissivity)
                                 .range(0.0..=1.0)
@@ -1673,8 +1671,8 @@ impl Editor {
                             ui.label("");
                             ui.colored_label(
                                 egui::Color32::from_rgb(200, 0, 0),
-                                "Strahlung braucht die physikalischen Konstanten\n\
-                                 (Modelleigenschaften).",
+                                "Radiation needs the physical constants\n\
+                                 (Model Properties).",
                             );
                             ui.end_row();
                         }
@@ -1683,7 +1681,7 @@ impl Editor {
                 // Of a film or radiation the first amplitude scales the sink temperature.
                 let factor = load.kind.factor_amplitude_label();
                 let label = if factor.is_some() {
-                    "Amplitude Umgebungstemperatur"
+                    "Sink temperature amplitude"
                 } else {
                     "Amplitude"
                 };
@@ -1697,7 +1695,7 @@ impl Editor {
             }
             Draft::InitialCondition(condition, region) => {
                 name_row(ui, &mut condition.name);
-                ui.label("Art");
+                ui.label("Type");
                 let current = initial_condition_kind_name(&condition.kind);
                 let label = (initial_condition_kinds().into_iter())
                     .find(|(_, name, _)| *name == current)
@@ -1718,7 +1716,7 @@ impl Editor {
                 ui.end_row();
                 match &mut condition.kind {
                     InitialConditionKind::Temperature(t) => {
-                        ui.label("Temperatur");
+                        ui.label("Temperature");
                         ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0));
                         ui.end_row();
                     }
@@ -1757,7 +1755,7 @@ impl Editor {
                 ui.label("");
                 let hint = match condition.kind {
                     InitialConditionKind::Temperature(_) => {
-                        "Temperatur vor dem ersten Step, z. B. für Wärmedehnung."
+                        "Temperature before the first step, e.g. for thermal expansion."
                     }
                     _ => "Velocity at the start of a Dynamic step; other steps ignore it.",
                 };
@@ -1841,17 +1839,17 @@ impl Editor {
             Draft::NodeTie(tie, region) => {
                 name_row(ui, &mut tie.name);
                 region.ui(ui, model);
-                ui.label("Rotationen");
-                ui.checkbox(&mut tie.rotations, "biegesteif");
+                ui.label("Rotations");
+                ui.checkbox(&mut tie.rotations, "rigid");
                 ui.end_row();
                 ui.label("");
                 ui.add(
                     egui::Label::new(
                         egui::RichText::new(
-                            "Alle Knoten der Region folgen dem ersten. Verbindet die Enden \
-                             von Balken oder Stäben verschiedener Parts; die Kontaktsuche \
-                             findet sie. Biegesteif koppelt auch die Rotationen, sonst ist \
-                             die Verbindung ein Gelenk; Stäbe haben keine Rotationen.",
+                            "All nodes of the region follow the first one. Connects the ends \
+                             of beams or trusses of different parts; the contact search \
+                             finds them. Rigid also couples the rotations, otherwise the \
+                             connection is a hinge; trusses have no rotations.",
                         )
                         .weak(),
                     )
@@ -1865,7 +1863,7 @@ impl Editor {
                     OutputKind::Node => &["RF", "U", "V", "NT", "RFL"],
                     OutputKind::Element => &["S", "E", "ME", "PEEQ", "ENER", "HFL"],
                 };
-                ui.label("Variablen");
+                ui.label("Variables");
                 ui.horizontal(|ui| {
                     for &variable in choices {
                         let mut on = output.variables.iter().any(|v| v == variable);
@@ -1940,14 +1938,14 @@ impl Editor {
             Draft::Amplitude(a, _) => &a.name,
         };
         if name.trim().is_empty() {
-            return Err("Bitte einen Namen eingeben.".into());
+            return Err("Please enter a name.".into());
         }
         let duplicate = self
             .taken(fe)
             .iter()
             .any(|other| other.eq_ignore_ascii_case(name));
         if duplicate {
-            return Err(format!("Der Name {name} ist schon vergeben."));
+            return Err(format!("The name {name} is already used."));
         }
         if let Draft::DefinedField(_, field, _) = &self.draft
             && let DefinedFieldKind::TemperatureFromFile { file, step } = &field.kind
@@ -1966,12 +1964,12 @@ impl Editor {
         }
         if let Draft::Section(section, _) = &self.draft {
             if !fe.materials.iter().any(|m| m.name == section.material) {
-                return Err("Bitte ein Material wählen; zuerst unter Materials anlegen.".into());
+                return Err("Please select a material; create one under Materials first.".into());
             }
             match &section.kind {
                 SectionKind::Solid => {}
                 SectionKind::Truss { area } if !(area.is_finite() && *area > 0.0) => {
-                    return Err("Die Querschnittsfläche muss größer als 0 sein.".into());
+                    return Err("The cross-section area must be greater than 0.".into());
                 }
                 SectionKind::Truss { .. } => {}
                 SectionKind::Shell { thickness, .. }
@@ -1983,15 +1981,15 @@ impl Editor {
                 SectionKind::Beam(beam) => {
                     if !beam.profile.is_valid() {
                         return Err(
-                            "Die Profilmaße müssen größer als 0 sein; Wände dünner als das \
-                             Profil."
+                            "The profile dimensions must be greater than 0; walls thinner \
+                             than the profile."
                                 .into(),
                         );
                     }
                     if let BeamOrientation::Direction(n) = beam.orientation
                         && n.iter().all(|v| *v == 0.0)
                     {
-                        return Err("Die Normale darf nicht der Nullvektor sein.".into());
+                        return Err("The normal must not be the zero vector.".into());
                     }
                 }
             }
@@ -2011,7 +2009,7 @@ impl Editor {
             }
             _ => {
                 if self.region().is_some_and(RegionDraft::is_empty) {
-                    return Err("Die Region ist leer.".into());
+                    return Err("The region is empty.".into());
                 }
             }
         }
@@ -2387,7 +2385,7 @@ fn history_output_form(
     taken: &[&str],
 ) {
     name_row(ui, &mut output.name);
-    ui.label("Art");
+    ui.label("Type");
     ui.horizontal(|ui| {
         let current = output.kind.prefix();
         let pair = (model.fe.contact_pairs.first()).map_or(String::new(), |c| c.name.clone());
@@ -2416,7 +2414,7 @@ fn history_output_form(
         }
     });
     ui.end_row();
-    ui.label("Variablen");
+    ui.label("Variables");
     let choices = output.kind.choices();
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(320.0);
@@ -2432,7 +2430,7 @@ fn history_output_form(
         }
     });
     ui.end_row();
-    ui.label("Summen");
+    ui.label("Totals");
     egui::ComboBox::from_id_salt("history totals")
         .selected_text(output.totals.label())
         .width(200.0)
@@ -2457,8 +2455,8 @@ fn history_output_form(
             ui.end_row();
             ui.label("");
             ui.weak(
-                "CalculiX gibt die Werte aller Kontaktelemente aus;
-                 das Paar bestimmt die Flächen der Kontaktkräfte CF.",
+                "CalculiX writes the values of all contact elements;
+                 the pair defines the surfaces of the contact forces CF.",
             );
             ui.end_row();
         }
@@ -2472,19 +2470,19 @@ fn validate_history_output(
     fe: &FeModel,
 ) -> Result<(), String> {
     if output.variables.is_empty() {
-        return Err("Bitte mindestens eine Variable wählen.".into());
+        return Err("Please select at least one variable.".into());
     }
     match &output.kind {
         HistoryKind::Contact { pair } => {
             if !fe.contact_pairs.iter().any(|c| c.name == *pair) {
                 return Err(
-                    "Bitte ein Contact Pair wählen; zuerst unter Contact Pairs anlegen.".into(),
+                    "Please select a contact pair; create one under Contact Pairs first.".into(),
                 );
             }
         }
         _ => {
             if region.is_empty() {
-                return Err("Die Region ist leer.".into());
+                return Err("The region is empty.".into());
             }
         }
     }
@@ -2510,7 +2508,7 @@ fn name_row(ui: &mut Ui, name: &mut String) {
 /// Profile, normal and offsets of a beam section, with CalculiX's directions: the
 /// 1-direction is the normal, the 2-direction the beam axis crossed with it.
 fn beam_form(ui: &mut Ui, beam: &mut BeamSection, units: UnitSystem) {
-    ui.label("Profil");
+    ui.label("Profile");
     egui::ComboBox::from_id_salt("beam profile")
         .selected_text(beam.profile.label())
         .width(200.0)
@@ -2530,40 +2528,40 @@ fn beam_form(ui: &mut Ui, beam: &mut BeamSection, units: UnitSystem) {
     };
     match &mut beam.profile {
         BeamProfile::Rect { a, b } => {
-            positive(ui, "Dicke in 1-Richtung (a)", a);
-            positive(ui, "Dicke in 2-Richtung (b)", b);
+            positive(ui, "Thickness in 1-direction (a)", a);
+            positive(ui, "Thickness in 2-direction (b)", b);
         }
         BeamProfile::Circ { radius } => positive(ui, "Radius", radius),
         BeamProfile::Pipe { radius, thickness } => {
-            positive(ui, "Außenradius", radius);
-            positive(ui, "Wanddicke", thickness);
+            positive(ui, "Outer radius", radius);
+            positive(ui, "Wall thickness", thickness);
         }
         BeamProfile::Box { a, b, t } => {
-            positive(ui, "Breite in 1-Richtung (a)", a);
-            positive(ui, "Breite in 2-Richtung (b)", b);
+            positive(ui, "Width in 1-direction (a)", a);
+            positive(ui, "Width in 2-direction (b)", b);
             let [t1, t2, t3, t4] = t;
-            positive(ui, "Wanddicke bei +1", t1);
-            positive(ui, "Wanddicke bei +2", t2);
-            positive(ui, "Wanddicke bei -1", t3);
-            positive(ui, "Wanddicke bei -2", t4);
+            positive(ui, "Wall thickness at +1", t1);
+            positive(ui, "Wall thickness at +2", t2);
+            positive(ui, "Wall thickness at -1", t3);
+            positive(ui, "Wall thickness at -2", t4);
         }
     }
     if beam.profile.needs_reduced_integration() {
         ui.label("");
         ui.label(
-            egui::RichText::new("Rohr und Kasten brauchen Linien mit 3 Knoten (B32R).")
+            egui::RichText::new("Pipe and box need lines with 3 nodes (B32R).")
                 .small()
                 .weak(),
         );
         ui.end_row();
     }
-    ui.label("Normale (1-Richtung)");
+    ui.label("Normal (1-direction)");
     ui.horizontal(|ui| {
         let automatic = matches!(beam.orientation, BeamOrientation::Automatic);
-        if ui.radio(automatic, "Automatisch").clicked() && !automatic {
+        if ui.radio(automatic, "Automatic").clicked() && !automatic {
             beam.orientation = BeamOrientation::Automatic;
         }
-        if ui.radio(!automatic, "Vektor").clicked() && automatic {
+        if ui.radio(!automatic, "Vector").clicked() && automatic {
             beam.orientation = BeamOrientation::Direction([0.0, 0.0, 1.0]);
         }
     });
@@ -2572,7 +2570,7 @@ fn beam_form(ui: &mut Ui, beam: &mut BeamSection, units: UnitSystem) {
         BeamOrientation::Automatic => {
             ui.label("");
             ui.label(
-                egui::RichText::new("Globale z-Achse, bei Balken entlang z die x-Achse.")
+                egui::RichText::new("Global z-axis, for beams along z the x-axis.")
                     .small()
                     .weak(),
             );
@@ -2590,10 +2588,10 @@ fn beam_form(ui: &mut Ui, beam: &mut BeamSection, units: UnitSystem) {
         }
     }
     let [offset_1, offset_2] = &mut beam.offset;
-    ui.label("Versatz in 1-Richtung");
+    ui.label("Offset in 1-direction");
     ui.add(numeric::drag_value(offset_1));
     ui.end_row();
-    ui.label("Versatz in 2-Richtung");
+    ui.label("Offset in 2-direction");
     ui.add(numeric::drag_value(offset_2));
     ui.end_row();
 }
@@ -2601,7 +2599,7 @@ fn beam_form(ui: &mut Ui, beam: &mut BeamSection, units: UnitSystem) {
 fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     name_row(ui, &mut material.name);
     let mut has_density = material.density.is_some();
-    ui.checkbox(&mut has_density, "Dichte");
+    ui.checkbox(&mut has_density, "Density");
     let mut density = material.density.unwrap_or(0.0);
     ui.add_enabled(
         has_density,
@@ -2610,19 +2608,19 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     material.density = has_density.then_some(density);
     ui.end_row();
     let mut elastic = material.elastic.is_some();
-    ui.checkbox(&mut elastic, "Elastizität");
+    ui.checkbox(&mut elastic, "Elasticity");
     ui.end_row();
     let mut values = material.elastic.unwrap_or(Elastic {
         young: 0.0,
         poisson: 0.0,
     });
-    ui.label("    E-Modul");
+    ui.label("    Young's modulus");
     ui.add_enabled(
         elastic,
         numeric::physical(&mut values.young, units, Quantity::Pressure),
     );
     ui.end_row();
-    ui.label("    Querkontraktionszahl");
+    ui.label("    Poisson's ratio");
     ui.add_enabled(
         elastic,
         numeric::drag_value(&mut values.poisson)
@@ -2635,12 +2633,12 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     plastic_rows(ui, material, units);
     for (label, value, quantity) in [
         (
-            "Wärmeleitfähigkeit",
+            "Thermal conductivity",
             &mut material.conductivity,
             Quantity::ThermalConductivity,
         ),
         (
-            "Spez. Wärmekapazität",
+            "Specific heat",
             &mut material.specific_heat,
             Quantity::SpecificHeat,
         ),
@@ -2653,10 +2651,10 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
         ui.end_row();
     }
     let mut expands = material.expansion.is_some();
-    ui.checkbox(&mut expands, "Wärmeausdehnung");
+    ui.checkbox(&mut expands, "Thermal expansion");
     ui.end_row();
     let mut expansion = material.expansion.unwrap_or_default();
-    ui.label("    Ausdehnungskoeffizient");
+    ui.label("    Expansion coefficient");
     ui.add_enabled(
         expands,
         numeric::physical(
@@ -2666,7 +2664,7 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
         ),
     );
     ui.end_row();
-    ui.label("    Referenztemperatur");
+    ui.label("    Reference temperature");
     ui.add_enabled(
         expands,
         numeric::quantity(
@@ -2878,15 +2876,15 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 9] {
     ]
 }
 
-const STATIC_LABEL: &str = "Statisch (Static)";
-const FREQUENCY_LABEL: &str = "Eigenfrequenzen (Frequency)";
+const STATIC_LABEL: &str = "Static";
+const FREQUENCY_LABEL: &str = "Frequency";
+const HEAT_TRANSFER_LABEL: &str = "Heat Transfer";
+const COUPLED_LABEL: &str = "Coupled Temperature-Displacement";
 const DYNAMIC_LABEL: &str = "Dynamic (time integration)";
 const MODAL_DYNAMICS_LABEL: &str = "Modal Dynamics (from stored modes)";
 const STEADY_STATE_LABEL: &str = "Steady State Dynamics (frequency response)";
 const COMPLEX_FREQUENCY_LABEL: &str = "Complex Frequency (rotating, Coriolis)";
-const BUCKLE_LABEL: &str = "Buckling (Buckle)";
-const HEAT_TRANSFER_LABEL: &str = "Wärmeübertragung (Heat Transfer)";
-const COUPLED_LABEL: &str = "Thermomechanisch gekoppelt (Coupled Temp-Disp)";
+const BUCKLE_LABEL: &str = "Buckle";
 
 fn step_kind_label(kind: &StepKind) -> &'static str {
     match kind {
@@ -2906,7 +2904,7 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
 /// step types; switching it starts with that kind's default field outputs.
 fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
     name_row(ui, &mut step.name);
-    ui.label("Art");
+    ui.label("Type");
     if creating {
         let current = step_kind_label(&step.kind);
         egui::ComboBox::from_id_salt("step kind")
@@ -2947,11 +2945,11 @@ fn heat_transfer_form(
     coupled: bool,
 ) {
     ui.label("");
-    ui.checkbox(&mut settings.steady_state, "Stationär (Steady state)");
+    ui.checkbox(&mut settings.steady_state, "Steady state");
     ui.end_row();
     let mut limited = settings.deltmx.is_some();
     ui.add_enabled_ui(!settings.steady_state, |ui| {
-        ui.checkbox(&mut limited, "Max. Temperaturänderung");
+        ui.checkbox(&mut limited, "Max. temperature change");
     });
     let mut deltmx = settings.deltmx.unwrap_or(10.0);
     ui.add_enabled(
@@ -2965,7 +2963,7 @@ fn heat_transfer_form(
     increments_form(ui, &mut settings.increments, units, coupled);
     if !settings.steady_state {
         ui.label("");
-        ui.weak("Instationär: Materialien brauchen Dichte und spezifische Wärmekapazität.");
+        ui.weak("Transient: materials need density and specific heat.");
         ui.end_row();
     }
 }
@@ -3199,13 +3197,13 @@ fn modal_damping_rows(ui: &mut Ui, damping: &mut Option<ModalDamping>, units: Un
 
 fn validate_heat_transfer_step(settings: &HeatTransferStep) -> Result<(), String> {
     if settings.deltmx.is_some_and(|d| d <= 0.0) && !settings.steady_state {
-        return Err("Die maximale Temperaturänderung muss größer als null sein.".into());
+        return Err("The maximum temperature change must be greater than zero.".into());
     }
     Ok(())
 }
 
 fn solver_row(ui: &mut Ui, solver: &mut EquationSolver, eigenvalues: bool) {
-    ui.label("Gleichungslöser");
+    ui.label("Solver");
     egui::ComboBox::from_id_salt("equation solver")
         .selected_text(solver_label(*solver))
         .show_ui(ui, |ui| {
@@ -3223,16 +3221,16 @@ fn frequency_form(ui: &mut Ui, settings: &mut FrequencyStep, units: UnitSystem) 
     ui.label("");
     ui.checkbox(
         &mut settings.perturbation,
-        "Vorspannung aus vorigem Step (Perturbation)",
+        "Perturbation (prestress from previous step)",
     );
     ui.end_row();
     solver_row(ui, &mut settings.solver, true);
-    ui.label("Anzahl Eigenfrequenzen");
+    ui.label("Number of eigenfrequencies");
     ui.add(numeric::drag_value(&mut settings.num_frequencies).range(1..=10_000));
     ui.end_row();
     for (label, bound) in [
-        ("Untere Frequenzgrenze", &mut settings.lower_frequency),
-        ("Obere Frequenzgrenze", &mut settings.upper_frequency),
+        ("Lower frequency bound", &mut settings.lower_frequency),
+        ("Upper frequency bound", &mut settings.upper_frequency),
     ] {
         let mut set = bound.is_some();
         ui.checkbox(&mut set, label);
@@ -3249,11 +3247,11 @@ fn frequency_form(ui: &mut Ui, settings: &mut FrequencyStep, units: UnitSystem) 
     ui.label("");
     ui.checkbox(
         &mut settings.storage,
-        "Matrizen und Eigenformen speichern (Storage, .eig)",
+        "Store matrices and eigenmodes (Storage, .eig)",
     );
     ui.end_row();
     ui.label("");
-    ui.weak("Lasten wirken in einem Frequency Step nicht; nur die Randbedingungen zählen.");
+    ui.weak("Loads have no effect in a frequency step; only the boundary conditions count.");
     ui.end_row();
 }
 
@@ -3283,12 +3281,12 @@ fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep) {
 
 fn validate_frequency_step(settings: &FrequencyStep) -> Result<(), String> {
     if !settings.solver.solves_eigenvalues() {
-        return Err("Die iterativen Löser können keine Eigenfrequenzen berechnen.".into());
+        return Err("The iterative solvers cannot compute eigenfrequencies.".into());
     }
     if let (Some(lower), Some(upper)) = (settings.lower_frequency, settings.upper_frequency)
         && lower >= upper
     {
-        return Err("Die untere Frequenzgrenze muss kleiner als die obere sein.".into());
+        return Err("The lower frequency bound must be less than the upper one.".into());
     }
     Ok(())
 }
@@ -3333,11 +3331,11 @@ fn static_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem) {
 fn increments_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem, mechanical: bool) {
     if mechanical {
         ui.label("");
-        ui.checkbox(&mut settings.nlgeom, "Geometrisch nichtlinear (Nlgeom)");
+        ui.checkbox(&mut settings.nlgeom, "Nonlinear geometry (Nlgeom)");
         ui.end_row();
     }
     solver_row(ui, &mut settings.solver, false);
-    ui.label("Inkrementierung");
+    ui.label("Incrementation");
     egui::ComboBox::from_id_salt("incrementation")
         .selected_text(incrementation_label(settings.incrementation))
         .show_ui(ui, |ui| {
@@ -3353,17 +3351,17 @@ fn increments_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem, me
     ui.end_row();
     let custom = settings.incrementation != Incrementation::Default;
     let automatic = settings.incrementation == Incrementation::Automatic;
-    ui.label("Max. Inkremente");
+    ui.label("Max. increments");
     ui.add_enabled(
         custom,
         numeric::drag_value(&mut settings.max_increments).range(1..=1_000_000),
     );
     ui.end_row();
     for (label, value, enabled) in [
-        ("Zeitraum", &mut settings.time_period, custom),
-        ("Anfangsinkrement", &mut settings.initial_increment, custom),
-        ("Min. Inkrement", &mut settings.min_increment, automatic),
-        ("Max. Inkrement", &mut settings.max_increment, automatic),
+        ("Time period", &mut settings.time_period, custom),
+        ("Initial increment", &mut settings.initial_increment, custom),
+        ("Min. increment", &mut settings.min_increment, automatic),
+        ("Max. increment", &mut settings.max_increment, automatic),
     ] {
         ui.label(label);
         ui.add_enabled(enabled, numeric::physical(value, units, Quantity::Time));
@@ -3373,7 +3371,7 @@ fn increments_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem, me
 
 fn solver_label(solver: EquationSolver) -> &'static str {
     match solver {
-        EquationSolver::Default => "Standard (Pardiso, falls vorhanden)",
+        EquationSolver::Default => "Default (Pardiso if available)",
         EquationSolver::Pardiso => "Pardiso",
         EquationSolver::Spooles => "Spooles",
         EquationSolver::PaStiX => "PaStiX",
@@ -3384,9 +3382,9 @@ fn solver_label(solver: EquationSolver) -> &'static str {
 
 fn incrementation_label(incrementation: Incrementation) -> &'static str {
     match incrementation {
-        Incrementation::Default => "Standard",
-        Incrementation::Automatic => "Automatisch",
-        Incrementation::Direct => "Fest (Direct)",
+        Incrementation::Default => "Default",
+        Incrementation::Automatic => "Automatic",
+        Incrementation::Direct => "Direct",
     }
 }
 
@@ -3399,9 +3397,9 @@ mod tests {
         let mut name = "Fixed-2".to_string();
         rename_default(&mut name, FIXED, DISPLACEMENT, &["Fixed-1"]);
         assert_eq!(name, "Displacement_Rotation-1");
-        let mut name = "Einspannung".to_string();
+        let mut name = "Clamp".to_string();
         rename_default(&mut name, FIXED, DISPLACEMENT, &[]);
-        assert_eq!(name, "Einspannung");
+        assert_eq!(name, "Clamp");
     }
 
     #[test]

@@ -139,10 +139,10 @@ fn from_field(
 ) -> Result<HistoryField, String> {
     let nodes = region.nodes(mesh);
     if nodes.is_empty() {
-        return Err("Die Region enthält keine Knoten.".into());
+        return Err("The region contains no nodes.".into());
     }
     if components.is_empty() {
-        return Err("Bitte mindestens eine Komponente wählen.".into());
+        return Err("Please select at least one component.".into());
     }
     let indices: Vec<Option<usize>> = nodes.iter().map(|&n| mesh.node_index(n)).collect();
     let mut result = Vec::new();
@@ -151,9 +151,7 @@ fn from_field(
             .iter()
             .any(|i| i.field(field).and_then(|f| f.component(name)).is_some())
         {
-            return Err(format!(
-                "Das Ergebnis {field}.{name} gibt es in keinem Inkrement."
-            ));
+            return Err(format!("The result {field}.{name} exists in no increment."));
         }
         let entries = nodes
             .iter()
@@ -190,17 +188,17 @@ fn from_equation(own: &str, equation: &str, sets: &[HistorySet]) -> Result<Histo
         let parts: Vec<&str> = variable.splitn(3, '.').collect();
         let [set, field, component] = parts[..] else {
             return Err(format!(
-                "{variable}: History-Ausgaben werden als Name.Feld.Komponente angegeben, \
-                 z. B. History-1.STRESS.MISES."
+                "{variable}: History outputs are given as Name.Field.Component, \
+                 e.g. History-1.STRESS.MISES."
             ));
         };
         if set == own {
-            return Err(format!("{own} kann sich nicht selbst verwenden."));
+            return Err(format!("{own} cannot use itself."));
         }
         let set = (sets.iter().find(|s| s.name == set))
-            .ok_or_else(|| format!("Die History-Ausgabe {set} gibt es nicht."))?;
+            .ok_or_else(|| format!("The history output {set} does not exist."))?;
         let component = (set.field(field).and_then(|f| f.component(component)))
-            .ok_or_else(|| format!("{variable} gibt es nicht."))?;
+            .ok_or_else(|| format!("{variable} does not exist."))?;
         sources.push(component);
     }
     let (columns, rows) = match sources.first() {
@@ -213,13 +211,13 @@ fn from_equation(own: &str, equation: &str, sets: &[HistorySet]) -> Result<Histo
     for source in &sources {
         if source.entries.len() != columns {
             return Err(
-                "Alle Komponenten der Gleichung müssen gleich viele Einträge (Spalten) haben."
+                "All components of the equation must have the same number of entries (columns)."
                     .into(),
             );
         }
         if source.entries.iter().any(|e| e.values.len() != rows) {
             return Err(
-                "Alle Komponenten der Gleichung müssen gleich viele Inkremente (Zeilen) haben."
+                "All components of the equation must have the same number of increments (rows)."
                     .into(),
             );
         }
@@ -332,8 +330,8 @@ fn element_size(
     };
     if items.is_empty() {
         return Err(match kind {
-            SizeKind::Volume => "Die Region enthält keine Volumenelemente.".into(),
-            SizeKind::Area => "Die Region enthält keine Elementflächen.".into(),
+            SizeKind::Volume => "The region contains no solid elements.".into(),
+            SizeKind::Area => "The region contains no element faces.".into(),
         });
     }
     let coords = mesh.coords();

@@ -87,7 +87,7 @@ pub fn output_path(results: &Path) -> PathBuf {
 pub fn write(results: &Path, reports: &[HotSpotReport]) -> Result<PathBuf, String> {
     let path = output_path(results);
     std::fs::write(&path, hot_spot::to_csv(reports))
-        .map_err(|e| format!("{} nicht geschrieben: {e}", path.display()))?;
+        .map_err(|e| format!("{} not written: {e}", path.display()))?;
     Ok(path)
 }
 
@@ -101,7 +101,7 @@ pub fn summary(reports: &[HotSpotReport]) -> Vec<String> {
                 .max_by(|a, b| a.1.hot_spot.total_cmp(&b.1.hot_spot));
             match maximum {
                 Some((increment, value)) => format!(
-                    "{}: max. {} = {:.2} an Knoten {} (Step {}, Inkrement {})",
+                    "{}: max. {} = {:.2} at node {} (Step {}, Increment {})",
                     report.name,
                     report.component.short(),
                     value.hot_spot,
@@ -109,7 +109,7 @@ pub fn summary(reports: &[HotSpotReport]) -> Vec<String> {
                     increment.step,
                     increment.increment
                 ),
-                None => format!("{}: keine Werte", report.name),
+                None => format!("{}: no values", report.name),
             }
         })
         .collect()
@@ -118,7 +118,7 @@ pub fn summary(reports: &[HotSpotReport]) -> Vec<String> {
 /// The table of the values in the shown increment. Returns false when it was closed.
 pub fn window(ctx: &egui::Context, evaluation: &HotSpots, step: Option<(u32, u32)>) -> bool {
     let mut open = true;
-    egui::Window::new("Hot-Spot-Spannungen")
+    egui::Window::new("Hot Spot Stresses")
         .open(&mut open)
         .collapsible(false)
         .default_size([520.0, 320.0])
@@ -126,13 +126,13 @@ pub fn window(ctx: &egui::Context, evaluation: &HotSpots, step: Option<(u32, u32
         .default_pos(ctx.content_rect().right_top() + egui::vec2(-20.0, 90.0))
         .show(ctx, |ui| {
             if let Some(file) = &evaluation.file {
-                ui.label(format!("Alle Inkremente in {}", file.display()));
+                ui.label(format!("All increments in {}", file.display()));
             }
             match step {
                 Some((step, increment)) => {
-                    ui.label(format!("Gezeigt: Step {step}, Inkrement {increment}"))
+                    ui.label(format!("Shown: Step {step}, Increment {increment}"))
                 }
-                None => ui.label("Kein Inkrement gewählt"),
+                None => ui.label("No increment selected"),
             };
             ui.separator();
             egui::ScrollArea::both()
@@ -147,13 +147,13 @@ pub fn window(ctx: &egui::Context, evaluation: &HotSpots, step: Option<(u32, u32
                         let values = (report.increments.iter())
                             .find(|i| Some((i.step, i.increment)) == step);
                         let Some(values) = values else {
-                            ui.weak("Keine Spannungen in diesem Inkrement.");
+                            ui.weak("No stresses in this increment.");
                             ui.add_space(8.0);
                             continue;
                         };
                         if let Some(maximum) = values.maximum() {
                             ui.label(format!(
-                                "Maximum: S_hs = {:.2} an Knoten {}",
+                                "Maximum: S_hs = {:.2} at node {}",
                                 maximum.hot_spot, maximum.node
                             ));
                         }
@@ -162,7 +162,7 @@ pub fn window(ctx: &egui::Context, evaluation: &HotSpots, step: Option<(u32, u32
                             .striped(true)
                             .num_columns(report.distances.len() + 2)
                             .show(ui, |ui| {
-                                ui.strong("Knoten");
+                                ui.strong("Node");
                                 for d in &report.distances {
                                     ui.strong(format!("S({})", short(*d)));
                                 }

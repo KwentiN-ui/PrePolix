@@ -587,12 +587,12 @@ pub fn part_menu(
 ) {
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
     if view == TreeView::Geometry {
-        if ui.button("Netz erzeugen").clicked() {
+        if ui.button("Create Mesh").clicked() {
             response.mesh_part = Some(index);
         }
         ui.separator();
     }
-    if ui.button("Eigenschaften …").clicked() {
+    if ui.button("Properties …").clicked() {
         response.open = Some(TreeItem::Part(index));
     }
     if view == TreeView::FeModel && ui.button("Transform ...").clicked() {
@@ -605,7 +605,7 @@ pub fn part_menu(
     {
         response.merge_parts = true;
     }
-    let label = if visible { "Ausblenden" } else { "Einblenden" };
+    let label = if visible { "Hide" } else { "Show" };
     if ui.button(label).clicked() {
         if selected.contains(&index) {
             (response.visibility).extend(selected.iter().map(|&i| (i, !visible)));
@@ -615,7 +615,7 @@ pub fn part_menu(
     }
     if deletable(view, &TreeItem::Part(index)) {
         ui.separator();
-        if ui.button("Löschen").clicked() {
+        if ui.button("Delete").clicked() {
             response.delete = Some(TreeItem::Part(index));
         }
     }
@@ -677,7 +677,7 @@ impl Tree<'_> {
             let mut hover: Vec<String> = (findings.iter())
                 .map(|f| format!("{}: {}", f.problem.title(), f.detail))
                 .collect();
-            hover.push("Klick auf das Warnsymbol erklärt das Problem.".into());
+            hover.push("Click the warning sign to explain the problem.".into());
             let hover = hover.join("\n");
             if warning_sign(ui).on_hover_text(&hover).clicked() {
                 self.response.findings = Some(findings);
@@ -714,7 +714,7 @@ impl Tree<'_> {
         if self.view == TreeView::Geometry && item == TreeItem::Group("Parts") {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                if ui.button("Alle Parts vernetzen").clicked() {
+                if ui.button("Mesh All Parts").clicked() {
                     self.response.generate_mesh = true;
                 }
             });
@@ -748,76 +748,72 @@ impl Tree<'_> {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 if let Some(kind) = creates
-                    && ui.button("Erstellen …").clicked()
+                    && ui.button("Create …").clicked()
                 {
                     self.response.create = Some(kind);
                 }
                 if item == TreeItem::Group("Materials") {
                     ui.separator();
-                    if ui.button("Materialbibliothek …").clicked() {
+                    if ui.button("Material Library …").clicked() {
                         self.response.material_library = true;
                     }
                 }
                 if item == TreeItem::Group("Mesh Setup") {
                     ui.separator();
-                    if ui.button("Standard-Netzparameter …").clicked() {
+                    if ui.button("Default Mesh Parameters …").clicked() {
                         self.response.mesh_defaults = true;
                     }
-                    if ui.button("Alle Parts vernetzen").clicked() {
+                    if ui.button("Mesh All Parts").clicked() {
                         self.response.generate_mesh = true;
                     }
                 }
                 // Node ties live with the contact pairs; the search creates most of them.
                 if item == TreeItem::Group("Contact Pairs")
-                    && ui.button("Node Tie erstellen …").clicked()
+                    && ui.button("Create Node Tie …").clicked()
                 {
                     self.response.create = Some(NewItem::NodeTie);
                 }
                 // PrePoMax offers the search on constraints and contact pairs.
                 if matches!(item, TreeItem::Group("Constraints" | "Contact Pairs")) {
                     ui.separator();
-                    if ui.button("Kontaktpaare suchen …").clicked() {
+                    if ui.button("Search Contact Pairs …").clicked() {
                         self.response.search_contacts = true;
                     }
                 }
                 if item == TreeItem::Group(HOT_SPOTS) {
                     ui.separator();
-                    if ui.button("Tabelle anzeigen").clicked() {
+                    if ui.button("Show Table").clicked() {
                         self.response.hot_spot_table = true;
                     }
                 }
                 if creates.is_some() {
                     ui.separator();
-                    if ui.button("Alle aufklappen").clicked() {
+                    if ui.button("Expand All").clicked() {
                         self.state.expand = Some((self.view, item.clone(), true));
                     }
-                    if ui.button("Alle zuklappen").clicked() {
+                    if ui.button("Collapse All").clicked() {
                         self.state.expand = Some((self.view, item.clone(), false));
                     }
                 }
                 if editable {
-                    if ui.button("Bearbeiten …").clicked() {
+                    if ui.button("Edit …").clicked() {
                         self.response.open = Some(item.clone());
                     }
                     if can_deactivate(&item) {
                         ui.separator();
-                        let label = if inactive {
-                            "Aktivieren"
-                        } else {
-                            "Deaktivieren"
-                        };
+                        let label = if inactive { "Activate" } else { "Deactivate" };
                         if ui.button(label).clicked() {
                             self.response.toggle_active = Some(item.clone());
                         }
                         ui.separator();
                     }
                     if self.master_slave.contains(&item) {
-                        if ui.button("Master und Slave tauschen").clicked() {
+                        if ui.button("Swap Master/Slave").clicked() {
                             self.response.swap_master_slave = Some(item.clone());
                         }
                         ui.separator();
                     }
-                    if deletable(self.view, &item) && ui.button("Löschen").clicked() {
+                    if deletable(self.view, &item) && ui.button("Delete").clicked() {
                         self.response.delete = Some(item.clone());
                     }
                 }
@@ -832,27 +828,27 @@ impl Tree<'_> {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         let running = self.job.is_some_and(|j| j.status == JobStatus::Running);
         let results = self.job.is_some_and(|j| j.results) && !running;
-        let single = "Es gibt nur eine Analyse.";
+        let single = "There is only one analysis.";
         let mut action = |ui: &mut Ui, enabled: bool, text: &str, action: AnalysisAction| {
             if ui.add_enabled(enabled, egui::Button::new(text)).clicked() {
                 self.response.analysis = Some(action);
             }
         };
-        action(ui, true, "Bearbeiten …", AnalysisAction::Edit);
-        ui.add_enabled(false, egui::Button::new("Duplizieren"))
+        action(ui, true, "Edit …", AnalysisAction::Edit);
+        ui.add_enabled(false, egui::Button::new("Duplicate"))
             .on_disabled_hover_text(single);
         ui.separator();
-        action(ui, !running, "Starten", AnalysisAction::Run);
-        action(ui, !running, "Modell prüfen", AnalysisAction::CheckModel);
+        action(ui, !running, "Run", AnalysisAction::Run);
+        action(ui, !running, "Check Model", AnalysisAction::CheckModel);
         action(ui, self.job.is_some(), "Monitor", AnalysisAction::Monitor);
-        action(ui, results, "Ergebnisse", AnalysisAction::Results);
-        action(ui, running, "Abbrechen", AnalysisAction::Kill);
+        action(ui, results, "Results", AnalysisAction::Results);
+        action(ui, running, "Kill", AnalysisAction::Kill);
         ui.separator();
         // An analysis has no children, as in PrePoMax the entries are there all the same.
-        ui.add_enabled(false, egui::Button::new("Alle aufklappen"));
-        ui.add_enabled(false, egui::Button::new("Alle zuklappen"));
+        ui.add_enabled(false, egui::Button::new("Expand All"));
+        ui.add_enabled(false, egui::Button::new("Collapse All"));
         ui.separator();
-        ui.add_enabled(false, egui::Button::new("Löschen"))
+        ui.add_enabled(false, egui::Button::new("Delete"))
             .on_disabled_hover_text(single);
     }
 
@@ -946,7 +942,7 @@ impl Tree<'_> {
             if ui.is_rect_visible(rect) {
                 tree_icons::paint(ui.painter(), rect.min, icon);
             }
-            if inactive && icon_response.on_hover_text("Aktivieren").clicked() {
+            if inactive && icon_response.on_hover_text("Activate").clicked() {
                 self.response.toggle_active = Some(item.clone());
             }
             ui.add_space(3.0);
@@ -1568,8 +1564,8 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                         let (_, response, changed) =
                             tree.row(ui, None, Some(&mut shown), icon, item, &result.name);
                         let _ = response.on_hover_text(
-                            "Angehakt zeigt das 3D-Fenster nur die Schnittfläche mit der \
-                             Legende der Werte darauf.",
+                            "When checked, the 3D view shows only the section plane with the \
+                             legend of the values on it.",
                         );
                         if changed {
                             tree.response.plane_result = Some(shown.then_some(i));

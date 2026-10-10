@@ -284,10 +284,10 @@ mod tests {
         match plx_mesher::self_test() {
             Ok(_) => true,
             Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
-                eprintln!("Gmsh nicht verfügbar, Test übersprungen: {error}");
+                eprintln!("Gmsh not available, test skipped: {error}");
                 false
             }
-            Err(error) => panic!("Gmsh wird verlangt: {error}"),
+            Err(error) => panic!("Gmsh is required: {error}"),
         }
     }
 
@@ -459,10 +459,7 @@ mod tests {
             // 100 MPa over 100 mm of steel stretch it by 0.048 mm; the hole adds a little.
             let plain = 100.0 / 210000.0 * 100.0;
             for value in [coarse, fine] {
-                assert!(
-                    value > plain && value < 1.3 * plain,
-                    "{value} gegen {plain}"
-                );
+                assert!(value > plain && value < 1.3 * plain, "{value} vs. {plain}");
             }
             assert!((fine - coarse).abs() < 0.03 * fine, "{coarse} -> {fine}");
         }

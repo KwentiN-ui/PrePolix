@@ -109,7 +109,7 @@ pub fn hot_spot_paths<'a>(
     let distances = hot_spot.distances();
     let reach = distances.iter().copied().fold(0.0, f64::max);
     let Some(direction) = normalize(hot_spot.direction) else {
-        warnings.push(format!("{}: Die Pfadrichtung ist null.", hot_spot.name));
+        warnings.push(format!("{}: The path direction is zero.", hot_spot.name));
         return (Vec::new(), warnings);
     };
     let mut toe: Vec<(NodeId, usize)> = Vec::new();
@@ -117,7 +117,7 @@ pub fn hot_spot_paths<'a>(
         match mesh.node_index(id) {
             Some(index) => toe.push((id, index)),
             None => warnings.push(format!(
-                "{}: Knoten {id} fehlt in den Ergebnissen.",
+                "{}: Node {id} is missing in the results.",
                 hot_spot.name
             )),
         }
@@ -198,15 +198,15 @@ pub fn hot_spot_paths<'a>(
         }
         if points.len() < distances.len() {
             warnings.push(format!(
-                "{}: Für Knoten {node} liegt keine Oberfläche am Pfad.",
+                "{}: No surface lies on the path of node {node}.",
                 hot_spot.name
             ));
             continue;
         }
         if gap > GAP_WARNING {
             warnings.push(format!(
-                "{}: Der Pfad von Knoten {node} verlässt die Blechoberfläche um {:.0} % des \
-                 Abstands; Richtung prüfen.",
+                "{}: The path of node {node} leaves the plate surface by {:.0} % of the \
+                 distance; check the direction.",
                 hot_spot.name,
                 gap * 100.0
             ));
@@ -253,7 +253,7 @@ pub fn evaluate(
                 .collect();
             if increments.is_empty() && !paths.is_empty() {
                 warnings.push(format!(
-                    "{}: Die Ergebnisse enthalten keine Spannungen (S).",
+                    "{}: The results contain no stresses (S).",
                     hot_spot.name
                 ));
             }
@@ -326,8 +326,7 @@ fn stress(t: [f64; 6], component: HotSpotComponent, direction: [f64; 3]) -> f64 
 /// and increment, UTF-8 with byte order mark so that Excel reads the names right.
 pub fn to_csv(reports: &[HotSpotReport]) -> String {
     let points = reports.iter().map(|r| r.distances.len()).max().unwrap_or(0);
-    let mut text =
-        String::from("\u{feff}Hot Spot;Methode;Komponente;Step;Inkrement;Zeit;Knoten;X;Y;Z");
+    let mut text = String::from("\u{feff}Hot Spot;Method;Component;Step;Increment;Time;Node;X;Y;Z");
     for i in 1..=points {
         text += &format!(";d{i};S{i}");
     }
@@ -671,8 +670,8 @@ mod tests {
         let report = report(&mesh, &hot_spot, &[]);
         assert_eq!(report.warnings.len(), 3, "{:?}", report.warnings);
         assert!(report.warnings[0].contains("999"));
-        assert!(report.warnings[1].contains("Richtung"));
-        assert!(report.warnings[2].contains("keine Spannungen"));
+        assert!(report.warnings[1].contains("direction"));
+        assert!(report.warnings[2].contains("no stresses"));
     }
 
     #[test]
@@ -681,14 +680,14 @@ mod tests {
         let hot_spot = HotSpot {
             toe: Region::Nodes(vec![35, 36]),
             thickness: 5.0,
-            ..HotSpot::new("Naht oben")
+            ..HotSpot::new("Weld top")
         };
         let report = report(&mesh, &hot_spot, &[increment(&mesh, |x| x)]);
         let csv = to_csv(&[report]);
         let lines: Vec<&str> = csv.lines().collect();
         assert_eq!(lines.len(), 3);
         assert!(lines[0].ends_with(";d1;S1;d2;S2;S_hs"));
-        assert!(lines[1].starts_with("Naht oben;IIW a"));
+        assert!(lines[1].starts_with("Weld top;IIW a"));
         assert!(
             lines[2].ends_with(";2.0000;6.0000;5.0000;9.0000;4.0000"),
             "{}",

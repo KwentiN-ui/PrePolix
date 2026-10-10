@@ -206,7 +206,7 @@ impl ConstraintDraft {
         if self.kind().has_master_slave() {
             self.pair.validate()
         } else if self.region.is_empty() {
-            Err("Die Region ist leer.".into())
+            Err("The region is empty.".into())
         } else if matches!(&self.constraint, Constraint::RigidBody(b) if b.reference_point.is_empty())
         {
             Err("Choose the reference point that drives the rigid body.".into())
@@ -240,7 +240,7 @@ impl ConstraintDraft {
 
     pub(crate) fn form(&mut self, ui: &mut Ui, model: &Model, taken: &[&str], creating: bool) {
         let current = self.kind();
-        ui.label("Typ");
+        ui.label("Type");
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(200.0);
             ui.vertical(|ui| {
@@ -250,9 +250,9 @@ impl ConstraintDraft {
                     let response =
                         ui.add_enabled(enabled, egui::Button::selectable(selected, label));
                     let response = match kind {
-                        None => response.on_disabled_hover_text("Noch nicht verfügbar"),
+                        None => response.on_disabled_hover_text("Not available yet"),
                         Some(_) if !selected => response.on_disabled_hover_text(
-                            "Der Typ eines Constraints bleibt beim Bearbeiten.",
+                            "The type of a constraint cannot be changed when editing.",
                         ),
                         Some(_) => response,
                     };
@@ -272,10 +272,7 @@ impl ConstraintDraft {
             Constraint::PointSpring(spring) => {
                 self.region.ui(ui, model);
                 stiffness_rows(ui, &mut spring.stiffness, units, stiffness(false));
-                hint(
-                    ui,
-                    "Jeder Knoten der Region erhält diese Federn gegen die Umgebung.",
-                );
+                hint(ui, "Each node of the region gets these springs to ground.");
             }
             Constraint::SurfaceSpring(spring) => {
                 self.region.ui(ui, model);
@@ -283,8 +280,8 @@ impl ConstraintDraft {
                 stiffness_rows(ui, &mut spring.stiffness, units, stiffness(spring.per_area));
                 hint(
                     ui,
-                    "Federn gegen die Umgebung, beim Export flächengewichtet auf die Knoten \
-                     verteilt.",
+                    "Springs to ground, distributed area-weighted to the nodes on \
+                     export.",
                 );
             }
             Constraint::CompressionOnly(support) => {
@@ -332,10 +329,10 @@ impl ConstraintDraft {
                 stiffness_rows(ui, &mut spring.stiffness, units, stiffness(spring.per_area));
                 hint(
                     ui,
-                    "Jeder Knoten der Slave-Fläche wird über Federn in den globalen Richtungen \
-                     mit dem nächstgelegenen Punkt der Master-Fläche verbunden. Die Steifigkeit \
-                     gilt für die ganze Verbindung und wird flächengewichtet auf die Knoten \
-                     verteilt.",
+                    "Each node of the slave surface is connected by springs in the global directions \
+                     to the nearest point of the master surface. The stiffness \
+                     applies to the whole connection and is distributed area-weighted to the \
+                     nodes.",
                 );
             }
         }
@@ -388,10 +385,10 @@ fn stiffness(per_area: bool) -> Quantity {
 }
 
 fn per_area_row(ui: &mut Ui, per_area: &mut bool) {
-    ui.label("Steifigkeit");
+    ui.label("Stiffness");
     ui.horizontal(|ui| {
-        ui.radio_value(per_area, false, "Gesamt");
-        ui.radio_value(per_area, true, "Pro Fläche");
+        ui.radio_value(per_area, false, "Total");
+        ui.radio_value(per_area, true, "Per area");
     });
     ui.end_row();
 }
@@ -409,30 +406,30 @@ fn stiffness_rows(ui: &mut Ui, stiffness: &mut [f64; 3], units: UnitSystem, of: 
 }
 
 fn compression_only_rows(ui: &mut Ui, support: &mut CompressionOnly, units: UnitSystem) {
-    length_row(ui, "Spaltmaß", &mut support.clearance, units);
+    length_row(ui, "Clearance", &mut support.clearance, units);
     optional_row(
         ui,
-        "Federsteifigkeit",
+        "Spring stiffness",
         &mut support.spring_stiffness,
         CompressionOnly::DEFAULT_STIFFNESS,
         (units, Quantity::ForcePerLength),
     );
     optional_row(
         ui,
-        "Zugkraft",
+        "Tensile force",
         &mut support.tensile_force,
         CompressionOnly::DEFAULT_TENSILE_FORCE,
         (units, Quantity::Force),
     );
-    length_row(ui, "Versatz", &mut support.offset, units);
-    ui.label("Nichtlinear");
+    length_row(ui, "Offset", &mut support.offset, units);
+    ui.label("Nonlinear");
     ui.checkbox(&mut support.nonlinear, "")
-        .on_hover_text("Sonst wird die Stützung in einem linearen Step linearisiert.");
+        .on_hover_text("Otherwise the support is linearized in a linear step.");
     ui.end_row();
     hint(
         ui,
-        "Spaltelemente nehmen nur Druck auf; die kleine Zugkraft im offenen Zustand hält das \
-         Modell lösbar. Steifigkeit und Zugkraft gelten für die ganze Fläche.",
+        "Gap elements carry compression only; the small tensile force in the open state keeps the \
+         model solvable. Stiffness and tensile force apply to the whole surface.",
     );
 }
 
@@ -461,7 +458,7 @@ fn optional_row(
                 .speed(0.0)
                 .custom_formatter(|v, _| numeric::format_physical(v)),
         );
-        ui.label(if set { unit } else { "Standard" });
+        ui.label(if set { unit } else { "Default" });
         *value = set.then_some(number);
     });
     ui.end_row();

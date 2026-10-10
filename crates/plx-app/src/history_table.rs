@@ -248,13 +248,11 @@ impl HistoryTable {
 
     /// The diagram of the selection: the first chosen column over x, the others as curves.
     pub fn plot(&self, sets: &[HistorySet], kind: AnalysisKind) -> Result<XyData, String> {
-        let table = self
-            .columns(sets, kind)
-            .ok_or("Die Tabelle hat keine Daten.")?;
+        let table = self.columns(sets, kind).ok_or("The table has no data.")?;
         let columns = &self.selection.columns;
         if columns.len() < 2 {
-            return Err("Für ein Diagramm mindestens zwei Spalten wählen; \
-                        die zuerst gewählte wird die X-Achse."
+            return Err("Select at least two columns for a plot; \
+                        the first one selected becomes the x axis."
                 .into());
         }
         let rows = match self.selection.rows {
@@ -293,7 +291,7 @@ impl HistoryTable {
         let mut action = TableAction::None;
         let mut open = true;
         let title = format!(
-            "History-Ausgabe: {}.{}.{}",
+            "History Output: {}.{}.{}",
             table.set.name, table.field, table.component.name
         );
         let window = egui::Window::new(title)
@@ -305,30 +303,30 @@ impl HistoryTable {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(format!(
-                        "{} Zeilen, {} Einträge",
+                        "{} rows, {} entries",
                         table.rows(),
                         table.component.entries.len()
                     ));
                     if let Some(unit) = unit.filter(|u| !u.trim().is_empty() && u.trim() != "/") {
-                        ui.label(format!("Einheit: {}", unit.trim()));
+                        ui.label(format!("Unit: {}", unit.trim()));
                     }
-                    if ui.button("Kopieren").clicked() {
+                    if ui.button("Copy").clicked() {
                         ui.ctx().copy_text(self.text(sets, kind));
                     }
                     let plottable = self.selection.columns.len() >= 2;
                     if ui
                         .add_enabled(plottable, egui::Button::new("Plot"))
-                        .on_hover_text("Strg+P")
-                        .on_disabled_hover_text("Mindestens zwei Spalten wählen")
+                        .on_hover_text("Ctrl+P")
+                        .on_disabled_hover_text("Select at least two columns")
                         .clicked()
                     {
                         action = self.plot_action(sets, kind);
                     }
                 });
                 ui.weak(
-                    "Spalten über die Kopfzeile wählen (Strg: weitere, Umschalt: Bereich), \
-                     Zellen durch Ziehen. Strg+P zeichnet die Auswahl, die zuerst gewählte \
-                     Spalte wird die X-Achse.",
+                    "Select columns via the header (Ctrl: more, Shift: range), cells by \
+                     dragging. Ctrl+P plots the selection, the first column selected \
+                     becomes the x axis.",
                 );
                 if let Some(message) = &self.message {
                     ui.colored_label(Color32::from_rgb(200, 0, 0), message);
@@ -443,19 +441,19 @@ impl HistoryTable {
                     self.active = true;
                 }
                 response.context_menu(|ui| {
-                    if ui.button("Kopieren          Strg+C").clicked() {
+                    if ui.button("Copy              Ctrl+C").clicked() {
                         ui.ctx().copy_text(self.text(sets, kind));
                         ui.close();
                     }
                     let plottable = self.selection.columns.len() >= 2;
                     if ui
-                        .add_enabled(plottable, egui::Button::new("Plot               Strg+P"))
+                        .add_enabled(plottable, egui::Button::new("Plot              Ctrl+P"))
                         .clicked()
                     {
                         action = Some(self.plot_action(sets, kind));
                         ui.close();
                     }
-                    if ui.button("Auswahl aufheben").clicked() {
+                    if ui.button("Clear Selection").clicked() {
                         self.selection.clear();
                         ui.close();
                     }
@@ -585,7 +583,7 @@ mod tests {
         assert_eq!(data.title, "NH_OUTPUT-1.DISPLACEMENTS.U3");
         assert_eq!(data.x_label, "41");
         assert_eq!(data.x, [-1.0, -2.0, -4.0]);
-        assert_eq!(data.curves, [("Zeit".to_string(), vec![0.25, 0.5, 1.0])]);
+        assert_eq!(data.curves, [("Time".to_string(), vec![0.25, 0.5, 1.0])]);
     }
 
     #[test]
@@ -626,7 +624,7 @@ mod tests {
         let mut table = HistoryTable::new(0, 0, 0);
         assert_eq!(
             table.text(&sets, AnalysisKind::Static),
-            "Step\tIncrement\tZeit\t41\t62\n1\t1\t0.25\t-1\t-0.5\n1\t2\t0.5\t-2\t-1\n\
+            "Step\tIncrement\tTime\t41\t62\n1\t1\t0.25\t-1\t-0.5\n1\t2\t0.5\t-2\t-1\n\
              1\t3\t1\t-4\t\n"
         );
         table.selection.press(4, Some(0), Modifiers::NONE);

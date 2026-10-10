@@ -47,9 +47,9 @@ impl Totals {
 
     pub fn label(self) -> &'static str {
         match self {
-            Totals::No => "Nein",
-            Totals::Yes => "Ja",
-            Totals::Only => "Nur Summe",
+            Totals::No => "No",
+            Totals::Yes => "Yes",
+            Totals::Only => "Only",
         }
     }
 }

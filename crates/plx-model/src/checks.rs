@@ -93,34 +93,34 @@ impl Problem {
 
     pub fn title(self) -> &'static str {
         match self {
-            Problem::MissingReference => "Fehlende Referenz",
-            Problem::NoSection => "Elemente ohne Material",
-            Problem::NoElastic => "Material ohne Elastizität",
-            Problem::NoDensity => "Material ohne Dichte",
+            Problem::MissingReference => "Missing reference",
+            Problem::NoSection => "Elements without material",
+            Problem::NoElastic => "Material without elasticity",
+            Problem::NoDensity => "Material without density",
+            Problem::NoConductivity => "Material without conductivity",
+            Problem::NoSpecificHeat => "Material without specific heat",
+            Problem::NoInitialTemperature => "No initial temperature",
+            Problem::InvalidElastic => "Invalid material constants",
+            Problem::DistortedElements => "Distorted elements",
+            Problem::RigidBodyMotion => "Rigid body motion possible",
+            Problem::Mechanism => "Truss structure is a mechanism",
+            Problem::HeldOnlyByContact => "Held only by contact",
+            Problem::ConflictingBoundaries => "Conflicting boundary conditions",
+            Problem::LoadOnFixedNodes => "Load on fixed nodes",
+            Problem::RotationsIgnored => "Rotations without effect",
+            Problem::NoGlobalResults => "No global results",
+            Problem::IncrementExceedsStep => "Increment larger than the step",
+            Problem::NoLoad => "No load",
             Problem::NoRigidBody => "Reference point without rigid body",
             Problem::InvalidPlastic => "Invalid plasticity",
-            Problem::NoConductivity => "Material ohne Wärmeleitfähigkeit",
-            Problem::NoSpecificHeat => "Material ohne Wärmekapazität",
-            Problem::NoInitialTemperature => "Keine Anfangstemperatur",
-            Problem::InvalidElastic => "Ungültige Materialkonstanten",
-            Problem::DistortedElements => "Verzerrte Elemente",
-            Problem::RigidBodyMotion => "Starrkörperbewegung möglich",
-            Problem::Mechanism => "Stabwerk beweglich",
-            Problem::HeldOnlyByContact => "Nur über Kontakt gehalten",
-            Problem::ConflictingBoundaries => "Widersprüchliche Randbedingungen",
-            Problem::LoadOnFixedNodes => "Last auf festgehaltenen Knoten",
-            Problem::RotationsIgnored => "Rotationen ohne Wirkung",
-            Problem::NoGlobalResults => "No global results",
-            Problem::IncrementExceedsStep => "Inkrement größer als der Step",
-            Problem::NoLoad => "Keine Last",
             Problem::NoExpansion => "Temperature without thermal expansion",
             Problem::NoStoredModes => "No stored eigenmodes",
             Problem::VelocityIgnored => "Initial velocity without a Dynamic step",
             Problem::NoRotation => "No rotation",
-            Problem::NoConvergence => "Keine Konvergenz",
-            Problem::MpcAndSpc => "Freiheitsgrad doppelt gebunden",
-            Problem::RotationIn2d => "Rotation in einem 2D-Modell",
-            Problem::SolverError => "Fehler von CalculiX",
+            Problem::NoConvergence => "No convergence",
+            Problem::MpcAndSpc => "Degree of freedom bound twice",
+            Problem::RotationIn2d => "Rotation in a 2D model",
+            Problem::SolverError => "CalculiX error",
         }
     }
 
@@ -128,24 +128,23 @@ impl Problem {
     pub fn explanation(self) -> &'static str {
         match self {
             Problem::MissingReference => {
-                "Das Element verweist auf etwas, das es nicht mehr gibt, zum Beispiel ein \
-                 gelöschtes Material oder ein Set, das das Netz nicht mehr hat. Die \
-                 Eingabedatei kann so nicht geschrieben werden."
+                "The item refers to something that no longer exists, for example a \
+                 deleted material or a set the mesh no longer has. The input file \
+                 cannot be written like this."
             }
             Problem::NoSection => {
-                "CalculiX braucht für jedes Element ein Material. Elemente, die keine Section \
-                 erfasst, bringen den Lauf mit \"no material was assigned to element\" zum \
-                 Abbruch."
+                "CalculiX needs a material for every element. Elements that no section \
+                 covers abort the run with \"no material was assigned to element\"."
             }
             Problem::NoElastic => {
-                "Eine Section verwendet dieses Material, es hat aber keinen \
-                 Elastizitätsmodul und keine Querkontraktionszahl. Ohne sie gibt es keine \
-                 Steifigkeit; CalculiX bricht mit \"no elastic constants were assigned\" ab."
+                "A section uses this material, but it has no Young's modulus and no \
+                 Poisson's ratio. Without them there is no stiffness; CalculiX aborts \
+                 with \"no elastic constants were assigned\"."
             }
             Problem::NoDensity => {
-                "Ein Frequency Step, ein Dynamic Step, eine instationäre Wärmeübertragung \
-                 sowie Gewichts- und Fliehkraftlasten brauchen die Masse des Modells. Ohne \
-                 Dichte bricht CalculiX mit \"no density was assigned\" ab."
+                "A Frequency step, a Dynamic step, a transient heat transfer as well as \
+                 gravity and centrifugal loads need the mass of the model. Without a \
+                 density CalculiX aborts with \"no density was assigned\"."
             }
             Problem::NoRigidBody => {
                 "A boundary condition or load on a reference point acts on the rigid body the \
@@ -161,71 +160,69 @@ impl Problem {
                  stiffness."
             }
             Problem::NoConductivity => {
-                "Eine Wärmeübertragung braucht die Wärmeleitfähigkeit jedes Materials. \
-                 CalculiX warnt nur (\"no conductivity constants were assigned\") und \
-                 stürzt danach beim Lösen ab."
+                "A heat transfer needs the thermal conductivity of every material. \
+                 CalculiX only warns (\"no conductivity constants were assigned\") and \
+                 then crashes while solving."
             }
             Problem::NoSpecificHeat => {
-                "Eine instationäre Wärmeübertragung braucht die spezifische \
-                 Wärmekapazität. CalculiX bricht mit \"no specific heat was assigned\" ab."
+                "A transient heat transfer needs the specific heat. CalculiX aborts \
+                 with \"no specific heat was assigned\"."
             }
             Problem::NoInitialTemperature => {
-                "Eine instationäre Wärmeübertragung startet von einer Anfangstemperatur, \
-                 und eine vorgegebene Temperatur (Defined Field) dehnt das Modell gegenüber \
-                 ihr. Ohne sie bricht CalculiX mit \"please define initial conditions for \
-                 the temperature\" oder \"no thermal *INITIAL CONDITIONS are given\" ab."
+                "A transient heat transfer starts from an initial temperature, and a \
+                 prescribed temperature (Defined Field) expands the model relative to it. \
+                 Without it CalculiX aborts with \"please define initial conditions for \
+                 the temperature\" or \"no thermal *INITIAL CONDITIONS are given\"."
             }
             Problem::InvalidElastic => {
-                "Der Elastizitätsmodul muss größer als 0 sein und die Querkontraktionszahl \
-                 zwischen -1 und 0,5 liegen (0,5 wäre ein inkompressibles Material, das ein \
-                 linear-elastisches Modell nicht abbilden kann). CalculiX lehnt das Material \
-                 beim Einlesen ab."
+                "Young's modulus must be greater than 0 and Poisson's ratio must lie \
+                 between -1 and 0.5 (0.5 would be an incompressible material, which a \
+                 linear elastic model cannot represent). CalculiX rejects the material \
+                 when reading the input."
             }
             Problem::DistortedElements => {
-                "Diese Elemente sind umgestülpt oder so stark verzerrt, dass ihre \
-                 Jacobi-Determinante an einem Integrationspunkt nicht positiv ist. CalculiX \
-                 bricht mit \"nonpositive jacobian determinant in element\" ab. Typische \
-                 Ursachen sind quadratische Tetraeder, deren Mittelknoten auf eine stark \
-                 gekrümmte Fläche verschoben wurden, sehr dünne Bereiche, oder 2D-Elemente, \
-                 deren Knoten im Uhrzeigersinn nummeriert sind."
+                "These elements are inverted or so badly distorted that their Jacobian \
+                 determinant is not positive at an integration point. CalculiX aborts \
+                 with \"nonpositive jacobian determinant in element\". Typical causes \
+                 are quadratic tetrahedra whose midside nodes were moved onto a strongly \
+                 curved face, very thin regions, or 2D elements whose nodes are numbered \
+                 clockwise."
             }
             Problem::RigidBodyMotion => {
-                "Diese Teile können sich als starrer Körper bewegen: Die Randbedingungen \
-                 und Federn halten nicht alle Verschiebungen und Drehungen fest, und keine \
-                 Tie verbindet sie mit gehaltenen Teilen. Die Steifigkeitsmatrix ist dann \
-                 singulär. Je nach Gleichungslöser bricht CalculiX mit \"zero pivot\" ab \
-                 oder liefert riesige, unbrauchbare Verschiebungen ohne Fehlermeldung."
+                "These parts can move as a rigid body: the boundary conditions and \
+                 springs do not fix all displacements and rotations, and no Tie \
+                 connects them to supported parts. The stiffness matrix is then \
+                 singular. Depending on the matrix solver CalculiX aborts with \"zero \
+                 pivot\" or returns huge, useless displacements without an error."
             }
             Problem::Mechanism => {
-                "Stäbe (Truss Section) tragen nur Längskraft. Ein Knoten, an dem alle Stäbe \
-                 in einer Linie oder in einer Ebene liegen, ist quer dazu durch nichts \
-                 gehalten: Ein Stab aus mehreren Elementen knickt an jedem inneren Knoten \
-                 widerstandslos ab, und ein ebenes Fachwerk ist senkrecht zu seiner Ebene \
-                 beweglich. Die Steifigkeitsmatrix ist singulär; CalculiX meldet das nicht, \
-                 sondern liefert riesige, unbrauchbare Verschiebungen."
+                "Trusses (Truss Section) carry axial force only. A node at which all \
+                 trusses lie on one line or in one plane is not held across it: a truss \
+                 of several elements buckles at every inner node without resistance, and \
+                 a plane truss can move perpendicular to its plane. The stiffness matrix \
+                 is singular; CalculiX does not report this but returns huge, useless \
+                 displacements."
             }
             Problem::HeldOnlyByContact => {
-                "Diese Teile werden nur über Kontaktpaare gehalten. Zu Beginn der Rechnung \
-                 trägt ein Kontakt erst, wenn er geschlossen ist; bis dahin können die Teile \
-                 frei wegdriften. Das führt oft zu \"zero pivot\", zu \"too many cutbacks\" \
-                 oder zu sehr langen Rechnungen."
+                "These parts are held only by contact pairs. At the start of the \
+                 analysis a contact carries load only once it is closed; until then the \
+                 parts can drift away freely. This often leads to \"zero pivot\", to \
+                 \"too many cutbacks\" or to very long analyses."
             }
             Problem::ConflictingBoundaries => {
-                "Dieselben Knoten werden in diesem Step von mehreren Randbedingungen mit \
-                 verschiedenen Werten festgelegt, etwa eine Fläche fest eingespannt und \
-                 eine angrenzende Kante mit Verschiebung. CalculiX meldet das nicht, sondern \
-                 verwendet den zuletzt geschriebenen Wert; das Ergebnis hängt dann von der \
-                 Reihenfolge im Baum ab."
+                "In this step the same nodes are prescribed by several boundary \
+                 conditions with different values, e.g. a face fixed and an adjacent \
+                 edge with a displacement. CalculiX does not report this but uses the \
+                 value written last; the result then depends on the order in the tree."
             }
             Problem::LoadOnFixedNodes => {
-                "Alle Knoten dieser Last sind in Lastrichtung festgehalten. Die Last geht \
-                 direkt in die Lagerreaktion und verformt das Modell nicht."
+                "All nodes of this load are fixed in the load direction. The load goes \
+                 directly into the reaction force and does not deform the model."
             }
             Problem::RotationsIgnored => {
-                "Drehungen (UR1 bis UR3) haben nur Balken- und Schalenknoten. Volumen- und \
-                 2D-Elemente haben nur Verschiebungen; vorgegebene Drehungen werden \
-                 ignoriert oder führen in 2D-Modellen zum Abbruch (\"mpc of type is \
-                 unknown\")."
+                "Only beam and shell nodes have rotations (UR1 to UR3). Solid and 2D \
+                 elements have displacements only; prescribed rotations are ignored or \
+                 abort the run in 2D models (\"mpc of type is unknown\")."
             }
             Problem::NoGlobalResults => {
                 "A submodel boundary condition takes its displacements from the results \
@@ -233,12 +230,13 @@ impl Problem {
                  file cannot be written."
             }
             Problem::IncrementExceedsStep => {
-                "Das Anfangsinkrement ist größer als die Dauer des Steps. CalculiX lehnt \
-                 den Step mit \"initial increment size exceeds step size\" ab."
+                "The initial increment is larger than the time period of the step. \
+                 CalculiX rejects the step with \"initial increment size exceeds step \
+                 size\"."
             }
             Problem::NoLoad => {
-                "Der Step hat weder eine aktive Last noch eine vorgegebene Verschiebung. \
-                 Die Rechnung läuft, alle Ergebnisse sind aber null."
+                "The step has neither an active load nor a prescribed displacement. The \
+                 analysis runs, but all results are zero."
             }
             Problem::NoExpansion => {
                 "A defined temperature (Defined Field) deforms the model only through the \
@@ -261,26 +259,26 @@ impl Problem {
                  complex eigenfrequencies are those of the Frequency step."
             }
             Problem::NoConvergence => {
-                "Die Newton-Iteration ist nicht konvergiert; CalculiX hat das Inkrement \
-                 immer weiter verkleinert und aufgegeben (\"too many cutbacks\" oder \
-                 \"increment size smaller than minimum\"). Meist liegt es an Kontakten, an \
-                 schlecht gehaltenen Teilen oder an zu großen Lasten in einer nichtlinearen \
-                 Rechnung. Ein noch kleineres Mindestinkrement hilft selten."
+                "The Newton iteration did not converge; CalculiX kept reducing the \
+                 increment and gave up (\"too many cutbacks\" or \"increment size \
+                 smaller than minimum\"). The cause is usually contacts, poorly supported \
+                 parts or too large loads in a nonlinear analysis. An even smaller \
+                 minimum increment rarely helps."
             }
             Problem::MpcAndSpc => {
-                "Ein Freiheitsgrad ist zugleich durch eine Randbedingung festgehalten und \
-                 als abhängiger Freiheitsgrad einer Gleichung (MPC) gebunden, etwa durch \
-                 eigene *EQUATION-Keywords. CalculiX bricht dann ab."
+                "A degree of freedom is both fixed by a boundary condition and bound as \
+                 the dependent degree of freedom of an equation (MPC), e.g. by user \
+                 *EQUATION keywords. CalculiX then aborts."
             }
             Problem::RotationIn2d => {
-                "In einem 2D-Modell wurden Drehungen (Freiheitsgrade 4 bis 6) festgehalten. \
-                 CalculiX erweitert 2D-Elemente intern zu Volumenelementen und kann dafür \
-                 keine Drehungen vorgeben; der Lauf bricht mit \"mpc of type is unknown\" \
-                 oder einem Gleitkommafehler ab."
+                "Rotations (degrees of freedom 4 to 6) were fixed in a 2D model. \
+                 CalculiX expands 2D elements internally into solid elements and cannot \
+                 prescribe rotations for them; the run aborts with \"mpc of type is \
+                 unknown\" or a floating point error."
             }
             Problem::SolverError => {
-                "CalculiX hat mit einer Fehlermeldung abgebrochen, die prepolix nicht \
-                 kennt. Der genaue Text steht im Monitor."
+                "CalculiX aborted with an error message that prepolix does not know. \
+                 The exact text is shown in the Monitor."
             }
         }
     }
@@ -289,33 +287,31 @@ impl Problem {
     pub fn fix(self) -> &'static str {
         match self {
             Problem::MissingReference => {
-                "Das Element bearbeiten und eine vorhandene Auswahl oder ein vorhandenes \
-                 Material wählen, oder es löschen."
+                "Edit the item and select an existing selection or an existing \
+                 material, or delete it."
             }
             Problem::NoSection => {
-                "Unter Sections eine Section für den Part erstellen oder eine bestehende um \
-                 ihn erweitern."
+                "Under Sections create a section for the part or extend an existing one \
+                 to it."
             }
             Problem::NoElastic => {
-                "Das Material bearbeiten und Elastizitätsmodul und Querkontraktionszahl \
-                 eintragen, oder ein Material aus der Materialbibliothek nehmen."
+                "Edit the material and enter Young's modulus and Poisson's ratio, or \
+                 take a material from the material library."
             }
-            Problem::NoDensity => "Das Material bearbeiten und eine Dichte eintragen.",
-            Problem::NoConductivity => {
-                "Das Material bearbeiten und eine Wärmeleitfähigkeit eintragen."
-            }
+            Problem::NoDensity => "Edit the material and enter a density.",
+            Problem::NoConductivity => "Edit the material and enter a thermal conductivity.",
             Problem::NoSpecificHeat => {
-                "Das Material bearbeiten und eine spezifische Wärmekapazität eintragen, \
-                 oder den Step stationär rechnen."
+                "Edit the material and enter a specific heat, or compute the step as \
+                 steady state."
             }
             Problem::NoInitialTemperature => {
-                "Unter Initial Conditions eine Anfangstemperatur für das Modell erstellen \
-                 (bei Wärmedehnung die Temperatur des spannungsfreien Zustands), oder den \
-                 Step stationär rechnen."
+                "Under Initial Conditions create an initial temperature for the model \
+                 (for thermal expansion the temperature of the stress-free state), or \
+                 compute the step as steady state."
             }
             Problem::InvalidElastic => {
-                "Elastizitätsmodul größer als 0 und Querkontraktionszahl kleiner als 0,5 \
-                 eintragen (Stahl: 210000 MPa, 0,3)."
+                "Enter a Young's modulus greater than 0 and a Poisson's ratio less than \
+                 0.5 (steel: 210000 MPa, 0.3)."
             }
             Problem::NoRigidBody => {
                 "Create a Rigid Body constraint on the surface or nodes the reference point \
@@ -327,48 +323,48 @@ impl Problem {
                  400 MPa at 0.2."
             }
             Problem::DistortedElements => {
-                "Den Part neu vernetzen: kleinere Elementgröße an engen Radien oder dünnen \
-                 Wänden, oder lineare statt quadratischer Elemente. Bei importierten Netzen \
-                 die Knotenreihenfolge prüfen."
+                "Remesh the part: a smaller element size at tight radii or thin walls, \
+                 or linear instead of quadratic elements. For imported meshes check the \
+                 node order."
             }
             Problem::RigidBodyMotion => {
-                "Eine Randbedingung ergänzen, die die genannten Bewegungen sperrt, die Teile \
-                 mit einer Tie an gehaltene Teile binden, oder schwache Federn (Constraints \
-                 > Point Spring) gegen Masse setzen."
+                "Add a boundary condition that blocks the listed motions, tie the parts \
+                 to supported parts with a Tie, or add weak springs (Constraints \
+                 > Point Spring) to ground."
             }
             Problem::Mechanism => {
-                "Jeden Stab mit genau einem Element vernetzen (Mesh Setup > Meshing \
-                 Parameters: maximale Elementgröße größer als der längste Stab). Ein ebenes \
-                 Fachwerk zusätzlich an allen Knoten senkrecht zur Ebene festhalten. Sollen \
-                 die Stäbe Biegung tragen, eine Beam Section statt der Truss Section \
-                 verwenden."
+                "Mesh every truss with exactly one element (Mesh Setup > Meshing \
+                 Parameters: max element size larger than the longest truss). Also fix \
+                 a plane truss at all nodes perpendicular to its plane. If the trusses \
+                 should carry bending, use a Beam Section instead of the Truss \
+                 Section."
             }
             Problem::HeldOnlyByContact => {
-                "Die Teile zusätzlich schwach lagern (Point Spring mit kleiner Steifigkeit), \
-                 die Kontaktflächen zu Beginn berühren lassen (Adjust im Kontaktpaar) oder \
-                 die Teile in einem ersten Step über eine kleine Verschiebung in Kontakt \
-                 bringen."
+                "Additionally support the parts weakly (Point Spring with a small \
+                 stiffness), let the contact surfaces touch at the start (Adjust in the \
+                 contact pair) or bring the parts into contact with a small \
+                 displacement in a first step."
             }
             Problem::ConflictingBoundaries => {
-                "Die Auswahl der Randbedingungen so ändern, dass sich keine Knoten \
-                 überschneiden, oder beiden Randbedingungen denselben Wert geben."
+                "Change the selection of the boundary conditions so that no nodes \
+                 overlap, or give both boundary conditions the same value."
             }
             Problem::LoadOnFixedNodes => {
-                "Die Last auf eine Fläche oder Knoten legen, die sich bewegen können, oder \
-                 die Randbedingung dort entfernen."
+                "Apply the load to a surface or nodes that can move, or remove the \
+                 boundary condition there."
             }
             Problem::RotationsIgnored => {
-                "UR1 bis UR3 in der Randbedingung frei lassen. Drehungen von Volumenkörpern \
-                 über Verschiebungen mehrerer Knoten vorgeben."
+                "Leave UR1 to UR3 free in the boundary condition. Prescribe rotations of \
+                 solids by displacements of several nodes."
             }
             Problem::NoGlobalResults => {
                 "Open Model > Model Properties, set the model type to Submodel and pick the results \
                  file (.frd) of the global model."
             }
             Problem::IncrementExceedsStep => {
-                "Im Step das Anfangsinkrement höchstens so groß wie die Step-Dauer wählen."
+                "In the step choose an initial increment no larger than the time period."
             }
-            Problem::NoLoad => "Unter Loads eine Last erstellen oder eine deaktivierte aktivieren.",
+            Problem::NoLoad => "Under Loads create a load or activate a deactivated one.",
             Problem::NoExpansion => {
                 "Edit the material and enter a thermal expansion coefficient \
                  (steel: 1.2e-5 1/K)."
@@ -383,22 +379,22 @@ impl Problem {
                 "Create a Centrifugal load in the static step before the Frequency step."
             }
             Problem::NoConvergence => {
-                "Kontakte prüfen (Steifigkeit der Surface Interaction, Adjust, Lage der \
-                 Flächen), Teile ausreichend lagern, die Last auf mehrere Inkremente \
-                 verteilen (Inkrementierung Automatisch mit kleinerem Anfangsinkrement) und \
-                 das Netz an den Kontaktflächen verfeinern."
+                "Check the contacts (stiffness of the Surface Interaction, Adjust, \
+                 position of the surfaces), support the parts sufficiently, spread the \
+                 load over several increments (incrementation Automatic with a smaller \
+                 initial increment) and refine the mesh at the contact surfaces."
             }
             Problem::MpcAndSpc => {
-                "Die Randbedingung von den abhängigen Knoten der Gleichung entfernen oder \
-                 die Gleichung umformulieren."
+                "Remove the boundary condition from the dependent nodes of the equation \
+                 or reformulate the equation."
             }
             Problem::RotationIn2d => {
-                "In 2D-Modellen nur U1 und U2 vorgeben; eigene *BOUNDARY-Keywords im \
-                 Keyword-Editor prüfen."
+                "In 2D models prescribe only U1 and U2; check user *BOUNDARY keywords in \
+                 the Keyword Editor."
             }
             Problem::SolverError => {
-                "Die Meldung im Monitor lesen; oft hilft \"Modell prüfen\" im Kontextmenü der \
-                 Analyse."
+                "Read the message in the Monitor; \"Check Model\" in the context menu of \
+                 the analysis often helps."
             }
         }
     }
@@ -530,7 +526,7 @@ impl FeModel {
         for (part, bad) in mesh_check.distorted.iter().enumerate() {
             if !bad.is_empty() {
                 let detail = format!(
-                    "{} Element(e) mit nicht positiver Jacobi-Determinante, z. B. {}",
+                    "{} element(s) with nonpositive Jacobian determinant, e.g. {}",
                     bad.len(),
                     list(bad.iter().take(5))
                 );
@@ -573,7 +569,7 @@ impl FeModel {
                 findings.push(Finding::new(
                     ModelItem::Step(s),
                     Problem::NoInitialTemperature,
-                    format!("{} ist instationär", step.name),
+                    format!("{} is transient", step.name),
                 ));
             }
             // CalculiX refuses a *Temperature without an initial temperature.
@@ -594,7 +590,7 @@ impl FeModel {
                     ModelItem::Step(s),
                     Problem::IncrementExceedsStep,
                     format!(
-                        "Anfangsinkrement {} > Step-Dauer {}",
+                        "Initial increment {} > time period {}",
                         settings.initial_increment, settings.time_period
                     ),
                 ));
@@ -630,7 +626,7 @@ impl FeModel {
                 None if mechanical => findings.push(Finding::new(
                     item,
                     Problem::NoElastic,
-                    format!("{} hat keine Elastizität", material.name),
+                    format!("{} has no elasticity", material.name),
                 )),
                 Some(e) if e.young <= 0.0 || e.poisson >= 0.5 || e.poisson <= -1.0 => {
                     findings.push(Finding::new(
@@ -663,21 +659,21 @@ impl FeModel {
                 findings.push(Finding::new(
                     item,
                     Problem::NoConductivity,
-                    format!("{} hat keine Wärmeleitfähigkeit", material.name),
+                    format!("{} has no thermal conductivity", material.name),
                 ));
             }
             if transient && material.specific_heat.is_none() {
                 findings.push(Finding::new(
                     item,
                     Problem::NoSpecificHeat,
-                    format!("{} hat keine spezifische Wärmekapazität", material.name),
+                    format!("{} has no specific heat", material.name),
                 ));
             }
             if (frequency || transient || body_force) && material.density.is_none_or(|d| d <= 0.0) {
                 findings.push(Finding::new(
                     item,
                     Problem::NoDensity,
-                    format!("{} hat keine Dichte", material.name),
+                    format!("{} has no density", material.name),
                 ));
             }
         }
@@ -712,7 +708,7 @@ impl FeModel {
                     ModelItem::Part(i),
                     Problem::NoSection,
                     format!(
-                        "{missing} von {} Elementen von {} ohne Section",
+                        "{missing} of {} elements of {} without section",
                         part.elements.len(),
                         part.name
                     ),
@@ -802,7 +798,7 @@ impl FeModel {
                 findings.push(Finding::new(
                     ModelItem::BoundaryCondition(s, i),
                     Problem::RotationsIgnored,
-                    format!("{} gibt Drehungen vor", bc.name),
+                    format!("{} prescribes rotations", bc.name),
                 ));
             }
             let mut conflicts: HashMap<usize, usize> = HashMap::new();
@@ -821,7 +817,7 @@ impl FeModel {
                     ModelItem::BoundaryCondition(s, i),
                     Problem::ConflictingBoundaries,
                     format!(
-                        "{count} Freiheitsgrade auch in {} mit anderem Wert; es gilt {}",
+                        "{count} degrees of freedom also in {} with a different value; {} applies",
                         step.boundary_conditions[other].name, bc.name
                     ),
                 ));
@@ -846,7 +842,7 @@ impl FeModel {
                     findings.push(Finding::new(
                         ModelItem::DefinedField(s, i),
                         Problem::NoExpansion,
-                        format!("{}: kein Material mit Wärmedehnung", field.name),
+                        format!("{}: no material with thermal expansion", field.name),
                     ));
                 }
             }
@@ -888,7 +884,7 @@ impl FeModel {
                     findings.push(Finding::new(
                         ModelItem::Load(s, i),
                         Problem::LoadOnFixedNodes,
-                        format!("{}: alle {} Knoten festgehalten", load.name, nodes.len()),
+                        format!("{}: all {} nodes fixed", load.name, nodes.len()),
                     ));
                 }
             }
@@ -900,7 +896,7 @@ impl FeModel {
                 findings.push(Finding::new(
                     ModelItem::Step(s),
                     Problem::NoLoad,
-                    format!("{} hat keine aktive Last", step.name),
+                    format!("{} has no active load", step.name),
                 ));
             }
         }
@@ -1174,9 +1170,9 @@ impl FeModel {
                 Problem::RigidBodyMotion
             };
             let what = if names.is_empty() {
-                "Elemente ohne Part".to_string()
+                "Elements without part".to_string()
             } else if names.len() > 5 {
-                format!("{} und {} weitere", names[..5].join(", "), names.len() - 5)
+                format!("{} and {} more", names[..5].join(", "), names.len() - 5)
             } else {
                 names.join(", ")
             };
@@ -1331,7 +1327,7 @@ impl FeModel {
             .map(|(node, directions)| format!("{node} {}", describe_directions(directions)))
             .collect();
         let detail = format!(
-            "{}: {} Stabknoten nicht gehalten, z. B. Knoten {}",
+            "{}: {} truss nodes not held, e.g. node {}",
             self.steps[s].name,
             free.len(),
             examples.join(", ")
@@ -1424,11 +1420,11 @@ impl Trusses {
 fn describe_directions(free: &[[f64; 6]]) -> String {
     match free {
         [f] => match (0..3).find(|&i| f[i].abs() > 0.99) {
-            Some(i) => format!("frei in {}", ["X", "Y", "Z"][i]),
-            None => "frei senkrecht zur Ebene der Stäbe".into(),
+            Some(i) => format!("free in {}", ["X", "Y", "Z"][i]),
+            None => "free perpendicular to the plane of the trusses".into(),
         },
-        [_, _] => "frei quer zum Stab".into(),
-        _ => "ganz frei".into(),
+        [_, _] => "free across the truss".into(),
+        _ => "completely free".into(),
     }
 }
 
@@ -1511,7 +1507,7 @@ fn free_motions(gram: &[[f64; 6]; 6], unknowns: usize) -> Vec<[f64; 6]> {
         .collect()
 }
 
-/// Names the free motions, e.g. "Verschiebung in X, Drehung um Z".
+/// Names the free motions, e.g. "translation in X, rotation about Z".
 fn describe_motions(space: ModelSpace, free: &[[f64; 6]]) -> String {
     let project = |v: &[f64; 6]| -> f64 {
         free.iter()
@@ -1529,13 +1525,13 @@ fn describe_motions(space: ModelSpace, free: &[[f64; 6]]) -> String {
         _ => (&[(0, "X"), (1, "Y")], &[(2, "Z")]),
     };
     if free.len() == translations.len() + rotations.len() {
-        return "ganz frei, nichts hält sie".into();
+        return "completely free, nothing holds them".into();
     }
     let mut parts = Vec::new();
     let mut found = 0;
     for &(i, name) in translations {
         if project(&unit(i)) > 0.99 {
-            parts.push(format!("Verschiebung in {name}"));
+            parts.push(format!("displacement in {name}"));
             found += 1;
         }
     }
@@ -1559,12 +1555,12 @@ fn describe_motions(space: ModelSpace, free: &[[f64; 6]]) -> String {
     }
     let rotations_free = free.len().saturating_sub(found);
     for axis in axes.iter().take(rotations_free) {
-        parts.push(format!("Drehung um {axis}"));
+        parts.push(format!("rotation about {axis}"));
     }
     if parts.is_empty() {
-        parts.push(format!("{} Bewegung(en)", free.len()));
+        parts.push(format!("{} motion(s)", free.len()));
     }
-    format!("{} frei", parts.join(", "))
+    format!("{} free", parts.join(", "))
 }
 
 /// Eigenvalues and eigenvectors of the upper left `n` x `n` block of a symmetric matrix by
@@ -1656,7 +1652,7 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
             &mut findings,
             problem,
             format!(
-                "{} Element(e), z. B. {}",
+                "{} element(s), e.g. {}",
                 ids.len(),
                 list(ids.iter().take(5))
             ),
@@ -1670,7 +1666,10 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
                 part_findings.push(Finding::new(
                     ModelItem::Part(p),
                     problem,
-                    format!("Laut CalculiX: Element(e) {}", list(in_part.iter().take(5))),
+                    format!(
+                        "According to CalculiX: element(s) {}",
+                        list(in_part.iter().take(5))
+                    ),
                 ));
             }
         }
@@ -1717,7 +1716,7 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
             add(
                 &mut findings,
                 problem,
-                format!("CalculiX meldet \"{marker}\""),
+                format!("CalculiX reports \"{marker}\""),
             );
         }
     }
@@ -1937,11 +1936,17 @@ mod tests {
                 (ModelItem::Part(0), Problem::RigidBodyMotion),
             ]
         );
-        assert!(findings[0].detail.contains("Drehung um"), "{findings:?}");
-        assert!(!findings[0].detail.contains("Verschiebung"), "{findings:?}");
+        assert!(
+            findings[0].detail.contains("rotation about"),
+            "{findings:?}"
+        );
+        assert!(!findings[0].detail.contains("displacement"), "{findings:?}");
         model.steps[0].boundary_conditions.clear();
         let detail = &check(&model, &mesh)[0].detail;
-        assert!(detail.ends_with(": ganz frei, nichts hält sie"), "{detail}");
+        assert!(
+            detail.ends_with(": completely free, nothing holds them"),
+            "{detail}"
+        );
         // Two corners fixed leave the rotation about the line through them.
         model.steps[0].boundary_conditions.push(BoundaryCondition {
             name: "Fixed-1".into(),
@@ -1951,7 +1956,7 @@ mod tests {
             amplitude: None,
         });
         let detail = &check(&model, &mesh)[0].detail;
-        assert!(detail.ends_with(": Drehung um X frei"), "{detail}");
+        assert!(detail.ends_with(": rotation about X free"), "{detail}");
         // A spring on a third corner holds it.
         model
             .constraints
@@ -2192,7 +2197,7 @@ mod tests {
         assert!(
             findings[0]
                 .detail
-                .starts_with("1 Freiheitsgrade auch in Fixed-1")
+                .starts_with("1 degrees of freedom also in Fixed-1")
         );
         // The same value is no conflict.
         model.steps[0].boundary_conditions[1].kind =
@@ -2230,7 +2235,7 @@ mod tests {
         );
         assert_eq!(
             findings[0].detail,
-            "Defined_Temperature-1: kein Material mit Wärmedehnung"
+            "Defined_Temperature-1: no material with thermal expansion"
         );
         model.materials[0].expansion = Some(crate::Expansion::default());
         assert_eq!(check(&model, &mesh), []);
@@ -2280,7 +2285,7 @@ mod tests {
                 (ModelItem::Part(1), Problem::DistortedElements),
             ]
         );
-        assert!(findings[0].detail.ends_with("z. B. 1"));
+        assert!(findings[0].detail.ends_with("e.g. 1"));
     }
 
     #[test]
@@ -2311,7 +2316,7 @@ mod tests {
         let findings = check(&model, &mesh);
         assert_eq!(findings[0].problem, Problem::RigidBodyMotion);
         assert!(
-            findings[0].detail.ends_with(": Drehung um Z frei"),
+            findings[0].detail.ends_with(": rotation about Z free"),
             "{findings:?}"
         );
         // Axisymmetric: only the axial motion is a rigid body motion.
@@ -2447,14 +2452,14 @@ mod tests {
         );
         assert_eq!(
             findings[0].detail,
-            "Step-1: 1 Stabknoten nicht gehalten, z. B. Knoten 4 frei in Z"
+            "Step-1: 1 truss nodes not held, e.g. node 4 free in Z"
         );
         // Without the supports in Y the plane truss moves out of its plane.
         let (mesh, mut model) = truss_triangle(1, false);
         model.steps[0].boundary_conditions[2].region = Region::Nodes(vec![1, 2]);
         let findings = check(&model, &mesh);
         assert!(findings.iter().any(|f| f.problem == Problem::Mechanism
-            && f.detail == "Step-1: 1 Stabknoten nicht gehalten, z. B. Knoten 3 frei in Y"));
+            && f.detail == "Step-1: 1 truss nodes not held, e.g. node 3 free in Y"));
         // Tied nodes count as one node, as they are written.
         let (mesh, model) = truss_triangle(1, true);
         assert_eq!(check(&model, &mesh), []);

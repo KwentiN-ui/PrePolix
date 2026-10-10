@@ -146,7 +146,7 @@ impl Transformation {
             TransformationKind::Symmetry { .. } => Ok(()),
             TransformationKind::LinearPattern { start, end, .. } => {
                 if DVec3::from(end) == DVec3::from(start) {
-                    return error("Der Versatz des Musters muss größer als 0 sein.");
+                    return error("The offset of the pattern must be greater than 0.");
                 }
                 Ok(())
             }
@@ -157,10 +157,10 @@ impl Transformation {
                 ..
             } => {
                 if angle == 0.0 || !angle.is_finite() {
-                    return error("Der Winkel des Musters muss ungleich 0 sein.");
+                    return error("The angle of the pattern must not be 0.");
                 }
                 if DVec3::from(axis_end) == DVec3::from(axis_start) {
-                    return error("Die Punkte der Achse fallen zusammen.");
+                    return error("The points of the axis coincide.");
                 }
                 Ok(())
             }
