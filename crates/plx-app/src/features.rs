@@ -645,31 +645,24 @@ impl FeatureDialog {
         egui::CollapsingHeader::new("Table")
             .id_salt("path table")
             .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .max_height(200.0)
-                    .show(ui, |ui| {
-                        egui::Grid::new("path table grid")
-                            .striped(true)
-                            .spacing([16.0, 2.0])
-                            .show(ui, |ui| {
-                                for title in ["Distance", "X", "Y", "Z", component.name.as_str()] {
-                                    ui.strong(title);
-                                }
-                                ui.end_row();
-                                for (point, value) in points.iter().zip(&values) {
-                                    ui.label(format_value(point.distance as f32));
-                                    for c in point.position {
-                                        ui.label(format_value(c as f32));
-                                    }
-                                    ui.label(if value.is_finite() {
-                                        format_value(*value as f32)
-                                    } else {
-                                        "–".into()
-                                    });
-                                    ui.end_row();
-                                }
-                            });
-                    });
+                let headers = ["Distance", "X", "Y", "Z", component.name.as_str()];
+                crate::virtual_table::show(
+                    ui,
+                    "path table",
+                    &headers,
+                    "-8.888E-88",
+                    points.len(),
+                    200.0,
+                    |row, column| {
+                        let point = &points[row];
+                        match column {
+                            0 => format_value(point.distance as f32),
+                            1..=3 => format_value(point.position[column - 1] as f32),
+                            _ if values[row].is_finite() => format_value(values[row] as f32),
+                            _ => "–".into(),
+                        }
+                    },
+                );
             });
     }
 

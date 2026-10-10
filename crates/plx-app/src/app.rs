@@ -1183,14 +1183,13 @@ impl Workbench {
     }
 
     fn output(&self, ui: &mut egui::Ui) {
-        egui::ScrollArea::both()
-            .auto_shrink([false, false])
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                for line in &self.output {
-                    ui.monospace(line);
-                }
-            });
+        crate::virtual_table::lines(
+            ui,
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
+                .stick_to_bottom(true),
+            &self.output,
+        );
     }
 
     fn model_tree(&mut self, ui: &mut egui::Ui, view: TreeView) {
