@@ -13,7 +13,8 @@ comes from; the choices depend on the item:
 / Selection in the 3D view: picked nodes, element faces, edges, parts or CAD faces. The field shows
   what is selected ("12 element faces") and has a #ui("Clear Selection") button.
 / Parts: whole parts, picked in the 3D view.
-/ Node Set, Element Set, Surface: sets and surfaces of an imported `.inp` mesh.
+/ Node Set, Element Set, Surface: sets and surfaces of an imported `.inp` mesh, or ones you
+  defined yourself (@mesh-sets).
 
 The #ui("...") button next to a field makes it the target of clicks in the 3D view; it is shown
 pressed while it is active. Dialogs with two regions (master and slave) use one #ui("...")

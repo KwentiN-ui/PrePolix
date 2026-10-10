@@ -1912,6 +1912,13 @@ impl Workbench {
             }
             return;
         }
+        if let NewItem::MeshSet(kind) = kind {
+            if let Some(model) = self.setup_model() {
+                self.editor = Some(Editor::create_set(kind, &model.fe, &model.mesh));
+                self.set_tree_view(TreeView::FeModel);
+            }
+            return;
+        }
         if kind == NewItem::ResultFieldOutput {
             if let Some(model) = self.results.get(self.current_result)
                 && let Some(view) = &model.results
@@ -3309,6 +3316,17 @@ impl Workbench {
                     };
                 }
             }
+        } else if let Some(kind) = tree::set_kind(&item) {
+            if let (Some(model), Some(name)) = (self.model.as_mut(), tree::set_name(&item)) {
+                model
+                    .fe
+                    .mesh_sets
+                    .retain(|s| s.kind != kind || s.name != name);
+                kind.remove(&mut model.mesh, name);
+                self.tree.selected = None;
+                self.editor = None;
+                self.highlighted = None;
+            }
         } else if let Some(model) = self.model.as_mut()
             && crate::setup::delete(&mut model.fe, &item)
         {
@@ -3511,7 +3529,14 @@ impl Workbench {
             EditorResult::Ok => {
                 if let Some(editor) = self.editor.take() {
                     let created = editor.new_interaction_item(&model.fe);
+                    let sets = model.fe.mesh_sets.clone();
+                    if let Some((kind, name)) = editor.replaced_set() {
+                        kind.remove(&mut model.mesh, name);
+                    }
                     editor.apply(&mut model.fe);
+                    if model.fe.mesh_sets != sets {
+                        model.fe.sync_mesh_sets(&sets, &mut model.mesh);
+                    }
                     // The new item shows in the tree, even in a collapsed branch.
                     if let Some(item) = created {
                         self.tree.selected = Some((TreeView::FeModel, item));

@@ -23,11 +23,12 @@ file. You do not need to read it from front to back.
 
 == How prepolix thinks about a model
 
-You never edit node sets, element sets or surfaces directly. Instead you pick faces, edges, parts
-or nodes in the 3D view, and the model stores your _intent_: "a pressure of 2 MPa on these
+You do not need to define node sets, element sets or surfaces. Instead you pick faces, edges,
+parts or nodes in the 3D view, and the model stores your _intent_: "a pressure of 2 MPa on these
 faces", "these two parts are tied". Only when the input file is written does prepolix turn this
 intent into CalculiX keywords: it creates the required node sets, element sets and surfaces with
-generated names and splits a distributed load into what CalculiX needs.
+generated names and splits a distributed load into what CalculiX needs. Named sets of your own
+are still possible (@mesh-sets).
 
 This has two consequences you will notice:
 
