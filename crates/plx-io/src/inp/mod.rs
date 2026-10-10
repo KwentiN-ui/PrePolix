@@ -13,7 +13,7 @@ use plx_mesh::{Element, ElementId, ElementShape, FeMesh, NodeId, Part, SurfaceDe
 
 pub use write::{
     Keyword, KeywordKind, WriteError, insert_user_keywords, model_keywords, user_keywords,
-    write_check_inp, write_inp, write_keywords,
+    write_check_inp, write_deformed_mesh_inp, write_inp, write_keywords,
 };
 
 use lines::{Keyword as KeywordLine, SourceLine, fields, is_keyword, parse_f64};

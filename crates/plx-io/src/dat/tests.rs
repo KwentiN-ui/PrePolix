@@ -259,6 +259,33 @@ fn frequency_steps_have_a_row_per_mode() {
     assert_eq!(u1.entries[0].values, [-1.653821E+01, -1.418389E+01]);
 }
 
+/// The `.dat` file of the buckle step of the cantilever, from CalculiX 2.21.
+const BUCKLING: &str = "
+
+                        S T E P       1
+
+
+     B U C K L I N G   F A C T O R   O U T P U T
+
+ MODE NO       BUCKLING
+                FACTOR
+
+      1   0.2051835E+04
+      2   0.2051835E+04
+
+";
+
+#[test]
+fn buckle_steps_list_the_factor_of_each_mode() {
+    let import = parse_dat(BUCKLING);
+    assert!(import.warnings.is_empty(), "{:?}", import.warnings);
+    let step = import.sets.iter().find(|s| s.name == "STEP_1").unwrap();
+    assert_eq!(step.rows, [(1, 1, 2051.835), (1, 2, 2051.835)]);
+    let factors = step.field("BUCKLING_FACTOR_OUTPUT").unwrap();
+    let factor = factors.component("BUCKLING_FACTOR").unwrap();
+    assert_eq!(factor.entries[0].values, [2051.835, 2051.835]);
+}
+
 #[test]
 fn numbers_without_exponent_letter() {
     assert_eq!(parse_number("1.5-282"), 1.5e-282);
@@ -273,4 +300,49 @@ fn unknown_blocks_are_reported_once() {
     assert!(import.sets.is_empty());
     assert_eq!(import.warnings.len(), 1);
     assert!(import.warnings[0].contains("foo bar"));
+}
+
+const COMPLEX_FREQUENCY: &str = "
+                        S T E P       3
+
+
+     E I G E N V A L U E   O U T P U T
+
+ MODE NO                     FREQUENCY                   
+                      REAL PART         IMAGINARY PART
+             (RAD/TIME)   (CYCLES/TIME)   (RAD/TIME)
+
+      1   0.4602752E+04   0.7325508E+03   0.4018004E-11
+      2   0.6595139E+04   0.1049649E+04   0.5608028E-12
+
+P A R T I C I P A T I O N   F A C T O R S   F O R   M O D E       1
+
+  0.6746E-01  0.6754E-01  0.7071E+00  0.7071E+00  0.1114E-13  0.5820E-14
+
+     E I G E N M O D E   T U R N I N G   D I R E C T I O N
+
+    Axis reference direction:  0.1000E+01  0.0000E+00  0.0000E+00
+
+ MODE NO     TURNING DIRECTION (F=FORWARD,B=BACKWARD)
+
+      1          F
+      2          B
+";
+
+#[test]
+fn complex_frequency_steps_have_real_and_imaginary_parts_and_a_whirl() {
+    let import = parse_dat(COMPLEX_FREQUENCY);
+    assert!(import.warnings.is_empty(), "{:?}", import.warnings);
+    let set = &import.sets[0];
+    assert_eq!(set.name, "STEP_3");
+    let output = set.field("EIGENVALUE_OUTPUT").unwrap();
+    let component = |name: &str| &output.component(name).unwrap().entries[0].values;
+    assert_eq!(component("FREQUENCY"), &[732.5508, 1049.649]);
+    assert_eq!(component("OMEGA"), &[4602.752, 6595.139]);
+    assert_eq!(component("OMEGA_IM"), &[4.018004e-12, 5.608028e-13]);
+    assert_eq!(component("TURNING_DIRECTION"), &[1.0, -1.0]);
+    assert_eq!(
+        set.rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+        [732.5508, 1049.649]
+    );
 }

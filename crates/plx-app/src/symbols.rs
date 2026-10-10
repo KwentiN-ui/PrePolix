@@ -118,6 +118,40 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     add(center, DVec3::from(force), SymbolShape::Arrow);
                 }
             }
+            Kind::Load(LoadKind::PreTension {
+                value, direction, ..
+            }) => {
+                // The preload pulls the cut together: arrows onto the faces, out of them
+                // for a negative value.
+                let faces = face_geometry(model, &item.region, &visible);
+                let centers: Vec<DVec3> = faces.iter().map(|f| f.center).collect();
+                for index in sample(&centers) {
+                    let face = &faces[index];
+                    let along = direction.map_or(face.normal, DVec3::from);
+                    if value >= 0.0 {
+                        add(face.center, -along, SymbolShape::ArrowOnto);
+                    } else {
+                        add(face.center, along, SymbolShape::Arrow);
+                    }
+                }
+            }
+            // Gravity as an arrow at the centre of the loaded elements, as in PrePoMax.
+            Kind::Load(LoadKind::Gravity(acceleration)) => {
+                if let Some(center) = region_center(model, &item.region, &visible) {
+                    add(center, DVec3::from(acceleration), SymbolShape::Arrow);
+                }
+            }
+            // The rotation axis through the loaded elements: the point of the axis closest
+            // to their centre, with the direction of the axis.
+            Kind::Load(LoadKind::Centrifugal { point, axis, .. }) => {
+                if let Some(center) = region_center(model, &item.region, &visible)
+                    && let Some(direction) = DVec3::from(axis).try_normalize()
+                {
+                    let point = DVec3::from(point);
+                    let foot = point + (center - point).dot(direction) * direction;
+                    add(foot, direction, SymbolShape::RotationLock);
+                }
+            }
             Kind::Load(
                 LoadKind::SurfaceFlux(_) | LoadKind::Film { .. } | LoadKind::Radiation { .. },
             ) => {
@@ -145,6 +179,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     BoundaryKind::Fixed => [true; 6],
                     BoundaryKind::Displacement(values) => values.map(|v| v.is_some()),
                     BoundaryKind::Temperature(_) => [false; 6],
+                    BoundaryKind::Submodel { dofs, .. } => dofs,
                 };
                 if let Some(center) = region_center(model, &item.region, &visible) {
                     for (axis, &held) in held.iter().enumerate() {

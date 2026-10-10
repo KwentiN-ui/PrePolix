@@ -11,11 +11,12 @@ use std::fmt::Write as _;
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
-    Amplitude, AmplitudeTime, BoundaryKind, Constraint, ContactMethod, ContactPair, FeModel,
-    FieldOutput, FrequencyStep, GapConductance, HeatTransferStep, HistoryKind, HistoryOutput,
-    Incrementation, InitialConditionKind, InteractionProperty, LoadKind, ModelSpace, NodeTie,
-    OutputKind, Region, Section, SectionKind, StaticStep, Step, StepKind, SurfaceBehavior,
-    SurfaceInteraction, Totals, UserKeyword, line_tangent,
+    Amplitude, AmplitudeTime, BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint,
+    ContactMethod, ContactPair, DynamicStep, FeModel, FieldOutput, FrequencyStep, GapConductance,
+    HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialConditionKind,
+    InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep, ModelSpace, NodeTie,
+    OutputKind, Region, Section, SectionKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
+    SurfaceBehavior, SurfaceInteraction, Totals, UserKeyword, line_tangent,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -38,6 +39,15 @@ pub enum WriteError {
     /// A section that does not fit its elements, see [`Section::kind_problem`].
     #[error("{item}: {reason}")]
     InvalidSection { item: String, reason: String },
+    /// A load without a direction, such as a gravity of zero.
+    #[error("{item}: {reason}")]
+    InvalidLoad { item: String, reason: String },
+    /// A submodel boundary condition in a model that names no global results file.
+    #[error(
+        "{item}: the submodel has no global results file (Model > Model Properties: model \
+         type Submodel)"
+    )]
+    NoGlobalResults { item: String },
 }
 
 /// One entry of the keyword tree of an input file, the structure PrePoMax's keyword editor
@@ -117,6 +127,23 @@ pub fn write_inp(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<String
     let mut tree = model_keywords(mesh, model, heading)?;
     insert_user_keywords(&mut tree, &model.user_keywords);
     Ok(write_keywords(&tree))
+}
+
+/// An input file with only the mesh, its nodes moved by `scale` times `displacements` (one per
+/// node, in the order of [`FeMesh::coords`]), as PrePoMax's "Export deformed mesh": the
+/// deformed shape, e.g. a buckling mode as imperfection, can be imported into another model.
+pub fn write_deformed_mesh_inp(
+    mesh: &FeMesh,
+    displacements: &[[f32; 3]],
+    scale: f64,
+    heading: &str,
+) -> Result<String, WriteError> {
+    let mut deformed = mesh.clone();
+    for ((&id, coords), u) in mesh.node_ids().iter().zip(mesh.coords()).zip(displacements) {
+        let moved = std::array::from_fn(|k| coords[k] + scale * f64::from(u[k]));
+        deformed.set_node(id, moved);
+    }
+    write_inp(&deformed, &FeModel::default(), heading)
 }
 
 /// The input file for PrePoMax's "Check Model": every step's procedure is replaced by
@@ -258,8 +285,9 @@ pub fn model_keywords(
     // Regions are resolved first: their sets must precede the materials and steps.
     let materials = materials(model);
     let mut sections = sections(&mut sets, model)?;
-    let generated = constraints::springs(&mut sets, model)?;
+    let mut generated = constraints::springs(&mut sets, model)?;
     let mut constraints = constraints(&mut sets, model)?;
+    let pre_tension_sections = pre_tension_sections(&mut sets, model, &mut generated)?;
     constraints.extend(generated.equations);
     sections.extend(generated.sections);
     let mut materials = materials;
@@ -329,8 +357,11 @@ pub fn model_keywords(
         .collect();
     let heading = format!("*Heading\n{}\n", heading.lines().next().unwrap_or_default());
     let empty = |name| Keyword::title(name, Vec::new());
-    Ok(vec![
-        Keyword::title("Heading", vec![Keyword::generated(heading)]),
+    let mut tree = vec![Keyword::title("Heading", vec![Keyword::generated(heading)])];
+    if let Some(submodel) = submodel(model, &sets.submodel_sets)? {
+        tree.push(Keyword::title("Submodel", vec![submodel]));
+    }
+    tree.extend([
         Keyword::title("Nodes", vec![Keyword::generated(nodes)]),
         Keyword::title("Elements", element_blocks),
         Keyword::title("Node sets", node_sets),
@@ -340,14 +371,40 @@ pub fn model_keywords(
         empty("Coordinate systems"),
         Keyword::title("Materials", materials),
         Keyword::title("Sections", sections),
-        empty("Pre-tension sections"),
+        Keyword::title("Pre-tension sections", pre_tension_sections),
         Keyword::title("Constraints", constraints),
         Keyword::title("Surface interactions", interactions),
         Keyword::title("Contact pairs", contact_pairs),
         Keyword::title("Amplitudes", amplitudes),
         Keyword::title("Initial conditions", initial_conditions),
         Keyword::title("Steps", steps),
-    ])
+    ]);
+    Ok(tree)
+}
+
+/// `*SUBMODEL` with the node sets of the submodel boundary conditions, as PrePoMax writes it
+/// after the heading. The global results file is named without its directory; it has to be
+/// next to the input file, where the analysis and the export put it.
+fn submodel(
+    model: &FeModel,
+    node_sets: &[(String, String)],
+) -> Result<Option<Keyword>, WriteError> {
+    let Some((_, first)) = node_sets.first() else {
+        return Ok(None);
+    };
+    let input = (model.properties.submodel_input())
+        .and_then(|path| path.file_name())
+        .ok_or_else(|| WriteError::NoGlobalResults {
+            item: first.clone(),
+        })?;
+    let mut out = format!(
+        "*Submodel, Type=Node, Input=\"{}\"\n",
+        input.to_string_lossy()
+    );
+    for (set, _) in node_sets {
+        let _ = writeln!(out, "{set}");
+    }
+    Ok(Some(Keyword::generated(out)))
 }
 
 /// The line elements of beam and truss sections: the CalculiX type each one is written
@@ -509,6 +566,11 @@ struct Sets<'a> {
     used: BTreeSet<String>,
     /// Face element sets and node set of each element surface.
     surface_sets: BTreeMap<String, (Vec<(String, u8)>, String)>,
+    /// The pre-tension node of each pre-tension load, by the load's name.
+    pre_tension_nodes: BTreeMap<String, NodeId>,
+    /// Node sets of submodel boundary conditions, with the first boundary condition naming
+    /// each; `*SUBMODEL` lists them.
+    submodel_sets: Vec<(String, String)>,
 }
 
 impl<'a> Sets<'a> {
@@ -527,6 +589,8 @@ impl<'a> Sets<'a> {
                 .chain(mesh.surfaces.keys().map(|n| n.to_ascii_uppercase()))
                 .collect(),
             surface_sets: BTreeMap::new(),
+            pre_tension_nodes: BTreeMap::new(),
+            submodel_sets: Vec::new(),
         };
         for (name, ids) in &mesh.node_sets {
             sets.node_sets.push((name.clone(), ids.clone()));
@@ -810,22 +874,53 @@ fn amplitude_parameter(
     Ok(format!(", {parameter}={}", name(reference)))
 }
 
-/// Initial temperatures as PrePoMax's `CalInitialTemperature` writes them.
+/// Initial temperatures and velocities as PrePoMax's `CalInitialTemperature`,
+/// `CalInitialTranslationalVelocity` and `CalInitialAngularVelocity` write them: one line
+/// per set or node and non-zero component, 2D models without the third.
 fn initial_conditions(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+    let components = if model.properties.space.is_2d() { 2 } else { 3 };
     let mut keywords = Vec::new();
     for condition in &model.initial_conditions {
         if !condition.active {
             keywords.push(deactivated(&condition.name));
             continue;
         }
-        let set = sets.node_set(&condition.name, &condition.region)?;
-        let out = match condition.kind {
-            InitialConditionKind::Temperature(t) => format!(
-                "** Name: {}\n*Initial conditions, Type=Temperature\n{set}, {}\n",
-                condition.name,
-                number(t)
-            ),
+        let mut out = format!("** Name: {}\n", condition.name);
+        let velocity_lines = |out: &mut String, target: &str, v: [f64; 3]| {
+            for (dof, value) in v.iter().enumerate().take(components) {
+                if *value != 0.0 {
+                    out.push_str(&format!("{target}, {}, {}\n", dof + 1, number(*value)));
+                }
+            }
         };
+        match condition.kind {
+            InitialConditionKind::Temperature(t) => {
+                let set = sets.node_set(&condition.name, &condition.region)?;
+                out.push_str(&format!(
+                    "*Initial conditions, Type=Temperature\n{set}, {}\n",
+                    number(t)
+                ));
+            }
+            InitialConditionKind::Velocity(v) => {
+                let set = sets.node_set(&condition.name, &condition.region)?;
+                out.push_str("*Initial conditions, Type=Velocity\n");
+                velocity_lines(&mut out, &set, v);
+            }
+            InitialConditionKind::AngularVelocity { .. } => {
+                let nodes = condition.region.nodes(sets.mesh);
+                if nodes.is_empty() {
+                    return Err(empty(&condition.name, "nodes"));
+                }
+                out.push_str("*Initial conditions, Type=Velocity\n");
+                for id in nodes {
+                    let Some(position) = sets.mesh.node(id) else {
+                        continue;
+                    };
+                    let v = condition.kind.velocity_at(position).unwrap_or_default();
+                    velocity_lines(&mut out, &id.to_string(), v);
+                }
+            }
+        }
         keywords.push(Keyword::generated(out));
     }
     Ok(keywords)
@@ -971,6 +1066,56 @@ fn constraints(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteEr
                 let _ = writeln!(out, "\n{slave}, {master}");
                 keywords.push(Keyword::generated(out));
             }
+        }
+    }
+    Ok(keywords)
+}
+
+/// One `*Pre-tension section` per pre-tension load, with a new node that carries the
+/// preload: loads of the same name in several steps share the section, as the bolt is one.
+fn pre_tension_sections(
+    sets: &mut Sets,
+    model: &FeModel,
+    generated: &mut constraints::Generated,
+) -> Result<Vec<Keyword>, WriteError> {
+    let mut keywords = Vec::new();
+    let mut next_node = (sets.mesh.node_ids().iter().copied())
+        .chain(generated.nodes.iter().map(|(id, _)| *id))
+        .max()
+        .map_or(1, |n| n + 1);
+    for step in model
+        .steps
+        .iter()
+        .filter(|s| s.active && s.kind.supports_loads())
+    {
+        for load in step.loads.iter().filter(|l| l.active) {
+            let LoadKind::PreTension { direction, .. } = load.kind else {
+                continue;
+            };
+            if sets.pre_tension_nodes.contains_key(&load.name) {
+                continue;
+            }
+            let surface = sets.surface(&load.name, "Section", &load.region)?;
+            // The node sits at the centre of the cut; CalculiX does not use its position.
+            let nodes = load.region.nodes(sets.mesh);
+            let mut centre = [0.0; 3];
+            for coords in nodes.iter().filter_map(|&n| sets.mesh.node(n)) {
+                for (c, x) in centre.iter_mut().zip(coords) {
+                    *c += x / nodes.len() as f64;
+                }
+            }
+            let node = next_node;
+            next_node += 1;
+            generated.nodes.push((node, centre));
+            sets.pre_tension_nodes.insert(load.name.clone(), node);
+            let mut out = format!(
+                "** Name: {}\n*Pre-tension section, Surface={surface}, Node={node}\n",
+                load.name
+            );
+            if let Some([x, y, z]) = direction {
+                let _ = writeln!(out, "{}, {}, {}", number(x), number(y), number(z));
+            }
+            keywords.push(Keyword::generated(out));
         }
     }
     Ok(keywords)
@@ -1192,12 +1337,24 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
     let (header, procedure) = match &step.kind {
         StepKind::Static(settings) => static_step(settings),
         StepKind::Frequency(settings) => frequency_step(settings),
+        StepKind::ComplexFrequency(settings) => complex_frequency_step(settings),
+        StepKind::Buckle(settings) => buckle_step(settings),
         StepKind::HeatTransfer(settings) => heat_transfer_step(settings, "*Heat transfer", false),
         StepKind::CoupledTempDisp(settings) => {
             heat_transfer_step(settings, "*Coupled temperature-displacement", true)
         }
+        StepKind::Dynamic(settings) => dynamic_step(settings),
+        StepKind::ModalDynamics(settings) => modal_dynamics_step(settings),
+        StepKind::SteadyStateDynamics(settings) => steady_state_dynamics_step(settings),
     };
-    let mut boundaries = vec![Keyword::generated("*Boundary, op=New\n".into())];
+    // A modal step keeps the supports of the frequency step that stored the modes;
+    // CalculiX refuses new ones ("in a modal dynamic step new SPCs are not allowed"), and
+    // the reset would make the same supports new. Writing them again is accepted.
+    let mut boundaries = if step.kind.uses_stored_modes() {
+        Vec::new()
+    } else {
+        vec![Keyword::generated("*Boundary, op=New\n".into())]
+    };
     for bc in &step.boundary_conditions {
         // A step leaves out what it cannot take, like a deactivated item: displacements in
         // a heat transfer step, temperatures in a static one.
@@ -1216,7 +1373,11 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         let reference = bc.amplitude.as_ref().filter(|_| bc.kind.takes_amplitude());
         let amplitude =
             amplitude_parameter(amplitudes, &bc.name, "Amplitude", &reference.cloned())?;
-        let mut out = format!("** Name: {}\n*Boundary{amplitude}\n", bc.name);
+        let options = match bc.kind {
+            BoundaryKind::Submodel { step, .. } => format!(", Submodel, Step={}", step.max(1)),
+            _ => amplitude,
+        };
+        let mut out = format!("** Name: {}\n*Boundary{options}\n", bc.name);
         match bc.kind {
             BoundaryKind::Fixed => {
                 let _ = writeln!(out, "{set}, 1, {dofs}, 0");
@@ -1230,6 +1391,14 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
             }
             BoundaryKind::Temperature(t) => {
                 let _ = writeln!(out, "{set}, 11, 11, {}", number(t));
+            }
+            BoundaryKind::Submodel { dofs: held, .. } => {
+                for dof in (1..=dofs).filter(|&d| held[d - 1]) {
+                    let _ = writeln!(out, "{set}, {dof}, {dof}");
+                }
+                if !sets.submodel_sets.iter().any(|(s, _)| *s == set) {
+                    sets.submodel_sets.push((set, bc.name.clone()));
+                }
             }
         }
         boundaries.push(Keyword::generated(out));
@@ -1297,6 +1466,20 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
                     let _ = writeln!(out, "{set}, P{face}, {}", number(pressure));
                 }
             }
+            LoadKind::PreTension {
+                value,
+                by_displacement,
+                ..
+            } => {
+                // The preload is the first degree of freedom of the pre-tension node: a
+                // force, or the shortening of the bolt as a prescribed displacement.
+                let node = sets.pre_tension_nodes[&load.name];
+                if by_displacement {
+                    let _ = writeln!(out, "*Boundary{amplitude}\n{node}, 1, 1, {}", number(value));
+                } else {
+                    let _ = writeln!(out, "*Cload{amplitude}\n{node}, 1, {}", number(value));
+                }
+            }
             LoadKind::SurfaceTraction(force) => {
                 let faces = load.region.faces(sets.mesh);
                 let axisymmetric = space == ModelSpace::Axisymmetric;
@@ -1341,6 +1524,38 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
                     let _ = writeln!(out, "{set}, R{face}, {sink}, {e}");
                 }
             }
+            // As PrePoMax's CalGravityLoad: the size of the acceleration and its direction.
+            LoadKind::Gravity(acceleration) => {
+                let set = sets.element_set(&load.name, &load.region)?;
+                let Some((size, direction)) = unit_vector(acceleration) else {
+                    return Err(WriteError::InvalidLoad {
+                        item: load.name.clone(),
+                        reason: "the gravitational acceleration is zero".into(),
+                    });
+                };
+                let _ = writeln!(out, "*Dload{amplitude}");
+                let [x, y, z] = direction.map(number);
+                let _ = writeln!(out, "{set}, Grav, {}, {x}, {y}, {z}", number(size));
+            }
+            // As PrePoMax's CalCentrifLoad: the square of the rotational speed, a point on
+            // the axis and the axis direction.
+            LoadKind::Centrifugal { point, axis, speed } => {
+                let set = sets.element_set(&load.name, &load.region)?;
+                let Some((_, direction)) = unit_vector(axis) else {
+                    return Err(WriteError::InvalidLoad {
+                        item: load.name.clone(),
+                        reason: "the rotation axis has no direction".into(),
+                    });
+                };
+                let _ = writeln!(out, "*Dload{amplitude}");
+                let [px, py, pz] = point.map(number);
+                let [x, y, z] = direction.map(number);
+                let _ = writeln!(
+                    out,
+                    "{set}, Centrif, {}, {px}, {py}, {pz}, {x}, {y}, {z}",
+                    number(speed * speed)
+                );
+            }
         }
         loads.push(Keyword::generated(out));
     }
@@ -1382,8 +1597,13 @@ fn deactivated_step(step: &Step) -> Keyword {
     let procedure = match step.kind {
         StepKind::Static(_) => "StaticStep",
         StepKind::Frequency(_) => "FrequencyStep",
+        StepKind::ComplexFrequency(_) => "ComplexFrequencyStep",
+        StepKind::Buckle(_) => "BuckleStep",
         StepKind::HeatTransfer(_) => "HeatTransferStep",
         StepKind::CoupledTempDisp(_) => "CoupledTempDispStep",
+        StepKind::Dynamic(_) => "DynamicStep",
+        StepKind::ModalDynamics(_) => "ModalDynamicsStep",
+        StepKind::SteadyStateDynamics(_) => "SteadyStateDynamicsStep",
     };
     fn all<'a>(names: impl Iterator<Item = &'a str>) -> Vec<Keyword> {
         names.map(deactivated).collect()
@@ -1548,6 +1768,122 @@ fn heat_transfer_step(
     incremented_step(increments, keyword, coupled && increments.nlgeom)
 }
 
+/// The `*Step` line and the procedure keyword of a dynamic step, as PrePoMax's
+/// `CalDynamicStep` and `CalDamping` write them: the Rayleigh damping follows the
+/// procedure in the step, where CalculiX applies it to the whole model.
+fn dynamic_step(settings: &DynamicStep) -> (String, String) {
+    let mut keyword = String::from("*Dynamic");
+    if let Some(solver) = settings.increments.solver.keyword() {
+        let _ = write!(keyword, ", Solver={solver}");
+    }
+    if settings.alpha != -0.05 {
+        let _ = write!(keyword, ", Alpha={}", number(settings.alpha));
+    }
+    if let Some(explicit) = settings.procedure.keyword() {
+        let _ = write!(keyword, ", Explicit={explicit}");
+    }
+    let (header, mut procedure) =
+        incremented_step(&settings.increments, keyword, settings.increments.nlgeom);
+    if let Some(damping) = &settings.damping {
+        let _ = writeln!(
+            procedure,
+            "*Damping, Alpha={}, Beta={}",
+            number(damping.alpha),
+            number(damping.beta)
+        );
+    }
+    (header, procedure)
+}
+
+/// The `*Step` line and the procedure keyword of a modal dynamics step, as PrePoMax's
+/// `CalModalDynamicsStep` writes them, with the modal damping after the procedure.
+fn modal_dynamics_step(settings: &ModalDynamicsStep) -> (String, String) {
+    let header = format!("*Step, Inc={}\n", settings.increments());
+    let mut procedure = String::from("*Modal dynamics");
+    if let Some(solver) = settings.solver.keyword() {
+        let _ = write!(procedure, ", Solver={solver}");
+    }
+    if settings.steady_state {
+        procedure.push_str(", Steady state");
+    }
+    let second = if settings.steady_state {
+        settings.relative_error
+    } else {
+        settings.time_period
+    };
+    let _ = writeln!(
+        procedure,
+        "\n{}, {}",
+        number(settings.increment),
+        number(second)
+    );
+    modal_damping(&mut procedure, settings.damping.as_ref());
+    (header, procedure)
+}
+
+/// The `*Step` line and the procedure keyword of a steady state dynamics step, as
+/// PrePoMax's `CalSteadyStateDynamicsStep` writes them.
+fn steady_state_dynamics_step(settings: &SteadyStateDynamicsStep) -> (String, String) {
+    let mut procedure = String::from("*Steady state dynamics");
+    if !settings.harmonic {
+        procedure.push_str(", Harmonic=No");
+    }
+    if let Some(solver) = settings.solver.keyword() {
+        let _ = write!(procedure, ", Solver={solver}");
+    }
+    let _ = write!(
+        procedure,
+        "\n{}, {}, {}, {}",
+        number(settings.lower_frequency),
+        number(settings.upper_frequency),
+        settings.data_points,
+        number(settings.bias)
+    );
+    if !settings.harmonic {
+        let _ = write!(
+            procedure,
+            ", {}, {}, {}",
+            settings.fourier_terms,
+            number(settings.time_lower),
+            number(settings.time_upper)
+        );
+    }
+    procedure.push('\n');
+    modal_damping(&mut procedure, settings.damping.as_ref());
+    ("*Step\n".into(), procedure)
+}
+
+/// `*Modal damping` as PrePoMax's `CalModalDamping` writes it: a constant ratio covers
+/// modes 1 to 1000000, Rayleigh damping leaves the mode range empty.
+fn modal_damping(out: &mut String, damping: Option<&ModalDamping>) {
+    match damping {
+        None => {}
+        Some(ModalDamping::Constant(ratio)) => {
+            let _ = writeln!(out, "*Modal damping\n1, 1000000, {}", number(*ratio));
+        }
+        Some(ModalDamping::Direct(ranges)) => {
+            out.push_str("*Modal damping\n");
+            for range in ranges {
+                let _ = writeln!(
+                    out,
+                    "{}, {}, {}",
+                    range.lowest,
+                    range.highest,
+                    number(range.ratio)
+                );
+            }
+        }
+        Some(ModalDamping::Rayleigh(r)) => {
+            let _ = writeln!(
+                out,
+                "*Modal damping, Rayleigh\n , , {}, {}",
+                number(r.alpha),
+                number(r.beta)
+            );
+        }
+    }
+}
+
 /// The `*Step` line and the procedure with its increments, for steps with a time period.
 fn incremented_step(settings: &StaticStep, keyword: String, nlgeom: bool) -> (String, String) {
     let default = settings.incrementation == Incrementation::Default;
@@ -1604,6 +1940,43 @@ fn frequency_step(settings: &FrequencyStep) -> (String, String) {
         }
     }
     procedure.push('\n');
+    (header, procedure)
+}
+
+/// The `*Step` line and the procedure keyword of a complex frequency step, as PrePoMax's
+/// `CalComplexFrequency` writes them.
+fn complex_frequency_step(settings: &ComplexFrequencyStep) -> (String, String) {
+    let mut header = String::from("*Step");
+    if settings.perturbation {
+        header.push_str(", Perturbation");
+    }
+    header.push('\n');
+    let mut procedure = String::from("*Complex frequency");
+    if settings.coriolis {
+        procedure.push_str(", Coriolis");
+    }
+    let _ = writeln!(procedure, "\n{}", settings.num_frequencies);
+    (header, procedure)
+}
+
+/// The `*Step` line and the procedure keyword of a buckle step, as PrePoMax's
+/// `CalBuckleStep` writes them.
+fn buckle_step(settings: &BuckleStep) -> (String, String) {
+    let mut header = String::from("*Step");
+    if settings.perturbation {
+        header.push_str(", Perturbation");
+    }
+    header.push('\n');
+    let mut procedure = String::from("*Buckle");
+    if let Some(solver) = settings.solver.keyword() {
+        let _ = write!(procedure, ", Solver={solver}");
+    }
+    let _ = writeln!(
+        procedure,
+        "\n{}, {}",
+        settings.num_factors,
+        number(settings.accuracy)
+    );
     (header, procedure)
 }
 
@@ -1689,6 +2062,12 @@ fn id_list(header: &str, ids: &[u32]) -> String {
 }
 
 /// A real number in at most 16 characters, CalculiX's field width.
+/// Length and direction of a vector; `None` for the zero vector.
+fn unit_vector(v: [f64; 3]) -> Option<(f64, [f64; 3])> {
+    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    (length > 0.0).then(|| (length, v.map(|c| c / length)))
+}
+
 fn number(value: f64) -> String {
     let short = value.to_string();
     if short.len() <= 16 {

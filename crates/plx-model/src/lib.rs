@@ -38,7 +38,7 @@ pub use geometry::{
 };
 pub use history::{HistoryKind, HistoryOutput, Totals};
 pub use library::MaterialLibrary;
-pub use properties::{ModelProperties, ModelSpace};
+pub use properties::{ModelKind, ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
 pub use section::{
     BeamOrientation, BeamProfile, BeamSection, Section, SectionKind, line_tangent, unit_thickness,
@@ -114,8 +114,9 @@ impl FeModel {
     /// installed CalculiX should use by default.
     pub fn resolve_default_solver(&mut self, solver: EquationSolver) {
         for step in &mut self.steps {
-            let current = step.kind.solver_mut();
-            if *current == EquationSolver::Default {
+            if let Some(current) = step.kind.solver_mut()
+                && *current == EquationSolver::Default
+            {
                 *current = solver;
             }
         }
@@ -161,6 +162,51 @@ impl FeModel {
                 }
                 nodes.sort_unstable();
                 nodes.dedup();
+            }
+        };
+        self.regions_mut().for_each(follow);
+        (self.initial_conditions.iter_mut()).for_each(|i| follow(&mut i.region));
+    }
+
+    /// Follows renumbered nodes and elements, as [`plx_mesh::FeMesh::renumber`] does:
+    /// regions of node and face ids name the new ids.
+    pub fn renumber(
+        &mut self,
+        nodes: &std::collections::BTreeMap<NodeId, NodeId>,
+        elements: &std::collections::BTreeMap<plx_mesh::ElementId, plx_mesh::ElementId>,
+    ) {
+        let follow = |region: &mut Region| match region {
+            Region::Nodes(ids) => {
+                for id in ids.iter_mut() {
+                    *id = nodes.get(id).copied().unwrap_or(*id);
+                }
+                ids.sort_unstable();
+            }
+            Region::Faces(faces) => {
+                for (element, _) in faces.iter_mut() {
+                    *element = elements.get(element).copied().unwrap_or(*element);
+                }
+            }
+            _ => {}
+        };
+        self.regions_mut().for_each(follow);
+        (self.initial_conditions.iter_mut()).for_each(|i| follow(&mut i.region));
+    }
+
+    /// Follows the face numbers of inverted elements, as
+    /// [`plx_mesh::FeMesh::transform_parts`] returns them: regions of faces name the new
+    /// numbers.
+    pub fn renumber_faces(&mut self, renumbering: &plx_mesh::FaceRenumbering) {
+        let follow = |region: &mut Region| {
+            if let Region::Faces(faces) = region {
+                for (element, face) in faces.iter_mut() {
+                    if let Some(new) = renumbering.get(element)
+                        && let Some(&number) = new.get(usize::from(*face).wrapping_sub(1))
+                        && number > 0
+                    {
+                        *face = number;
+                    }
+                }
             }
         };
         self.regions_mut().for_each(follow);
@@ -224,6 +270,18 @@ impl FeModel {
         }
     }
 
+    /// Whether an active step that takes it has an active submodel boundary condition, so
+    /// that the input file reads the results of the global model.
+    pub fn uses_global_results(&self) -> bool {
+        (self.steps.iter().filter(|s| s.active)).any(|step| {
+            (step.boundary_conditions.iter()).any(|b| {
+                b.active
+                    && matches!(b.kind, BoundaryKind::Submodel { .. })
+                    && step.kind.supports_boundary(&b.kind)
+            })
+        })
+    }
+
     /// The amplitude of the name, if the model has it.
     pub fn amplitude(&self, name: &str) -> Option<&Amplitude> {
         self.amplitudes.iter().find(|a| a.name == name)
@@ -251,6 +309,9 @@ impl FeModel {
                     for name in names.iter_mut().filter(|n| n.as_str() == old) {
                         *name = new.to_string();
                     }
+                    // Merged parts leave the same name twice.
+                    let mut seen = std::collections::BTreeSet::new();
+                    names.retain(|name| seen.insert(name.clone()));
                 }
                 Region::ElementSet(name) if name == old => *name = new.to_string(),
                 _ => {}
@@ -332,28 +393,60 @@ pub enum StepKind {
     Static(StaticStep),
     /// Eigenfrequencies and mode shapes (`*FREQUENCY`).
     Frequency(FrequencyStep),
+    /// Complex eigenfrequencies of a rotating structure with Coriolis forces
+    /// (`*COMPLEX FREQUENCY`), from the eigenmodes a frequency step stored before.
+    ComplexFrequency(ComplexFrequencyStep),
+    /// Buckling factors and buckling modes (`*BUCKLE`).
+    Buckle(BuckleStep),
     /// Temperatures only (`*HEAT TRANSFER`).
     HeatTransfer(HeatTransferStep),
     /// Temperatures and displacements solved together
     /// (`*COUPLED TEMPERATURE-DISPLACEMENT`).
     CoupledTempDisp(HeatTransferStep),
+    /// Displacements over time with inertia and damping (`*DYNAMIC`).
+    Dynamic(DynamicStep),
+    /// Response over time as a superposition of the stored eigenmodes (`*MODAL DYNAMICS`).
+    ModalDynamics(ModalDynamicsStep),
+    /// Harmonic response over a frequency range from the stored eigenmodes
+    /// (`*STEADY STATE DYNAMICS`).
+    SteadyStateDynamics(SteadyStateDynamicsStep),
 }
 
 impl StepKind {
-    pub fn solver_mut(&mut self) -> &mut EquationSolver {
+    /// The equation solver of the step; a complex frequency step chooses none, it works
+    /// on the stored eigenmodes.
+    pub fn solver_mut(&mut self) -> Option<&mut EquationSolver> {
         match self {
-            StepKind::Static(settings) => &mut settings.solver,
-            StepKind::Frequency(settings) => &mut settings.solver,
+            StepKind::Static(settings) => Some(&mut settings.solver),
+            StepKind::Frequency(settings) => Some(&mut settings.solver),
+            StepKind::ComplexFrequency(_) => None,
+            StepKind::Buckle(settings) => Some(&mut settings.solver),
             StepKind::HeatTransfer(settings) | StepKind::CoupledTempDisp(settings) => {
-                &mut settings.increments.solver
+                Some(&mut settings.increments.solver)
             }
+            StepKind::Dynamic(settings) => Some(&mut settings.increments.solver),
+            StepKind::ModalDynamics(settings) => Some(&mut settings.solver),
+            StepKind::SteadyStateDynamics(settings) => Some(&mut settings.solver),
         }
+    }
+
+    /// Whether the step superposes the eigenmodes a previous frequency step stored.
+    pub fn uses_stored_modes(&self) -> bool {
+        matches!(
+            self,
+            StepKind::ModalDynamics(_) | StepKind::SteadyStateDynamics(_)
+        )
     }
 
     /// Whether the step takes loads. A frequency step has none, as in PrePoMax; preloads
     /// come from the previous step with [`FrequencyStep::perturbation`].
     pub fn supports_loads(&self) -> bool {
-        !matches!(self, StepKind::Frequency(_))
+        !matches!(self, StepKind::Frequency(_) | StepKind::ComplexFrequency(_))
+    }
+
+    /// Whether the step computes eigenmodes, whose shapes are scaled arbitrarily.
+    pub fn is_modal(&self) -> bool {
+        matches!(self, StepKind::Frequency(_) | StepKind::ComplexFrequency(_))
     }
 
     /// Whether the step solves for displacements.
@@ -373,7 +466,10 @@ impl StepKind {
     /// `IsBoundaryConditionSupported`: temperatures in thermal steps, displacements in
     /// mechanical ones.
     pub fn supports_boundary(&self, kind: &BoundaryKind) -> bool {
-        if kind.is_thermal() {
+        // PrePoMax drives submodels in static steps only.
+        if let BoundaryKind::Submodel { .. } = kind {
+            matches!(self, StepKind::Static(_))
+        } else if kind.is_thermal() {
             self.is_thermal()
         } else {
             self.is_mechanical()
@@ -524,6 +620,276 @@ pub struct FrequencyStep {
     pub solver: EquationSolver,
 }
 
+/// Settings of a `*DYNAMIC` step, with PrePoMax's defaults; like PrePoMax's `DynamicStep` it
+/// extends the static step by the time integration and the damping.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DynamicStep {
+    /// Increments, time period, geometric nonlinearity and solver as in a static step.
+    pub increments: StaticStep,
+    /// Numerical damping of the Hilber-Hughes-Taylor integration (`ALPHA=`), between -1/3
+    /// and 0; CalculiX's default is -0.05.
+    pub alpha: f64,
+    /// Implicit or explicit integration of the structure and the fluid (`EXPLICIT=`).
+    pub procedure: DynamicProcedure,
+    /// Rayleigh damping of the whole model, written as `*DAMPING` in the step like PrePoMax
+    /// does; `None` leaves the model undamped.
+    pub damping: Option<RayleighDamping>,
+}
+
+impl Default for DynamicStep {
+    fn default() -> Self {
+        Self {
+            increments: StaticStep {
+                incrementation: Incrementation::Automatic,
+                initial_increment: 0.01,
+                ..StaticStep::default()
+            },
+            alpha: -0.05,
+            procedure: DynamicProcedure::Implicit,
+            damping: None,
+        }
+    }
+}
+
+impl DynamicStep {
+    /// What is wrong with the settings, if anything.
+    pub fn problem(&self) -> Option<String> {
+        if !(-1.0 / 3.0..=0.0).contains(&self.alpha) {
+            return Some("Alpha must lie between -1/3 and 0.".into());
+        }
+        if self.increments.incrementation == Incrementation::Default {
+            return Some("A dynamic step needs its time period and increments.".into());
+        }
+        if self.increments.time_period <= 0.0 || self.increments.initial_increment <= 0.0 {
+            return Some(
+                "The time period and the initial increment must be greater than 0.".into(),
+            );
+        }
+        if let Some(damping) = &self.damping
+            && (damping.alpha < 0.0 || damping.beta < 0.0)
+        {
+            return Some("The damping coefficients cannot be negative.".into());
+        }
+        None
+    }
+}
+
+/// Settings of a `*MODAL DYNAMICS` step, with PrePoMax's defaults: the response over time
+/// as a superposition of the eigenmodes a previous frequency step stored.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModalDynamicsStep {
+    /// Fixed time increment of the response.
+    pub increment: f64,
+    pub time_period: f64,
+    /// Maximum number of increments (`INC`); the writer raises it to fit the time period.
+    pub max_increments: u32,
+    /// Steady state (`STEADY STATE`): integrated until the response repeats within the
+    /// relative error, instead of over the time period.
+    pub steady_state: bool,
+    pub relative_error: f64,
+    pub solver: EquationSolver,
+    pub damping: Option<ModalDamping>,
+}
+
+impl Default for ModalDynamicsStep {
+    fn default() -> Self {
+        Self {
+            increment: 0.1,
+            time_period: 1.0,
+            max_increments: 100,
+            steady_state: false,
+            relative_error: 0.01,
+            solver: EquationSolver::Default,
+            damping: None,
+        }
+    }
+}
+
+impl ModalDynamicsStep {
+    /// What is wrong with the settings, if anything.
+    pub fn problem(&self) -> Option<String> {
+        if self.increment <= 0.0 {
+            return Some("The time increment must be greater than 0.".into());
+        }
+        if !self.steady_state && self.time_period <= 0.0 {
+            return Some("The time period must be greater than 0.".into());
+        }
+        if self.steady_state && !(0.0..=1.0).contains(&self.relative_error) {
+            return Some("The relative error must lie between 0 and 1.".into());
+        }
+        self.damping.as_ref().and_then(ModalDamping::problem)
+    }
+
+    /// The `INC` of the step: the limit, or the number of increments the time period
+    /// takes when that is more.
+    pub fn increments(&self) -> u32 {
+        if self.steady_state || self.increment <= 0.0 {
+            return self.max_increments;
+        }
+        let needed = (self.time_period / self.increment).ceil() as u32 + 1;
+        self.max_increments.max(needed)
+    }
+}
+
+/// Settings of a `*STEADY STATE DYNAMICS` step, with PrePoMax's defaults: the harmonic
+/// response over a frequency range from the stored eigenmodes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SteadyStateDynamicsStep {
+    /// Harmonic excitation; otherwise the loads are periodic over the time range and
+    /// expanded into Fourier terms (`HARMONIC=NO`).
+    pub harmonic: bool,
+    pub lower_frequency: f64,
+    pub upper_frequency: f64,
+    /// Frequencies evaluated between two eigenfrequencies, at least 2.
+    pub data_points: u32,
+    /// Crowds the frequencies towards the eigenfrequencies; 1 spreads them evenly.
+    pub bias: f64,
+    /// Fourier terms of a non-harmonic excitation.
+    pub fourier_terms: u32,
+    /// Time range of one period of a non-harmonic excitation.
+    pub time_lower: f64,
+    pub time_upper: f64,
+    pub solver: EquationSolver,
+    pub damping: Option<ModalDamping>,
+}
+
+impl Default for SteadyStateDynamicsStep {
+    fn default() -> Self {
+        Self {
+            harmonic: true,
+            lower_frequency: 0.0,
+            upper_frequency: 10.0,
+            data_points: 20,
+            bias: 3.0,
+            fourier_terms: 20,
+            time_lower: 0.0,
+            time_upper: 1.0,
+            solver: EquationSolver::Default,
+            damping: None,
+        }
+    }
+}
+
+impl SteadyStateDynamicsStep {
+    /// What is wrong with the settings, if anything.
+    pub fn problem(&self) -> Option<String> {
+        if self.lower_frequency < 0.0 || self.upper_frequency <= self.lower_frequency {
+            return Some("The upper frequency must be greater than the lower one.".into());
+        }
+        if self.data_points < 2 {
+            return Some("At least 2 data points are needed.".into());
+        }
+        if self.bias < 1.0 {
+            return Some("The bias must be 1 or more.".into());
+        }
+        if !self.harmonic && (self.fourier_terms < 1 || self.time_upper <= self.time_lower) {
+            return Some("A periodic excitation needs Fourier terms and a time range.".into());
+        }
+        self.damping.as_ref().and_then(ModalDamping::problem)
+    }
+}
+
+/// Damping of the modes of a modal dynamics or steady state dynamics step
+/// (`*MODAL DAMPING`), PrePoMax's modal damping.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ModalDamping {
+    /// One viscous damping ratio (damping over critical damping) for all modes.
+    Constant(f64),
+    /// A damping ratio per range of modes.
+    Direct(Vec<ModeDamping>),
+    /// Rayleigh damping from the mass and stiffness matrices.
+    Rayleigh(RayleighDamping),
+}
+
+impl ModalDamping {
+    /// What is wrong with the damping, if anything.
+    pub fn problem(&self) -> Option<String> {
+        let bad = |ratio: f64| !(0.0..=1.0).contains(&ratio);
+        match self {
+            ModalDamping::Constant(ratio) if bad(*ratio) => {
+                Some("The damping ratio must lie between 0 and 1.".into())
+            }
+            ModalDamping::Direct(ranges) if ranges.is_empty() => {
+                Some("Give at least one range of modes with its damping ratio.".into())
+            }
+            ModalDamping::Direct(ranges)
+                if ranges
+                    .iter()
+                    .any(|r| r.lowest < 1 || r.highest < r.lowest || bad(r.ratio)) =>
+            {
+                Some("Each range needs modes from 1 up and a ratio between 0 and 1.".into())
+            }
+            ModalDamping::Rayleigh(r) if r.alpha < 0.0 || r.beta < 0.0 => {
+                Some("The damping coefficients cannot be negative.".into())
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The viscous damping ratio of a range of modes.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModeDamping {
+    pub lowest: u32,
+    pub highest: u32,
+    pub ratio: f64,
+}
+
+/// How a dynamic step integrates over time, CalculiX's `EXPLICIT` parameter of `*DYNAMIC`:
+/// the structure and, with fluids, the fluid.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DynamicProcedure {
+    /// Implicit for both, the default; unconditionally stable.
+    #[default]
+    Implicit,
+    /// Implicit structure, explicit fluid (`EXPLICIT=1`).
+    ImplicitExplicit,
+    /// Explicit structure, implicit fluid (`EXPLICIT=2`).
+    ExplicitImplicit,
+    /// Explicit for both (`EXPLICIT=3`); needs increments below the stability limit.
+    Explicit,
+}
+
+impl DynamicProcedure {
+    pub const ALL: [DynamicProcedure; 4] = [
+        DynamicProcedure::Implicit,
+        DynamicProcedure::ImplicitExplicit,
+        DynamicProcedure::ExplicitImplicit,
+        DynamicProcedure::Explicit,
+    ];
+
+    /// The value of `EXPLICIT=`; `None` for the implicit default.
+    pub fn keyword(self) -> Option<u8> {
+        match self {
+            DynamicProcedure::Implicit => None,
+            DynamicProcedure::ImplicitExplicit => Some(1),
+            DynamicProcedure::ExplicitImplicit => Some(2),
+            DynamicProcedure::Explicit => Some(3),
+        }
+    }
+
+    /// Name in the GUI, as PrePoMax labels the procedures.
+    pub fn label(self) -> &'static str {
+        match self {
+            DynamicProcedure::Implicit => "Implicit / Implicit",
+            DynamicProcedure::ImplicitExplicit => "Implicit / Explicit",
+            DynamicProcedure::ExplicitImplicit => "Explicit / Implicit",
+            DynamicProcedure::Explicit => "Explicit / Explicit",
+        }
+    }
+}
+
+/// Rayleigh damping: the damping matrix is `alpha` times the mass plus `beta` times the
+/// stiffness matrix. For a damping ratio zeta at the circular frequency omega,
+/// `alpha = 2 zeta omega` (mass) or `beta = 2 zeta / omega` (stiffness).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RayleighDamping {
+    /// Mass-proportional coefficient, in 1 / time.
+    pub alpha: f64,
+    /// Stiffness-proportional coefficient, in time.
+    pub beta: f64,
+}
+
 impl Default for FrequencyStep {
     fn default() -> Self {
         Self {
@@ -537,7 +903,68 @@ impl Default for FrequencyStep {
     }
 }
 
+/// Settings of a `*COMPLEX FREQUENCY` step, with PrePoMax's defaults. CalculiX solves it on
+/// the eigenmodes of the last frequency step with [`FrequencyStep::storage`]; the Coriolis
+/// forces come from the centrifugal load of the static step before that frequency step.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ComplexFrequencyStep {
+    /// Number of complex eigenfrequencies to compute.
+    pub num_frequencies: u32,
+    /// Coriolis forces of the rotation (`CORIOLIS`); the usual reason for the step.
+    pub coriolis: bool,
+    /// `*STEP, PERTURBATION`, as PrePoMax offers it for this step.
+    pub perturbation: bool,
+}
+
+impl Default for ComplexFrequencyStep {
+    fn default() -> Self {
+        Self {
+            num_frequencies: 10,
+            coriolis: true,
+            perturbation: true,
+        }
+    }
+}
+
+/// Settings of a `*BUCKLE` step, with PrePoMax's defaults. The loads of the step are the
+/// reference loads; the buckling factors scale them to the critical loads.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BuckleStep {
+    /// Number of buckling factors to compute.
+    pub num_factors: u32,
+    /// Accuracy of the eigenvalue solver.
+    pub accuracy: f64,
+    /// Adds the stiffness of the deformed state of the previous step, e.g. of a preload that
+    /// is not scaled by the buckling factor (`*STEP, PERTURBATION`).
+    pub perturbation: bool,
+    pub solver: EquationSolver,
+}
+
+impl Default for BuckleStep {
+    fn default() -> Self {
+        Self {
+            num_factors: 1,
+            accuracy: 1e-4,
+            perturbation: false,
+            solver: EquationSolver::Default,
+        }
+    }
+}
+
 impl Step {
+    /// A complex frequency step with PrePoMax's default field outputs.
+    pub fn new_complex_frequency(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            active: true,
+            kind: StepKind::ComplexFrequency(ComplexFrequencyStep::default()),
+            boundary_conditions: Vec::new(),
+            loads: Vec::new(),
+            history_outputs: Vec::new(),
+            field_outputs: FieldOutput::complex_frequency_defaults(),
+        }
+    }
+
     /// A static step with PrePoMax's default field outputs.
     pub fn new_static(name: impl Into<String>) -> Self {
         Self {
@@ -564,6 +991,19 @@ impl Step {
         }
     }
 
+    /// A buckle step with PrePoMax's default field outputs.
+    pub fn new_buckle(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            active: true,
+            kind: StepKind::Buckle(BuckleStep::default()),
+            boundary_conditions: Vec::new(),
+            loads: Vec::new(),
+            history_outputs: Vec::new(),
+            field_outputs: FieldOutput::defaults(),
+        }
+    }
+
     /// A heat transfer step with PrePoMax's default field outputs.
     pub fn new_heat_transfer(name: impl Into<String>) -> Self {
         Self {
@@ -574,6 +1014,36 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             field_outputs: FieldOutput::heat_transfer_defaults(),
+        }
+    }
+
+    /// A dynamic step with PrePoMax's default field outputs.
+    pub fn new_dynamic(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            active: true,
+            kind: StepKind::Dynamic(DynamicStep::default()),
+            boundary_conditions: Vec::new(),
+            loads: Vec::new(),
+            history_outputs: Vec::new(),
+            field_outputs: FieldOutput::dynamic_defaults(),
+        }
+    }
+
+    /// A modal dynamics step with PrePoMax's default field outputs.
+    pub fn new_modal_dynamics(name: impl Into<String>) -> Self {
+        Self {
+            kind: StepKind::ModalDynamics(ModalDynamicsStep::default()),
+            ..Self::new_dynamic(name)
+        }
+    }
+
+    /// A steady state dynamics step with PrePoMax's default field outputs.
+    pub fn new_steady_state_dynamics(name: impl Into<String>) -> Self {
+        Self {
+            kind: StepKind::SteadyStateDynamics(SteadyStateDynamicsStep::default()),
+            field_outputs: FieldOutput::defaults(),
+            ..Self::new_dynamic(name)
         }
     }
 
@@ -612,12 +1082,20 @@ pub enum BoundaryKind {
     Displacement([Option<f64>; 6]),
     /// Prescribed temperature (degree of freedom 11), PrePoMax's `TemperatureBC`.
     Temperature(f64),
+    /// Displacements (U1..U3) and rotations (UR1..UR3) taken from the results of the global
+    /// model of a submodel (`*BOUNDARY, SUBMODEL`), PrePoMax's `SubmodelBC`.
+    Submodel {
+        /// Step of the global model whose results are read, counted from 1.
+        step: u32,
+        /// The degrees of freedom that follow the global model.
+        dofs: [bool; 6],
+    },
 }
 
 impl BoundaryKind {
     /// Whether an amplitude can scale the boundary condition; fixed supports stay zero.
     pub fn takes_amplitude(&self) -> bool {
-        !matches!(self, BoundaryKind::Fixed)
+        !matches!(self, BoundaryKind::Fixed | BoundaryKind::Submodel { .. })
     }
 
     pub fn is_thermal(&self) -> bool {
@@ -652,6 +1130,15 @@ pub enum LoadKind {
     /// Total force on a surface region, spread over its nodes by area when the input file is
     /// written (PrePoMax's surface traction).
     SurfaceTraction([f64; 3]),
+    /// Bolt preload across a cut through the shank (`*PRE-TENSION SECTION`), PrePoMax's
+    /// pre-tension load: the region is the element faces on one side of the cut, the value
+    /// the force pulling the two sides together, or the shortening when `by_displacement`.
+    PreTension {
+        value: f64,
+        by_displacement: bool,
+        /// Direction of the preload; `None` lets CalculiX take the surface normal.
+        direction: Option<[f64; 3]>,
+    },
     /// Heat flow into every node of the region (`*CFLUX`), PrePoMax's concentrated flux.
     ConcentratedFlux(f64),
     /// Heat flow per area into a surface (`*DFLUX`, `S`), PrePoMax's surface flux.
@@ -663,6 +1150,17 @@ pub enum LoadKind {
     /// Radiation to the surroundings at the sink temperature (`*RADIATE`); needs the
     /// physical constants of the model.
     Radiation { sink: f64, emissivity: f64 },
+    /// Gravity, as the acceleration vector acting on the elements of the region
+    /// (`*DLOAD`, `GRAV`), PrePoMax's gravity load. Needs the density of the materials.
+    Gravity([f64; 3]),
+    /// Rotation of the elements of the region about an axis through `point` along `axis`
+    /// at `speed` radians per time (`*DLOAD`, `CENTRIF`), PrePoMax's centrifugal load.
+    /// CalculiX takes the square of the speed; the model keeps the speed the user entered.
+    Centrifugal {
+        point: [f64; 3],
+        axis: [f64; 3],
+        speed: f64,
+    },
 }
 
 impl LoadKind {
@@ -679,8 +1177,19 @@ impl LoadKind {
     pub fn is_thermal(&self) -> bool {
         !matches!(
             self,
-            LoadKind::ConcentratedForce(_) | LoadKind::Pressure(_) | LoadKind::SurfaceTraction(_)
+            LoadKind::ConcentratedForce(_)
+                | LoadKind::Pressure(_)
+                | LoadKind::SurfaceTraction(_)
+                | LoadKind::PreTension { .. }
+                | LoadKind::Gravity(_)
+                | LoadKind::Centrifugal { .. }
         )
+    }
+
+    /// Whether the load acts on the mass of the elements (gravity, centrifugal), so the
+    /// materials need a density.
+    pub fn is_body_force(&self) -> bool {
+        matches!(self, LoadKind::Gravity(_) | LoadKind::Centrifugal { .. })
     }
 }
 
@@ -698,6 +1207,54 @@ pub struct InitialCondition {
 pub enum InitialConditionKind {
     /// `*INITIAL CONDITIONS, TYPE=TEMPERATURE`
     Temperature(f64),
+    /// `*INITIAL CONDITIONS, TYPE=VELOCITY`: the same velocity at every node of the region,
+    /// the start of a Dynamic step.
+    Velocity([f64; 3]),
+    /// A rigid rotation at the start of a Dynamic step: `speed` in rad/s about the axis
+    /// through `point`, written as the velocity of every node of the region.
+    AngularVelocity {
+        point: [f64; 3],
+        axis: [f64; 3],
+        speed: f64,
+    },
+}
+
+impl InitialConditionKind {
+    /// A velocity that only a Dynamic step takes up.
+    pub fn is_velocity(&self) -> bool {
+        !matches!(self, Self::Temperature(_))
+    }
+
+    /// Velocity of a node at `position` under this condition; `None` for a temperature.
+    pub fn velocity_at(&self, position: [f64; 3]) -> Option<[f64; 3]> {
+        match self {
+            Self::Temperature(_) => None,
+            Self::Velocity(v) => Some(*v),
+            Self::AngularVelocity { point, axis, speed } => {
+                let length = axis.iter().map(|a| a * a).sum::<f64>().sqrt();
+                if length == 0.0 {
+                    return Some([0.0; 3]);
+                }
+                let n = axis.map(|a| a / length);
+                let r: [f64; 3] = std::array::from_fn(|k| position[k] - point[k]);
+                Some([
+                    speed * (n[1] * r[2] - n[2] * r[1]),
+                    speed * (n[2] * r[0] - n[0] * r[2]),
+                    speed * (n[0] * r[1] - n[1] * r[0]),
+                ])
+            }
+        }
+    }
+
+    /// Why the values cannot be written.
+    pub fn problem(&self) -> Option<String> {
+        match self {
+            Self::AngularVelocity { axis, .. } if axis.iter().all(|a| *a == 0.0) => {
+                Some("The axis must not be the zero vector.".into())
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -742,12 +1299,28 @@ impl FieldOutput {
         outputs
     }
 
+    /// Field outputs PrePoMax adds to a new complex frequency step: the displacements with
+    /// their magnitudes and phases (`PU`), so the whirling of a mode can be shown.
+    pub fn complex_frequency_defaults() -> Vec<Self> {
+        let mut outputs = Self::defaults();
+        outputs[0].variables = vec!["U".into(), "PU".into()];
+        outputs
+    }
+
     /// Field outputs PrePoMax adds to a new heat transfer step: temperatures, reaction heat
     /// flows and heat fluxes.
     pub fn heat_transfer_defaults() -> Vec<Self> {
         let mut outputs = Self::defaults();
         outputs[0].variables = vec!["NT".into(), "RFL".into()];
         outputs[1].variables = vec!["HFL".into()];
+        outputs
+    }
+
+    /// Field outputs PrePoMax adds to a new dynamic step: velocities and energies too.
+    pub fn dynamic_defaults() -> Vec<Self> {
+        let mut outputs = Self::defaults();
+        outputs[0].variables = ["RF", "U", "V"].map(String::from).to_vec();
+        outputs[1].variables = ["S", "E", "ENER"].map(String::from).to_vec();
         outputs
     }
 
@@ -816,6 +1389,9 @@ mod tests {
             Region::ElementSet("C".into())
         );
         assert_eq!(step.loads[0].region, Region::Surface("A".into()));
+        // A part merged into another leaves no duplicate.
+        model.rename_part("B", "C");
+        assert_eq!(model.sections[0].region, Region::Parts(vec!["C".into()]));
     }
 
     #[test]

@@ -36,6 +36,35 @@ const QUAD8: i32 = 16;
 /// than CalculiX (edges 3-2, 3-1 against 2-4, 3-4 in 1-based CalculiX numbering).
 const TET10_TO_CALCULIX: [usize; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 9, 8];
 
+/// The faces, edges and vertices a Gmsh message names, such as "Invalid boundary mesh
+/// (overlapping facets) on surface 23 surface 35", in the order named.
+pub fn named_entities(message: &str) -> Vec<CadEntity> {
+    let text = message.to_ascii_lowercase();
+    let mut entities = Vec::new();
+    let mut words = text.split_whitespace().peekable();
+    while let Some(word) = words.next() {
+        let word = word.trim_start_matches(|c: char| !c.is_ascii_alphabetic());
+        let kind: fn(i32) -> CadEntity = match word {
+            "surface" => CadEntity::Face,
+            "curve" => CadEntity::Edge,
+            "point" => CadEntity::Vertex,
+            _ => continue,
+        };
+        // The tag follows as a whole number, maybe with a comma or bracket after it.
+        let Some(next) = words.peek() else {
+            break;
+        };
+        let digits = next.trim_end_matches([',', ')', ';', ':']);
+        if let Ok(tag) = digits.parse::<i32>() {
+            let entity = kind(tag);
+            if !entities.contains(&entity) {
+                entities.push(entity);
+            }
+        }
+    }
+    entities
+}
+
 /// Whether a file is a CAD file by its extension.
 pub fn is_cad_file(path: &Path) -> bool {
     path.extension()
@@ -1406,3 +1435,30 @@ impl Drop for TempFile {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod message_tests {
+    use super::*;
+
+    #[test]
+    fn gmsh_messages_name_their_entities() {
+        assert_eq!(
+            named_entities(
+                "Gmsh: Invalid boundary mesh (overlapping facets) on surface 23 surface 35"
+            ),
+            [CadEntity::Face(23), CadEntity::Face(35)]
+        );
+        assert_eq!(
+            named_entities("Unable to recover the edge 12 (1/3) on curve 4 (on surface 7)"),
+            [CadEntity::Edge(4), CadEntity::Face(7)]
+        );
+        assert_eq!(
+            named_entities("Meshing Surface 5 failed, surface 5"),
+            [CadEntity::Face(5)]
+        );
+        assert_eq!(named_entities("near point 3."), []);
+        assert_eq!(named_entities("point 3"), [CadEntity::Vertex(3)]);
+        assert!(named_entities("No elements in volume 1").is_empty());
+        assert!(named_entities("segment and facet intersect at point (1, 2, 3)").is_empty());
+    }
+}

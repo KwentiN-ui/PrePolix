@@ -51,6 +51,7 @@ pub fn read_frd_bytes(bytes: &[u8]) -> Result<FrdImport, FrdError> {
         import: FrdImport::default(),
         element_materials: BTreeMap::new(),
         pending: None,
+        buckling: None,
         blocks: Vec::new(),
     }
     .run()
@@ -71,8 +72,22 @@ struct Reader<'a> {
     import: FrdImport,
     element_materials: BTreeMap<i32, Vec<u32>>,
     pending: Option<StepHeader>,
+    /// Numbering of the data sets of the buckling step being read, see
+    /// [`BucklingSets`].
+    buckling: Option<BucklingSets>,
     /// Result blocks found so far; their values are parsed in parallel at the end.
     blocks: Vec<ResultBlock<'a>>,
+}
+
+/// CalculiX writes a buckle step as data sets of one increment, telling them apart only by
+/// the set number of their headers (`100CL  102`): first the static solution of the step's
+/// loads with the value 0, then one set per buckling mode with its buckling factor. The
+/// reference state becomes increment 0 and the modes count from 1, as in the `.dat` file.
+#[derive(Clone, Copy)]
+struct BucklingSets {
+    step: u32,
+    set: u32,
+    increment: u32,
 }
 
 /// A result block whose header has been read, with its values still unparsed.
@@ -350,19 +365,22 @@ impl<'a> Reader<'a> {
             .get(12..24)
             .and_then(|t| parse_float(t.trim()))
             .unwrap_or(0.0);
-        let kind = match int_field(header, 56..58).unwrap_or(0) {
-            0 => AnalysisKind::Static,
-            1 => AnalysisKind::Dynamic,
-            2 => AnalysisKind::Frequency,
-            4 => AnalysisKind::Buckling,
-            other => AnalysisKind::Other(other),
-        };
         let binary = binary_size(header.get(73..75));
         let step = self.pending.take().unwrap_or(StepHeader {
             step: 1,
             increment: 1,
             mode: None,
         });
+        let kind = match int_field(header, 56..58).unwrap_or(0) {
+            0 => AnalysisKind::Static,
+            1 => AnalysisKind::Dynamic,
+            2 => AnalysisKind::Frequency,
+            // CalculiX writes 3 for every other procedure; with a mode number it is a
+            // complex frequency step.
+            3 if step.mode.is_some() => AnalysisKind::ComplexFrequency,
+            4 => AnalysisKind::Buckling,
+            other => AnalysisKind::Other(other),
+        };
 
         let field_line = self
             .next_line()
@@ -399,8 +417,14 @@ impl<'a> Reader<'a> {
                 }
             }
         }
+        // Steady state dynamics writes increment 0 into every `1PSTEP` line; the frequency
+        // points are then only told apart by the increment counter of the block header.
         let increment = match (kind, step.mode) {
-            (AnalysisKind::Frequency, Some(mode)) => mode,
+            (AnalysisKind::Frequency | AnalysisKind::ComplexFrequency, Some(mode)) => mode,
+            (AnalysisKind::Buckling, _) => self.buckling_increment(header, step.step, value),
+            _ if step.increment == 0 => int_field(header, 58..63)
+                .map(|n| n.max(0) as u32)
+                .unwrap_or(0),
             _ => step.increment,
         };
         let data: &'a [u8] = self.data;
@@ -415,6 +439,30 @@ impl<'a> Reader<'a> {
             body: &data[start..self.pos],
         });
         Ok(())
+    }
+
+    /// Increment of a buckling data set, see [`BucklingSets`].
+    fn buckling_increment(&mut self, header: &str, step: u32, value: f64) -> u32 {
+        let set = header
+            .get(6..12)
+            .map(|name| name.trim_start_matches(|c: char| !c.is_ascii_digit()))
+            .and_then(|digits| digits.trim().parse().ok())
+            .unwrap_or(0);
+        let sets = match self.buckling {
+            Some(sets) if sets.step == step && sets.set == set => sets,
+            Some(sets) if sets.step == step => BucklingSets {
+                set,
+                increment: sets.increment + 1,
+                ..sets
+            },
+            _ => BucklingSets {
+                step,
+                set,
+                increment: u32::from(value != 0.0),
+            },
+        };
+        self.buckling = Some(sets);
+        sets.increment
     }
 
     /// Like [`Reader::next_line`] without the text conversion, for skipping lines quickly.

@@ -7,12 +7,14 @@
 //! so their weights only depend on the mesh and are computed once for all increments.
 
 mod definition;
+mod grid;
 
 pub use definition::{Extrapolation, HotSpot, HotSpotComponent, extrapolation_weights};
 
 use plx_mesh::{FeMesh, NodeId, SkinFace};
 
 use crate::{Increment, principal_values};
+use grid::Grid;
 
 /// Components of the `STRESS` field in the order xx, yy, zz, xy, yz, zx.
 const STRESS_COMPONENTS: [&str; 6] = ["S11", "S22", "S33", "S12", "S23", "S13"];
@@ -143,26 +145,35 @@ pub fn hot_spot_paths<'a>(
             triangulate(coords, face, &mut triangles);
         }
     }
+    let triangle_grid = Grid::new(
+        &triangles
+            .iter()
+            .map(|t| bounds(&t.corners))
+            .collect::<Vec<_>>(),
+    );
+    let closest = |point| closest(&triangles, &triangle_grid, point);
+    let toe_points: Vec<[f64; 3]> = toe.iter().map(|&(_, index)| coords[index]).collect();
+    let toe_grid = Grid::new(&toe_points.iter().map(|&p| (p, p)).collect::<Vec<_>>());
 
     let mut paths = Vec::new();
     for &(node, index) in &toe {
         let start = coords[index];
         let mut along = direction;
         // Perpendicular to the toe line, where the toe nodes form one.
-        if let Some(tangent) = toe_tangent(coords, &toe, index)
+        if let Some(tangent) = toe_tangent(&toe_points, &toe_grid, start)
             && dot(along, tangent).abs() < 0.95
         {
             along = normalize(sub(along, scale(tangent, dot(along, tangent)))).unwrap_or(along);
         }
         // Into the plate surface, which the first read-out point lies on.
-        if let Some((triangle, _)) = closest(&triangles, add(start, scale(along, distances[0]))) {
+        if let Some((triangle, _)) = closest(add(start, scale(along, distances[0]))) {
             along = in_plane(along, triangle.normal).unwrap_or(along);
         }
         let mut points = Vec::with_capacity(distances.len());
         let mut gap: f64 = 0.0;
         for &distance in &distances {
             let target = add(start, scale(along, distance));
-            let Some((triangle, [u, v, w])) = closest(&triangles, target) else {
+            let Some((triangle, [u, v, w])) = closest(target) else {
                 break;
             };
             let [a, b, c] = triangle.corners;
@@ -398,17 +409,32 @@ fn triangulate(coords: &[[f64; 3]], face: &SkinFace, triangles: &mut Vec<Triangl
 }
 
 /// The triangle nearest to `point` with the barycentric coordinates of the nearest point.
-fn closest(triangles: &[Triangle], point: [f64; 3]) -> Option<(&Triangle, [f64; 3])> {
-    triangles
-        .iter()
-        .map(|t| {
-            let bary = closest_on_triangle(point, t.corners);
-            let [a, b, c] = t.corners;
-            let q = add(add(scale(a, bary[0]), scale(b, bary[1])), scale(c, bary[2]));
-            (t, bary, length(sub(q, point)))
-        })
-        .min_by(|x, y| x.2.total_cmp(&y.2))
-        .map(|(t, bary, _)| (t, bary))
+fn closest<'a>(
+    triangles: &'a [Triangle],
+    grid: &Grid,
+    point: [f64; 3],
+) -> Option<(&'a Triangle, [f64; 3])> {
+    let nearest = |t: &Triangle| {
+        let bary = closest_on_triangle(point, t.corners);
+        let [a, b, c] = t.corners;
+        let q = add(add(scale(a, bary[0]), scale(b, bary[1])), scale(c, bary[2]));
+        (bary, length(sub(q, point)))
+    };
+    let (index, _) = grid.nearest(point, |i| nearest(&triangles[i]).1)?;
+    let triangle = &triangles[index];
+    Some((triangle, nearest(triangle).0))
+}
+
+/// Lowest and highest corner of the box around `points`.
+fn bounds(points: &[[f64; 3]]) -> ([f64; 3], [f64; 3]) {
+    let (mut low, mut high) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+    for p in points {
+        for k in 0..3 {
+            low[k] = low[k].min(p[k]);
+            high[k] = high[k].max(p[k]);
+        }
+    }
+    (low, high)
 }
 
 /// Barycentric coordinates of the point of triangle `abc` nearest to `p` (Ericson,
@@ -450,13 +476,17 @@ fn closest_on_triangle(p: [f64; 3], [a, b, c]: [[f64; 3]; 3]) -> [f64; 3] {
 }
 
 /// Direction of the toe line at a toe node: towards the nearest other toe node.
-fn toe_tangent(coords: &[[f64; 3]], toe: &[(NodeId, usize)], index: usize) -> Option<[f64; 3]> {
-    let here = coords[index];
-    toe.iter()
-        .map(|&(_, other)| sub(coords[other], here))
-        .filter(|d| length(*d) > 0.0)
-        .min_by(|a, b| length(*a).total_cmp(&length(*b)))
-        .and_then(normalize)
+fn toe_tangent(toe: &[[f64; 3]], grid: &Grid, here: [f64; 3]) -> Option<[f64; 3]> {
+    let distance = |i: usize| match length(sub(toe[i], here)) {
+        0.0 => f64::INFINITY,
+        d => d,
+    };
+    let (index, d) = grid.nearest(here, distance)?;
+    if d.is_finite() {
+        normalize(sub(toe[index], here))
+    } else {
+        None
+    }
 }
 
 /// `v` turned into the plane with normal `n`, as a unit vector.
