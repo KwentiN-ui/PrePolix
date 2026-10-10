@@ -693,6 +693,7 @@ const FORCE: &str = "Concentrated_Force";
 const MOMENT: &str = "Moment";
 const PRESSURE: &str = "Pressure";
 const TRACTION: &str = "Surface_Traction";
+const PRE_TENSION: &str = "Pre-tension";
 const CFLUX: &str = "Concentrated_Flux";
 const SURFACE_FLUX: &str = "Surface_Flux";
 const BODY_FLUX: &str = "Body_Flux";
@@ -766,7 +767,7 @@ const DOF_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
 
 /// The load kinds of the dialog in PrePoMax's order: label, default name and the kind with
 /// zero values.
-fn load_kinds() -> [(&'static str, &'static str, LoadKind); 11] {
+fn load_kinds() -> [(&'static str, &'static str, LoadKind); 12] {
     [
         ("Einzelkraft", FORCE, LoadKind::ConcentratedForce([0.0; 3])),
         ("Moment", MOMENT, LoadKind::Moment([0.0; 3])),
@@ -780,6 +781,15 @@ fn load_kinds() -> [(&'static str, &'static str, LoadKind); 11] {
                 point: [0.0; 3],
                 axis: [0.0, 0.0, 1.0],
                 speed: 0.0,
+            },
+        ),
+        (
+            "Pre-tension (bolt preload)",
+            PRE_TENSION,
+            LoadKind::PreTension {
+                value: 0.0,
+                by_displacement: false,
+                direction: None,
             },
         ),
         (
@@ -869,6 +879,7 @@ fn load_kind_name(kind: &LoadKind) -> &'static str {
         LoadKind::Moment(_) => MOMENT,
         LoadKind::Pressure(_) => PRESSURE,
         LoadKind::SurfaceTraction(_) => TRACTION,
+        LoadKind::PreTension { .. } => PRE_TENSION,
         LoadKind::ConcentratedFlux(_) => CFLUX,
         LoadKind::SurfaceFlux(_) => SURFACE_FLUX,
         LoadKind::BodyFlux(_) => BODY_FLUX,
@@ -1464,6 +1475,46 @@ impl Editor {
                         );
                         ui.end_row();
                         revolution_hint(ui, axisymmetric);
+                    }
+                    LoadKind::PreTension {
+                        value,
+                        by_displacement,
+                        direction,
+                    } => {
+                        ui.label("Preload by");
+                        ui.horizontal(|ui| {
+                            ui.radio_value(by_displacement, false, "Force");
+                            ui.radio_value(by_displacement, true, "Displacement");
+                        });
+                        ui.end_row();
+                        if *by_displacement {
+                            ui.label("Shortening");
+                            ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.001));
+                        } else {
+                            ui.label("Force");
+                            ui.add(numeric::quantity(value, units, Quantity::Force).speed(1.0));
+                        }
+                        ui.end_row();
+                        let mut given = direction.is_some();
+                        ui.label("Direction");
+                        ui.checkbox(&mut given, "Given (otherwise the surface normal)");
+                        ui.end_row();
+                        let mut values = direction.unwrap_or([1.0, 0.0, 0.0]);
+                        for (value, label) in values.iter_mut().zip(["    X", "    Y", "    Z"]) {
+                            ui.label(label);
+                            ui.add_enabled(given, numeric::drag_value(value).speed(0.01));
+                            ui.end_row();
+                        }
+                        *direction = given.then_some(values);
+                        for line in [
+                            "Select the element faces on one side of a cut through the bolt shank.",
+                            "A positive force pulls the two sides together; a displacement shortens the bolt.",
+                            "A later step with displacement 0 keeps the bolt at its length.",
+                        ] {
+                            ui.label("");
+                            ui.weak(line);
+                            ui.end_row();
+                        }
                     }
                     LoadKind::ConcentratedFlux(flux) => {
                         ui.label("Wärmestrom");

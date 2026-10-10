@@ -72,11 +72,11 @@ pub enum MeshError {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(try_from = "MeshFile", into = "MeshFile")]
 pub struct FeMesh {
-    node_ids: Vec<NodeId>,
-    coords: Vec<[f64; 3]>,
-    node_lookup: FastMap<NodeId, usize>,
-    elements: Vec<Element>,
-    element_lookup: FastMap<ElementId, usize>,
+    pub(crate) node_ids: Vec<NodeId>,
+    pub(crate) coords: Vec<[f64; 3]>,
+    pub(crate) node_lookup: FastMap<NodeId, usize>,
+    pub(crate) elements: Vec<Element>,
+    pub(crate) element_lookup: FastMap<ElementId, usize>,
     pub node_sets: BTreeMap<String, Vec<NodeId>>,
     pub element_sets: BTreeMap<String, Vec<ElementId>>,
     pub surfaces: BTreeMap<String, SurfaceDefinition>,
@@ -266,6 +266,34 @@ impl FeMesh {
             || self.surfaces.keys().any(same)
     }
 
+    /// Merges parts into the first of them (by index), as PrePoMax's Merge of mesh parts:
+    /// the others' elements join it and their element sets of the same name join its set.
+    /// Returns the name kept and the names that went.
+    pub fn merge_parts(&mut self, indices: &[usize]) -> Option<(String, Vec<String>)> {
+        let mut indices = indices.to_vec();
+        indices.sort_unstable();
+        indices.dedup();
+        let (&target, others) = indices.split_first()?;
+        if others.is_empty() || indices.last().is_some_and(|&i| i >= self.parts.len()) {
+            return None;
+        }
+        let kept = self.parts[target].name.clone();
+        let mut gone = Vec::new();
+        for &index in others.iter().rev() {
+            let part = self.parts.remove(index);
+            self.parts[target].elements.extend(part.elements);
+            if let Some(elements) = self.element_sets.remove(&part.name) {
+                self.element_sets
+                    .entry(kept.clone())
+                    .or_default()
+                    .extend(elements);
+            }
+            gone.push(part.name);
+        }
+        gone.reverse();
+        Some((kept, gone))
+    }
+
     /// Renames a part together with the element set of the same name that an input file
     /// defines for it. Returns the old name.
     pub fn rename_part(&mut self, index: usize, name: &str) -> Option<String> {
@@ -282,8 +310,8 @@ impl FeMesh {
 /// shapes follow from the type names.
 #[derive(Serialize, Deserialize)]
 struct MeshFile {
-    node_ids: Vec<NodeId>,
-    coords: Vec<[f64; 3]>,
+    pub(crate) node_ids: Vec<NodeId>,
+    pub(crate) coords: Vec<[f64; 3]>,
     elements: Vec<(ElementId, String, Vec<NodeId>)>,
     #[serde(default)]
     node_sets: BTreeMap<String, Vec<NodeId>>,
@@ -347,6 +375,26 @@ impl TryFrom<MeshFile> for FeMesh {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn merging_parts_keeps_the_first_and_joins_its_element_set() {
+        let mut mesh = super::FeMesh::default();
+        for (name, elements) in [("A", vec![1, 2]), ("B", vec![3]), ("C", vec![4, 5])] {
+            mesh.parts.push(super::Part {
+                name: name.into(),
+                elements: elements.clone(),
+            });
+            mesh.element_sets.insert(name.into(), elements);
+        }
+        assert_eq!(mesh.merge_parts(&[1]), None);
+        let (kept, gone) = mesh.merge_parts(&[2, 0]).unwrap();
+        assert_eq!((kept.as_str(), gone), ("A", vec!["C".to_string()]));
+        assert_eq!(mesh.parts.len(), 2);
+        assert_eq!(mesh.parts[0].elements, [1, 2, 4, 5]);
+        assert_eq!(mesh.parts[1].name, "B");
+        assert_eq!(mesh.element_sets["A"], [1, 2, 4, 5]);
+        assert!(!mesh.element_sets.contains_key("C"));
+    }
+
     use super::*;
 
     #[test]

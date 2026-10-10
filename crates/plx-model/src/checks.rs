@@ -785,6 +785,8 @@ impl FeModel {
                         .filter(|&d| m[d] != 0.0 && d + 3 < dofs)
                         .map(|d| d + 3)
                         .collect(),
+                    // Acts on its own node, which nothing holds.
+                    LoadKind::PreTension { .. } => Vec::new(),
                     LoadKind::Pressure(_) | LoadKind::Centrifugal { .. } => {
                         (0..dofs.min(3)).collect()
                     }
