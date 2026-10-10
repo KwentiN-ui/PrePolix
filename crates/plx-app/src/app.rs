@@ -51,6 +51,8 @@ struct Workbench {
     settings: Settings,
     /// Open settings window with its unsaved draft.
     settings_window: Option<SettingsWindow>,
+    /// Open Campbell diagram window with its speed sweep.
+    campbell: Option<crate::campbell::CampbellWindow>,
     /// Open dialog of the model space and unit system, for a new or the open model.
     model_dialog: Option<ModelPropertiesDialog>,
     /// The new model asked for the geometry import; the app opens the file dialog.
@@ -223,6 +225,7 @@ impl PrepolixApp {
                 history_plot: None,
                 highlighted: None,
                 analysis: None,
+                campbell: None,
                 solver_findings: Vec::new(),
                 findings_window: None,
                 open_results: None,
@@ -900,6 +903,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.feature_window(&ctx);
         self.workbench.sync_result_features();
         self.workbench.run_analysis(&ctx);
+        self.workbench.campbell_window(&ctx);
         if let Some(path) = self.workbench.open_results.take() {
             self.open_path(path, &ctx);
         }
@@ -2308,6 +2312,45 @@ impl Workbench {
             .clicked()
         {
             self.open_results = results;
+        }
+        ui.separator();
+        let rotor = self
+            .setup_model()
+            .is_some_and(|m| crate::campbell::applies(&m.fe));
+        if ui
+            .add_enabled(
+                rotor || self.campbell.is_some(),
+                egui::Button::new("Campbell diagram ..."),
+            )
+            .on_disabled_hover_text(
+                "Needs an active Centrifugal load and a Complex Frequency step.",
+            )
+            .clicked()
+            && self.campbell.is_none()
+            && let Some(model) = self.setup_model()
+        {
+            self.campbell = Some(crate::campbell::CampbellWindow::new(&model.fe));
+        }
+    }
+
+    /// The Campbell diagram window with its sweep over the rotational speed.
+    fn campbell_window(&mut self, ctx: &egui::Context) {
+        let Some(mut window) = self.campbell.take() else {
+            return;
+        };
+        let can_start = self
+            .setup_model()
+            .is_some_and(|m| crate::campbell::applies(&m.fe) && m.mesh.element_count() > 0);
+        let default_solver = self.settings.solver.default_solver();
+        let open = window.show(ctx, can_start, |window| {
+            let model = self
+                .model
+                .as_ref()
+                .ok_or_else(|| "No model is open.".to_string())?;
+            window.start(&self.settings.solver, model, default_solver)
+        });
+        if open || window.is_running() {
+            self.campbell = Some(window);
         }
     }
 

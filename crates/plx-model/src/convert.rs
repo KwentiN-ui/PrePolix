@@ -91,6 +91,7 @@ impl FeModel {
                     c.option(&mut f.lower_frequency, Quantity::Frequency);
                     c.option(&mut f.upper_frequency, Quantity::Frequency);
                 }
+                StepKind::ComplexFrequency(_) => {}
                 // Buckling factors and the accuracy have no unit.
                 StepKind::Buckle(_) => {}
             }

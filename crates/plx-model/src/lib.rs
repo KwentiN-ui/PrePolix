@@ -116,8 +116,9 @@ impl FeModel {
     /// installed CalculiX should use by default.
     pub fn resolve_default_solver(&mut self, solver: EquationSolver) {
         for step in &mut self.steps {
-            let current = step.kind.solver_mut();
-            if *current == EquationSolver::Default {
+            if let Some(current) = step.kind.solver_mut()
+                && *current == EquationSolver::Default
+            {
                 *current = solver;
             }
         }
@@ -353,6 +354,9 @@ pub enum StepKind {
     Static(StaticStep),
     /// Eigenfrequencies and mode shapes (`*FREQUENCY`).
     Frequency(FrequencyStep),
+    /// Complex eigenfrequencies of a rotating structure with Coriolis forces
+    /// (`*COMPLEX FREQUENCY`), from the eigenmodes a frequency step stored before.
+    ComplexFrequency(ComplexFrequencyStep),
     /// Buckling factors and buckling modes (`*BUCKLE`).
     Buckle(BuckleStep),
     /// Temperatures only (`*HEAT TRANSFER`).
@@ -363,13 +367,16 @@ pub enum StepKind {
 }
 
 impl StepKind {
-    pub fn solver_mut(&mut self) -> &mut EquationSolver {
+    /// The equation solver of the step; a complex frequency step chooses none, it works
+    /// on the stored eigenmodes.
+    pub fn solver_mut(&mut self) -> Option<&mut EquationSolver> {
         match self {
-            StepKind::Static(settings) => &mut settings.solver,
-            StepKind::Frequency(settings) => &mut settings.solver,
-            StepKind::Buckle(settings) => &mut settings.solver,
+            StepKind::Static(settings) => Some(&mut settings.solver),
+            StepKind::Frequency(settings) => Some(&mut settings.solver),
+            StepKind::ComplexFrequency(_) => None,
+            StepKind::Buckle(settings) => Some(&mut settings.solver),
             StepKind::HeatTransfer(settings) | StepKind::CoupledTempDisp(settings) => {
-                &mut settings.increments.solver
+                Some(&mut settings.increments.solver)
             }
         }
     }
@@ -377,7 +384,12 @@ impl StepKind {
     /// Whether the step takes loads. A frequency step has none, as in PrePoMax; preloads
     /// come from the previous step with [`FrequencyStep::perturbation`].
     pub fn supports_loads(&self) -> bool {
-        !matches!(self, StepKind::Frequency(_))
+        !matches!(self, StepKind::Frequency(_) | StepKind::ComplexFrequency(_))
+    }
+
+    /// Whether the step computes eigenmodes, whose shapes are scaled arbitrarily.
+    pub fn is_modal(&self) -> bool {
+        matches!(self, StepKind::Frequency(_) | StepKind::ComplexFrequency(_))
     }
 
     /// Whether the step takes defined fields. A thermal step solves for the temperatures
@@ -570,6 +582,29 @@ impl Default for FrequencyStep {
     }
 }
 
+/// Settings of a `*COMPLEX FREQUENCY` step, with PrePoMax's defaults. CalculiX solves it on
+/// the eigenmodes of the last frequency step with [`FrequencyStep::storage`]; the Coriolis
+/// forces come from the centrifugal load of the static step before that frequency step.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ComplexFrequencyStep {
+    /// Number of complex eigenfrequencies to compute.
+    pub num_frequencies: u32,
+    /// Coriolis forces of the rotation (`CORIOLIS`); the usual reason for the step.
+    pub coriolis: bool,
+    /// `*STEP, PERTURBATION`, as PrePoMax offers it for this step.
+    pub perturbation: bool,
+}
+
+impl Default for ComplexFrequencyStep {
+    fn default() -> Self {
+        Self {
+            num_frequencies: 10,
+            coriolis: true,
+            perturbation: true,
+        }
+    }
+}
+
 /// Settings of a `*BUCKLE` step, with PrePoMax's defaults. The loads of the step are the
 /// reference loads; the buckling factors scale them to the critical loads.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -596,6 +631,19 @@ impl Default for BuckleStep {
 }
 
 impl Step {
+    /// A complex frequency step with PrePoMax's default field outputs.
+    pub fn new_complex_frequency(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            active: true,
+            kind: StepKind::ComplexFrequency(ComplexFrequencyStep::default()),
+            boundary_conditions: Vec::new(),
+            loads: Vec::new(),
+            history_outputs: Vec::new(),
+            field_outputs: FieldOutput::complex_frequency_defaults(),
+        }
+    }
+
     /// A static step with PrePoMax's default field outputs.
     pub fn new_static(name: impl Into<String>) -> Self {
         Self {
@@ -903,6 +951,14 @@ impl FieldOutput {
     pub fn frequency_defaults() -> Vec<Self> {
         let mut outputs = Self::defaults();
         outputs[0].variables = vec!["U".into()];
+        outputs
+    }
+
+    /// Field outputs PrePoMax adds to a new complex frequency step: the displacements with
+    /// their magnitudes and phases (`PU`), so the whirling of a mode can be shown.
+    pub fn complex_frequency_defaults() -> Vec<Self> {
+        let mut outputs = Self::defaults();
+        outputs[0].variables = vec!["U".into(), "PU".into()];
         outputs
     }
 

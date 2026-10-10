@@ -5,6 +5,7 @@ mod analysis;
 mod animation;
 mod app;
 mod cad_selection;
+mod campbell;
 mod constraint_dialog;
 mod contact_search;
 mod contacts;

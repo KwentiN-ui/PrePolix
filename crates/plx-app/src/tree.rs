@@ -1356,7 +1356,7 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                 if !step.kind.supports_loads() {
                     tree.closed.insert(
                         TreeItem::StepGroup(s, "Loads"),
-                        "Ein Frequency Step hat keine Lasten.",
+                        "A frequency step has no loads.",
                     );
                 }
                 if !step.kind.supports_defined_fields() {
