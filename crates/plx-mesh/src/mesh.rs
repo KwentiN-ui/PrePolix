@@ -72,11 +72,11 @@ pub enum MeshError {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(try_from = "MeshFile", into = "MeshFile")]
 pub struct FeMesh {
-    node_ids: Vec<NodeId>,
-    coords: Vec<[f64; 3]>,
-    node_lookup: FastMap<NodeId, usize>,
-    elements: Vec<Element>,
-    element_lookup: FastMap<ElementId, usize>,
+    pub(crate) node_ids: Vec<NodeId>,
+    pub(crate) coords: Vec<[f64; 3]>,
+    pub(crate) node_lookup: FastMap<NodeId, usize>,
+    pub(crate) elements: Vec<Element>,
+    pub(crate) element_lookup: FastMap<ElementId, usize>,
     pub node_sets: BTreeMap<String, Vec<NodeId>>,
     pub element_sets: BTreeMap<String, Vec<ElementId>>,
     pub surfaces: BTreeMap<String, SurfaceDefinition>,
@@ -282,8 +282,8 @@ impl FeMesh {
 /// shapes follow from the type names.
 #[derive(Serialize, Deserialize)]
 struct MeshFile {
-    node_ids: Vec<NodeId>,
-    coords: Vec<[f64; 3]>,
+    pub(crate) node_ids: Vec<NodeId>,
+    pub(crate) coords: Vec<[f64; 3]>,
     elements: Vec<(ElementId, String, Vec<NodeId>)>,
     #[serde(default)]
     node_sets: BTreeMap<String, Vec<NodeId>>,

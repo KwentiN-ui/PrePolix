@@ -402,6 +402,19 @@ impl Model {
         self.cad_entities.get(index).copied()
     }
 
+    /// Changes the mesh in place, e.g. by a mesh tool, and rebuilds what the GUI derives
+    /// from it; the parts keep their colours and visibility.
+    pub fn edit_mesh(&mut self, edit: impl FnOnce(&mut FeMesh, &mut FeModel)) {
+        let mut mesh = std::mem::take(&mut self.mesh);
+        edit(&mut mesh, &mut self.fe);
+        let kept: Vec<([f32; 3], bool)> = self.parts.iter().map(|p| (p.color, p.visible)).collect();
+        self.set_mesh(mesh);
+        for (part, (color, visible)) in self.parts.iter_mut().zip(kept) {
+            part.color = color;
+            part.visible = visible;
+        }
+    }
+
     /// Replaces the mesh, e.g. by a newly generated one; the FE model stays.
     pub fn set_mesh(&mut self, mesh: FeMesh) {
         let mut fresh = Self::new(&self.path, mesh);

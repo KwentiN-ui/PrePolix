@@ -167,6 +167,51 @@ impl FeModel {
         (self.initial_conditions.iter_mut()).for_each(|i| follow(&mut i.region));
     }
 
+    /// Follows renumbered nodes and elements, as [`plx_mesh::FeMesh::renumber`] does:
+    /// regions of node and face ids name the new ids.
+    pub fn renumber(
+        &mut self,
+        nodes: &std::collections::BTreeMap<NodeId, NodeId>,
+        elements: &std::collections::BTreeMap<plx_mesh::ElementId, plx_mesh::ElementId>,
+    ) {
+        let follow = |region: &mut Region| match region {
+            Region::Nodes(ids) => {
+                for id in ids.iter_mut() {
+                    *id = nodes.get(id).copied().unwrap_or(*id);
+                }
+                ids.sort_unstable();
+            }
+            Region::Faces(faces) => {
+                for (element, _) in faces.iter_mut() {
+                    *element = elements.get(element).copied().unwrap_or(*element);
+                }
+            }
+            _ => {}
+        };
+        self.regions_mut().for_each(follow);
+        (self.initial_conditions.iter_mut()).for_each(|i| follow(&mut i.region));
+    }
+
+    /// Follows the face numbers of inverted elements, as
+    /// [`plx_mesh::FeMesh::transform_parts`] returns them: regions of faces name the new
+    /// numbers.
+    pub fn renumber_faces(&mut self, renumbering: &plx_mesh::FaceRenumbering) {
+        let follow = |region: &mut Region| {
+            if let Region::Faces(faces) = region {
+                for (element, face) in faces.iter_mut() {
+                    if let Some(new) = renumbering.get(element)
+                        && let Some(&number) = new.get(usize::from(*face).wrapping_sub(1))
+                        && number > 0
+                    {
+                        *face = number;
+                    }
+                }
+            }
+        };
+        self.regions_mut().for_each(follow);
+        (self.initial_conditions.iter_mut()).for_each(|i| follow(&mut i.region));
+    }
+
     fn regions_mut(&mut self) -> impl Iterator<Item = &mut Region> {
         (self.sections.iter_mut().map(|s| &mut s.region))
             .chain(
