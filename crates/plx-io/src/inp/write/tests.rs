@@ -3034,6 +3034,86 @@ fn calculix_prints_the_contact_force_of_a_pair() {
     assert!(all.field("TOTAL_NUMBER_OF_CONTACT_ELEMENTS").is_some());
 }
 
+fn body_load(kind: LoadKind) -> Load {
+    Load {
+        name: "Body-1".into(),
+        active: true,
+        region: Region::Parts(vec!["EALL".into()]),
+        kind,
+        amplitude: None,
+        factor_amplitude: None,
+    }
+}
+
+#[test]
+fn gravity_and_centrifugal_loads_are_written_like_prepomax() {
+    let (mesh, model) = cantilever(body_load(LoadKind::Gravity([0.0, 0.0, -9810.0])));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains(
+            "** Name: Body-1\n*Dload\nInternal_Selection-1_Body-1, Grav, 9810, 0, 0, -1\n"
+        ),
+        "{text}"
+    );
+    let (mesh, model) = cantilever(body_load(LoadKind::Centrifugal {
+        point: [0.0, 5.0, 5.0],
+        axis: [0.0, 0.0, 2.0],
+        speed: 100.0,
+    }));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Dload\nInternal_Selection-1_Body-1, Centrif, 10000, 0, 5, 5, 0, 0, 1\n"),
+        "{text}"
+    );
+    let (mesh, model) = cantilever(body_load(LoadKind::Gravity([0.0; 3])));
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::InvalidLoad { .. })
+    ));
+}
+
+/// The nodes of the fixed end of the cantilever.
+fn fixed_nodes(mesh: &FeMesh) -> Vec<NodeId> {
+    mesh.node_sets.get("FIX").unwrap().to_vec()
+}
+
+#[test]
+fn calculix_reactions_balance_the_weight_and_the_centrifugal_force() {
+    // Steel beam 10 x 10 x 100 mm, 7.85e-9 t/mm³: weight 0.077 N under 9810 mm/s².
+    let (mesh, model) = cantilever(body_load(LoadKind::Gravity([0.0, 0.0, -9810.0])));
+    let Some(frd) = run_ccx("gravity", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let weight = 7.85e-9 * 100.0 * 100.0 * 9810.0;
+    // CalculiX's nodal forces hold the reaction and the applied body force at a node; the
+    // fixed nodes carry the weight of half of the first of the ten element layers.
+    let expected = weight * (1.0 - 0.5 / 10.0);
+    let reaction = node_sum(&frd, "FORC", "F3", &fixed_nodes(&mesh));
+    assert!(
+        (reaction - expected).abs() < 1e-3 * weight,
+        "{reaction} vs {expected}"
+    );
+    // Rotating about the z axis through the fixed end: the centrifugal force on the beam is
+    // rho A omega² L² / 2, pulling it away from the axis.
+    let speed = 100.0;
+    let (mesh, model) = cantilever(body_load(LoadKind::Centrifugal {
+        point: [0.0, 5.0, 5.0],
+        axis: [0.0, 0.0, 1.0],
+        speed,
+    }));
+    let Some(frd) = run_ccx("centrifugal", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let pull = 7.85e-9 * 100.0 * speed * speed * 100.0_f64.powi(2) / 2.0;
+    // The fixed nodes take a third of the force of the first layer (1/100 of the pull).
+    let expected = pull * (1.0 - 1.0 / 300.0);
+    let reaction = node_sum(&frd, "FORC", "F1", &fixed_nodes(&mesh));
+    assert!(
+        (reaction + expected).abs() < 1e-3 * pull,
+        "{reaction} vs {expected}"
+    );
+}
+
 /// The half x <= 50 of the cantilever as a submodel: held at x = 0, its cut at x = 50
 /// driven by the global results with `dofs`.
 fn cantilever_submodel(dofs: [bool; 6]) -> (FeMesh, FeModel) {

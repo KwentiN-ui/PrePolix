@@ -129,6 +129,11 @@ impl FeModel {
                         c.value(coefficient, Quantity::HeatTransferCoefficient);
                     }
                     LoadKind::Radiation { sink, .. } => c.value(sink, Quantity::Temperature),
+                    LoadKind::Gravity(acceleration) => c.all(acceleration, Quantity::Acceleration),
+                    LoadKind::Centrifugal { point, speed, .. } => {
+                        c.all(point, Quantity::Length);
+                        c.value(speed, Quantity::RotationalSpeed);
+                    }
                 }
             }
         }
