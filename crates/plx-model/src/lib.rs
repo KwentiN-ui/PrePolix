@@ -548,9 +548,10 @@ impl StepKind {
     }
 
     /// Whether the step takes defined fields. A thermal step solves for the temperatures
-    /// instead of taking them, as in PrePoMax.
+    /// instead of taking them, as in PrePoMax, and a step that superposes stored eigenmodes
+    /// only takes the loads CalculiX allows there (forces, pressures, base motion).
     pub fn supports_defined_fields(&self) -> bool {
-        !self.is_thermal()
+        !self.is_thermal() && !self.uses_stored_modes()
     }
 
     /// Whether the step solves for displacements.
@@ -1525,6 +1526,29 @@ pub fn next_name<'a>(prefix: &str, existing: impl IntoIterator<Item = &'a str>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_steps_with_prescribed_temperatures_take_defined_fields() {
+        let kinds = [
+            (StepKind::Static(StaticStep::default()), true),
+            (StepKind::Frequency(FrequencyStep::default()), true),
+            (StepKind::Dynamic(DynamicStep::default()), true),
+            (StepKind::Buckle(BuckleStep::default()), true),
+            (StepKind::ModalDynamics(ModalDynamicsStep::default()), false),
+            (
+                StepKind::SteadyStateDynamics(SteadyStateDynamicsStep::default()),
+                false,
+            ),
+            (StepKind::HeatTransfer(HeatTransferStep::default()), false),
+            (
+                StepKind::CoupledTempDisp(HeatTransferStep::default()),
+                false,
+            ),
+        ];
+        for (kind, expected) in kinds {
+            assert_eq!(kind.supports_defined_fields(), expected, "{kind:?}");
+        }
+    }
 
     #[test]
     fn regions_follow_renamed_parts() {
