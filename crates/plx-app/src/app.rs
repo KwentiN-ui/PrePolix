@@ -26,6 +26,7 @@ use crate::model_properties::{DialogResult, ModelPropertiesDialog, geometry_chec
 use crate::numeric;
 use crate::overlay::{Marker, Overlay};
 use crate::properties;
+use crate::query::{QueryAction, QueryWindow};
 use crate::results::{Deformation, ResultsView, format_legend_value};
 use crate::screenshot::{self, Screenshot};
 use crate::section::{PlaneDefinition, SectionDialog, SectionResult, SectionView};
@@ -64,6 +65,8 @@ struct Workbench {
     /// Open dialog of a mesh setup item.
     mesh_item_editor: Option<MeshItemEditor>,
     meshing: Option<MeshingJob>,
+    /// CAD faces and edges Gmsh named when meshing failed, shown red on the geometry.
+    mesh_failure: BTreeSet<plx_mesher::CadEntity>,
     /// The results workspace: every results file opened in this session, PrePoMax's results
     /// collection. One of them is shown on the Results tab.
     results: Vec<Model>,
@@ -96,6 +99,8 @@ struct Workbench {
     keyword_editor: Option<KeywordEditor>,
     /// Open search for contact pairs.
     contact_search: Option<ContactSearchDialog>,
+    /// PrePoMax's Query tool, while its window is open.
+    query: Option<QueryWindow>,
     /// Open material library editor.
     material_library: Option<MaterialLibraryEditor>,
     /// Open dialog creating or editing a field output derived from the shown results.
@@ -192,6 +197,7 @@ impl PrepolixApp {
                 mesh_setup: None,
                 mesh_item_editor: None,
                 meshing: None,
+                mesh_failure: BTreeSet::new(),
                 results: Vec::new(),
                 current_result: 0,
                 parked_camera: None,
@@ -209,6 +215,7 @@ impl PrepolixApp {
                 confirm_delete: None,
                 keyword_editor: None,
                 contact_search: None,
+                query: None,
                 material_library: None,
                 field_output_dialog: None,
                 history_dialog: None,
@@ -398,6 +405,17 @@ impl PrepolixApp {
                 if ui.add_enabled(setup, export).clicked() {
                     self.workbench.export_inp();
                 }
+                let deformed = self.workbench.shown_results_view().is_some();
+                let export = egui::Button::new("Export Deformed Mesh (.inp) …");
+                let tip = "Writes the mesh of the current results, deformed by the current \
+                           deformation scale factor, as an input file with only the mesh.";
+                if ui
+                    .add_enabled(deformed, export)
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    self.workbench.export_deformed_mesh();
+                }
                 ui.separator();
                 if ui.button("Beenden").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -478,6 +496,10 @@ impl PrepolixApp {
             ui.menu_button("Analyse", |ui| self.workbench.analysis_menu(ui));
             ui.menu_button("Ergebnisse", |ui| self.workbench.results_menu(ui));
             ui.menu_button("Werkzeuge", |ui| {
+                if ui.button("Query …").clicked() {
+                    self.workbench.query = Some(QueryWindow::default());
+                }
+                ui.separator();
                 if ui.button("Einstellungen …").clicked() {
                     self.workbench.settings_window =
                         Some(SettingsWindow::new(&self.workbench.settings));
@@ -564,7 +586,7 @@ impl PrepolixApp {
         ui.horizontal(|ui| {
             // PrePoMax shows the unit system of the model at the right.
             if let Some(model) = &self.workbench.model {
-                let properties = model.fe.properties;
+                let properties = &model.fe.properties;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(format!(
                         "Einheitensystem: {}   Modellraum: {}",
@@ -862,6 +884,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.editor_window(&ctx);
         self.workbench.confirm_delete_window(&ctx);
         self.workbench.contact_search_window(&ctx);
+        self.workbench.query_window(&ctx);
         self.workbench.section_window(&ctx);
         self.workbench.exploded_window(&ctx);
         self.workbench.keyword_editor_window(&ctx);
@@ -1594,6 +1617,9 @@ impl Workbench {
     /// Whether clicks in the 3D view pick for an open dialog: an item dialog of the FE model
     /// or a history output or hot spot dialog of the results.
     fn picking(&self) -> bool {
+        if self.query.is_some() {
+            return true;
+        }
         match self.tree_view {
             TreeView::Results => {
                 (self.history_dialog.as_ref()).is_some_and(HistoryOutputDialog::picks)
@@ -1906,6 +1932,26 @@ impl Workbench {
         }
     }
 
+    fn query_window(&mut self, ctx: &egui::Context) {
+        let Some(query) = &mut self.query else {
+            return;
+        };
+        let model = match self.tree_view {
+            TreeView::Results => self.results.get(self.current_result),
+            TreeView::Geometry => self.geometry.as_ref(),
+            TreeView::FeModel => self.model.as_ref(),
+        };
+        match query.show(ctx, model, &mut self.output) {
+            QueryAction::Open => {}
+            QueryAction::Changed => self.update_contour(),
+            QueryAction::Close => {
+                self.query = None;
+                self.viewport.preview = Default::default();
+                self.update_contour();
+            }
+        }
+    }
+
     fn open_mesh_setup(&mut self) {
         if let Some(model) = &self.model
             && let Some(geometry) = &model.geometry
@@ -1981,6 +2027,7 @@ impl Workbench {
         };
         self.output.push(format!("Vernetze {what} …"));
         self.meshing = Some(MeshingJob::start(geometry, parts, ctx));
+        self.mesh_failure.clear();
     }
 
     fn poll_meshing(&mut self) {
@@ -2045,9 +2092,21 @@ impl Workbench {
                     self.view_command = Some(ViewCommand::Fit);
                 }
             }
-            Err(error) => self
-                .output
-                .push(format!("Vernetzung fehlgeschlagen: {error}")),
+            Err(error) => {
+                let message = error.to_string();
+                self.mesh_failure = plx_mesher::named_entities(&message).into_iter().collect();
+                self.output
+                    .push(format!("Vernetzung fehlgeschlagen: {message}"));
+                // The geometry shows the faces and edges Gmsh names in red.
+                if !self.mesh_failure.is_empty() {
+                    self.output.push(
+                        "Die betroffenen Flächen und Kanten sind in der Geometrie rot markiert"
+                            .into(),
+                    );
+                    self.tree.selected = None;
+                    self.set_tree_view(TreeView::Geometry);
+                }
+            }
         }
     }
 
@@ -2423,19 +2482,40 @@ impl Workbench {
         let heading = format!("prepolix: {}", model.file_name());
         let mut fe = model.fe.clone();
         fe.resolve_default_solver(default_solver);
-        let text = match plx_io::inp::write_inp(&model.mesh, &fe, &heading) {
-            Ok(text) => text,
-            Err(error) => {
-                self.output.push(format!("Export nicht möglich: {error}"));
-                return;
-            }
-        };
+        // Checked before asking for the file; the global results are staged once it is known.
+        if let Err(error) = plx_io::inp::write_inp(&model.mesh, &fe, &heading) {
+            self.output.push(format!("Export nicht möglich: {error}"));
+            return;
+        }
         let picked = rfd::FileDialog::new()
             .set_title("CalculiX-Eingabedatei exportieren")
             .add_filter("Eingabedatei (*.inp)", &["inp"])
             .set_file_name(format!("{}.inp", crate::tree::ANALYSIS_NAME))
             .save_file();
         if let Some(path) = picked {
+            // A submodel's global results go next to the input file, which names them.
+            let dir = path.parent().unwrap_or(std::path::Path::new("."));
+            let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+            if let Err(error) = crate::analysis::stage_global_results(
+                &mut fe,
+                dir,
+                stem.as_deref().unwrap_or("Analysis"),
+            ) {
+                self.output.push(error);
+                return;
+            }
+            let text = match plx_io::inp::write_inp(&model.mesh, &fe, &heading) {
+                Ok(text) => text,
+                Err(error) => {
+                    self.output.push(format!("Export nicht möglich: {error}"));
+                    return;
+                }
+            };
+            if fe.uses_global_results()
+                && let Some(global) = fe.properties.submodel_input()
+            {
+                self.output.push(format!("{} copied", global.display()));
+            }
             match std::fs::write(&path, text) {
                 Ok(()) => self.output.push(format!("{} geschrieben", path.display())),
                 Err(error) => self.output.push(format!("{}: {error}", path.display())),
@@ -2448,10 +2528,79 @@ impl Workbench {
         }
     }
 
+    /// PrePoMax's "Export deformed mesh": the mesh of the current results with the shown
+    /// displacements times the deformation scale factor, without materials or steps, so
+    /// that another model can import it.
+    fn export_deformed_mesh(&mut self) {
+        let Some(model) = self.results.get(self.current_result) else {
+            return;
+        };
+        let Some(view) = &model.results else {
+            return;
+        };
+        let Some(displacements) = view.shown_displacements() else {
+            self.output
+                .push("Export not possible: the results have no displacements".into());
+            return;
+        };
+        let scale = f64::from(view.scale());
+        let shown = view
+            .current_increment()
+            .map(|i| format!(", step {}, increment {}", i.step, i.increment))
+            .unwrap_or_default();
+        let heading = format!(
+            "prepolix: deformed mesh of {}{shown}, scale factor {scale}",
+            model.file_name()
+        );
+        let text = match plx_io::inp::write_deformed_mesh_inp(
+            &model.mesh,
+            &displacements,
+            scale,
+            &heading,
+        ) {
+            Ok(text) => text,
+            Err(error) => {
+                self.output.push(format!("Export not possible: {error}"));
+                return;
+            }
+        };
+        let stem = model
+            .path
+            .file_stem()
+            .map_or("Results".into(), |s| s.to_string_lossy().into_owned());
+        let picked = rfd::FileDialog::new()
+            .set_title("Export Deformed Mesh")
+            .add_filter("Input file (*.inp)", &["inp"])
+            .set_file_name(format!("{stem}_deformed.inp"))
+            .save_file();
+        if let Some(path) = picked {
+            match std::fs::write(&path, text) {
+                Ok(()) => self
+                    .output
+                    .push(format!("Deformed mesh exported to {}", path.display())),
+                Err(error) => self.output.push(format!("{}: {error}", path.display())),
+            }
+        }
+    }
+
     /// A click in the 3D view picks for the open dialog. Without one, a click on a part
     /// selects it in the tree, as in PrePoMax, and a click into empty space clears the tree
     /// selection and with it the highlighted region.
     fn click(&mut self, click: Click) {
+        if let Some(query) = &mut self.query {
+            let model = match self.tree_view {
+                TreeView::Results => self.results.get(self.current_result),
+                TreeView::Geometry => self.geometry.as_ref(),
+                TreeView::FeModel => self.model.as_ref(),
+            };
+            if let Some(model) = model {
+                let hit = model.pick_click(&click);
+                if query.click(model, hit.as_ref(), &mut self.output) {
+                    self.update_contour();
+                }
+            }
+            return;
+        }
         if self.feature_picks()
             && let Some(dialog) = &mut self.feature_dialog
         {
@@ -2631,6 +2780,16 @@ impl Workbench {
 
     /// Shows what a click would select where the mouse rests.
     fn hover(&mut self, hover: Option<Click>) {
+        if let Some(query) = &self.query {
+            self.viewport.preview = match (hover, self.shown()) {
+                (Some(click), Some(model)) => model
+                    .pick_click(&click)
+                    .map(|hit| query.preview(model, &hit))
+                    .unwrap_or_default(),
+                _ => Default::default(),
+            };
+            return;
+        }
         if self.feature_picks()
             && let Some(dialog) = &self.feature_dialog
             && let Some(model) = self.feature_model(dialog.results)
@@ -3341,7 +3500,8 @@ impl Workbench {
                 .get(*index)
                 .map(|item| crate::meshing::item_highlight(view, &item.kind))
                 .unwrap_or_default(),
-            _ => Highlight::default(),
+            // Without a selection, the faces and edges meshing failed on.
+            _ => crate::meshing::entities_highlight(view, &self.mesh_failure),
         };
         if highlight != view.highlight {
             view.highlight = highlight;
@@ -3923,14 +4083,14 @@ impl Workbench {
     /// with the last choice proposed. `then_import` opens the geometry import afterwards.
     fn new_model(&mut self, then_import: bool) {
         self.model_dialog = Some(ModelPropertiesDialog::new_model(
-            self.settings.new_model,
+            self.settings.new_model.clone(),
             then_import,
         ));
     }
 
     fn edit_model_properties(&mut self) {
         if let Some(model) = &self.model {
-            self.model_dialog = Some(ModelPropertiesDialog::edit(model.fe.properties));
+            self.model_dialog = Some(ModelPropertiesDialog::edit(model.fe.properties.clone()));
         }
     }
 
@@ -3951,7 +4111,12 @@ impl Workbench {
                 self.set_model_properties(properties, convert)
             }
             DialogResult::Ok(properties) => {
-                self.settings.new_model = properties;
+                // New models propose the space and units, never a submodel's global results.
+                self.settings.new_model = plx_model::ModelProperties {
+                    kind: plx_model::ModelKind::General,
+                    global_results: None,
+                    ..properties.clone()
+                };
                 self.create_model(properties);
                 self.import_requested = then_import;
             }
@@ -3966,12 +4131,12 @@ impl Workbench {
             std::path::Path::new("Unbenannt"),
             plx_mesh::FeMesh::default(),
         );
-        model.fe.properties = properties;
         self.output.push(format!(
             "Neues Modell: {}, {}",
             properties.space.label(),
             properties.units.label()
         ));
+        model.fe.properties = properties;
         self.model = Some(model);
         self.set_tree_view(TreeView::Geometry);
         self.viewport.set_parts(&[]);
@@ -3985,14 +4150,14 @@ impl Workbench {
         let Some(model) = &mut self.model else {
             return;
         };
-        let old = model.fe.properties;
+        let old = model.fe.properties.clone();
         if convert && old.units != properties.units {
             self.convert_units(properties.units);
         }
         let Some(model) = &mut self.model else {
             return;
         };
-        model.fe.properties = properties;
+        model.fe.properties = properties.clone();
         if old.space != properties.space {
             let mut mesh = model.mesh.clone();
             if properties.space.convert_mesh(&mut mesh) {
@@ -4181,8 +4346,22 @@ impl Workbench {
         if actions.play || actions.changed {
             sound.mix = None;
         }
+        // A mode clicked in the window swings in the 3D view until another increment is
+        // shown; a playing sound with its overlay takes precedence.
+        if let Some(increment) = actions.show {
+            sound.preview = Some(increment);
+            sound.shape_clock = (0.0, f64::NEG_INFINITY);
+        }
+        if sound
+            .preview
+            .is_some_and(|p| p != view.increment && actions.show.is_none())
+        {
+            sound.preview = None;
+        }
         let audible = self.audio.as_ref().is_some_and(|a| a.synth().sounding());
-        let overlay = sound.show_shape && audible && !actions.close;
+        let playing_overlay = sound.show_shape && audible;
+        let only = (!playing_overlay).then_some(sound.preview).flatten();
+        let overlay = (playing_overlay || only.is_some()) && !actions.close;
         // The overlay takes the place of an animation.
         if overlay && view.animation.is_some() {
             view.stop_animation();
@@ -4195,12 +4374,12 @@ impl Workbench {
             if sound
                 .mix
                 .as_ref()
-                .is_some_and(|m| !m.shows(&field, &component))
+                .is_some_and(|m| !m.shows(&field, &component, only))
             {
                 sound.mix = None;
             }
             if sound.mix.is_none() {
-                let mix = sound::ShapeMix::new(sound, &view.increments, &field, &component);
+                let mix = sound::ShapeMix::new(sound, &view.increments, &field, &component, only);
                 sound.mix = mix;
             }
             // A new frame at the chosen rate; the swings advance with the chosen speed, so
@@ -4223,9 +4402,9 @@ impl Workbench {
             self.results_changed = true;
         }
         if let Some(increment) = actions.show
-            && view.animation.is_none()
             && increment != view.increment
         {
+            view.stop_animation();
             view.select_increment(increment);
             self.results_changed = true;
         }
@@ -4336,8 +4515,14 @@ impl Workbench {
                 text: format!("{label}: {}\nSection plane", format_legend_value(value)),
             })
         };
+        let query = self
+            .query
+            .as_ref()
+            .map(|q| q.marks(model))
+            .unwrap_or_default();
         self.viewport.overlay = Overlay {
             legend: view.and_then(ResultsView::legend),
+            annotations: query.markers,
             status: view
                 .filter(|_| post.status_block)
                 .map_or_else(Vec::new, |v| v.status_lines(&model.file_name())),
@@ -4356,12 +4541,17 @@ impl Workbench {
             nodes: (model.highlight.nodes.iter())
                 .filter_map(|&id| model.node_position(model.mesh.node_index(id)?))
                 .chain(transformation.iter().flat_map(|d| d.points(model)))
+                .chain(query.points)
                 .collect(),
             edges: render_lines(model, &model.highlight.lines),
             secondary_edges: render_lines(model, &model.highlight.secondary_lines),
             axis,
             paths: self.overlay_paths(),
-            lines: transformation.map_or_else(Vec::new, |d| d.lines(model)),
+            lines: (transformation
+                .map_or_else(Vec::new, |d| d.lines(model))
+                .into_iter())
+            .chain(query.lines)
+            .collect(),
             features: Vec::new(),
             result_path: None,
         };

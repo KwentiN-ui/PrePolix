@@ -33,6 +33,8 @@ pub struct Overlay {
     pub status: Vec<String>,
     pub maximum: Option<Marker>,
     pub minimum: Option<Marker>,
+    /// Labels left by the query tool, drawn like the markers.
+    pub annotations: Vec<Marker>,
     /// Global origin in render coordinates, where the global axis triad is drawn.
     pub global_origin: Option<Vec3>,
     pub show_scale_bar: bool,
@@ -97,6 +99,8 @@ pub struct LabelOffsets {
     /// Box position relative to the marked point, once dragged.
     pub maximum: Option<Vec2>,
     pub minimum: Option<Vec2>,
+    /// One per annotation of the query tool.
+    pub annotations: Vec<Option<Vec2>>,
 }
 
 fn font() -> FontId {
@@ -203,6 +207,15 @@ pub fn draw(
             let point = project(camera, rect, marker.position);
             draw_marker(ui, &painter, rect, point, &marker.text, offset, id);
         }
+    }
+    offsets.annotations.resize(overlay.annotations.len(), None);
+    for (index, (marker, offset)) in (overlay.annotations.iter())
+        .zip(&mut offsets.annotations)
+        .enumerate()
+    {
+        let point = project(camera, rect, marker.position);
+        let id = format!("annotation {index}");
+        draw_marker(ui, &painter, rect, point, &marker.text, offset, &id);
     }
     if let Some(legend) = &overlay.legend {
         draw_legend(ui, &painter, rect, legend, &mut offsets.legend);

@@ -8,7 +8,8 @@ use plx_mesh::{ElementFamily, ElementShape, FeMesh};
 use plx_mesher::CadEntity;
 use plx_model::convert::Conversion;
 use plx_model::{
-    BASE_QUANTITIES, DERIVED_QUANTITIES, ModelProperties, ModelSpace, Quantity, UnitSystem,
+    BASE_QUANTITIES, DERIVED_QUANTITIES, ModelKind, ModelProperties, ModelSpace, Quantity,
+    UnitSystem,
 };
 
 const ERROR: egui::Color32 = egui::Color32::from_rgb(200, 0, 0);
@@ -38,9 +39,9 @@ pub enum DialogResult {
 impl ModelPropertiesDialog {
     pub fn new_model(properties: ModelProperties, then_import: bool) -> Self {
         Self {
-            draft: properties,
+            draft: properties.clone(),
             editing: false,
-            original: properties,
+            original: properties.clone(),
             convert: true,
             then_import,
             constants_units: properties.units,
@@ -49,9 +50,9 @@ impl ModelPropertiesDialog {
 
     pub fn edit(properties: ModelProperties) -> Self {
         Self {
-            draft: properties,
+            draft: properties.clone(),
             editing: true,
-            original: properties,
+            original: properties.clone(),
             convert: true,
             then_import: false,
             constants_units: properties.units,
@@ -69,7 +70,8 @@ impl ModelPropertiesDialog {
         let mut open = true;
         let mut result = DialogResult::Open;
         let error = (mesh.and_then(|mesh| space_error(self.draft.space, mesh)))
-            .or_else(|| geometry.and_then(|g| geometry_check(self.draft.space, g).err()));
+            .or_else(|| geometry.and_then(|g| geometry_check(self.draft.space, g).err()))
+            .or_else(|| submodel_error(&self.draft));
         egui::Window::new("Modelleigenschaften")
             .id(egui::Id::new("model properties"))
             .open(&mut open)
@@ -94,6 +96,7 @@ impl ModelPropertiesDialog {
                             }
                         });
                 });
+                group(ui, "Model type", |ui| model_type(ui, draft));
                 group(ui, "Einheitensystem", |ui| {
                     egui::Frame::new()
                         .fill(crate::style::WINDOW)
@@ -144,18 +147,73 @@ impl ModelPropertiesDialog {
                     }
                     let ok = ui.add_enabled(error.is_none(), egui::Button::new("OK"));
                     if ok.clicked() {
-                        result = DialogResult::Ok(*draft);
+                        result = DialogResult::Ok(draft.clone());
                     }
                 });
             });
         if error.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-            result = DialogResult::Ok(self.draft);
+            result = DialogResult::Ok(self.draft.clone());
         }
         if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             result = DialogResult::Cancel;
         }
         result
     }
+}
+
+/// PrePoMax's model type and, for a submodel, the results file of the global model.
+fn model_type(ui: &mut egui::Ui, draft: &mut ModelProperties) {
+    ui.horizontal(|ui| {
+        for kind in ModelKind::ALL {
+            ui.radio_value(&mut draft.kind, kind, kind.label());
+        }
+    });
+    if draft.kind != ModelKind::Submodel {
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.label("Global results .frd");
+        let shown = (draft.global_results.as_deref())
+            .and_then(|p| p.file_name())
+            .map_or_else(
+                || "(none)".to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+        let label = ui.add(egui::Label::new(shown).truncate());
+        if let Some(path) = &draft.global_results {
+            label.on_hover_text(path.display().to_string());
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let browse = ui
+                .button("...")
+                .on_hover_text("Pick the results file (.frd) of the global model");
+            if browse.clicked() {
+                let mut dialog = rfd::FileDialog::new()
+                    .set_title("Global results")
+                    .add_filter("CalculiX results (*.frd)", &["frd"]);
+                if let Some(dir) = (draft.global_results.as_deref()).and_then(|p| p.parent()) {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(path) = dialog.pick_file() {
+                    draft.global_results = Some(path);
+                }
+            }
+        });
+    });
+    let note = match &draft.global_results {
+        Some(path) if !path.exists() => "The file does not exist (any more).",
+        _ => {
+            "The submodel boundary conditions read the displacements of the global model \
+             from this file; it is copied next to the input file when the analysis runs."
+        }
+    };
+    ui.add(egui::Label::new(egui::RichText::new(note).weak()).wrap());
+}
+
+/// Why a submodel cannot be set up yet: it needs the results of its global model.
+fn submodel_error(properties: &ModelProperties) -> Option<String> {
+    (properties.kind == ModelKind::Submodel && properties.global_results.is_none())
+        .then(|| "Pick the results file (.frd) of the global model.".to_string())
 }
 
 /// Why the model space does not fit the existing mesh: a 2D model takes no solid elements,
