@@ -3994,9 +3994,43 @@ fn a_complex_frequency_step_is_written_like_prepomax_does() {
         unreachable!()
     };
     settings.coriolis = false;
+    let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
+        unreachable!()
+    };
     settings.perturbation = false;
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Step\n*Complex frequency\n4\n"), "{text}");
+}
+
+#[test]
+fn the_complex_frequency_step_takes_perturbation_from_the_stored_frequency_step() {
+    // CalculiX stops ("the .eig-file was created without perturbation info") unless both
+    // steps agree; a rotor without prestress in the frequency step must solve as well.
+    for perturbation in [false, true] {
+        let (mesh, mut model) = rotor_analysis(100.0);
+        let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
+            unreachable!()
+        };
+        settings.perturbation = perturbation;
+        let text = write_inp(&mesh, &model, "").unwrap();
+        let complex = &text[text.find("** Step-3").unwrap()..];
+        let header = if perturbation {
+            "*Step, Perturbation\n"
+        } else {
+            "*Step\n"
+        };
+        assert!(
+            complex.contains(&format!("{header}*Complex frequency, Coriolis\n")),
+            "{complex}"
+        );
+        let Some(frd) = run_ccx(&format!("rotor-perturbation-{perturbation}"), &text) else {
+            return;
+        };
+        let whirling = (frd.increments.iter())
+            .filter(|i| i.kind == plx_results::AnalysisKind::ComplexFrequency)
+            .count();
+        assert_eq!(whirling, 4);
+    }
 }
 
 #[test]

@@ -1011,14 +1011,16 @@ impl Default for FrequencyStep {
 /// Settings of a `*COMPLEX FREQUENCY` step, with PrePoMax's defaults. CalculiX solves it on
 /// the eigenmodes of the last frequency step with [`FrequencyStep::storage`]; the Coriolis
 /// forces come from the centrifugal load of the static step before that frequency step.
+///
+/// The step has no perturbation flag of its own: CalculiX stops unless `*STEP, PERTURBATION`
+/// of this step matches the one of the frequency step that stored the modes, so the writer
+/// takes [`FrequencyStep::perturbation`] of that step.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ComplexFrequencyStep {
     /// Number of complex eigenfrequencies to compute.
     pub num_frequencies: u32,
     /// Coriolis forces of the rotation (`CORIOLIS`); the usual reason for the step.
     pub coriolis: bool,
-    /// `*STEP, PERTURBATION`, as PrePoMax offers it for this step.
-    pub perturbation: bool,
 }
 
 impl Default for ComplexFrequencyStep {
@@ -1026,7 +1028,6 @@ impl Default for ComplexFrequencyStep {
         Self {
             num_frequencies: 10,
             coriolis: true,
-            perturbation: true,
         }
     }
 }
