@@ -641,6 +641,7 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             field_outputs: FieldOutput::complex_frequency_defaults(),
+            defined_fields: Vec::new(),
         }
     }
 
