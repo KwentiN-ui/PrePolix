@@ -37,6 +37,9 @@ pub enum Problem {
     /// A boundary condition or load on a reference point that no active rigid body is driven
     /// by: the point has no node in the input file.
     NoRigidBody,
+    /// A plastic hardening curve CalculiX rejects: no elasticity, a row without a yield
+    /// stress, or plastic strains that do not start at 0 and grow.
+    InvalidPlastic,
     NoConductivity,
     NoSpecificHeat,
     NoInitialTemperature,
@@ -91,6 +94,7 @@ impl Problem {
             Problem::NoElastic => "Material ohne Elastizität",
             Problem::NoDensity => "Material ohne Dichte",
             Problem::NoRigidBody => "Reference point without rigid body",
+            Problem::InvalidPlastic => "Invalid plasticity",
             Problem::NoConductivity => "Material ohne Wärmeleitfähigkeit",
             Problem::NoSpecificHeat => "Material ohne Wärmekapazität",
             Problem::NoInitialTemperature => "Keine Anfangstemperatur",
@@ -142,6 +146,14 @@ impl Problem {
                 "A boundary condition or load on a reference point acts on the rigid body the \
                  point drives. Without an active rigid body constraint with this reference \
                  point there is no node to apply it to; the input file would be incomplete."
+            }
+            Problem::InvalidPlastic => {
+                "The hardening curve of a plastic material lists the yield stress over the \
+                 plastic strain. Every row needs a stress above 0, the first row of each \
+                 temperature starts at plastic strain 0 and the strain grows from row to \
+                 row; plasticity also needs the elastic constants. Otherwise CalculiX stops \
+                 with \"*PLASTIC: the plastic strain must be increasing\" or gives a wrong \
+                 stiffness."
             }
             Problem::NoConductivity => {
                 "Eine Wärmeübertragung braucht die Wärmeleitfähigkeit jedes Materials. \
@@ -296,6 +308,11 @@ impl Problem {
             Problem::NoRigidBody => {
                 "Create a Rigid Body constraint on the surface or nodes the reference point \
                  shall drive, or put the boundary condition or load on nodes of the mesh."
+            }
+            Problem::InvalidPlastic => {
+                "Edit the material: enter the elastic constants and a hardening curve that \
+                 starts at plastic strain 0 with the yield stress, e.g. 235 MPa at 0 and \
+                 400 MPa at 0.2."
             }
             Problem::DistortedElements => {
                 "Den Part neu vernetzen: kleinere Elementgröße an engen Radien oder dünnen \
@@ -597,6 +614,24 @@ impl FeModel {
                     ));
                 }
                 _ => {}
+            }
+            if let Some(plastic) = &material.plastic
+                && mechanical
+            {
+                let detail = match plastic.invalid_row() {
+                    _ if material.elastic.is_none() => {
+                        Some(format!("{} is plastic but not elastic", material.name))
+                    }
+                    Some(row) => Some(format!(
+                        "{}: row {} of the hardening curve",
+                        material.name,
+                        row + 1
+                    )),
+                    None => None,
+                };
+                if let Some(detail) = detail {
+                    findings.push(Finding::new(item, Problem::InvalidPlastic, detail));
+                }
             }
             if thermal && material.conductivity.is_none() {
                 findings.push(Finding::new(
@@ -1591,8 +1626,12 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
             }
         }
     }
-    let known: [(Problem, &[&str]); 11] = [
+    let known: [(Problem, &[&str]); 12] = [
         (Problem::NoElastic, &["no elastic constants"]),
+        (
+            Problem::InvalidPlastic,
+            &["reading *PLASTIC", "plastic strain must be"],
+        ),
         (Problem::NoDensity, &["no density was assigned"]),
         (Problem::NoConductivity, &["no conductivity constants"]),
         (Problem::NoSpecificHeat, &["no specific heat was assigned"]),
@@ -1676,8 +1715,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        BoundaryCondition, ContactPair, Elastic, Load, Material, ReferencePoint, Region, RigidBody,
-        Section, Step, SurfaceInteraction, Tie,
+        BoundaryCondition, ContactPair, Elastic, Hardening, Load, Material, Plastic, PlasticPoint,
+        ReferencePoint, Region, RigidBody, Section, Step, SurfaceInteraction, Tie,
     };
 
     /// Unit cubes side by side along x, one C3D8 and one part each; neighbours share nodes
@@ -2023,6 +2062,57 @@ mod tests {
         assert!(
             found.contains(&(ModelItem::Load(0, 0), Problem::NoRigidBody)),
             "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_plastic_material_needs_elasticity_and_a_growing_hardening_curve() {
+        let mesh = cubes(1, false);
+        let mut model = model(&mesh);
+        let plastic = |rows: &[(f64, f64, f64)]| {
+            Some(Plastic {
+                hardening: Hardening::Isotropic,
+                points: rows
+                    .iter()
+                    .map(|&(stress, plastic_strain, temperature)| PlasticPoint {
+                        stress,
+                        plastic_strain,
+                        temperature,
+                    })
+                    .collect(),
+            })
+        };
+        model.materials[0].plastic = plastic(&[(235.0, 0.0, 0.0), (400.0, 0.2, 0.0)]);
+        assert_eq!(problems(&check(&model, &mesh)), []);
+        // Rows at a second temperature start at plastic strain 0 again.
+        model.materials[0].plastic = plastic(&[
+            (235.0, 0.0, 20.0),
+            (400.0, 0.2, 20.0),
+            (200.0, 0.0, 300.0),
+            (300.0, 0.2, 300.0),
+        ]);
+        assert_eq!(problems(&check(&model, &mesh)), []);
+        for rows in [
+            &[(235.0, 0.1, 0.0)][..],
+            &[(235.0, 0.0, 0.0), (400.0, 0.0, 0.0)],
+            &[(0.0, 0.0, 0.0)],
+            &[],
+        ] {
+            model.materials[0].plastic = plastic(rows);
+            assert_eq!(
+                problems(&check(&model, &mesh)),
+                [(ModelItem::Material(0), Problem::InvalidPlastic)],
+                "{rows:?}"
+            );
+        }
+        model.materials[0].plastic = plastic(&[(235.0, 0.0, 0.0)]);
+        model.materials[0].elastic = None;
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [
+                (ModelItem::Material(0), Problem::NoElastic),
+                (ModelItem::Material(0), Problem::InvalidPlastic),
+            ]
         );
     }
 

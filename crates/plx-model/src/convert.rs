@@ -230,6 +230,12 @@ impl Material {
             c.value(&mut expansion.coefficient, Quantity::ThermalExpansion);
             c.value(&mut expansion.zero_temperature, Quantity::Temperature);
         }
+        if let Some(plastic) = &mut self.plastic {
+            for point in &mut plastic.points {
+                c.value(&mut point.stress, Quantity::Pressure);
+                c.value(&mut point.temperature, Quantity::Temperature);
+            }
+        }
     }
 }
 

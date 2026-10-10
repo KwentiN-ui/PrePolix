@@ -11,11 +11,11 @@ use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
     Amplitude, BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, BoundaryKind,
     BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, DynamicProcedure, DynamicStep,
-    Elastic, EquationSolver, FeModel, FieldOutput, FrequencyStep, HeatTransferStep, HistoryKind,
-    HistoryOutput, Incrementation, InitialCondition, InitialConditionKind, Load, LoadKind,
-    Material, ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, NodeTie, OutputKind,
-    Quantity, Region, Section, SectionKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
-    SurfaceInteraction, UnitSystem, next_name,
+    Elastic, EquationSolver, FeModel, FieldOutput, FrequencyStep, Hardening, HeatTransferStep,
+    HistoryKind, HistoryOutput, Incrementation, InitialCondition, InitialConditionKind, Load,
+    LoadKind, Material, ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, NodeTie,
+    OutputKind, PlasticPoint, Quantity, Region, Section, SectionKind, StaticStep,
+    SteadyStateDynamicsStep, Step, StepKind, SurfaceInteraction, UnitSystem, next_name,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row};
@@ -2464,6 +2464,7 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     );
     ui.end_row();
     material.elastic = elastic.then_some(values);
+    plastic_rows(ui, material, units);
     for (label, value, quantity) in [
         (
             "Wärmeleitfähigkeit",
@@ -2508,6 +2509,121 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     );
     ui.end_row();
     material.expansion = expands.then_some(expansion);
+}
+
+/// The plasticity of the material form: the hardening rule and the hardening curve as an
+/// editable table like PrePoMax's `Plastic` property, rows of yield stress, plastic strain
+/// and temperature.
+fn plastic_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
+    let mut plastic = material.plastic.is_some();
+    ui.checkbox(&mut plastic, "Plasticity");
+    ui.end_row();
+    let mut values = material.plastic.clone().unwrap_or_default();
+    ui.label("    Hardening");
+    ui.add_enabled_ui(plastic, |ui| {
+        egui::ComboBox::from_id_salt("plastic hardening")
+            .selected_text(hardening_label(values.hardening))
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                for hardening in Hardening::ALL {
+                    ui.selectable_value(
+                        &mut values.hardening,
+                        hardening,
+                        hardening_label(hardening),
+                    );
+                }
+            });
+    });
+    ui.end_row();
+    ui.label("    Hardening curve");
+    ui.add_enabled_ui(plastic, |ui| {
+        ui.vertical(|ui| {
+            let header = |quantity| {
+                let unit = units.unit(quantity);
+                if unit.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{unit}]")
+                }
+            };
+            let mut remove = None;
+            egui::Grid::new("plastic points")
+                .num_columns(4)
+                .striped(true)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.strong(format!("Yield stress{}", header(Quantity::Pressure)));
+                    ui.strong("Plastic strain");
+                    ui.strong(format!("Temperature{}", header(Quantity::Temperature)));
+                    ui.label("");
+                    ui.end_row();
+                    let removable = values.points.len() > 1;
+                    for (i, point) in values.points.iter_mut().enumerate() {
+                        ui.add(numeric::without_unit(
+                            &mut point.stress,
+                            units,
+                            Quantity::Pressure,
+                        ));
+                        ui.add(
+                            numeric::drag_value(&mut point.plastic_strain)
+                                .speed(0.001)
+                                .range(0.0..=f64::MAX),
+                        );
+                        ui.add(numeric::without_unit(
+                            &mut point.temperature,
+                            units,
+                            Quantity::Temperature,
+                        ));
+                        if ui
+                            .add_enabled(removable, egui::Button::new("Remove").small())
+                            .clicked()
+                        {
+                            remove = Some(i);
+                        }
+                        ui.end_row();
+                    }
+                });
+            if let Some(i) = remove {
+                values.points.remove(i);
+            }
+            if ui.button("Add row").clicked() {
+                // Continues the curve: the same temperature, a larger plastic strain.
+                let next = match values.points.as_slice() {
+                    [.., a, b] => PlasticPoint {
+                        stress: b.stress,
+                        plastic_strain: b.plastic_strain
+                            + (b.plastic_strain - a.plastic_strain).max(0.0),
+                        temperature: b.temperature,
+                    },
+                    [b] => PlasticPoint {
+                        stress: b.stress,
+                        plastic_strain: b.plastic_strain + 0.1,
+                        temperature: b.temperature,
+                    },
+                    [] => PlasticPoint {
+                        stress: 0.0,
+                        plastic_strain: 0.0,
+                        temperature: 0.0,
+                    },
+                };
+                values.points.push(next);
+            }
+            ui.weak(
+                "First row at plastic strain 0 with the yield stress; the strain grows from \
+                 row to row. Rows at other temperatures start at 0 again.",
+            );
+        });
+    });
+    ui.end_row();
+    material.plastic = plastic.then_some(values);
+}
+
+fn hardening_label(hardening: Hardening) -> &'static str {
+    match hardening {
+        Hardening::Isotropic => "Isotropic",
+        Hardening::Kinematic => "Kinematic",
+        Hardening::Combined => "Combined",
+    }
 }
 
 /// Solution settings for a new static step: PrePoMax carries those of the last static step
