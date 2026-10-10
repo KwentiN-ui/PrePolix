@@ -210,6 +210,10 @@ pub struct TreeResponse {
     pub generate_mesh: bool,
     /// Mesh one part of the geometry, by index.
     pub mesh_part: Option<usize>,
+    /// Transform a mesh part (translate, rotate, mirror, scale), by index.
+    pub transform_part: Option<usize>,
+    /// Merge the selected mesh parts into one.
+    pub merge_parts: bool,
     /// Show the table of the hot spot values.
     pub hot_spot_table: bool,
     /// Open PrePoMax's Search Contact Pairs.
@@ -590,6 +594,16 @@ pub fn part_menu(
     }
     if ui.button("Eigenschaften …").clicked() {
         response.open = Some(TreeItem::Part(index));
+    }
+    if view == TreeView::FeModel && ui.button("Transform ...").clicked() {
+        response.transform_part = Some(index);
+    }
+    if view == TreeView::FeModel
+        && selected.len() > 1
+        && selected.contains(&index)
+        && ui.button("Merge").clicked()
+    {
+        response.merge_parts = true;
     }
     let label = if visible { "Ausblenden" } else { "Einblenden" };
     if ui.button(label).clicked() {

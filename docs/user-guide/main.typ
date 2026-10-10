@@ -20,6 +20,7 @@
 
 #include "chapters/geometry-mesh/geometry.typ"
 #include "chapters/geometry-mesh/mesh.typ"
+#include "chapters/geometry-mesh/mesh-tools.typ"
 
 #include "chapters/model/model-properties.typ"
 #include "chapters/model/materials.typ"
@@ -33,6 +34,7 @@
 #include "chapters/model/complex-frequency.typ"
 #include "chapters/model/modal-dynamics.typ"
 #include "chapters/model/bcs-loads.typ"
+#include "chapters/model/pre-tension.typ"
 #include "chapters/model/defined-fields.typ"
 #include "chapters/model/keywords.typ"
 
