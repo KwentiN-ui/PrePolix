@@ -4,7 +4,7 @@
 
 use plx_mesh::FeMesh;
 
-use crate::{FeModel, LoadKind, Region, Section, SectionKind, line_tangent};
+use crate::{Constraint, FeModel, LoadKind, Region, Section, SectionKind, line_tangent};
 
 /// An item of the model that can refer to something else.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -61,7 +61,13 @@ impl FeModel {
             let reason = match constraint.master_slave() {
                 Some([master, slave]) => master_slave_reference(master, slave, mesh),
                 None => (constraint.regions().into_iter())
-                    .find_map(|region| region.missing_reference(mesh)),
+                    .find_map(|region| region.missing_reference(mesh))
+                    .or_else(|| match constraint {
+                        Constraint::RigidBody(body) => {
+                            self.missing_reference_point(&body.reference_point)
+                        }
+                        _ => None,
+                    }),
             };
             if let Some(reason) = reason {
                 invalid.push(Invalid {
@@ -98,6 +104,7 @@ impl FeModel {
         for (s, step) in self.steps.iter().enumerate() {
             for (i, bc) in step.boundary_conditions.iter().enumerate() {
                 let reason = (bc.region.missing_reference(mesh))
+                    .or_else(|| self.missing_region_point(&bc.region))
                     .or_else(|| self.missing_amplitude([&bc.amplitude]));
                 if let Some(reason) = reason {
                     invalid.push(Invalid {
@@ -117,9 +124,11 @@ impl FeModel {
                             .into(),
                     )
                 } else {
-                    (load.region.missing_reference(mesh)).or_else(|| {
-                        self.missing_amplitude([&load.amplitude, &load.factor_amplitude])
-                    })
+                    (load.region.missing_reference(mesh))
+                        .or_else(|| self.missing_region_point(&load.region))
+                        .or_else(|| {
+                            self.missing_amplitude([&load.amplitude, &load.factor_amplitude])
+                        })
                 };
                 if let Some(reason) = reason {
                     invalid.push(Invalid {
@@ -180,6 +189,19 @@ impl FeModel {
             }
         }
         invalid
+    }
+
+    /// The reference point, if the model has none of that name.
+    fn missing_reference_point(&self, name: &str) -> Option<String> {
+        (self.reference_point(name).is_none())
+            .then(|| format!("Reference Point {name} does not exist"))
+    }
+
+    /// The reference point of a region on one, if the model has none of that name.
+    fn missing_region_point(&self, region: &Region) -> Option<String> {
+        region
+            .reference_point()
+            .and_then(|name| self.missing_reference_point(name))
     }
 
     /// The first of the amplitude references that names no amplitude of the model.
@@ -269,6 +291,8 @@ impl Region {
                     .count();
                 (missing > 0).then(|| format!("{missing} Elementflächen existieren nicht"))
             }
+            // Checked against the model's reference points by the caller.
+            Region::ReferencePoint(_) => None,
             Region::Geometry(entities) => {
                 if mesh.cad.is_empty() {
                     return Some("Das Netz ist nicht aus der Geometrie erzeugt".into());

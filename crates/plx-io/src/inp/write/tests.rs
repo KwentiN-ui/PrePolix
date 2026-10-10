@@ -4,8 +4,8 @@ use std::process::Command;
 use plx_model::{
     BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, DefinedField, DefinedFieldKind,
     DynamicStep, Elastic, EquationSolver, Hardening, Load, Material, ModalDamping,
-    ModalDynamicsStep, NodeTie, Plastic, PlasticPoint, Section, SectionKind,
-    SteadyStateDynamicsStep, UserKeyword,
+    ModalDynamicsStep, NodeTie, Plastic, PlasticPoint, ReferencePoint, RigidBody, Section,
+    SectionKind, SteadyStateDynamicsStep, UserKeyword,
 };
 
 use super::*;
@@ -234,6 +234,129 @@ fn calculix_reproduces_the_reference_cantilever() {
         (ours - expected).abs() < 1e-6 * expected.abs(),
         "{ours} != {expected}"
     );
+}
+
+/// The cantilever with its tip face as a rigid body driven by reference point RP-1 at the
+/// centre of the face, and the load or boundary condition given on the point.
+fn rigid_tip(load: Option<Load>, bc: Option<BoundaryCondition>) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = cantilever(tip_force());
+    model.steps[0].loads.clear();
+    model.steps[0].loads.extend(load);
+    model.steps[0].boundary_conditions.extend(bc);
+    model.reference_points.push(ReferencePoint {
+        name: "RP-1".into(),
+        position: [100.0, 5.0, 5.0],
+    });
+    let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+    body.region = Region::Surface("TIP".into());
+    model.constraints.push(Constraint::RigidBody(body));
+    (mesh, model)
+}
+
+fn moment(moment: [f64; 3]) -> Load {
+    Load {
+        name: "Moment-1".into(),
+        active: true,
+        region: Region::ReferencePoint("RP-1".into()),
+        kind: LoadKind::Moment(moment),
+        amplitude: None,
+        factor_amplitude: None,
+    }
+}
+
+#[test]
+fn a_rigid_body_and_its_reference_point_are_written_like_prepomax_does() {
+    let bc = BoundaryCondition {
+        name: "Turn-1".into(),
+        active: true,
+        region: Region::ReferencePoint("RP-1".into()),
+        kind: BoundaryKind::Displacement([Some(0.0), Some(0.0), None, None, None, Some(0.01)]),
+        amplitude: None,
+    };
+    let (mesh, model) = rigid_tip(Some(moment([0.0, 0.0, 1000.0])), Some(bc));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    // The reference and rotation node follow the mesh nodes, both on the point.
+    assert!(
+        text.contains("99, 1.00000000E2, 1.00000000E1, 1.00000000E1\n100, 1.00000000E2, 5.00000000E0, 5.00000000E0\n101, 1.00000000E2, 5.00000000E0, 5.00000000E0\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("*Nset, Nset=Internal_Selection-1_RP-1\n100\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("*Rigid body, Nset=Internal-1_TIP, Ref node=100, Rot node=101\n"),
+        "{text}"
+    );
+    // Translations on the reference node, rotations on the rotation node.
+    assert!(
+        text.contains(
+            "*Boundary\nInternal_Selection-1_RP-1, 1, 1, 0\nInternal_Selection-1_RP-1, 2, 2, 0\n101, 3, 3, 0.01\n"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("*Cload\n101, 3, 1000\n"), "{text}");
+}
+
+/// A moment at the reference point bends the beam: the reactions at the clamped end balance
+/// it and the rigid tip face stays plane.
+#[test]
+fn calculix_bends_the_cantilever_by_a_moment_on_the_rigid_tip() {
+    let m = 10_000.0;
+    let (mesh, model) = rigid_tip(Some(moment([0.0, 0.0, m])), None);
+    let Some(frd) = run_ccx("moment", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let reaction: f64 = (mesh.node_sets["FIX"].iter())
+        .map(|&node| {
+            let y = mesh.node(node).unwrap()[1];
+            (y - 5.0) * node_value(&frd, "FORC", "F1", node)
+        })
+        .sum();
+    assert!((reaction - m).abs() < 1e-3 * m, "{reaction} != {m}");
+    let tip = |y: f64| -> Vec<f64> {
+        (1..=99)
+            .filter(|&id| mesh.node(id).is_some_and(|c| c[0] == 100.0 && c[1] == y))
+            .map(|id| node_value(&frd, "DISP", "U1", id))
+            .collect()
+    };
+    let (top, bottom, middle) = (tip(10.0), tip(0.0), tip(5.0));
+    assert_eq!(top.len(), 3);
+    let rotation = (bottom[0] - top[0]) / 10.0;
+    assert!(rotation > 1e-4, "{rotation}");
+    for (u_top, u_bottom) in top.iter().zip(&bottom) {
+        assert!(
+            (u_top + u_bottom).abs() < 1e-6 * rotation,
+            "{u_top} {u_bottom}"
+        );
+    }
+    assert!(
+        middle.iter().all(|u| u.abs() < 1e-6 * rotation),
+        "{middle:?}"
+    );
+}
+
+/// A rotation prescribed at the reference point turns the rigid tip face about it.
+#[test]
+fn calculix_turns_the_rigid_tip_by_the_rotation_of_its_reference_point() {
+    let angle = 0.01;
+    let bc = BoundaryCondition {
+        name: "Turn-1".into(),
+        active: true,
+        region: Region::ReferencePoint("RP-1".into()),
+        kind: BoundaryKind::Displacement([None, None, None, None, None, Some(angle)]),
+        amplitude: None,
+    };
+    let (mesh, model) = rigid_tip(None, Some(bc));
+    let Some(frd) = run_ccx("drehung", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    for id in (1..=99).filter(|&id| mesh.node(id).is_some_and(|c| c[0] == 100.0)) {
+        let y = mesh.node(id).unwrap()[1];
+        let u1 = node_value(&frd, "DISP", "U1", id);
+        let expected = -angle * (y - 5.0);
+        assert!((u1 - expected).abs() < 1e-7, "{u1} != {expected}");
+    }
 }
 
 /// Steel S235 with a linear hardening to 400 MPa at 20 % plastic strain.
