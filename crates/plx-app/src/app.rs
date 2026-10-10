@@ -2175,6 +2175,7 @@ impl Workbench {
             (NewItem::Constraint, "Create Constraint …"),
             (NewItem::SurfaceInteraction, "Create Surface Interaction …"),
             (NewItem::ContactPair, "Create Contact Pair …"),
+            (NewItem::Tie, "Create Tie …"),
         ] {
             if ui.button(label).clicked() {
                 kind = Some(item);
@@ -3168,16 +3169,16 @@ impl Workbench {
                 // The first new item shows in the tree, even in a collapsed branch.
                 let first = if !pairs.is_empty() {
                     Some(TreeItem::ContactPair(model.fe.contact_pairs.len()))
-                } else if !joints.is_empty() {
-                    Some(TreeItem::NodeTie(model.fe.node_ties.len()))
+                } else if !ties.is_empty() {
+                    Some(TreeItem::Tie(model.fe.ties.len()))
                 } else {
-                    (!ties.is_empty()).then_some(TreeItem::Constraint(model.fe.constraints.len()))
+                    (!joints.is_empty()).then_some(TreeItem::NodeTie(model.fe.node_ties.len()))
                 };
                 if let Some(item) = first {
                     self.tree.selected = Some((TreeView::FeModel, item));
                     self.tree.reveal = true;
                 }
-                model.fe.constraints.extend(ties);
+                model.fe.ties.extend(ties);
                 model.fe.contact_pairs.extend(pairs);
                 model.fe.node_ties.extend(joints);
                 self.output.push(created);
