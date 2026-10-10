@@ -409,7 +409,9 @@ impl RegionDraft {
     ) -> bool {
         // Top-aligned: the grid centers a cell, which would put the label beside the
         // rows below the source combo box.
-        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| ui.label(label));
+        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.label(label)
+        });
         let wanted = ui.push_id(id, |ui| self.ui_body(ui, model, active)).inner;
         ui.end_row();
         wanted
