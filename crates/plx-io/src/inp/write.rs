@@ -776,6 +776,19 @@ fn materials(model: &FeModel) -> Vec<Keyword> {
                     "*Elastic\n{young}, {poisson}\n"
                 )));
             }
+            if let Some(plastic) = &material.plastic {
+                let mut out = format!("*Plastic, Hardening={}\n", plastic.hardening.keyword());
+                for point in &plastic.points {
+                    let _ = writeln!(
+                        out,
+                        "{}, {}, {}",
+                        number(point.stress),
+                        number(point.plastic_strain),
+                        number(point.temperature)
+                    );
+                }
+                properties.push(Keyword::generated(out));
+            }
             // Thermal properties in PrePoMax's order.
             if let Some(expansion) = material.expansion {
                 let mut out = String::from("*Expansion");
