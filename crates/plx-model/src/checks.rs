@@ -53,6 +53,13 @@ pub enum Problem {
     NoGlobalResults,
     IncrementExceedsStep,
     NoLoad,
+    /// A step that builds on stored eigenmodes (modal dynamics, steady state dynamics,
+    /// complex frequency) without a frequency step before it that stores them.
+    NoStoredModes,
+    /// An initial velocity in a model without a Dynamic step.
+    VelocityIgnored,
+    /// A Coriolis complex frequency step without a centrifugal load before it.
+    NoRotation,
     /// Found in the solver output only.
     NoConvergence,
     /// Found in the solver output only.
@@ -70,7 +77,9 @@ impl Problem {
             | Problem::ConflictingBoundaries
             | Problem::LoadOnFixedNodes
             | Problem::RotationsIgnored
-            | Problem::NoLoad => Severity::Warning,
+            | Problem::VelocityIgnored
+            | Problem::NoLoad
+            | Problem::NoRotation => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -96,6 +105,9 @@ impl Problem {
             Problem::NoGlobalResults => "No global results",
             Problem::IncrementExceedsStep => "Inkrement größer als der Step",
             Problem::NoLoad => "Keine Last",
+            Problem::NoStoredModes => "No stored eigenmodes",
+            Problem::VelocityIgnored => "Initial velocity without a Dynamic step",
+            Problem::NoRotation => "No rotation",
             Problem::NoConvergence => "Keine Konvergenz",
             Problem::MpcAndSpc => "Freiheitsgrad doppelt gebunden",
             Problem::RotationIn2d => "Rotation in einem 2D-Modell",
@@ -122,9 +134,9 @@ impl Problem {
                  Steifigkeit; CalculiX bricht mit \"no elastic constants were assigned\" ab."
             }
             Problem::NoDensity => {
-                "Ein Frequency Step, eine instationäre Wärmeübertragung sowie Gewichts- und \
-                 Fliehkraftlasten brauchen die Masse des Modells. Ohne Dichte bricht CalculiX \
-                 mit \"no density was assigned\" ab."
+                "Ein Frequency Step, ein Dynamic Step, eine instationäre Wärmeübertragung \
+                 sowie Gewichts- und Fliehkraftlasten brauchen die Masse des Modells. Ohne \
+                 Dichte bricht CalculiX mit \"no density was assigned\" ab."
             }
             Problem::NoRigidBody => {
                 "A boundary condition or load on a reference point acts on the rigid body the \
@@ -209,6 +221,21 @@ impl Problem {
             Problem::NoLoad => {
                 "Der Step hat weder eine aktive Last noch eine vorgegebene Verschiebung. \
                  Die Rechnung läuft, alle Ergebnisse sind aber null."
+            }
+            Problem::NoStoredModes => {
+                "Modal Dynamics, Steady State Dynamics and Complex Frequency steps work on \
+                 the eigenmodes a previous Frequency step with Storage wrote to the .eig \
+                 file. Without it CalculiX stops with \"error opening the eigenvalue file\" \
+                 or \"the eigenvalue file does not exist\"."
+            }
+            Problem::VelocityIgnored => {
+                "Only a Dynamic step (time integration) starts from an initial velocity; \
+                 static, frequency and thermal steps ignore it without a message."
+            }
+            Problem::NoRotation => {
+                "The Coriolis forces of a Complex Frequency step come from the centrifugal \
+                 load of a static step before the Frequency step. Without a rotation the \
+                 complex eigenfrequencies are those of the Frequency step."
             }
             Problem::NoConvergence => {
                 "Die Newton-Iteration ist nicht konvergiert; CalculiX hat das Inkrement \
@@ -313,6 +340,15 @@ impl Problem {
                 "Im Step das Anfangsinkrement höchstens so groß wie die Step-Dauer wählen."
             }
             Problem::NoLoad => "Unter Loads eine Last erstellen oder eine deaktivierte aktivieren.",
+            Problem::NoStoredModes => {
+                "Add a Frequency step with \"Store eigenmodes (Storage)\" before it, with \
+                 the same supports (for Complex Frequency as a perturbation step after a \
+                 static step with the centrifugal load)."
+            }
+            Problem::VelocityIgnored => "Add a Dynamic step or deactivate the initial condition.",
+            Problem::NoRotation => {
+                "Create a Centrifugal load in the static step before the Frequency step."
+            }
             Problem::NoConvergence => {
                 "Kontakte prüfen (Steifigkeit der Surface Interaction, Adjust, Lage der \
                  Flächen), Teile ausreichend lagern, die Last auf mehrere Inkremente \
@@ -472,10 +508,31 @@ impl FeModel {
                 ));
             }
         }
-        let initial_temperature = self.initial_conditions.iter().any(|c| c.active);
+        let initial_temperature =
+            (self.initial_conditions.iter()).any(|c| c.active && !c.kind.is_velocity());
+        let dynamic =
+            (self.steps.iter()).any(|s| s.active && matches!(s.kind, StepKind::Dynamic(_)));
+        for (i, condition) in self.initial_conditions.iter().enumerate() {
+            if condition.active && condition.kind.is_velocity() && !dynamic {
+                findings.push(Finding::new(
+                    ModelItem::InitialCondition(i),
+                    Problem::VelocityIgnored,
+                    format!("{} needs a Dynamic step", condition.name),
+                ));
+            }
+        }
         let trusses = Trusses::new(self, mesh);
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             self.check_step(s, mesh, mesh_check, &trusses, &mut findings);
+            let stored = (self.steps[..s].iter().filter(|p| p.active))
+                .any(|p| matches!(&p.kind, StepKind::Frequency(f) if f.storage));
+            if step.kind.uses_stored_modes() && !stored {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::NoStoredModes,
+                    format!("{} needs the eigenmodes of a Frequency step", step.name),
+                ));
+            }
             if let StepKind::HeatTransfer(h) | StepKind::CoupledTempDisp(h) = &step.kind
                 && !h.steady_state
                 && !initial_temperature
@@ -512,7 +569,11 @@ impl FeModel {
             StepKind::HeatTransfer(h) | StepKind::CoupledTempDisp(h) => !h.steady_state,
             _ => false,
         });
-        let frequency = active().any(|s| matches!(s.kind, StepKind::Frequency(_)));
+        // Eigenfrequencies and inertia need the mass.
+        let frequency = active().any(|s| {
+            matches!(s.kind, StepKind::Frequency(_) | StepKind::Dynamic(_))
+                || s.kind.uses_stored_modes()
+        });
         // Gravity and centrifugal loads act on the mass of the elements.
         let body_force = active().any(|s| {
             s.kind.supports_loads() && (s.loads.iter()).any(|l| l.active && l.kind.is_body_force())
@@ -746,7 +807,10 @@ impl FeModel {
                 }
             }
             let displaced = fixed.values().any(|&(_, v)| v != 0.0);
-            if !loaded && !displaced && !user_keywords {
+            // A Dynamic step may start from an initial velocity instead of a load.
+            let started = matches!(step.kind, StepKind::Dynamic(_))
+                && (self.initial_conditions.iter()).any(|c| c.active && c.kind.is_velocity());
+            if !loaded && !displaced && !started && !user_keywords {
                 findings.push(Finding::new(
                     ModelItem::Step(s),
                     Problem::NoLoad,
@@ -770,6 +834,32 @@ impl FeModel {
                 .iter()
                 .any(|w| text.contains(w))
         });
+        if let StepKind::ComplexFrequency(settings) = &step.kind {
+            let before = || self.steps[..s].iter().filter(|s| s.active);
+            let stored = before().rev().find_map(|s| match &s.kind {
+                StepKind::Frequency(f) => Some(f.storage),
+                _ => None,
+            });
+            if stored != Some(true) {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::NoStoredModes,
+                    format!("{}: no Frequency step with Storage before it", step.name),
+                ));
+            }
+            let rotating = before().any(|s| {
+                s.kind.supports_loads()
+                    && (s.loads.iter())
+                        .any(|l| l.active && matches!(l.kind, LoadKind::Centrifugal { .. }))
+            });
+            if settings.coriolis && !rotating {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::NoRotation,
+                    format!("{}: no centrifugal load in a step before it", step.name),
+                ));
+            }
+        }
         // A buckle step solves the static state of its loads first.
         let static_mechanical = matches!(
             step.kind,
@@ -1689,6 +1779,31 @@ mod tests {
     fn a_held_and_loaded_model_has_no_findings() {
         let mesh = cubes(2, true);
         assert_eq!(check(&model(&mesh), &mesh), []);
+    }
+
+    #[test]
+    fn an_initial_velocity_needs_a_dynamic_step() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        model.initial_conditions.push(crate::InitialCondition {
+            name: "Initial_Velocity-1".into(),
+            active: true,
+            region: Region::Nodes(vec![1]),
+            kind: crate::InitialConditionKind::Velocity([1.0, 0.0, 0.0]),
+        });
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::InitialCondition(0), Problem::VelocityIgnored)]
+        );
+        // A Dynamic step takes it up, even without a load.
+        model.steps[0].kind = StepKind::Dynamic(crate::DynamicStep::default());
+        model.steps[0].loads.clear();
+        assert_eq!(check(&model, &mesh), []);
+        model.initial_conditions[0].active = false;
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Step(0), Problem::NoLoad)]
+        );
     }
 
     #[test]

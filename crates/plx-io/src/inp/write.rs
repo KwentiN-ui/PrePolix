@@ -11,11 +11,12 @@ use std::fmt::Write as _;
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
-    Amplitude, AmplitudeTime, BoundaryKind, BuckleStep, Constraint, ContactMethod, ContactPair,
-    FeModel, FieldOutput, FrequencyStep, GapConductance, HeatTransferStep, HistoryKind,
-    HistoryOutput, Incrementation, InitialConditionKind, InteractionProperty, LoadKind, ModelSpace,
-    NodeTie, OutputKind, Region, Section, SectionKind, StaticStep, Step, StepKind, SurfaceBehavior,
-    SurfaceInteraction, Totals, UserKeyword, line_tangent,
+    Amplitude, AmplitudeTime, BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint,
+    ContactMethod, ContactPair, DynamicStep, FeModel, FieldOutput, FrequencyStep, GapConductance,
+    HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialConditionKind,
+    InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep, ModelSpace, NodeTie,
+    OutputKind, Region, Section, SectionKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
+    SurfaceBehavior, SurfaceInteraction, Totals, UserKeyword, line_tangent,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -905,22 +906,53 @@ fn amplitude_parameter(
     Ok(format!(", {parameter}={}", name(reference)))
 }
 
-/// Initial temperatures as PrePoMax's `CalInitialTemperature` writes them.
+/// Initial temperatures and velocities as PrePoMax's `CalInitialTemperature`,
+/// `CalInitialTranslationalVelocity` and `CalInitialAngularVelocity` write them: one line
+/// per set or node and non-zero component, 2D models without the third.
 fn initial_conditions(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+    let components = if model.properties.space.is_2d() { 2 } else { 3 };
     let mut keywords = Vec::new();
     for condition in &model.initial_conditions {
         if !condition.active {
             keywords.push(deactivated(&condition.name));
             continue;
         }
-        let set = sets.node_set(&condition.name, &condition.region)?;
-        let out = match condition.kind {
-            InitialConditionKind::Temperature(t) => format!(
-                "** Name: {}\n*Initial conditions, Type=Temperature\n{set}, {}\n",
-                condition.name,
-                number(t)
-            ),
+        let mut out = format!("** Name: {}\n", condition.name);
+        let velocity_lines = |out: &mut String, target: &str, v: [f64; 3]| {
+            for (dof, value) in v.iter().enumerate().take(components) {
+                if *value != 0.0 {
+                    out.push_str(&format!("{target}, {}, {}\n", dof + 1, number(*value)));
+                }
+            }
         };
+        match condition.kind {
+            InitialConditionKind::Temperature(t) => {
+                let set = sets.node_set(&condition.name, &condition.region)?;
+                out.push_str(&format!(
+                    "*Initial conditions, Type=Temperature\n{set}, {}\n",
+                    number(t)
+                ));
+            }
+            InitialConditionKind::Velocity(v) => {
+                let set = sets.node_set(&condition.name, &condition.region)?;
+                out.push_str("*Initial conditions, Type=Velocity\n");
+                velocity_lines(&mut out, &set, v);
+            }
+            InitialConditionKind::AngularVelocity { .. } => {
+                let nodes = condition.region.nodes(sets.mesh);
+                if nodes.is_empty() {
+                    return Err(empty(&condition.name, "Knoten"));
+                }
+                out.push_str("*Initial conditions, Type=Velocity\n");
+                for id in nodes {
+                    let Some(position) = sets.mesh.node(id) else {
+                        continue;
+                    };
+                    let v = condition.kind.velocity_at(position).unwrap_or_default();
+                    velocity_lines(&mut out, &id.to_string(), v);
+                }
+            }
+        }
         keywords.push(Keyword::generated(out));
     }
     Ok(keywords)
@@ -1321,13 +1353,24 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
     let (header, procedure) = match &step.kind {
         StepKind::Static(settings) => static_step(settings),
         StepKind::Frequency(settings) => frequency_step(settings),
+        StepKind::ComplexFrequency(settings) => complex_frequency_step(settings),
         StepKind::Buckle(settings) => buckle_step(settings),
         StepKind::HeatTransfer(settings) => heat_transfer_step(settings, "*Heat transfer", false),
         StepKind::CoupledTempDisp(settings) => {
             heat_transfer_step(settings, "*Coupled temperature-displacement", true)
         }
+        StepKind::Dynamic(settings) => dynamic_step(settings),
+        StepKind::ModalDynamics(settings) => modal_dynamics_step(settings),
+        StepKind::SteadyStateDynamics(settings) => steady_state_dynamics_step(settings),
     };
-    let mut boundaries = vec![Keyword::generated("*Boundary, op=New\n".into())];
+    // A modal step keeps the supports of the frequency step that stored the modes;
+    // CalculiX refuses new ones ("in a modal dynamic step new SPCs are not allowed"), and
+    // the reset would make the same supports new. Writing them again is accepted.
+    let mut boundaries = if step.kind.uses_stored_modes() {
+        Vec::new()
+    } else {
+        vec![Keyword::generated("*Boundary, op=New\n".into())]
+    };
     for bc in &step.boundary_conditions {
         // A step leaves out what it cannot take, like a deactivated item: displacements in
         // a heat transfer step, temperatures in a static one.
@@ -1594,9 +1637,13 @@ fn deactivated_step(step: &Step) -> Keyword {
     let procedure = match step.kind {
         StepKind::Static(_) => "StaticStep",
         StepKind::Frequency(_) => "FrequencyStep",
+        StepKind::ComplexFrequency(_) => "ComplexFrequencyStep",
         StepKind::Buckle(_) => "BuckleStep",
         StepKind::HeatTransfer(_) => "HeatTransferStep",
         StepKind::CoupledTempDisp(_) => "CoupledTempDispStep",
+        StepKind::Dynamic(_) => "DynamicStep",
+        StepKind::ModalDynamics(_) => "ModalDynamicsStep",
+        StepKind::SteadyStateDynamics(_) => "SteadyStateDynamicsStep",
     };
     fn all<'a>(names: impl Iterator<Item = &'a str>) -> Vec<Keyword> {
         names.map(deactivated).collect()
@@ -1761,6 +1808,122 @@ fn heat_transfer_step(
     incremented_step(increments, keyword, coupled && increments.nlgeom)
 }
 
+/// The `*Step` line and the procedure keyword of a dynamic step, as PrePoMax's
+/// `CalDynamicStep` and `CalDamping` write them: the Rayleigh damping follows the
+/// procedure in the step, where CalculiX applies it to the whole model.
+fn dynamic_step(settings: &DynamicStep) -> (String, String) {
+    let mut keyword = String::from("*Dynamic");
+    if let Some(solver) = settings.increments.solver.keyword() {
+        let _ = write!(keyword, ", Solver={solver}");
+    }
+    if settings.alpha != -0.05 {
+        let _ = write!(keyword, ", Alpha={}", number(settings.alpha));
+    }
+    if let Some(explicit) = settings.procedure.keyword() {
+        let _ = write!(keyword, ", Explicit={explicit}");
+    }
+    let (header, mut procedure) =
+        incremented_step(&settings.increments, keyword, settings.increments.nlgeom);
+    if let Some(damping) = &settings.damping {
+        let _ = writeln!(
+            procedure,
+            "*Damping, Alpha={}, Beta={}",
+            number(damping.alpha),
+            number(damping.beta)
+        );
+    }
+    (header, procedure)
+}
+
+/// The `*Step` line and the procedure keyword of a modal dynamics step, as PrePoMax's
+/// `CalModalDynamicsStep` writes them, with the modal damping after the procedure.
+fn modal_dynamics_step(settings: &ModalDynamicsStep) -> (String, String) {
+    let header = format!("*Step, Inc={}\n", settings.increments());
+    let mut procedure = String::from("*Modal dynamics");
+    if let Some(solver) = settings.solver.keyword() {
+        let _ = write!(procedure, ", Solver={solver}");
+    }
+    if settings.steady_state {
+        procedure.push_str(", Steady state");
+    }
+    let second = if settings.steady_state {
+        settings.relative_error
+    } else {
+        settings.time_period
+    };
+    let _ = writeln!(
+        procedure,
+        "\n{}, {}",
+        number(settings.increment),
+        number(second)
+    );
+    modal_damping(&mut procedure, settings.damping.as_ref());
+    (header, procedure)
+}
+
+/// The `*Step` line and the procedure keyword of a steady state dynamics step, as
+/// PrePoMax's `CalSteadyStateDynamicsStep` writes them.
+fn steady_state_dynamics_step(settings: &SteadyStateDynamicsStep) -> (String, String) {
+    let mut procedure = String::from("*Steady state dynamics");
+    if !settings.harmonic {
+        procedure.push_str(", Harmonic=No");
+    }
+    if let Some(solver) = settings.solver.keyword() {
+        let _ = write!(procedure, ", Solver={solver}");
+    }
+    let _ = write!(
+        procedure,
+        "\n{}, {}, {}, {}",
+        number(settings.lower_frequency),
+        number(settings.upper_frequency),
+        settings.data_points,
+        number(settings.bias)
+    );
+    if !settings.harmonic {
+        let _ = write!(
+            procedure,
+            ", {}, {}, {}",
+            settings.fourier_terms,
+            number(settings.time_lower),
+            number(settings.time_upper)
+        );
+    }
+    procedure.push('\n');
+    modal_damping(&mut procedure, settings.damping.as_ref());
+    ("*Step\n".into(), procedure)
+}
+
+/// `*Modal damping` as PrePoMax's `CalModalDamping` writes it: a constant ratio covers
+/// modes 1 to 1000000, Rayleigh damping leaves the mode range empty.
+fn modal_damping(out: &mut String, damping: Option<&ModalDamping>) {
+    match damping {
+        None => {}
+        Some(ModalDamping::Constant(ratio)) => {
+            let _ = writeln!(out, "*Modal damping\n1, 1000000, {}", number(*ratio));
+        }
+        Some(ModalDamping::Direct(ranges)) => {
+            out.push_str("*Modal damping\n");
+            for range in ranges {
+                let _ = writeln!(
+                    out,
+                    "{}, {}, {}",
+                    range.lowest,
+                    range.highest,
+                    number(range.ratio)
+                );
+            }
+        }
+        Some(ModalDamping::Rayleigh(r)) => {
+            let _ = writeln!(
+                out,
+                "*Modal damping, Rayleigh\n , , {}, {}",
+                number(r.alpha),
+                number(r.beta)
+            );
+        }
+    }
+}
+
 /// The `*Step` line and the procedure with its increments, for steps with a time period.
 fn incremented_step(settings: &StaticStep, keyword: String, nlgeom: bool) -> (String, String) {
     let default = settings.incrementation == Incrementation::Default;
@@ -1817,6 +1980,22 @@ fn frequency_step(settings: &FrequencyStep) -> (String, String) {
         }
     }
     procedure.push('\n');
+    (header, procedure)
+}
+
+/// The `*Step` line and the procedure keyword of a complex frequency step, as PrePoMax's
+/// `CalComplexFrequency` writes them.
+fn complex_frequency_step(settings: &ComplexFrequencyStep) -> (String, String) {
+    let mut header = String::from("*Step");
+    if settings.perturbation {
+        header.push_str(", Perturbation");
+    }
+    header.push('\n');
+    let mut procedure = String::from("*Complex frequency");
+    if settings.coriolis {
+        procedure.push_str(", Coriolis");
+    }
+    let _ = writeln!(procedure, "\n{}", settings.num_frequencies);
     (header, procedure)
 }
 

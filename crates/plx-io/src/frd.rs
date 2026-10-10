@@ -363,19 +363,22 @@ impl<'a> Reader<'a> {
             .get(12..24)
             .and_then(|t| parse_float(t.trim()))
             .unwrap_or(0.0);
-        let kind = match int_field(header, 56..58).unwrap_or(0) {
-            0 => AnalysisKind::Static,
-            1 => AnalysisKind::Dynamic,
-            2 => AnalysisKind::Frequency,
-            4 => AnalysisKind::Buckling,
-            other => AnalysisKind::Other(other),
-        };
         let binary = binary_size(header.get(73..75));
         let step = self.pending.take().unwrap_or(StepHeader {
             step: 1,
             increment: 1,
             mode: None,
         });
+        let kind = match int_field(header, 56..58).unwrap_or(0) {
+            0 => AnalysisKind::Static,
+            1 => AnalysisKind::Dynamic,
+            2 => AnalysisKind::Frequency,
+            // CalculiX writes 3 for every other procedure; with a mode number it is a
+            // complex frequency step.
+            3 if step.mode.is_some() => AnalysisKind::ComplexFrequency,
+            4 => AnalysisKind::Buckling,
+            other => AnalysisKind::Other(other),
+        };
 
         let field_line = self
             .next_line()
@@ -412,9 +415,14 @@ impl<'a> Reader<'a> {
                 }
             }
         }
+        // Steady state dynamics writes increment 0 into every `1PSTEP` line; the frequency
+        // points are then only told apart by the increment counter of the block header.
         let increment = match (kind, step.mode) {
-            (AnalysisKind::Frequency, Some(mode)) => mode,
+            (AnalysisKind::Frequency | AnalysisKind::ComplexFrequency, Some(mode)) => mode,
             (AnalysisKind::Buckling, _) => self.buckling_increment(header, step.step, value),
+            _ if step.increment == 0 => int_field(header, 58..63)
+                .map(|n| n.max(0) as u32)
+                .unwrap_or(0),
             _ => step.increment,
         };
         let data: &'a [u8] = self.data;
