@@ -198,6 +198,8 @@ pub struct TreeResponse {
     pub delete: Option<TreeItem>,
     /// Activate a deactivated step, boundary condition or load, or deactivate an active one.
     pub toggle_active: Option<TreeItem>,
+    /// Move a step one place up (`true`) or down in the list of steps.
+    pub move_step: Option<(usize, bool)>,
     /// Swap master and slave of a tie, spring connection or contact pair.
     pub swap_master_slave: Option<TreeItem>,
     /// An entry of the analysis' context menu, or the monitor by double click.
@@ -650,6 +652,8 @@ struct Tree<'a> {
     inactive: HashSet<TreeItem>,
     /// Items with a master and a slave, whose menu offers to swap them.
     master_slave: HashSet<TreeItem>,
+    /// Number of steps, to disable "Move Down" on the last one.
+    step_count: usize,
 }
 
 impl Tree<'_> {
@@ -804,6 +808,21 @@ impl Tree<'_> {
                         let label = if inactive { "Activate" } else { "Deactivate" };
                         if ui.button(label).clicked() {
                             self.response.toggle_active = Some(item.clone());
+                        }
+                        ui.separator();
+                    }
+                    if let TreeItem::Step(s) = item {
+                        if ui
+                            .add_enabled(s > 0, egui::Button::new("Move Up"))
+                            .clicked()
+                        {
+                            self.response.move_step = Some((s, true));
+                        }
+                        if ui
+                            .add_enabled(s + 1 < self.step_count, egui::Button::new("Move Down"))
+                            .clicked()
+                        {
+                            self.response.move_step = Some((s, false));
                         }
                         ui.separator();
                     }
@@ -1201,6 +1220,7 @@ pub fn show(
         closed: HashMap::new(),
         inactive: HashSet::new(),
         master_slave: HashSet::new(),
+        step_count: 0,
     };
     let expanding = tree.state.expand.clone();
     egui::ScrollArea::both()
@@ -1343,6 +1363,7 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             tree.leaf(ui, steps, "Steps");
             return;
         }
+        tree.step_count = fe.steps.len();
         let text = counted("Steps", fe.steps.len());
         tree.branch(ui, steps, text, true, |tree, ui| {
             for (s, step) in fe.steps.iter().enumerate() {
