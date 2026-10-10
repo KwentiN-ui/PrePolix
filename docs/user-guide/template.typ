@@ -36,7 +36,7 @@
 
 // Table of dialog fields: pairs of (field, description).
 #let fields(..rows) = table(
-  columns: (auto, 1fr),
+  columns: (30%, 1fr),
   stroke: (x, y) => if y == 0 { (bottom: 0.7pt) } else { (bottom: 0.3pt + luma(200)) },
   inset: (x: 5pt, y: 4pt),
   table.header([*Field*], [*Meaning*]),
@@ -88,3 +88,13 @@
   outline(depth: 2, indent: auto)
   body
 }
+
+// A screenshot from images/, shown at the same scale as all others: 0.55 pt per pixel, at most
+// the text width. Full-window shots therefore fill the line and dialogs stay readable.
+#let screenshot(name, caption) = figure(
+  layout(size => {
+    let natural = measure(image("images/" + name)).width
+    image("images/" + name, width: calc.min(natural * 0.55, size.width))
+  }),
+  caption: caption,
+)
