@@ -28,6 +28,48 @@ pub enum MonitorEvent {
     OpenResults(PathBuf),
 }
 
+/// Copies the results file of a submodel's global model next to the input file `<name>.inp`
+/// in `dir`, as `<name>-global.frd`, and lets `fe` refer to the copy: CalculiX reads it from
+/// the directory of the input file and cannot take paths with spaces. Does nothing unless a
+/// submodel boundary condition needs the file.
+pub fn stage_global_results(
+    fe: &mut plx_model::FeModel,
+    dir: &std::path::Path,
+    name: &str,
+) -> Result<(), String> {
+    if !fe.uses_global_results() {
+        return Ok(());
+    }
+    // Without a file the input file reports the missing global results.
+    let Some(source) = fe
+        .properties
+        .submodel_input()
+        .map(std::path::Path::to_path_buf)
+    else {
+        return Ok(());
+    };
+    let target = dir.join(format!("{name}-global.frd"));
+    let same = |a: &std::path::Path, b: &std::path::Path| {
+        a.canonicalize()
+            .ok()
+            .is_some_and(|a| b.canonicalize().ok() == Some(a))
+    };
+    if same(&source, &dir.join(format!("{name}.frd"))) {
+        return Err(format!(
+            "The global results {} are this analysis's own results file, which the run \
+             overwrites. Copy the file elsewhere and pick the copy in Model > Model Properties.",
+            source.display()
+        ));
+    }
+    if !same(&source, &target) {
+        std::fs::create_dir_all(dir)
+            .and_then(|()| std::fs::copy(&source, &target))
+            .map_err(|e| format!("Global results {} not copied: {e}", source.display()))?;
+    }
+    fe.properties.global_results = Some(target);
+    Ok(())
+}
+
 impl Analysis {
     /// Writes `Analysis-1.inp` into the work directory and starts CalculiX on it; steps left
     /// at the default solver use `default_solver`, see [`Solver::default_solver`]. With
@@ -50,6 +92,8 @@ impl Analysis {
         let heading = format!("prepolix: {}", model.file_name());
         let mut fe = model.fe.clone();
         fe.resolve_default_solver(default_solver);
+        let work_dir = solver.work_dir();
+        stage_global_results(&mut fe, &work_dir, ANALYSIS_NAME)?;
         let write = if check_model {
             plx_io::inp::write_check_inp
         } else {
@@ -57,7 +101,6 @@ impl Analysis {
         };
         let input = write(&model.mesh, &fe, &heading)
             .map_err(|e| format!("Eingabedatei nicht geschrieben: {e}"))?;
-        let work_dir = solver.work_dir();
         let job_solver = solver.job_solver();
         let hint = "Programm unter Werkzeuge > Einstellungen > CalculiX prüfen.";
         if let Some(message) = crate::settings::missing_executable(&job_solver.executable) {

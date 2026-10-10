@@ -153,6 +153,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     BoundaryKind::Fixed => [true; 6],
                     BoundaryKind::Displacement(values) => values.map(|v| v.is_some()),
                     BoundaryKind::Temperature(_) => [false; 6],
+                    BoundaryKind::Submodel { dofs, .. } => dofs,
                 };
                 if let Some(center) = region_center(model, &item.region, &visible) {
                     for (axis, &held) in held.iter().enumerate() {
