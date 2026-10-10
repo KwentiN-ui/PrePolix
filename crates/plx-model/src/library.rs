@@ -657,8 +657,10 @@ mod tests {
     #[test]
     fn old_libraries_get_the_generic_materials() {
         // A library as saved before the generic materials: S235 only, no version.
-        let mut old = MaterialLibrary::default();
-        old.defaults_version = 0;
+        let mut old = MaterialLibrary {
+            defaults_version: 0,
+            ..MaterialLibrary::default()
+        };
         old.root.items.clear();
         let steel = ensure_category(&mut old.root, &["Elastic_Models", "Steel", "Structural"]);
         steel.items.push(LibraryNode::Material(old_steel()));
