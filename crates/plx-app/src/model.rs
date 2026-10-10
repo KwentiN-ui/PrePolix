@@ -1047,6 +1047,76 @@ impl Model {
         self.mesh.node_ids()[nearest]
     }
 
+    /// The element (by index) whose face or line segment was hit.
+    pub fn hit_element(&self, hit: &Hit) -> Option<usize> {
+        let skin = self.skins.get(hit.part)?;
+        if hit.line {
+            skin.line_elements.get(hit.face).copied()
+        } else {
+            skin.faces.get(hit.face).map(|f| f.element)
+        }
+    }
+
+    /// The edges of the hit face, or the hit line segment, in render coordinates.
+    pub fn hit_outline(&self, hit: &Hit) -> Vec<[Vec3; 2]> {
+        let Some(skin) = self.skins.get(hit.part) else {
+            return Vec::new();
+        };
+        if hit.line {
+            return (skin.lines.get(hit.face).iter())
+                .filter_map(|&&[a, b]| Some([self.node_position(a)?, self.node_position(b)?]))
+                .collect();
+        }
+        skin.faces
+            .get(hit.face)
+            .map_or_else(Vec::new, |face| self.face_outline(&face.corners))
+    }
+
+    /// The visible edges of an element in render coordinates: its skin faces and line
+    /// segments.
+    pub fn element_outline(&self, element: usize) -> Vec<[Vec3; 2]> {
+        let mut edges = Vec::new();
+        for skin in &self.skins {
+            for face in skin.faces.iter().filter(|f| f.element == element) {
+                edges.extend(self.face_outline(&face.corners));
+            }
+            for (segment, &owner) in skin.lines.iter().zip(&skin.line_elements) {
+                if owner == element
+                    && let (Some(a), Some(b)) = (
+                        self.node_position(segment[0]),
+                        self.node_position(segment[1]),
+                    )
+                {
+                    edges.push([a, b]);
+                }
+            }
+        }
+        edges
+    }
+
+    fn face_outline(&self, corners: &[usize]) -> Vec<[Vec3; 2]> {
+        (0..corners.len())
+            .filter_map(|i| {
+                let (a, b) = (corners[i], corners[(i + 1) % corners.len()]);
+                Some([self.node_position(a)?, self.node_position(b)?])
+            })
+            .collect()
+    }
+
+    /// Where a node is drawn, in model coordinates: with the exploded view and the shown
+    /// deformation.
+    pub fn shown_node(&self, id: NodeId) -> Option<[f64; 3]> {
+        let index = self.mesh.node_index(id)?;
+        self.shown_coords().get(index).copied()
+    }
+
+    /// The unit system of the results, or of the FE model.
+    pub fn units(&self) -> UnitSystem {
+        self.results
+            .as_ref()
+            .map_or(self.fe.properties.units, |v| v.units)
+    }
+
     /// Where a node is drawn, relative to the model origin, including the shown deformation.
     pub fn node_position(&self, index: usize) -> Option<Vec3> {
         let mut p = DVec3::from(*self.mesh.coords().get(index)?) + self.explosion_offset(index);
@@ -1074,6 +1144,11 @@ impl Model {
     /// A point given in model coordinates, in render coordinates.
     pub fn to_render(&self, point: [f64; 3]) -> Vec3 {
         (DVec3::from(point) - self.origin).as_vec3()
+    }
+
+    /// A point in render coordinates, in model coordinates.
+    pub fn model_point(&self, point: Vec3) -> DVec3 {
+        point.as_dvec3() + self.origin
     }
 
     /// The global origin in render coordinates.

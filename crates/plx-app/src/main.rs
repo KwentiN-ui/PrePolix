@@ -26,6 +26,7 @@ mod model_properties;
 mod numeric;
 mod overlay;
 mod properties;
+mod query;
 mod results;
 mod screenshot;
 mod section;

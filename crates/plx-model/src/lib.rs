@@ -38,7 +38,7 @@ pub use geometry::{
 };
 pub use history::{HistoryKind, HistoryOutput, Totals};
 pub use library::MaterialLibrary;
-pub use properties::{ModelProperties, ModelSpace};
+pub use properties::{ModelKind, ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
 pub use section::{
     BeamOrientation, BeamProfile, BeamSection, Section, SectionKind, line_tangent, unit_thickness,
@@ -269,6 +269,18 @@ impl FeModel {
         }
     }
 
+    /// Whether an active step that takes it has an active submodel boundary condition, so
+    /// that the input file reads the results of the global model.
+    pub fn uses_global_results(&self) -> bool {
+        (self.steps.iter().filter(|s| s.active)).any(|step| {
+            (step.boundary_conditions.iter()).any(|b| {
+                b.active
+                    && matches!(b.kind, BoundaryKind::Submodel { .. })
+                    && step.kind.supports_boundary(&b.kind)
+            })
+        })
+    }
+
     /// The amplitude of the name, if the model has it.
     pub fn amplitude(&self, name: &str) -> Option<&Amplitude> {
         self.amplitudes.iter().find(|a| a.name == name)
@@ -380,6 +392,8 @@ pub enum StepKind {
     Static(StaticStep),
     /// Eigenfrequencies and mode shapes (`*FREQUENCY`).
     Frequency(FrequencyStep),
+    /// Buckling factors and buckling modes (`*BUCKLE`).
+    Buckle(BuckleStep),
     /// Temperatures only (`*HEAT TRANSFER`).
     HeatTransfer(HeatTransferStep),
     /// Temperatures and displacements solved together
@@ -392,6 +406,7 @@ impl StepKind {
         match self {
             StepKind::Static(settings) => &mut settings.solver,
             StepKind::Frequency(settings) => &mut settings.solver,
+            StepKind::Buckle(settings) => &mut settings.solver,
             StepKind::HeatTransfer(settings) | StepKind::CoupledTempDisp(settings) => {
                 &mut settings.increments.solver
             }
@@ -421,7 +436,10 @@ impl StepKind {
     /// `IsBoundaryConditionSupported`: temperatures in thermal steps, displacements in
     /// mechanical ones.
     pub fn supports_boundary(&self, kind: &BoundaryKind) -> bool {
-        if kind.is_thermal() {
+        // PrePoMax drives submodels in static steps only.
+        if let BoundaryKind::Submodel { .. } = kind {
+            matches!(self, StepKind::Static(_))
+        } else if kind.is_thermal() {
             self.is_thermal()
         } else {
             self.is_mechanical()
@@ -585,6 +603,31 @@ impl Default for FrequencyStep {
     }
 }
 
+/// Settings of a `*BUCKLE` step, with PrePoMax's defaults. The loads of the step are the
+/// reference loads; the buckling factors scale them to the critical loads.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BuckleStep {
+    /// Number of buckling factors to compute.
+    pub num_factors: u32,
+    /// Accuracy of the eigenvalue solver.
+    pub accuracy: f64,
+    /// Adds the stiffness of the deformed state of the previous step, e.g. of a preload that
+    /// is not scaled by the buckling factor (`*STEP, PERTURBATION`).
+    pub perturbation: bool,
+    pub solver: EquationSolver,
+}
+
+impl Default for BuckleStep {
+    fn default() -> Self {
+        Self {
+            num_factors: 1,
+            accuracy: 1e-4,
+            perturbation: false,
+            solver: EquationSolver::Default,
+        }
+    }
+}
+
 impl Step {
     /// A static step with PrePoMax's default field outputs.
     pub fn new_static(name: impl Into<String>) -> Self {
@@ -609,6 +652,19 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             field_outputs: FieldOutput::frequency_defaults(),
+        }
+    }
+
+    /// A buckle step with PrePoMax's default field outputs.
+    pub fn new_buckle(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            active: true,
+            kind: StepKind::Buckle(BuckleStep::default()),
+            boundary_conditions: Vec::new(),
+            loads: Vec::new(),
+            history_outputs: Vec::new(),
+            field_outputs: FieldOutput::defaults(),
         }
     }
 
@@ -660,12 +716,20 @@ pub enum BoundaryKind {
     Displacement([Option<f64>; 6]),
     /// Prescribed temperature (degree of freedom 11), PrePoMax's `TemperatureBC`.
     Temperature(f64),
+    /// Displacements (U1..U3) and rotations (UR1..UR3) taken from the results of the global
+    /// model of a submodel (`*BOUNDARY, SUBMODEL`), PrePoMax's `SubmodelBC`.
+    Submodel {
+        /// Step of the global model whose results are read, counted from 1.
+        step: u32,
+        /// The degrees of freedom that follow the global model.
+        dofs: [bool; 6],
+    },
 }
 
 impl BoundaryKind {
     /// Whether an amplitude can scale the boundary condition; fixed supports stay zero.
     pub fn takes_amplitude(&self) -> bool {
-        !matches!(self, BoundaryKind::Fixed)
+        !matches!(self, BoundaryKind::Fixed | BoundaryKind::Submodel { .. })
     }
 
     pub fn is_thermal(&self) -> bool {
