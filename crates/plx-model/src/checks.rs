@@ -48,10 +48,11 @@ pub enum Problem {
     NoGlobalResults,
     IncrementExceedsStep,
     NoLoad,
+    /// A step that builds on stored eigenmodes (modal dynamics, steady state dynamics,
+    /// complex frequency) without a frequency step before it that stores them.
+    NoStoredModes,
     /// An initial velocity in a model without a Dynamic step.
     VelocityIgnored,
-    /// A complex frequency step without a frequency step before it that stores its modes.
-    NoStoredModes,
     /// A Coriolis complex frequency step without a centrifugal load before it.
     NoRotation,
     /// Found in the solver output only.
@@ -98,8 +99,8 @@ impl Problem {
             Problem::NoGlobalResults => "No global results",
             Problem::IncrementExceedsStep => "Inkrement größer als der Step",
             Problem::NoLoad => "Keine Last",
-            Problem::VelocityIgnored => "Initial velocity without a Dynamic step",
             Problem::NoStoredModes => "No stored eigenmodes",
+            Problem::VelocityIgnored => "Initial velocity without a Dynamic step",
             Problem::NoRotation => "No rotation",
             Problem::NoConvergence => "Keine Konvergenz",
             Problem::MpcAndSpc => "Freiheitsgrad doppelt gebunden",
@@ -210,14 +211,15 @@ impl Problem {
                 "Der Step hat weder eine aktive Last noch eine vorgegebene Verschiebung. \
                  Die Rechnung läuft, alle Ergebnisse sind aber null."
             }
+            Problem::NoStoredModes => {
+                "Modal Dynamics, Steady State Dynamics and Complex Frequency steps work on \
+                 the eigenmodes a previous Frequency step with Storage wrote to the .eig \
+                 file. Without it CalculiX stops with \"error opening the eigenvalue file\" \
+                 or \"the eigenvalue file does not exist\"."
+            }
             Problem::VelocityIgnored => {
                 "Only a Dynamic step (time integration) starts from an initial velocity; \
                  static, frequency and thermal steps ignore it without a message."
-            }
-            Problem::NoStoredModes => {
-                "A Complex Frequency step works on the eigenmodes of the last Frequency step \
-                 before it, which writes them to the .eig file with Storage. Without it \
-                 CalculiX stops with \"the eigenvalue file does not exist\"."
             }
             Problem::NoRotation => {
                 "The Coriolis forces of a Complex Frequency step come from the centrifugal \
@@ -323,11 +325,12 @@ impl Problem {
                 "Im Step das Anfangsinkrement höchstens so groß wie die Step-Dauer wählen."
             }
             Problem::NoLoad => "Unter Loads eine Last erstellen oder eine deaktivierte aktivieren.",
-            Problem::VelocityIgnored => "Add a Dynamic step or deactivate the initial condition.",
             Problem::NoStoredModes => {
-                "Create a Frequency step with the Storage option before the Complex Frequency \
-                 step (as a perturbation step after a static step with the centrifugal load)."
+                "Add a Frequency step with \"Store eigenmodes (Storage)\" before it, with \
+                 the same supports (for Complex Frequency as a perturbation step after a \
+                 static step with the centrifugal load)."
             }
+            Problem::VelocityIgnored => "Add a Dynamic step or deactivate the initial condition.",
             Problem::NoRotation => {
                 "Create a Centrifugal load in the static step before the Frequency step."
             }
@@ -506,6 +509,15 @@ impl FeModel {
         let trusses = Trusses::new(self, mesh);
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             self.check_step(s, mesh, mesh_check, &trusses, &mut findings);
+            let stored = (self.steps[..s].iter().filter(|p| p.active))
+                .any(|p| matches!(&p.kind, StepKind::Frequency(f) if f.storage));
+            if step.kind.uses_stored_modes() && !stored {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::NoStoredModes,
+                    format!("{} needs the eigenmodes of a Frequency step", step.name),
+                ));
+            }
             if let StepKind::HeatTransfer(h) | StepKind::CoupledTempDisp(h) = &step.kind
                 && !h.steady_state
                 && !initial_temperature
@@ -543,8 +555,10 @@ impl FeModel {
             _ => false,
         });
         // Eigenfrequencies and inertia need the mass.
-        let frequency =
-            active().any(|s| matches!(s.kind, StepKind::Frequency(_) | StepKind::Dynamic(_)));
+        let frequency = active().any(|s| {
+            matches!(s.kind, StepKind::Frequency(_) | StepKind::Dynamic(_))
+                || s.kind.uses_stored_modes()
+        });
         // Gravity and centrifugal loads act on the mass of the elements.
         let body_force = active().any(|s| {
             s.kind.supports_loads() && (s.loads.iter()).any(|l| l.active && l.kind.is_body_force())

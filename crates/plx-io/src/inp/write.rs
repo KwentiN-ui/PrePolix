@@ -14,9 +14,9 @@ use plx_model::{
     Amplitude, AmplitudeTime, BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint,
     ContactMethod, ContactPair, DynamicStep, FeModel, FieldOutput, FrequencyStep, GapConductance,
     HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialConditionKind,
-    InteractionProperty, LoadKind, ModelSpace, NodeTie, OutputKind, Region, Section, SectionKind,
-    StaticStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Totals, UserKeyword,
-    line_tangent,
+    InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep, ModelSpace, NodeTie,
+    OutputKind, Region, Section, SectionKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
+    SurfaceBehavior, SurfaceInteraction, Totals, UserKeyword, line_tangent,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -1290,8 +1290,17 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
             heat_transfer_step(settings, "*Coupled temperature-displacement", true)
         }
         StepKind::Dynamic(settings) => dynamic_step(settings),
+        StepKind::ModalDynamics(settings) => modal_dynamics_step(settings),
+        StepKind::SteadyStateDynamics(settings) => steady_state_dynamics_step(settings),
     };
-    let mut boundaries = vec![Keyword::generated("*Boundary, op=New\n".into())];
+    // A modal step keeps the supports of the frequency step that stored the modes;
+    // CalculiX refuses new ones ("in a modal dynamic step new SPCs are not allowed"), and
+    // the reset would make the same supports new. Writing them again is accepted.
+    let mut boundaries = if step.kind.uses_stored_modes() {
+        Vec::new()
+    } else {
+        vec![Keyword::generated("*Boundary, op=New\n".into())]
+    };
     for bc in &step.boundary_conditions {
         // A step leaves out what it cannot take, like a deactivated item: displacements in
         // a heat transfer step, temperatures in a static one.
@@ -1525,6 +1534,8 @@ fn deactivated_step(step: &Step) -> Keyword {
         StepKind::HeatTransfer(_) => "HeatTransferStep",
         StepKind::CoupledTempDisp(_) => "CoupledTempDispStep",
         StepKind::Dynamic(_) => "DynamicStep",
+        StepKind::ModalDynamics(_) => "ModalDynamicsStep",
+        StepKind::SteadyStateDynamics(_) => "SteadyStateDynamicsStep",
     };
     fn all<'a>(names: impl Iterator<Item = &'a str>) -> Vec<Keyword> {
         names.map(deactivated).collect()
@@ -1714,6 +1725,95 @@ fn dynamic_step(settings: &DynamicStep) -> (String, String) {
         );
     }
     (header, procedure)
+}
+
+/// The `*Step` line and the procedure keyword of a modal dynamics step, as PrePoMax's
+/// `CalModalDynamicsStep` writes them, with the modal damping after the procedure.
+fn modal_dynamics_step(settings: &ModalDynamicsStep) -> (String, String) {
+    let header = format!("*Step, Inc={}\n", settings.increments());
+    let mut procedure = String::from("*Modal dynamics");
+    if let Some(solver) = settings.solver.keyword() {
+        let _ = write!(procedure, ", Solver={solver}");
+    }
+    if settings.steady_state {
+        procedure.push_str(", Steady state");
+    }
+    let second = if settings.steady_state {
+        settings.relative_error
+    } else {
+        settings.time_period
+    };
+    let _ = writeln!(
+        procedure,
+        "\n{}, {}",
+        number(settings.increment),
+        number(second)
+    );
+    modal_damping(&mut procedure, settings.damping.as_ref());
+    (header, procedure)
+}
+
+/// The `*Step` line and the procedure keyword of a steady state dynamics step, as
+/// PrePoMax's `CalSteadyStateDynamicsStep` writes them.
+fn steady_state_dynamics_step(settings: &SteadyStateDynamicsStep) -> (String, String) {
+    let mut procedure = String::from("*Steady state dynamics");
+    if !settings.harmonic {
+        procedure.push_str(", Harmonic=No");
+    }
+    if let Some(solver) = settings.solver.keyword() {
+        let _ = write!(procedure, ", Solver={solver}");
+    }
+    let _ = write!(
+        procedure,
+        "\n{}, {}, {}, {}",
+        number(settings.lower_frequency),
+        number(settings.upper_frequency),
+        settings.data_points,
+        number(settings.bias)
+    );
+    if !settings.harmonic {
+        let _ = write!(
+            procedure,
+            ", {}, {}, {}",
+            settings.fourier_terms,
+            number(settings.time_lower),
+            number(settings.time_upper)
+        );
+    }
+    procedure.push('\n');
+    modal_damping(&mut procedure, settings.damping.as_ref());
+    ("*Step\n".into(), procedure)
+}
+
+/// `*Modal damping` as PrePoMax's `CalModalDamping` writes it: a constant ratio covers
+/// modes 1 to 1000000, Rayleigh damping leaves the mode range empty.
+fn modal_damping(out: &mut String, damping: Option<&ModalDamping>) {
+    match damping {
+        None => {}
+        Some(ModalDamping::Constant(ratio)) => {
+            let _ = writeln!(out, "*Modal damping\n1, 1000000, {}", number(*ratio));
+        }
+        Some(ModalDamping::Direct(ranges)) => {
+            out.push_str("*Modal damping\n");
+            for range in ranges {
+                let _ = writeln!(
+                    out,
+                    "{}, {}, {}",
+                    range.lowest,
+                    range.highest,
+                    number(range.ratio)
+                );
+            }
+        }
+        Some(ModalDamping::Rayleigh(r)) => {
+            let _ = writeln!(
+                out,
+                "*Modal damping, Rayleigh\n , , {}, {}",
+                number(r.alpha),
+                number(r.beta)
+            );
+        }
+    }
 }
 
 /// The `*Step` line and the procedure with its increments, for steps with a time period.

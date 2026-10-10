@@ -357,6 +357,11 @@ pub enum StepKind {
     CoupledTempDisp(HeatTransferStep),
     /// Displacements over time with inertia and damping (`*DYNAMIC`).
     Dynamic(DynamicStep),
+    /// Response over time as a superposition of the stored eigenmodes (`*MODAL DYNAMICS`).
+    ModalDynamics(ModalDynamicsStep),
+    /// Harmonic response over a frequency range from the stored eigenmodes
+    /// (`*STEADY STATE DYNAMICS`).
+    SteadyStateDynamics(SteadyStateDynamicsStep),
 }
 
 impl StepKind {
@@ -372,7 +377,17 @@ impl StepKind {
                 Some(&mut settings.increments.solver)
             }
             StepKind::Dynamic(settings) => Some(&mut settings.increments.solver),
+            StepKind::ModalDynamics(settings) => Some(&mut settings.solver),
+            StepKind::SteadyStateDynamics(settings) => Some(&mut settings.solver),
         }
+    }
+
+    /// Whether the step superposes the eigenmodes a previous frequency step stored.
+    pub fn uses_stored_modes(&self) -> bool {
+        matches!(
+            self,
+            StepKind::ModalDynamics(_) | StepKind::SteadyStateDynamics(_)
+        )
     }
 
     /// Whether the step takes loads. A frequency step has none, as in PrePoMax; preloads
@@ -611,6 +626,167 @@ impl DynamicStep {
     }
 }
 
+/// Settings of a `*MODAL DYNAMICS` step, with PrePoMax's defaults: the response over time
+/// as a superposition of the eigenmodes a previous frequency step stored.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModalDynamicsStep {
+    /// Fixed time increment of the response.
+    pub increment: f64,
+    pub time_period: f64,
+    /// Maximum number of increments (`INC`); the writer raises it to fit the time period.
+    pub max_increments: u32,
+    /// Steady state (`STEADY STATE`): integrated until the response repeats within the
+    /// relative error, instead of over the time period.
+    pub steady_state: bool,
+    pub relative_error: f64,
+    pub solver: EquationSolver,
+    pub damping: Option<ModalDamping>,
+}
+
+impl Default for ModalDynamicsStep {
+    fn default() -> Self {
+        Self {
+            increment: 0.1,
+            time_period: 1.0,
+            max_increments: 100,
+            steady_state: false,
+            relative_error: 0.01,
+            solver: EquationSolver::Default,
+            damping: None,
+        }
+    }
+}
+
+impl ModalDynamicsStep {
+    /// What is wrong with the settings, if anything.
+    pub fn problem(&self) -> Option<String> {
+        if self.increment <= 0.0 {
+            return Some("The time increment must be greater than 0.".into());
+        }
+        if !self.steady_state && self.time_period <= 0.0 {
+            return Some("The time period must be greater than 0.".into());
+        }
+        if self.steady_state && !(0.0..=1.0).contains(&self.relative_error) {
+            return Some("The relative error must lie between 0 and 1.".into());
+        }
+        self.damping.as_ref().and_then(ModalDamping::problem)
+    }
+
+    /// The `INC` of the step: the limit, or the number of increments the time period
+    /// takes when that is more.
+    pub fn increments(&self) -> u32 {
+        if self.steady_state || self.increment <= 0.0 {
+            return self.max_increments;
+        }
+        let needed = (self.time_period / self.increment).ceil() as u32 + 1;
+        self.max_increments.max(needed)
+    }
+}
+
+/// Settings of a `*STEADY STATE DYNAMICS` step, with PrePoMax's defaults: the harmonic
+/// response over a frequency range from the stored eigenmodes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SteadyStateDynamicsStep {
+    /// Harmonic excitation; otherwise the loads are periodic over the time range and
+    /// expanded into Fourier terms (`HARMONIC=NO`).
+    pub harmonic: bool,
+    pub lower_frequency: f64,
+    pub upper_frequency: f64,
+    /// Frequencies evaluated between two eigenfrequencies, at least 2.
+    pub data_points: u32,
+    /// Crowds the frequencies towards the eigenfrequencies; 1 spreads them evenly.
+    pub bias: f64,
+    /// Fourier terms of a non-harmonic excitation.
+    pub fourier_terms: u32,
+    /// Time range of one period of a non-harmonic excitation.
+    pub time_lower: f64,
+    pub time_upper: f64,
+    pub solver: EquationSolver,
+    pub damping: Option<ModalDamping>,
+}
+
+impl Default for SteadyStateDynamicsStep {
+    fn default() -> Self {
+        Self {
+            harmonic: true,
+            lower_frequency: 0.0,
+            upper_frequency: 10.0,
+            data_points: 20,
+            bias: 3.0,
+            fourier_terms: 20,
+            time_lower: 0.0,
+            time_upper: 1.0,
+            solver: EquationSolver::Default,
+            damping: None,
+        }
+    }
+}
+
+impl SteadyStateDynamicsStep {
+    /// What is wrong with the settings, if anything.
+    pub fn problem(&self) -> Option<String> {
+        if self.lower_frequency < 0.0 || self.upper_frequency <= self.lower_frequency {
+            return Some("The upper frequency must be greater than the lower one.".into());
+        }
+        if self.data_points < 2 {
+            return Some("At least 2 data points are needed.".into());
+        }
+        if self.bias < 1.0 {
+            return Some("The bias must be 1 or more.".into());
+        }
+        if !self.harmonic && (self.fourier_terms < 1 || self.time_upper <= self.time_lower) {
+            return Some("A periodic excitation needs Fourier terms and a time range.".into());
+        }
+        self.damping.as_ref().and_then(ModalDamping::problem)
+    }
+}
+
+/// Damping of the modes of a modal dynamics or steady state dynamics step
+/// (`*MODAL DAMPING`), PrePoMax's modal damping.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ModalDamping {
+    /// One viscous damping ratio (damping over critical damping) for all modes.
+    Constant(f64),
+    /// A damping ratio per range of modes.
+    Direct(Vec<ModeDamping>),
+    /// Rayleigh damping from the mass and stiffness matrices.
+    Rayleigh(RayleighDamping),
+}
+
+impl ModalDamping {
+    /// What is wrong with the damping, if anything.
+    pub fn problem(&self) -> Option<String> {
+        let bad = |ratio: f64| !(0.0..=1.0).contains(&ratio);
+        match self {
+            ModalDamping::Constant(ratio) if bad(*ratio) => {
+                Some("The damping ratio must lie between 0 and 1.".into())
+            }
+            ModalDamping::Direct(ranges) if ranges.is_empty() => {
+                Some("Give at least one range of modes with its damping ratio.".into())
+            }
+            ModalDamping::Direct(ranges)
+                if ranges
+                    .iter()
+                    .any(|r| r.lowest < 1 || r.highest < r.lowest || bad(r.ratio)) =>
+            {
+                Some("Each range needs modes from 1 up and a ratio between 0 and 1.".into())
+            }
+            ModalDamping::Rayleigh(r) if r.alpha < 0.0 || r.beta < 0.0 => {
+                Some("The damping coefficients cannot be negative.".into())
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The viscous damping ratio of a range of modes.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModeDamping {
+    pub lowest: u32,
+    pub highest: u32,
+    pub ratio: f64,
+}
+
 /// How a dynamic step integrates over time, CalculiX's `EXPLICIT` parameter of `*DYNAMIC`:
 /// the structure and, with fluids, the fluid.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -803,6 +979,23 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             field_outputs: FieldOutput::dynamic_defaults(),
+        }
+    }
+
+    /// A modal dynamics step with PrePoMax's default field outputs.
+    pub fn new_modal_dynamics(name: impl Into<String>) -> Self {
+        Self {
+            kind: StepKind::ModalDynamics(ModalDynamicsStep::default()),
+            ..Self::new_dynamic(name)
+        }
+    }
+
+    /// A steady state dynamics step with PrePoMax's default field outputs.
+    pub fn new_steady_state_dynamics(name: impl Into<String>) -> Self {
+        Self {
+            kind: StepKind::SteadyStateDynamics(SteadyStateDynamicsStep::default()),
+            field_outputs: FieldOutput::defaults(),
+            ..Self::new_dynamic(name)
         }
     }
 
