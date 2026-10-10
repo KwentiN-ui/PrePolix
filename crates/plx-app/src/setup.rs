@@ -3256,11 +3256,9 @@ fn frequency_form(ui: &mut Ui, settings: &mut FrequencyStep, units: UnitSystem) 
 }
 
 /// Settings of a complex frequency step, PrePoMax's dialog: the number of modes; the Coriolis
-/// option and the perturbation flag are CalculiX's, with a hint at what the step builds on.
+/// option is CalculiX's, with a hint at what the step builds on. The perturbation flag is the
+/// one of the Frequency step, since CalculiX requires the same on both steps.
 fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep) {
-    ui.label("");
-    ui.checkbox(&mut settings.perturbation, "Perturbation step");
-    ui.end_row();
     ui.label("");
     ui.checkbox(
         &mut settings.coriolis,
@@ -3274,6 +3272,8 @@ fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep) {
     ui.weak(
         "Solved on the modes of the last Frequency step with Storage before this step.\n\
          The rotation comes from a Centrifugal load in the Static step before that one.\n\
+         Perturbation is taken from that Frequency step: tick \"Perturbation\" there\n\
+         to include the stiffening by the centrifugal preload.\n\
          Loads have no effect in this step; only the boundary conditions count.",
     );
     ui.end_row();
