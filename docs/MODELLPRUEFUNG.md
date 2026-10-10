@@ -26,6 +26,7 @@ fehlgeschlagenen Lauf aus der Ausgabe von CalculiX erkennt. Nachgestellt mit Cal
 | Keine Konvergenz | `too many cutbacks`, `increment size smaller than minimum` | Abbruch | Ausgabe wird erkannt |
 | Last nur auf festgehaltenen Knoten | keine | Last wirkungslos | Warnung |
 | Statischer Step ohne Last | keine | Ergebnis null | Warnung |
+| Anfangsgeschwindigkeit (Initial Condition Velocity) ohne Dynamic Step | keine | ignoriert | Warnung an der Anfangsbedingung; im Dynamic Step zählt sie als Last |
 | Frequency Step ohne Lagerung | keine | sechs Starrkörpermoden nahe 0 Hz | keine (gewollt) |
 
 Quellen: CalculiX-Handbuch (ccx 2.21), [PrePoMax-Forum: Known CalculiX limitations](https://prepomax.discourse.group/t/known-calculix-limitations/3050),

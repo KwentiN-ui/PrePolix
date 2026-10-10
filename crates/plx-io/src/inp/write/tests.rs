@@ -2851,3 +2851,81 @@ fn calculix_prints_the_contact_force_of_a_pair() {
     assert!(all.field("CONTACT_STRESS").is_some());
     assert!(all.field("TOTAL_NUMBER_OF_CONTACT_ELEMENTS").is_some());
 }
+
+/// The free cantilever without supports or loads, moving from an initial velocity in a
+/// short Dynamic step with direct increments.
+fn coasting_cantilever(kind: plx_model::InitialConditionKind) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = dynamic_cantilever(1e-3, 1e-4, None);
+    let step = &mut model.steps[0];
+    step.boundary_conditions.clear();
+    step.loads.clear();
+    model.initial_conditions.push(plx_model::InitialCondition {
+        name: "Initial_Velocity-1".into(),
+        active: true,
+        region: Region::Parts(vec!["EALL".into()]),
+        kind,
+    });
+    (mesh, model)
+}
+
+#[test]
+fn initial_velocities_are_written_like_prepomax_does() {
+    use plx_model::InitialConditionKind;
+    let (mesh, mut model) =
+        coasting_cantilever(InitialConditionKind::Velocity([0.0, 0.0, -1000.0]));
+    model.initial_conditions[0].region = Region::NodeSet("FIX".into());
+    let tip = mesh.node(99).unwrap();
+    model.initial_conditions.push(plx_model::InitialCondition {
+        name: "Initial_Angular_Velocity-1".into(),
+        active: true,
+        region: Region::Nodes(vec![99]),
+        kind: InitialConditionKind::AngularVelocity {
+            point: [0.0, 0.0, 5.0],
+            axis: [0.0, 2.0, 0.0],
+            speed: 10.0,
+        },
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    // y x (x, y, z - 5) = (z - 5, 0, -x): the tip moves down and, off the axis, along x.
+    let expected = format!(
+        "** Name: Initial_Velocity-1\n*Initial conditions, Type=Velocity\nFIX, 3, -1000\n\
+         ** Name: Initial_Angular_Velocity-1\n*Initial conditions, Type=Velocity\n\
+         99, 1, {}\n99, 3, {}\n",
+        number(10.0 * (tip[2] - 5.0)),
+        number(-10.0 * tip[0])
+    );
+    assert!(text.contains(&expected), "missing {expected:?} in\n{text}");
+    assert!(
+        !text.contains("FIX, 1,"),
+        "zero components are left out:\n{text}"
+    );
+}
+
+/// A free body keeps its initial velocity: after 1 ms at 1000 mm/s the tip has moved
+/// 1 mm; rotating at 10 rad/s about the root, the tip at the length L has moved 10 L t.
+#[test]
+fn calculix_starts_the_cantilever_from_its_initial_velocity() {
+    use plx_model::InitialConditionKind;
+    let (mesh, model) = coasting_cantilever(InitialConditionKind::Velocity([0.0, 0.0, -1000.0]));
+    let Some(frd) = run_ccx(
+        "anfangsgeschwindigkeit",
+        &write_inp(&mesh, &model, "").unwrap(),
+    ) else {
+        return;
+    };
+    let u3 = node_value(&frd, "DISP", "U3", 99);
+    assert!((u3 + 1.0).abs() < 0.02, "tip moved {u3} mm, expected -1");
+    let tip = mesh.node(99).unwrap();
+    let (mesh, model) = coasting_cantilever(InitialConditionKind::AngularVelocity {
+        point: [0.0, tip[1], tip[2]],
+        axis: [0.0, 1.0, 0.0],
+        speed: 10.0,
+    });
+    let frd = run_ccx("anfangsdrehung", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let u3 = node_value(&frd, "DISP", "U3", 99);
+    let expected = -10.0 * tip[0] * 1e-3;
+    assert!(
+        (u3 - expected).abs() < 0.02 * expected.abs(),
+        "tip moved {u3} mm, expected {expected}"
+    );
+}

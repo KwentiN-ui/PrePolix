@@ -46,6 +46,8 @@ pub enum Problem {
     RotationsIgnored,
     IncrementExceedsStep,
     NoLoad,
+    /// An initial velocity in a model without a Dynamic step.
+    VelocityIgnored,
     /// Found in the solver output only.
     NoConvergence,
     /// Found in the solver output only.
@@ -63,6 +65,7 @@ impl Problem {
             | Problem::ConflictingBoundaries
             | Problem::LoadOnFixedNodes
             | Problem::RotationsIgnored
+            | Problem::VelocityIgnored
             | Problem::NoLoad => Severity::Warning,
             _ => Severity::Error,
         }
@@ -87,6 +90,7 @@ impl Problem {
             Problem::RotationsIgnored => "Rotationen ohne Wirkung",
             Problem::IncrementExceedsStep => "Inkrement größer als der Step",
             Problem::NoLoad => "Keine Last",
+            Problem::VelocityIgnored => "Initial velocity without a Dynamic step",
             Problem::NoConvergence => "Keine Konvergenz",
             Problem::MpcAndSpc => "Freiheitsgrad doppelt gebunden",
             Problem::RotationIn2d => "Rotation in einem 2D-Modell",
@@ -191,6 +195,10 @@ impl Problem {
                 "Der Step hat weder eine aktive Last noch eine vorgegebene Verschiebung. \
                  Die Rechnung läuft, alle Ergebnisse sind aber null."
             }
+            Problem::VelocityIgnored => {
+                "Only a Dynamic step (time integration) starts from an initial velocity; \
+                 static, frequency and thermal steps ignore it without a message."
+            }
             Problem::NoConvergence => {
                 "Die Newton-Iteration ist nicht konvergiert; CalculiX hat das Inkrement \
                  immer weiter verkleinert und aufgegeben (\"too many cutbacks\" oder \
@@ -286,6 +294,7 @@ impl Problem {
                 "Im Step das Anfangsinkrement höchstens so groß wie die Step-Dauer wählen."
             }
             Problem::NoLoad => "Unter Loads eine Last erstellen oder eine deaktivierte aktivieren.",
+            Problem::VelocityIgnored => "Add a Dynamic step or deactivate the initial condition.",
             Problem::NoConvergence => {
                 "Kontakte prüfen (Steifigkeit der Surface Interaction, Adjust, Lage der \
                  Flächen), Teile ausreichend lagern, die Last auf mehrere Inkremente \
@@ -445,7 +454,19 @@ impl FeModel {
                 ));
             }
         }
-        let initial_temperature = self.initial_conditions.iter().any(|c| c.active);
+        let initial_temperature =
+            (self.initial_conditions.iter()).any(|c| c.active && !c.kind.is_velocity());
+        let dynamic =
+            (self.steps.iter()).any(|s| s.active && matches!(s.kind, StepKind::Dynamic(_)));
+        for (i, condition) in self.initial_conditions.iter().enumerate() {
+            if condition.active && condition.kind.is_velocity() && !dynamic {
+                findings.push(Finding::new(
+                    ModelItem::InitialCondition(i),
+                    Problem::VelocityIgnored,
+                    format!("{} needs a Dynamic step", condition.name),
+                ));
+            }
+        }
         let trusses = Trusses::new(self, mesh);
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             self.check_step(s, mesh, mesh_check, &trusses, &mut findings);
@@ -665,7 +686,10 @@ impl FeModel {
                 }
             }
             let displaced = fixed.values().any(|&(_, v)| v != 0.0);
-            if !loaded && !displaced && !user_keywords {
+            // A Dynamic step may start from an initial velocity instead of a load.
+            let started = matches!(step.kind, StepKind::Dynamic(_))
+                && (self.initial_conditions.iter()).any(|c| c.active && c.kind.is_velocity());
+            if !loaded && !displaced && !started && !user_keywords {
                 findings.push(Finding::new(
                     ModelItem::Step(s),
                     Problem::NoLoad,
@@ -1537,6 +1561,31 @@ mod tests {
     fn a_held_and_loaded_model_has_no_findings() {
         let mesh = cubes(2, true);
         assert_eq!(check(&model(&mesh), &mesh), []);
+    }
+
+    #[test]
+    fn an_initial_velocity_needs_a_dynamic_step() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        model.initial_conditions.push(crate::InitialCondition {
+            name: "Initial_Velocity-1".into(),
+            active: true,
+            region: Region::Nodes(vec![1]),
+            kind: crate::InitialConditionKind::Velocity([1.0, 0.0, 0.0]),
+        });
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::InitialCondition(0), Problem::VelocityIgnored)]
+        );
+        // A Dynamic step takes it up, even without a load.
+        model.steps[0].kind = StepKind::Dynamic(crate::DynamicStep::default());
+        model.steps[0].loads.clear();
+        assert_eq!(check(&model, &mesh), []);
+        model.initial_conditions[0].active = false;
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Step(0), Problem::NoLoad)]
+        );
     }
 
     #[test]

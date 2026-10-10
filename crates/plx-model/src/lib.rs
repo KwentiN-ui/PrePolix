@@ -823,6 +823,54 @@ pub struct InitialCondition {
 pub enum InitialConditionKind {
     /// `*INITIAL CONDITIONS, TYPE=TEMPERATURE`
     Temperature(f64),
+    /// `*INITIAL CONDITIONS, TYPE=VELOCITY`: the same velocity at every node of the region,
+    /// the start of a Dynamic step.
+    Velocity([f64; 3]),
+    /// A rigid rotation at the start of a Dynamic step: `speed` in rad/s about the axis
+    /// through `point`, written as the velocity of every node of the region.
+    AngularVelocity {
+        point: [f64; 3],
+        axis: [f64; 3],
+        speed: f64,
+    },
+}
+
+impl InitialConditionKind {
+    /// A velocity that only a Dynamic step takes up.
+    pub fn is_velocity(&self) -> bool {
+        !matches!(self, Self::Temperature(_))
+    }
+
+    /// Velocity of a node at `position` under this condition; `None` for a temperature.
+    pub fn velocity_at(&self, position: [f64; 3]) -> Option<[f64; 3]> {
+        match self {
+            Self::Temperature(_) => None,
+            Self::Velocity(v) => Some(*v),
+            Self::AngularVelocity { point, axis, speed } => {
+                let length = axis.iter().map(|a| a * a).sum::<f64>().sqrt();
+                if length == 0.0 {
+                    return Some([0.0; 3]);
+                }
+                let n = axis.map(|a| a / length);
+                let r: [f64; 3] = std::array::from_fn(|k| position[k] - point[k]);
+                Some([
+                    speed * (n[1] * r[2] - n[2] * r[1]),
+                    speed * (n[2] * r[0] - n[0] * r[2]),
+                    speed * (n[0] * r[1] - n[1] * r[0]),
+                ])
+            }
+        }
+    }
+
+    /// Why the values cannot be written.
+    pub fn problem(&self) -> Option<String> {
+        match self {
+            Self::AngularVelocity { axis, .. } if axis.iter().all(|a| *a == 0.0) => {
+                Some("The axis must not be the zero vector.".into())
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
