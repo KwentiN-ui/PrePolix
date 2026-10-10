@@ -7,14 +7,121 @@
 //! origin, a point on its x axis and a point in its xy plane. Cylindrical systems use the same
 //! points; their z axis is the cylinder axis and r, θ, z are the local directions.
 
+use plx_mesh::FeMesh;
 use serde::{Deserialize, Serialize};
 
-use crate::FeModel;
+use crate::{FeModel, Region};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReferencePoint {
     pub name: String,
+    /// Position in global coordinates: as entered, or computed from the definition and kept
+    /// up to date by [`FeModel::update_reference_points`].
     pub position: [f64; 3],
+    #[serde(default)]
+    pub definition: PointDefinition,
+}
+
+/// How a reference point is given, PrePoMax's "Create by".
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum PointDefinition {
+    /// Global coordinates, the position itself.
+    #[default]
+    Global,
+    /// Coordinates in a coordinate system of the features: x, y, z, or for a cylindrical
+    /// one r, θ in degrees, z.
+    Local {
+        system: String,
+        coordinates: [f64; 3],
+    },
+    /// The area-weighted centre of selected faces (of edges in 2D models), e.g. the centre
+    /// of a hole. It follows the mesh, also after remeshing a selection of the geometry.
+    CenterOfGravity(Region),
+    /// The centre of the bounding box of a selection.
+    BoundingBoxCenter(Region),
+}
+
+impl ReferencePoint {
+    pub fn new(name: impl Into<String>, position: [f64; 3]) -> Self {
+        Self {
+            name: name.into(),
+            position,
+            definition: PointDefinition::Global,
+        }
+    }
+
+    /// The global position after the definition, on `mesh`.
+    pub fn resolve(&self, model: &FeModel, mesh: &FeMesh) -> Result<[f64; 3], String> {
+        let empty = || {
+            format!(
+                "{}: The selection contains no faces of the mesh.",
+                self.name
+            )
+        };
+        match &self.definition {
+            PointDefinition::Global => Ok(self.position),
+            PointDefinition::Local {
+                system,
+                coordinates,
+            } => {
+                let system = model
+                    .coordinate_system_or_global(system)
+                    .ok_or_else(|| format!("Coordinate System {system} does not exist"))?;
+                system.global(*coordinates)
+            }
+            PointDefinition::CenterOfGravity(region) => {
+                face_centroid(mesh, &region.faces(mesh)).ok_or_else(empty)
+            }
+            PointDefinition::BoundingBoxCenter(region) => {
+                let points: Vec<[f64; 3]> = (region.nodes(mesh).into_iter())
+                    .filter_map(|id| mesh.node(id))
+                    .collect();
+                if points.is_empty() {
+                    return Err(empty());
+                }
+                let mut min = [f64::INFINITY; 3];
+                let mut max = [f64::NEG_INFINITY; 3];
+                for p in &points {
+                    for k in 0..3 {
+                        (min[k], max[k]) = (min[k].min(p[k]), max[k].max(p[k]));
+                    }
+                }
+                Ok([0, 1, 2].map(|k| (min[k] + max[k]) * 0.5))
+            }
+        }
+    }
+}
+
+/// Area-weighted centre of element faces, from their corners; of edges, length-weighted.
+fn face_centroid(mesh: &FeMesh, faces: &[(plx_mesh::ElementId, u8)]) -> Option<[f64; 3]> {
+    let (mut weight, mut sum) = (0.0, [0.0; 3]);
+    for &(element, face) in faces {
+        let Some(element) = mesh.element(element) else {
+            continue;
+        };
+        let Some(topology) = element.faces().get(usize::from(face).saturating_sub(1)) else {
+            continue;
+        };
+        let corners: Vec<[f64; 3]> = (topology.corners.iter())
+            .filter_map(|&local| mesh.node(*element.nodes.get(local)?))
+            .collect();
+        let mut accumulate = |w: f64, centre: [f64; 3]| {
+            weight += w;
+            sum = add(sum, scale(centre, w));
+        };
+        match corners[..] {
+            [a, b] => accumulate(norm(sub(b, a)), scale(add(a, b), 0.5)),
+            [a, ..] if corners.len() >= 3 => {
+                for pair in corners[1..].windows(2) {
+                    let (b, c) = (pair[0], pair[1]);
+                    let area = norm(cross(sub(b, a), sub(c, a))) * 0.5;
+                    accumulate(area, scale(add(add(a, b), c), 1.0 / 3.0));
+                }
+            }
+            _ => {}
+        }
+    }
+    (weight > 0.0).then(|| scale(sum, 1.0 / weight))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +252,22 @@ impl CoordinateSystem {
             CoordinateSystemKind::Rectangular => [a, b, c],
             CoordinateSystemKind::Cylindrical => [a.hypot(b), b.atan2(a), c],
         })
+    }
+
+    /// The global point at coordinates in the system: x, y, z, or r, θ (degrees), z.
+    pub fn global(&self, local: [f64; 3]) -> Result<[f64; 3], String> {
+        let [x, y, z] = self.axes()?;
+        let [a, b, c] = match self.kind {
+            CoordinateSystemKind::Rectangular => local,
+            CoordinateSystemKind::Cylindrical => {
+                let (r, theta) = (local[0], local[1].to_radians());
+                [r * theta.cos(), r * theta.sin(), local[2]]
+            }
+        };
+        Ok(add(
+            self.origin,
+            add(add(scale(x, a), scale(y, b)), scale(z, c)),
+        ))
     }
 }
 
@@ -345,6 +468,22 @@ impl FeModel {
         }
     }
 
+    /// Recomputes the positions of reference points defined by a coordinate system or a
+    /// selection, e.g. after remeshing; returns why points could not be placed.
+    pub fn update_reference_points(&mut self, mesh: &FeMesh) -> Vec<String> {
+        let mut errors = Vec::new();
+        let positions: Vec<Result<[f64; 3], String>> = (self.reference_points.iter())
+            .map(|point| point.resolve(self, mesh))
+            .collect();
+        for (point, position) in self.reference_points.iter_mut().zip(positions) {
+            match position {
+                Ok(position) => point.position = position,
+                Err(error) => errors.push(error),
+            }
+        }
+        errors
+    }
+
     /// Points referring to a renamed reference point follow it, as do rigid bodies and the
     /// boundary conditions and loads on it.
     pub fn rename_reference_point(&mut self, old: &str, new: &str) {
@@ -373,8 +512,15 @@ impl FeModel {
         }
     }
 
-    /// Planes of a renamed coordinate system follow it.
+    /// Reference points and planes of a renamed coordinate system follow it.
     pub fn rename_coordinate_system(&mut self, old: &str, new: &str) {
+        for point in &mut self.reference_points {
+            if let PointDefinition::Local { system, .. } = &mut point.definition
+                && system == old
+            {
+                *system = new.to_string();
+            }
+        }
         for plane in &mut self.planes {
             if let PlaneSource::CoordinateSystem { system, .. } = &mut plane.source
                 && system == old
@@ -478,10 +624,9 @@ mod tests {
     #[test]
     fn paths_resolve_reference_points_and_follow_renames() {
         let mut model = FeModel::default();
-        model.reference_points.push(ReferencePoint {
-            name: "RP-1".into(),
-            position: [0.0, 0.0, 4.0],
-        });
+        model
+            .reference_points
+            .push(ReferencePoint::new("RP-1", [0.0, 0.0, 4.0]));
         let mut path = ResultPath::new("Path-1");
         path.start = PointRef::ReferencePoint("RP-1".into());
         path.end = PointRef::Coordinates([0.0, 0.0, 0.0]);
@@ -501,10 +646,9 @@ mod tests {
     #[test]
     fn planes_resolve_their_definitions() {
         let mut model = FeModel::default();
-        model.reference_points.push(ReferencePoint {
-            name: "RP-1".into(),
-            position: [0.0, 0.0, 2.0],
-        });
+        model
+            .reference_points
+            .push(ReferencePoint::new("RP-1", [0.0, 0.0, 2.0]));
         let mut plane = Plane::new("Plane-1");
         let (point, normal) = plane.resolve(&model).unwrap();
         assert!(close(point, [0.0; 3]) && close(normal, [0.0, 0.0, 1.0]));
@@ -570,5 +714,77 @@ mod tests {
             },
         };
         assert!(missing.resolve(&model).is_err());
+    }
+
+    #[test]
+    fn local_coordinates_turn_into_global_ones() {
+        let mut cs = CoordinateSystem::new("CS");
+        cs.origin = [1.0, 0.0, 0.0];
+        cs.point_x = [1.0, 1.0, 0.0];
+        cs.point_xy = [0.0, 0.0, 0.0];
+        assert!(close(cs.global([2.0, 0.0, 3.0]).unwrap(), [1.0, 2.0, 3.0]));
+        cs.kind = CoordinateSystemKind::Cylindrical;
+        let p = cs.global([2.0, 90.0, 0.0]).unwrap();
+        assert!((0..3).all(|k| (p[k] - [-1.0, 0.0, 0.0][k]).abs() < 1e-12));
+        let back = cs.local(p).unwrap();
+        assert!((back[0] - 2.0).abs() < 1e-12 && (back[1].to_degrees() - 90.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reference_points_sit_at_the_centre_of_faces() {
+        use plx_mesh::{Element, ElementShape, Part};
+        // One hexahedron from 0 to 2 in x, 0 to 1 in y and z.
+        let mut mesh = FeMesh::default();
+        let corners = [
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [2.0, 0.0, 1.0],
+            [2.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ];
+        for (i, c) in corners.into_iter().enumerate() {
+            mesh.set_node(i as u32 + 1, c);
+        }
+        mesh.add_element(Element {
+            id: 1,
+            type_name: "C3D8".into(),
+            shape: ElementShape::Hex8,
+            nodes: (1..=8).collect(),
+        })
+        .unwrap();
+        mesh.parts.push(Part {
+            name: "P".into(),
+            elements: vec![1],
+        });
+        let mut model = FeModel::default();
+        let faces: Vec<(plx_mesh::ElementId, u8)> = (1..=6).map(|f| (1, f)).collect();
+        let mut point = ReferencePoint::new("RP-1", [9.0; 3]);
+        point.definition = PointDefinition::CenterOfGravity(Region::Faces(faces.clone()));
+        model.reference_points.push(point);
+        let mut corner = ReferencePoint::new("RP-2", [0.0; 3]);
+        corner.definition = PointDefinition::BoundingBoxCenter(Region::Faces(faces));
+        model.reference_points.push(corner);
+        assert!(model.update_reference_points(&mesh).is_empty());
+        assert!(close(model.reference_points[0].position, [1.0, 0.5, 0.5]));
+        assert!(close(model.reference_points[1].position, [1.0, 0.5, 0.5]));
+        // One face alone: its own centre.
+        let top = mesh.element(1).unwrap().faces().iter().position(|f| {
+            f.corners
+                .iter()
+                .all(|&c| mesh.node(mesh.element(1).unwrap().nodes[c]).unwrap()[0] == 2.0)
+        });
+        let face = top.unwrap() as u8 + 1;
+        model.reference_points[0].definition =
+            PointDefinition::CenterOfGravity(Region::Faces(vec![(1, face)]));
+        model.update_reference_points(&mesh);
+        assert!(close(model.reference_points[0].position, [2.0, 0.5, 0.5]));
+        // Nothing selected: the point keeps its place and the error is reported.
+        model.reference_points[0].definition =
+            PointDefinition::CenterOfGravity(Region::Faces(Vec::new()));
+        assert_eq!(model.update_reference_points(&mesh).len(), 1);
+        assert!(close(model.reference_points[0].position, [2.0, 0.5, 0.5]));
     }
 }

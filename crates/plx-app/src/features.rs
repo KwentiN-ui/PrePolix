@@ -3,8 +3,10 @@
 //! through the model, as a plot and a table, and plane results with the values where a plane
 //! cuts the model.
 //!
-//! Points are typed in or picked in the 3D view: one node is itself the point, an edge or a
-//! face gives its centre, e.g. that of a hole. The FE model and every results file have
+//! Points are typed in, in global coordinates or in a coordinate system, or picked in the 3D
+//! view: one node is itself the point, an edge or a face gives its centre, e.g. that of a
+//! hole. Reference points can also be the centre of gravity or of the bounding box of a
+//! selection of faces, as in PrePoMax; they follow the selection when the mesh changes. The FE model and every results file have
 //! their own features, as in PrePoMax.
 
 use std::collections::BTreeSet;
@@ -14,7 +16,7 @@ use glam::Vec3;
 use plx_mesh::NodeId;
 use plx_model::{
     CoordinatePlane, CoordinateSystem, CoordinateSystemKind, FeModel, GLOBAL, Plane, PlaneSource,
-    PointRef, ReferencePoint, ResultPath, ResultPlane, next_name,
+    PointDefinition, PointRef, ReferencePoint, ResultPath, ResultPlane, next_name,
 };
 use plx_render::SectionValues;
 use plx_results::path::{self, PathPoint};
@@ -24,7 +26,8 @@ use crate::numeric;
 use crate::overlay::FeatureMark;
 use crate::results::format_value;
 use crate::selection::{Items, Operation, Picker, PickerAction, Target};
-use crate::viewport::Preview;
+use crate::setup::{FACE_SOURCES, RegionDraft, face_target};
+use crate::viewport::{BoxSelect, Preview};
 
 /// Kinds of features the trees create.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +94,9 @@ pub struct FeatureDialog {
     /// Drag speed of coordinates, from the model size.
     speed: f64,
     located: Option<Located>,
+    /// The selection of a reference point at the centre of faces; clicks in the 3D view
+    /// fill it while no point is picked.
+    region: RegionDraft,
 }
 
 impl FeatureDialog {
@@ -99,10 +105,10 @@ impl FeatureDialog {
         let (min, max) = model.mesh.bounds().unwrap_or(([0.0; 3], [1.0; 3]));
         let center = [0, 1, 2].map(|k| (min[k] + max[k]) * 0.5);
         let draft = match kind {
-            FeatureKind::ReferencePoint => Draft::ReferencePoint(ReferencePoint {
-                name: next_name("RP", fe.reference_points.iter().map(|r| r.name.as_str())),
-                position: center,
-            }),
+            FeatureKind::ReferencePoint => Draft::ReferencePoint(ReferencePoint::new(
+                next_name("RP", fe.reference_points.iter().map(|r| r.name.as_str())),
+                center,
+            )),
             FeatureKind::CoordinateSystem => {
                 let names = fe.coordinate_systems.iter().map(|c| c.name.as_str());
                 Draft::CoordinateSystem(CoordinateSystem::new(next_name(
@@ -171,6 +177,16 @@ impl FeatureDialog {
         let size = model.mesh.bounds().map_or(1.0, |(min, max)| {
             (0..3).map(|k| max[k] - min[k]).fold(0.0, f64::max)
         });
+        let target = face_target(&model.fe);
+        let region = match &draft {
+            Draft::ReferencePoint(ReferencePoint {
+                definition:
+                    PointDefinition::CenterOfGravity(region)
+                    | PointDefinition::BoundingBoxCenter(region),
+                ..
+            }) => RegionDraft::from_region(region, FACE_SOURCES, target, &model.mesh),
+            _ => RegionDraft::new(FACE_SOURCES, target),
+        };
         Self {
             results,
             draft,
@@ -181,6 +197,30 @@ impl FeatureDialog {
             error: None,
             speed: (size * 0.005).max(1e-9),
             located: None,
+            region,
+        }
+    }
+
+    /// Whether the draft is a reference point at the centre of selected faces.
+    fn selects_region(&self) -> bool {
+        matches!(
+            &self.draft,
+            Draft::ReferencePoint(ReferencePoint {
+                definition: PointDefinition::CenterOfGravity(_)
+                    | PointDefinition::BoundingBoxCenter(_),
+                ..
+            })
+        )
+    }
+
+    /// Writes the selection into the reference point's definition.
+    fn sync_region(&mut self) {
+        if let Draft::ReferencePoint(point) = &mut self.draft {
+            match &mut point.definition {
+                PointDefinition::CenterOfGravity(region)
+                | PointDefinition::BoundingBoxCenter(region) => *region = self.region.region(),
+                _ => {}
+            }
         }
     }
 
@@ -210,19 +250,27 @@ impl FeatureDialog {
         })
     }
 
-    /// Whether a click in the 3D view picks a point.
+    /// Whether a click in the 3D view picks a point or selects faces.
     pub fn picks(&self) -> bool {
-        self.picking.is_some()
+        self.picking.is_some() || (self.selects_region() && self.region.picks())
     }
 
-    pub fn highlight(&self) -> Highlight {
+    pub fn highlight(&self, model: &Model) -> Highlight {
+        if self.selects_region() {
+            return self.region.highlight(model);
+        }
         Highlight {
             nodes: self.marked.iter().copied().collect(),
             ..Highlight::default()
         }
     }
 
-    pub fn click(&mut self, model: &Model, pick: Option<(&Hit, f32)>) {
+    pub fn click(&mut self, model: &Model, pick: Option<(&Hit, f32)>, operation: Operation) {
+        if self.picking.is_none() && self.selects_region() {
+            self.region.click(model, &self.picker, pick, operation);
+            self.sync_region();
+            return;
+        }
         let Some((hit, precision)) = pick else {
             return;
         };
@@ -231,7 +279,17 @@ impl FeatureDialog {
         }
     }
 
+    pub fn box_select(&mut self, model: &Model, area: &BoxSelect, operation: Operation) {
+        if self.picking.is_none() && self.selects_region() {
+            self.region.box_select(model, &self.picker, area, operation);
+            self.sync_region();
+        }
+    }
+
     pub fn preview(&self, model: &Model, hit: &Hit, precision: f32) -> Preview {
+        if self.picking.is_none() && self.selects_region() {
+            return self.region.preview(model, &self.picker, hit, precision);
+        }
         let items = self.picker.pick(model, hit, Target::Nodes, precision);
         crate::selection::preview(model, &items)
     }
@@ -244,7 +302,23 @@ impl FeatureDialog {
         let n = positions.len() as f64;
         let picked = [0, 1, 2].map(|k| positions.iter().map(|p| p[k]).sum::<f64>() / n);
         match (&mut self.draft, slot) {
-            (Draft::ReferencePoint(r), _) => r.position = picked,
+            (Draft::ReferencePoint(r), _) => match &mut r.definition {
+                // A picked point in a coordinate system is shown in its coordinates.
+                PointDefinition::Local {
+                    system,
+                    coordinates,
+                } => {
+                    let local = (model.fe.coordinate_system_or_global(system))
+                        .and_then(|c| Some((c.kind, c.local(picked).ok()?)));
+                    if let Some((kind, mut local)) = local {
+                        if kind == CoordinateSystemKind::Cylindrical {
+                            local[1] = local[1].to_degrees();
+                        }
+                        *coordinates = local;
+                    }
+                }
+                _ => r.position = picked,
+            },
             (Draft::CoordinateSystem(c), Slot::Origin) => c.origin = picked,
             (Draft::CoordinateSystem(c), Slot::PointX) => c.point_x = picked,
             (Draft::CoordinateSystem(c), _) => c.point_xy = picked,
@@ -314,7 +388,7 @@ impl FeatureDialog {
                 egui::Grid::new("feature form")
                     .num_columns(2)
                     .spacing([12.0, 4.0])
-                    .show(ui, |ui| self.form(ui, &model.fe));
+                    .show(ui, |ui| self.form(ui, model));
                 if is_path {
                     ui.separator();
                     self.path_results(ui, model);
@@ -332,13 +406,22 @@ impl FeatureDialog {
                         result = FeatureResult::Cancel;
                     }
                     if ui.button("OK").clicked() {
-                        self.error = self.validate(&model.fe).err();
+                        self.error = self.validate(model).err();
                         if self.error.is_none() {
                             result = FeatureResult::Ok;
                         }
                     }
                 });
             });
+        if let Some(window) = &window
+            && self.picking.is_none()
+            && self.selects_region()
+        {
+            let rect = window.response.rect;
+            self.region
+                .picker_window(ctx, rect, &mut self.picker, model);
+            self.sync_region();
+        }
         if let Some(window) = window
             && self.picking.is_some()
         {
@@ -356,20 +439,14 @@ impl FeatureDialog {
         result
     }
 
-    fn form(&mut self, ui: &mut Ui, fe: &FeModel) {
+    fn form(&mut self, ui: &mut Ui, model: &Model) {
+        let fe = &model.fe;
         let speed = self.speed;
         let picking = &mut self.picking;
         match &mut self.draft {
             Draft::ReferencePoint(point) => {
                 name_row(ui, &mut point.name);
-                point_rows(
-                    ui,
-                    "Point",
-                    Slot::Position,
-                    &mut point.position,
-                    picking,
-                    speed,
-                );
+                reference_point_rows(ui, point, model, &mut self.region, picking, speed);
             }
             Draft::CoordinateSystem(system) => {
                 name_row(ui, &mut system.name);
@@ -666,7 +743,8 @@ impl FeatureDialog {
             });
     }
 
-    fn validate(&self, fe: &FeModel) -> Result<(), String> {
+    fn validate(&self, model: &Model) -> Result<(), String> {
+        let fe = &model.fe;
         let (name, taken): (&str, Vec<&str>) = match &self.draft {
             Draft::ReferencePoint(r) => (&r.name, names(&fe.reference_points, |r| &r.name)),
             Draft::CoordinateSystem(c) => (&c.name, names(&fe.coordinate_systems, |c| &c.name)),
@@ -693,12 +771,18 @@ impl FeatureDialog {
                 Some(plane) => plane.resolve(fe).map(|_| ()),
                 None => Err("Please select a Plane.".into()),
             },
-            Draft::ReferencePoint(_) => Ok(()),
+            Draft::ReferencePoint(point) => point.resolve(fe, &model.mesh).map(|_| ()),
         }
     }
 
-    /// Copies the draft into the model; references follow a renamed item.
-    pub fn apply(self, fe: &mut FeModel) {
+    /// Copies the draft into the model; references follow a renamed item, and reference
+    /// points are placed anew on `mesh`, e.g. after their coordinate system changed.
+    pub fn apply(self, fe: &mut FeModel, mesh: &plx_mesh::FeMesh) {
+        self.apply_draft(fe);
+        fe.update_reference_points(mesh);
+    }
+
+    fn apply_draft(self, fe: &mut FeModel) {
         fn put<T>(items: &mut Vec<T>, index: Option<usize>, item: T) {
             match index.and_then(|i| items.get_mut(i)) {
                 Some(slot) => *slot = item,
@@ -735,7 +819,11 @@ impl FeatureDialog {
     /// The feature as it is being edited, to draw it in place of the stored one.
     pub fn mark(&self, model: &Model) -> Option<FeatureMark> {
         match &self.draft {
-            Draft::ReferencePoint(r) => Some(point_mark(model, r, true)),
+            Draft::ReferencePoint(r) => {
+                let mut r = r.clone();
+                r.position = r.resolve(&model.fe, &model.mesh).ok()?;
+                Some(point_mark(model, &r, true))
+            }
             Draft::CoordinateSystem(c) => system_mark(model, c, true),
             Draft::Plane(p) => plane_mark(model, p, true),
             Draft::Path(_) | Draft::ResultPlane(_) => None,
@@ -985,6 +1073,144 @@ pub fn path_line(model: &Model, path: &ResultPath) -> Option<([Vec3; 2], String)
         [model.to_render(start), model.to_render(end)],
         path.name.clone(),
     ))
+}
+
+/// How a reference point is created, PrePoMax's "Create by", with its rows.
+fn reference_point_rows(
+    ui: &mut Ui,
+    point: &mut ReferencePoint,
+    model: &Model,
+    region: &mut RegionDraft,
+    picking: &mut Option<Slot>,
+    speed: f64,
+) {
+    let fe = &model.fe;
+    const COORDINATES: usize = 0;
+    const CENTER_OF_GRAVITY: usize = 1;
+    const BOUNDING_BOX: usize = 2;
+    let labels = ["Coordinates", "Center of gravity", "Bounding box center"];
+    let kind = match point.definition {
+        PointDefinition::Global | PointDefinition::Local { .. } => COORDINATES,
+        PointDefinition::CenterOfGravity(_) => CENTER_OF_GRAVITY,
+        PointDefinition::BoundingBoxCenter(_) => BOUNDING_BOX,
+    };
+    let mut chosen = kind;
+    ui.label("Create by");
+    egui::ComboBox::from_id_salt("point create by")
+        .selected_text(labels[kind])
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            for (k, label) in labels.into_iter().enumerate() {
+                ui.selectable_value(&mut chosen, k, label);
+            }
+        });
+    ui.end_row();
+    if chosen != kind {
+        // The point stays where it is when it changes to coordinates.
+        let at = point.resolve(fe, &model.mesh).unwrap_or(point.position);
+        point.definition = match chosen {
+            CENTER_OF_GRAVITY => PointDefinition::CenterOfGravity(region.region()),
+            BOUNDING_BOX => PointDefinition::BoundingBoxCenter(region.region()),
+            _ => {
+                point.position = at;
+                PointDefinition::Global
+            }
+        };
+        *picking = None;
+    }
+    if chosen != COORDINATES {
+        region.ui_labeled(ui, model, "Faces", "point faces", true);
+        position_row(ui, point, model);
+        return;
+    }
+    // Coordinates in the global system or one of the features.
+    let system = match &point.definition {
+        PointDefinition::Local { system, .. } => system.clone(),
+        _ => GLOBAL.to_string(),
+    };
+    let mut chosen_system = system.clone();
+    ui.label("Coordinate system");
+    egui::ComboBox::from_id_salt("point system")
+        .selected_text(chosen_system.as_str())
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            let names = std::iter::once(GLOBAL)
+                .chain(fe.coordinate_systems.iter().map(|c| c.name.as_str()));
+            for name in names {
+                ui.selectable_value(&mut chosen_system, name.to_string(), name);
+            }
+        });
+    ui.end_row();
+    if chosen_system != system {
+        // The point keeps its place; its coordinates change to the new system.
+        let at = point.resolve(fe, &model.mesh).unwrap_or(point.position);
+        point.position = at;
+        point.definition = match fe.coordinate_system(&chosen_system) {
+            Some(cs) if chosen_system != GLOBAL => {
+                let mut local = cs.local(at).unwrap_or([0.0; 3]);
+                if cs.kind == CoordinateSystemKind::Cylindrical {
+                    local[1] = local[1].to_degrees();
+                }
+                PointDefinition::Local {
+                    system: chosen_system,
+                    coordinates: local,
+                }
+            }
+            _ => PointDefinition::Global,
+        };
+    }
+    match &mut point.definition {
+        PointDefinition::Local {
+            system,
+            coordinates,
+        } => {
+            let cylindrical = fe
+                .coordinate_system(system)
+                .is_some_and(|c| c.kind == CoordinateSystemKind::Cylindrical);
+            ui.label(RichText::new("Point").strong());
+            pick_button(ui, Slot::Position, picking);
+            ui.end_row();
+            let axes = if cylindrical {
+                ["R", "Theta [°]", "Z"]
+            } else {
+                ["X", "Y", "Z"]
+            };
+            for (k, axis) in axes.into_iter().enumerate() {
+                ui.label(format!("    {axis}"));
+                let step = if cylindrical && k == 1 { 0.5 } else { speed };
+                ui.add(
+                    numeric::drag_value(&mut coordinates[k])
+                        .speed(step)
+                        .max_decimals(6),
+                );
+                ui.end_row();
+            }
+            position_row(ui, point, model);
+        }
+        _ => point_rows(
+            ui,
+            "Point",
+            Slot::Position,
+            &mut point.position,
+            picking,
+            speed,
+        ),
+    }
+}
+
+/// The global position a reference point resolves to, or why it has none.
+fn position_row(ui: &mut Ui, point: &ReferencePoint, model: &Model) {
+    ui.label("Global position");
+    match point.resolve(&model.fe, &model.mesh) {
+        Ok(p) => ui.weak(format!(
+            "({}, {}, {})",
+            format_value(p[0] as f32),
+            format_value(p[1] as f32),
+            format_value(p[2] as f32)
+        )),
+        Err(error) => ui.colored_label(Color32::from_rgb(200, 0, 0), error),
+    };
+    ui.end_row();
 }
 
 fn name_row(ui: &mut Ui, name: &mut String) {

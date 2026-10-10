@@ -2079,10 +2079,9 @@ mod tests {
     fn a_reference_point_needs_an_active_rigid_body_and_holds_it() {
         let mesh = cubes(1, false);
         let mut model = model(&mesh);
-        model.reference_points.push(ReferencePoint {
-            name: "RP-1".into(),
-            position: [0.0, 0.5, 0.5],
-        });
+        model
+            .reference_points
+            .push(ReferencePoint::new("RP-1", [0.0, 0.5, 0.5]));
         // The support moves from the nodes to the reference point: without a rigid body
         // the point has no node, the cube is loose.
         model.steps[0].boundary_conditions[0].region = Region::ReferencePoint("RP-1".into());

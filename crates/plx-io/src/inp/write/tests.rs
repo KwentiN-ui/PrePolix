@@ -264,10 +264,9 @@ fn rigid_tip(load: Option<Load>, bc: Option<BoundaryCondition>) -> (FeMesh, FeMo
     model.steps[0].loads.clear();
     model.steps[0].loads.extend(load);
     model.steps[0].boundary_conditions.extend(bc);
-    model.reference_points.push(ReferencePoint {
-        name: "RP-1".into(),
-        position: [100.0, 5.0, 5.0],
-    });
+    model
+        .reference_points
+        .push(ReferencePoint::new("RP-1", [100.0, 5.0, 5.0]));
     let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
     body.region = Region::Surface("TIP".into());
     model.constraints.push(Constraint::RigidBody(body));
