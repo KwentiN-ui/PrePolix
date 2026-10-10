@@ -3,7 +3,8 @@
 //! pointing onto the faces, one arrow of the resultant force for a surface traction, and
 //! cones (translations) and plates (rotations) for held degrees of freedom. Heat loads and
 //! temperatures, which have no direction, are balls at the nodes; heat flowing through a
-//! surface is an arrow onto it (into the part) or off it.
+//! surface is an arrow onto it (into the part) or off it. A rigid body is a fan of yellow
+//! lines from points spread over its region to its reference point.
 //!
 //! Symbols keep their size on screen like PrePoMax's glyphs (PrePoMax symbol size 50) and lie
 //! on top of the model. They are 3D shapes in pixel units, drawn as the outlines of their
@@ -28,6 +29,10 @@ const ARROW_SIZE: f32 = 40.0;
 const LOAD_COLOR: Color32 = Color32::from_rgb(65, 105, 225);
 const BOUNDARY_COLOR: Color32 = Color32::from_rgb(0, 255, 0);
 const SELECTED_COLOR: Color32 = Color32::from_rgb(255, 0, 0);
+/// PrePoMax's default colour of constraints.
+const CONSTRAINT_COLOR: Color32 = Color32::from_rgb(255, 255, 0);
+/// Width of the lines of a rigid body in pixels.
+const LINE_WIDTH: f32 = 1.5;
 /// Splits of the region's extent when spreading arrows, as PrePoMax's spatial sampling.
 const DIVISIONS: f64 = 6.0;
 /// Sides of the polygons standing in for circles.
@@ -38,6 +43,10 @@ const CIRCLE_SEGMENTS: usize = 16;
 pub enum Kind {
     Load(LoadKind),
     Boundary(BoundaryKind),
+    /// A rigid body driven by the named reference point.
+    RigidBody {
+        reference_point: String,
+    },
 }
 
 /// A boundary condition or load to draw.
@@ -74,6 +83,8 @@ pub enum SymbolShape {
     RotationLock,
     /// Ball around the point: a temperature or heat at a node.
     Ball,
+    /// Line from the point to another point in render coordinates.
+    LineTo(Vec3),
 }
 
 /// Symbols of the items, on the visible parts of the model.
@@ -85,6 +96,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
             (_, true) => SELECTED_COLOR,
             (Kind::Load(_), false) => LOAD_COLOR,
             (Kind::Boundary(_), false) => BOUNDARY_COLOR,
+            (Kind::RigidBody { .. }, false) => CONSTRAINT_COLOR,
         };
         let mut add = |position: DVec3, direction: DVec3, shape: SymbolShape| {
             if let Some(direction) = direction.try_normalize() {
@@ -97,22 +109,41 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
             }
         };
         match item.kind {
+            // Lines from nodes spread over the region to the reference point, half as dense
+            // as the arrows of loads like PrePoMax's.
+            Kind::RigidBody {
+                ref reference_point,
+            } => {
+                let Some(point) = model.fe.reference_point(reference_point) else {
+                    continue;
+                };
+                let to = (DVec3::from(point.position) - model.origin()).as_vec3();
+                let points = node_points(model, &item.region, &visible);
+                for index in sample(&points, DIVISIONS / 2.0) {
+                    symbols.push(Symbol {
+                        position: (points[index] - model.origin()).as_vec3(),
+                        direction: Vec3::ZERO,
+                        shape: SymbolShape::LineTo(to),
+                        color,
+                    });
+                }
+            }
             Kind::Load(LoadKind::ConcentratedForce(force)) => {
                 let points = node_points(model, &item.region, &visible);
-                for index in sample(&points) {
+                for index in sample(&points, DIVISIONS) {
                     add(points[index], DVec3::from(force), SymbolShape::Arrow);
                 }
             }
             Kind::Load(LoadKind::Moment(moment)) => {
                 let points = node_points(model, &item.region, &visible);
-                for index in sample(&points) {
+                for index in sample(&points, DIVISIONS) {
                     add(points[index], DVec3::from(moment), SymbolShape::MomentArrow);
                 }
             }
             Kind::Load(LoadKind::Pressure(pressure)) => {
                 let faces = face_geometry(model, &item.region, &visible);
                 let centers: Vec<DVec3> = faces.iter().map(|f| f.center).collect();
-                for index in sample(&centers) {
+                for index in sample(&centers, DIVISIONS) {
                     let face = &faces[index];
                     if pressure >= 0.0 {
                         add(face.center, -face.normal, SymbolShape::ArrowOnto);
@@ -133,7 +164,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                 // for a negative value.
                 let faces = face_geometry(model, &item.region, &visible);
                 let centers: Vec<DVec3> = faces.iter().map(|f| f.center).collect();
-                for index in sample(&centers) {
+                for index in sample(&centers, DIVISIONS) {
                     let face = &faces[index];
                     let along = direction.map_or(face.normal, DVec3::from);
                     if value >= 0.0 {
@@ -166,7 +197,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                 let faces = face_geometry(model, &item.region, &visible);
                 let centers: Vec<DVec3> = faces.iter().map(|f| f.center).collect();
                 let into = matches!(item.kind, Kind::Load(LoadKind::SurfaceFlux(q)) if q >= 0.0);
-                for index in sample(&centers) {
+                for index in sample(&centers, DIVISIONS) {
                     let face = &faces[index];
                     if into {
                         add(face.center, -face.normal, SymbolShape::ArrowOnto);
@@ -178,7 +209,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
             Kind::Load(LoadKind::ConcentratedFlux(_) | LoadKind::BodyFlux(_))
             | Kind::Boundary(BoundaryKind::Temperature(_)) => {
                 let points = node_points(model, &item.region, &visible);
-                for index in sample(&points) {
+                for index in sample(&points, DIVISIONS) {
                     add(points[index], DVec3::Z, SymbolShape::Ball);
                 }
             }
@@ -336,9 +367,10 @@ fn region_center(model: &Model, region: &Region, visible: &Visible) -> Option<DV
 }
 
 /// Indices of points spread evenly over their extent: clusters are halved across their
-/// largest extent until none spans more than a sixth of the whole, then the point nearest
-/// each cluster's mean stands for it. A simpler take on PrePoMax's spatial point sampler.
-fn sample(points: &[DVec3]) -> Vec<usize> {
+/// largest extent until none spans more than the whole split into `divisions`, then the
+/// point nearest each cluster's mean stands for it. A simpler take on PrePoMax's spatial
+/// point sampler.
+fn sample(points: &[DVec3], divisions: f64) -> Vec<usize> {
     let span = |indices: &[usize]| {
         let (min, max) = indices.iter().fold(
             (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
@@ -350,7 +382,7 @@ fn sample(points: &[DVec3]) -> Vec<usize> {
     if all.is_empty() {
         return all;
     }
-    let limit = span(&all).1.max_element() / DIVISIONS;
+    let limit = span(&all).1.max_element() / divisions;
     let mut pending = vec![all];
     let mut done = Vec::new();
     while let Some(cluster) = pending.pop() {
@@ -393,12 +425,21 @@ fn sample(points: &[DVec3]) -> Vec<usize> {
     picked
 }
 
-/// Draws the symbols, farthest first.
+/// Draws the symbols: the lines below the shapes, the shapes farthest first.
 pub fn draw(painter: &Painter, rect: Rect, camera: &Camera, symbols: &[Symbol]) {
     let (right, up, forward) = (camera.right(), camera.up(), camera.forward());
     // Offsets in pixels on screen for a vector in pixel units of the scene.
     let screen = |v: Vec3| vec2(v.dot(right), -v.dot(up));
-    let mut order: Vec<&Symbol> = symbols.iter().collect();
+    for symbol in symbols {
+        if let SymbolShape::LineTo(to) = symbol.shape {
+            let from = crate::overlay::project(camera, rect, symbol.position);
+            let to = crate::overlay::project(camera, rect, to);
+            painter.line_segment([from, to], Stroke::new(LINE_WIDTH, symbol.color));
+        }
+    }
+    let mut order: Vec<&Symbol> = (symbols.iter())
+        .filter(|s| !matches!(s.shape, SymbolShape::LineTo(_)))
+        .collect();
     order.sort_by(|a, b| (b.position.dot(forward)).total_cmp(&a.position.dot(forward)));
     for symbol in order {
         let anchor = crate::overlay::project(camera, rect, symbol.position);
@@ -443,6 +484,7 @@ fn solids(shape: SymbolShape, direction: Vec3) -> Vec<Solid> {
     let size = match shape {
         SymbolShape::Arrow | SymbolShape::ArrowOnto | SymbolShape::MomentArrow => ARROW_SIZE,
         SymbolShape::Cone | SymbolShape::RotationLock | SymbolShape::Ball => SUPPORT_SIZE,
+        SymbolShape::LineTo(_) => return Vec::new(),
     };
     let axis = direction * size;
     let (u, v) = direction.any_orthonormal_pair();
@@ -511,6 +553,7 @@ fn solids(shape: SymbolShape, direction: Vec3) -> Vec<Solid> {
                 },
             ]
         }
+        SymbolShape::LineTo(_) => Vec::new(),
     }
 }
 
@@ -568,10 +611,40 @@ mod tests {
     fn sampling_spreads_over_the_extent() {
         // 101 points on a line: about one per sixth of its length.
         let points: Vec<DVec3> = (0..=100).map(|i| DVec3::new(i as f64, 0.0, 0.0)).collect();
-        let picked = sample(&points);
+        let picked = sample(&points, DIVISIONS);
         assert!((6..=12).contains(&picked.len()), "{picked:?}");
-        assert_eq!(sample(&points[..1]), vec![0]);
-        assert!(sample(&[]).is_empty());
+        assert_eq!(sample(&points[..1], DIVISIONS), vec![0]);
+        assert!(sample(&[], DIVISIONS).is_empty());
+    }
+
+    #[test]
+    fn rigid_bodies_are_lines_to_their_reference_point() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+        let path = root.join("kragbalken_c3d8.inp");
+        let mesh = plx_io::inp::read_inp(&path).unwrap().mesh;
+        let mut model = Model::new(&path, mesh);
+        model.fe.reference_points.push(plx_model::ReferencePoint {
+            name: "RP-1".into(),
+            position: [130.0, 5.0, 5.0],
+        });
+        let item = |reference_point: &str| Item {
+            kind: Kind::RigidBody {
+                reference_point: reference_point.into(),
+            },
+            region: Region::Surface("TIP".into()),
+            selected: false,
+        };
+        let symbols = build(&model, &[item("RP-1")]);
+        let to = (DVec3::new(130.0, 5.0, 5.0) - model.origin()).as_vec3();
+        assert!(!symbols.is_empty());
+        for symbol in &symbols {
+            assert_eq!(symbol.shape, SymbolShape::LineTo(to));
+            assert_eq!(symbol.color, CONSTRAINT_COLOR);
+            // From nodes of the end face at x = 100.
+            let from = symbol.position + model.origin().as_vec3();
+            assert!((from.x - 100.0).abs() < 1e-3, "{from}");
+        }
+        assert!(build(&model, &[item("RP-2")]).is_empty());
     }
 
     #[test]

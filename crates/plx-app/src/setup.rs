@@ -1217,6 +1217,19 @@ impl Editor {
         Some((step, self.index, item))
     }
 
+    /// The index of the constraint being edited (`None` for a new one), if a constraint is.
+    pub fn editing_constraint(&self) -> Option<Option<usize>> {
+        matches!(self.draft, Draft::Constraint(_)).then_some(self.index)
+    }
+
+    /// The symbol of the constraint being edited as it would be applied, for the 3D view.
+    pub fn constraint_item(&self) -> Option<crate::symbols::Item> {
+        match &self.draft {
+            Draft::Constraint(c) => c.symbol(),
+            _ => None,
+        }
+    }
+
     /// Whether clicks in the 3D view pick for this dialog.
     pub fn picks(&self) -> bool {
         self.region().is_some_and(RegionDraft::picks)

@@ -224,6 +224,20 @@ impl ConstraintDraft {
         }
     }
 
+    /// The symbol of the constraint as entered, for the 3D view: rigid bodies have one.
+    pub(crate) fn symbol(&self) -> Option<crate::symbols::Item> {
+        let Constraint::RigidBody(body) = &self.constraint else {
+            return None;
+        };
+        Some(crate::symbols::Item {
+            kind: crate::symbols::Kind::RigidBody {
+                reference_point: body.reference_point.clone(),
+            },
+            region: self.region.region(),
+            selected: true,
+        })
+    }
+
     /// The constraint with the regions as entered.
     pub(crate) fn finish(mut self) -> Constraint {
         let regions = if self.kind().has_master_slave() {

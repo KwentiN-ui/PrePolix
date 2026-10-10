@@ -3663,6 +3663,25 @@ impl Workbench {
             Some((TreeView::FeModel, item)) => Some(item),
             _ => None,
         };
+        // Constraints belong to no step: PrePoMax draws them with the symbols of any step.
+        let mut items = Vec::new();
+        let edited_constraint = self.editor.as_ref().and_then(|e| e.editing_constraint());
+        for (i, constraint) in model.fe.constraints.iter().enumerate() {
+            if let plx_model::Constraint::RigidBody(body) = constraint
+                && body.active
+                && edited_constraint != Some(Some(i))
+            {
+                items.push(symbols::Item {
+                    kind: symbols::Kind::RigidBody {
+                        reference_point: body.reference_point.clone(),
+                    },
+                    region: body.region.clone(),
+                    selected: edited_constraint.is_none()
+                        && selected == Some(&TreeItem::Constraint(i)),
+                });
+            }
+        }
+        items.extend(self.editor.as_ref().and_then(Editor::constraint_item));
         let step_of = |item: &TreeItem| match *item {
             TreeItem::Step(s)
             | TreeItem::StepGroup(s, _)
@@ -3677,7 +3696,7 @@ impl Workbench {
             .or_else(|| selected.and_then(step_of))
             .or_else(|| model.fe.steps.len().checked_sub(1));
         let Some((index, step)) = index.and_then(|i| Some((i, model.fe.steps.get(i)?))) else {
-            return Vec::new();
+            return items;
         };
         // The edited item replaces its saved version.
         let replaced = |load: bool, i: usize| {
@@ -3687,7 +3706,6 @@ impl Workbench {
         };
         let is_selected = |item: TreeItem| edited.is_none() && selected == Some(&item);
         // Like PrePoMax, deactivated items have no symbols; the edited one is drawn anyway.
-        let mut items = Vec::new();
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
             if step.active && bc.active && !replaced(false, i) {
                 items.push(symbols::Item {
