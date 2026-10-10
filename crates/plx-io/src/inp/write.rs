@@ -38,6 +38,9 @@ pub enum WriteError {
     /// A section that does not fit its elements, see [`Section::kind_problem`].
     #[error("{item}: {reason}")]
     InvalidSection { item: String, reason: String },
+    /// A load without a direction, such as a gravity of zero.
+    #[error("{item}: {reason}")]
+    InvalidLoad { item: String, reason: String },
     /// A submodel boundary condition in a model that names no global results file.
     #[error(
         "{item}: the submodel has no global results file (Model > Model Properties: model \
@@ -1423,6 +1426,38 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
                     let _ = writeln!(out, "{set}, R{face}, {sink}, {e}");
                 }
             }
+            // As PrePoMax's CalGravityLoad: the size of the acceleration and its direction.
+            LoadKind::Gravity(acceleration) => {
+                let set = sets.element_set(&load.name, &load.region)?;
+                let Some((size, direction)) = unit_vector(acceleration) else {
+                    return Err(WriteError::InvalidLoad {
+                        item: load.name.clone(),
+                        reason: "die Erdbeschleunigung ist null".into(),
+                    });
+                };
+                let _ = writeln!(out, "*Dload{amplitude}");
+                let [x, y, z] = direction.map(number);
+                let _ = writeln!(out, "{set}, Grav, {}, {x}, {y}, {z}", number(size));
+            }
+            // As PrePoMax's CalCentrifLoad: the square of the rotational speed, a point on
+            // the axis and the axis direction.
+            LoadKind::Centrifugal { point, axis, speed } => {
+                let set = sets.element_set(&load.name, &load.region)?;
+                let Some((_, direction)) = unit_vector(axis) else {
+                    return Err(WriteError::InvalidLoad {
+                        item: load.name.clone(),
+                        reason: "die Drehachse hat keine Richtung".into(),
+                    });
+                };
+                let _ = writeln!(out, "*Dload{amplitude}");
+                let [px, py, pz] = point.map(number);
+                let [x, y, z] = direction.map(number);
+                let _ = writeln!(
+                    out,
+                    "{set}, Centrif, {}, {px}, {py}, {pz}, {x}, {y}, {z}",
+                    number(speed * speed)
+                );
+            }
         }
         loads.push(Keyword::generated(out));
     }
@@ -1793,6 +1828,12 @@ fn id_list(header: &str, ids: &[u32]) -> String {
 }
 
 /// A real number in at most 16 characters, CalculiX's field width.
+/// Length and direction of a vector; `None` for the zero vector.
+fn unit_vector(v: [f64; 3]) -> Option<(f64, [f64; 3])> {
+    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    (length > 0.0).then(|| (length, v.map(|c| c / length)))
+}
+
 fn number(value: f64) -> String {
     let short = value.to_string();
     if short.len() <= 16 {
