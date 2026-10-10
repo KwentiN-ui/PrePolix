@@ -401,6 +401,17 @@ impl PrepolixApp {
                 if ui.add_enabled(setup, export).clicked() {
                     self.workbench.export_inp();
                 }
+                let deformed = self.workbench.shown_results_view().is_some();
+                let export = egui::Button::new("Export Deformed Mesh (.inp) …");
+                let tip = "Writes the mesh of the current results, deformed by the current \
+                           deformation scale factor, as an input file with only the mesh.";
+                if ui
+                    .add_enabled(deformed, export)
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    self.workbench.export_deformed_mesh();
+                }
                 ui.separator();
                 if ui.button("Beenden").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -2444,6 +2455,61 @@ impl Workbench {
         if let Some(path) = picked {
             match std::fs::write(&path, text) {
                 Ok(()) => self.output.push(format!("{} geschrieben", path.display())),
+                Err(error) => self.output.push(format!("{}: {error}", path.display())),
+            }
+        }
+    }
+
+    /// PrePoMax's "Export deformed mesh": the mesh of the current results with the shown
+    /// displacements times the deformation scale factor, without materials or steps, so
+    /// that another model can import it.
+    fn export_deformed_mesh(&mut self) {
+        let Some(model) = self.results.get(self.current_result) else {
+            return;
+        };
+        let Some(view) = &model.results else {
+            return;
+        };
+        let Some(displacements) = view.shown_displacements() else {
+            self.output
+                .push("Export not possible: the results have no displacements".into());
+            return;
+        };
+        let scale = f64::from(view.scale());
+        let shown = view
+            .current_increment()
+            .map(|i| format!(", step {}, increment {}", i.step, i.increment))
+            .unwrap_or_default();
+        let heading = format!(
+            "prepolix: deformed mesh of {}{shown}, scale factor {scale}",
+            model.file_name()
+        );
+        let text = match plx_io::inp::write_deformed_mesh_inp(
+            &model.mesh,
+            &displacements,
+            scale,
+            &heading,
+        ) {
+            Ok(text) => text,
+            Err(error) => {
+                self.output.push(format!("Export not possible: {error}"));
+                return;
+            }
+        };
+        let stem = model
+            .path
+            .file_stem()
+            .map_or("Results".into(), |s| s.to_string_lossy().into_owned());
+        let picked = rfd::FileDialog::new()
+            .set_title("Export Deformed Mesh")
+            .add_filter("Input file (*.inp)", &["inp"])
+            .set_file_name(format!("{stem}_deformed.inp"))
+            .save_file();
+        if let Some(path) = picked {
+            match std::fs::write(&path, text) {
+                Ok(()) => self
+                    .output
+                    .push(format!("Deformed mesh exported to {}", path.display())),
                 Err(error) => self.output.push(format!("{}: {error}", path.display())),
             }
         }

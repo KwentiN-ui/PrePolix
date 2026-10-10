@@ -10,8 +10,8 @@ use egui::Ui;
 use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
     Amplitude, BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, BoundaryKind,
-    Constraint, ContactPair, Elastic, EquationSolver, FeModel, FieldOutput, FrequencyStep,
-    HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
+    BuckleStep, Constraint, ContactPair, Elastic, EquationSolver, FeModel, FieldOutput,
+    FrequencyStep, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
     InitialConditionKind, Load, LoadKind, Material, ModelSpace, NodeTie, OutputKind, Quantity,
     Region, Section, SectionKind, StaticStep, Step, StepKind, SurfaceInteraction, UnitSystem,
     next_name,
@@ -1550,6 +1550,7 @@ impl Editor {
         if let Draft::Step(step) = &self.draft {
             match &step.kind {
                 StepKind::Frequency(settings) => validate_frequency_step(settings)?,
+                StepKind::Buckle(settings) => validate_buckle_step(settings)?,
                 StepKind::HeatTransfer(settings) | StepKind::CoupledTempDisp(settings) => {
                     validate_heat_transfer_step(settings)?
                 }
@@ -2191,7 +2192,7 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
 
 /// The step kinds of the dialog: label, the kind with its settings and its default field
 /// outputs, in PrePoMax's order.
-fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 4] {
+fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 5] {
     let heat = HeatTransferStep::default();
     [
         (
@@ -2203,6 +2204,11 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 4] {
             FREQUENCY_LABEL,
             StepKind::Frequency(FrequencyStep::default()),
             FieldOutput::frequency_defaults(),
+        ),
+        (
+            BUCKLE_LABEL,
+            StepKind::Buckle(BuckleStep::default()),
+            FieldOutput::defaults(),
         ),
         (
             HEAT_TRANSFER_LABEL,
@@ -2219,6 +2225,7 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 4] {
 
 const STATIC_LABEL: &str = "Statisch (Static)";
 const FREQUENCY_LABEL: &str = "Eigenfrequenzen (Frequency)";
+const BUCKLE_LABEL: &str = "Buckling (Buckle)";
 const HEAT_TRANSFER_LABEL: &str = "Wärmeübertragung (Heat Transfer)";
 const COUPLED_LABEL: &str = "Thermomechanisch gekoppelt (Coupled Temp-Disp)";
 
@@ -2226,6 +2233,7 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
     match kind {
         StepKind::Static(_) => STATIC_LABEL,
         StepKind::Frequency(_) => FREQUENCY_LABEL,
+        StepKind::Buckle(_) => BUCKLE_LABEL,
         StepKind::HeatTransfer(_) => HEAT_TRANSFER_LABEL,
         StepKind::CoupledTempDisp(_) => COUPLED_LABEL,
     }
@@ -2257,6 +2265,7 @@ fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
     match &mut step.kind {
         StepKind::Static(settings) => static_form(ui, settings, units),
         StepKind::Frequency(settings) => frequency_form(ui, settings, units),
+        StepKind::Buckle(settings) => buckle_form(ui, settings),
         StepKind::HeatTransfer(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::CoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, true),
     }
@@ -2362,6 +2371,37 @@ fn validate_frequency_step(settings: &FrequencyStep) -> Result<(), String> {
         && lower >= upper
     {
         return Err("Die untere Frequenzgrenze muss kleiner als die obere sein.".into());
+    }
+    Ok(())
+}
+
+/// PrePoMax's buckle step view: perturbation, solver, number of buckling factors and
+/// accuracy.
+fn buckle_form(ui: &mut Ui, settings: &mut BuckleStep) {
+    ui.label("");
+    ui.checkbox(
+        &mut settings.perturbation,
+        "Preload from previous step (Perturbation)",
+    );
+    ui.end_row();
+    solver_row(ui, &mut settings.solver, true);
+    ui.label("Number of buckling factors");
+    ui.add(numeric::drag_value(&mut settings.num_factors).range(1..=10_000));
+    ui.end_row();
+    ui.label("Accuracy");
+    ui.add(numeric::drag_value(&mut settings.accuracy).speed(0.0));
+    ui.end_row();
+    ui.label("");
+    ui.weak("The critical load is the buckling factor times the loads of this step.");
+    ui.end_row();
+}
+
+fn validate_buckle_step(settings: &BuckleStep) -> Result<(), String> {
+    if !settings.solver.solves_eigenvalues() {
+        return Err("The iterative solvers cannot compute buckling factors.".into());
+    }
+    if settings.accuracy <= 0.0 {
+        return Err("The accuracy must be greater than zero.".into());
     }
     Ok(())
 }

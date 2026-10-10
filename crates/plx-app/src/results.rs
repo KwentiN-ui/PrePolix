@@ -145,7 +145,8 @@ impl ResultsView {
         view
     }
 
-    /// PrePoMax opens the last increment of the last step, or the first mode of a frequency step.
+    /// PrePoMax opens the last increment of the last step, or the first mode of a frequency or
+    /// buckle step; the reference state of a buckle step (increment 0) is skipped.
     fn default_increment(&self) -> usize {
         let Some(last) = self.increments.last() else {
             return 0;
@@ -155,6 +156,9 @@ impl ResultsView {
             .collect();
         if last.kind == AnalysisKind::Frequency {
             step[0]
+        } else if last.kind == AnalysisKind::Buckling {
+            let first_mode = step.iter().find(|&&i| self.increments[i].increment > 0);
+            *first_mode.unwrap_or(&step[0])
         } else {
             *step.last().unwrap()
         }
@@ -400,9 +404,16 @@ impl ResultsView {
                     "Step: #{}   Mode: #{}   Frequency: {value}",
                     inc.step, inc.increment
                 ),
-                AnalysisKind::Buckling => {
-                    format!("Step: #{}   Buckling factor: {value}", inc.step)
+                AnalysisKind::Buckling if inc.increment == 0 => {
+                    format!(
+                        "Step: #{}   Reference state of the buckling loads",
+                        inc.step
+                    )
                 }
+                AnalysisKind::Buckling => format!(
+                    "Step: #{}   Mode: #{}   Buckling factor: {value}",
+                    inc.step, inc.increment
+                ),
                 _ => format!(
                     "Step: #{}   Increment: #{}   Analysis time: {value}",
                     inc.step, inc.increment
@@ -856,6 +867,21 @@ mod tests {
         );
         assert_eq!(modes.increment, 1);
         assert_eq!(modes.current().unwrap().1.name, "ALL");
+        // A buckle step opens at its first mode, after the reference state.
+        let buckling = ResultsView::new(
+            vec![
+                increment(1, 0, AnalysisKind::Buckling, &still),
+                increment(1, 1, AnalysisKind::Buckling, &still),
+                increment(1, 2, AnalysisKind::Buckling, &still),
+            ],
+            None,
+        );
+        assert_eq!(buckling.increment, 1);
+        let lines = buckling.status_lines("beulen.frd");
+        assert!(
+            lines[1].contains("Mode: #1   Buckling factor: 1"),
+            "{lines:?}"
+        );
     }
 
     #[test]
