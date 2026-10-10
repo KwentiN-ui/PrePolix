@@ -18,15 +18,12 @@ Create them with #menu("Interaction", "Create Constraint ...") or with #ui("Crea
     #ui("Clearance") is the initial gap, #ui("Spring stiffness") and #ui("Tensile force")
     are optional. With #ui("Nonlinear") the contact is solved nonlinearly, otherwise it is
     linearised in a linear step. Written as `GAPUNI` elements to fixed ground nodes.],
-  [Tie], [Glues a slave surface to a master surface (`*TIE`). #ui("Position tolerance") is
-    the largest distance at which slave nodes are tied. #ui("Move slave nodes onto master
-    (Adjust)") projects the slave nodes onto the master surface.],
   [Surface To Surface Spring], [Springs between the nodes of a slave surface and the closest
     points of a master surface, with total or per-area stiffness. Not available in PrePoMax.],
 )
 
-Ties and surface-to-surface springs have a #ui("Master") and a #ui("Slave") region, each with its
-own #ui("...") button. Choose the finer mesh as slave. #ui("Swap Master/Slave") in the context
+Surface-to-surface springs have a #ui("Master") and a #ui("Slave") region, each with its own
+#ui("...") button. Choose the finer mesh as slave. #ui("Swap Master/Slave") in the context
 menu exchanges the two.
 
 The 3D view of the FE model shows active constraints in yellow, as PrePoMax does, together with
@@ -73,6 +70,21 @@ surface.
   [Master / Slave], [The two surfaces, picked with their #ui("...") buttons.],
 )
 
+=== Ties
+
+#menu("Interaction", "Create Tie ...") or #ui("Create Tie ...") in the context menu of
+#ui("Contact Pairs") glues a slave surface to a master surface (`*TIE`). Ties are listed under
+#ui("Contact Pairs"), with the contact pairs and node ties; projects that kept them under
+#ui("Constraints") open with them moved there.
+
+#fields(
+  [Position tolerance], [The largest distance at which slave nodes are tied.],
+  [Adjust], [#ui("Move slave nodes onto master (Adjust)") projects the slave nodes onto the
+    master surface.],
+  [Master / Slave], [The two surfaces, picked with their #ui("...") buttons. Choose the finer
+    mesh as slave.],
+)
+
 === Node ties
 
 #ui("Create Node Tie ...") in the context menu of #ui("Contact Pairs") makes all nodes of a region
@@ -102,5 +114,5 @@ creates ties or contact pairs for them.
 #ui("Search") fills the table. Each row can be edited and switched off with its check box; select
 several rows to edit them together. The context menu of a row has #ui("Swap Master/Slave") and
 #ui("Merge by Master/Slave"). prepolix chooses the coarser mesh as master, then the stiffer
-material, then the larger surface. #ui("OK") creates the checked pairs; line ends become node
-ties. Surfaces that are whole CAD faces are stored by geometry and survive remeshing.
+material, then the larger surface. #ui("OK") creates the checked pairs, all under
+#ui("Contact Pairs"); line ends become node ties. Surfaces that are whole CAD faces are stored by geometry and survive remeshing.

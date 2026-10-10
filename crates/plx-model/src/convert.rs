@@ -73,6 +73,9 @@ impl FeModel {
         for pair in &mut self.contact_pairs {
             c.option(&mut pair.adjustment_size, Quantity::Length);
         }
+        for tie in &mut self.ties {
+            c.option(&mut tie.position_tolerance, Quantity::Length);
+        }
         c.option(&mut self.properties.absolute_zero, Quantity::Temperature);
         c.option(
             &mut self.properties.stefan_boltzmann,

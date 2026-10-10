@@ -5,10 +5,10 @@ use egui::Ui;
 use plx_mesh::FeMesh;
 use plx_model::{
     CompressionOnly, Constraint, FeModel, PointSpring, Quantity, Region, RigidBody, SurfaceSpring,
-    SurfaceToSurfaceSpring, Tie, UnitSystem, next_name,
+    SurfaceToSurfaceSpring, UnitSystem, next_name,
 };
 
-use crate::contacts::{self, MasterSlave};
+use crate::contacts::MasterSlave;
 use crate::model::{Highlight, Model};
 use crate::numeric;
 use crate::selection::Target;
@@ -16,12 +16,11 @@ use crate::setup::{FACE_SOURCES, NODE_SOURCES, RegionDraft, face_target};
 
 /// PrePoMax's list of constraint types, with prepolix's spring connection added; `None` for
 /// those prepolix does not have yet.
-const TYPES: [(&str, Option<Type>); 6] = [
+const TYPES: [(&str, Option<Type>); 5] = [
     ("Point Spring", Some(Type::PointSpring)),
     ("Surface Spring", Some(Type::SurfaceSpring)),
     ("Compression Only", Some(Type::CompressionOnly)),
     ("Rigid Body", Some(Type::RigidBody)),
-    ("Tie", Some(Type::Tie)),
     (
         "Surface To Surface Spring",
         Some(Type::SurfaceToSurfaceSpring),
@@ -34,7 +33,6 @@ enum Type {
     SurfaceSpring,
     CompressionOnly,
     RigidBody,
-    Tie,
     SurfaceToSurfaceSpring,
 }
 
@@ -45,9 +43,9 @@ impl Type {
             Constraint::SurfaceSpring(_) => Type::SurfaceSpring,
             Constraint::CompressionOnly(_) => Type::CompressionOnly,
             Constraint::RigidBody(_) => Type::RigidBody,
-            Constraint::Tie(_) => Type::Tie,
             Constraint::SurfaceToSurfaceSpring(_) => Type::SurfaceToSurfaceSpring,
-            // Moved to the node ties when the project was read; never edited here.
+            // Moved to the ties and node ties when the project was read; never edited here.
+            Constraint::Tie(_) => unreachable!("ties are not constraints"),
             Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
         }
     }
@@ -59,7 +57,6 @@ impl Type {
             Type::SurfaceSpring => "Surface_Spring",
             Type::CompressionOnly => "Compression_Only",
             Type::RigidBody => "Rigid_Body",
-            Type::Tie => "Tie",
             Type::SurfaceToSurfaceSpring => "Surface_To_Surface_Spring",
         }
     }
@@ -71,7 +68,7 @@ impl Type {
     }
 
     fn has_master_slave(self) -> bool {
-        matches!(self, Type::Tie | Type::SurfaceToSurfaceSpring)
+        matches!(self, Type::SurfaceToSurfaceSpring)
     }
 
     /// The constraint with PrePoMax's default values and empty regions.
@@ -102,7 +99,6 @@ impl Type {
                 nonlinear: false,
             }),
             Type::RigidBody => Constraint::RigidBody(RigidBody::new(name, "")),
-            Type::Tie => Constraint::Tie(Tie::new(name)),
             Type::SurfaceToSurfaceSpring => {
                 Constraint::SurfaceToSurfaceSpring(SurfaceToSurfaceSpring {
                     name,
@@ -336,7 +332,7 @@ impl ConstraintDraft {
                      body.",
                 );
             }
-            Constraint::Tie(tie) => contacts::tie_form(ui, model, tie, &mut self.pair),
+            Constraint::Tie(_) => unreachable!("ties are not constraints"),
             Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
             Constraint::SurfaceToSurfaceSpring(spring) => {
                 self.pair.ui(ui, model);
@@ -380,7 +376,7 @@ fn name_row(ui: &mut Ui, constraint: &mut Constraint) {
         Constraint::PointSpring(c) => &mut c.name,
         Constraint::SurfaceSpring(c) => &mut c.name,
         Constraint::CompressionOnly(c) => &mut c.name,
-        Constraint::Tie(c) => &mut c.name,
+        Constraint::Tie(_) => unreachable!("ties are not constraints"),
         Constraint::SurfaceToSurfaceSpring(c) => &mut c.name,
         Constraint::RigidBody(c) => &mut c.name,
         Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
@@ -500,14 +496,13 @@ mod tests {
         draft.switch(Type::SurfaceSpring, &["Surface_Spring-1"]);
         assert_eq!(draft.name(), "Surface_Spring-2");
         assert_eq!(draft.region.target, Target::Faces);
-        draft.switch(Type::Tie, &[]);
-        assert_eq!(draft.name(), "Tie-1");
-        assert!(matches!(draft.constraint, Constraint::Tie(_)));
-        let Constraint::Tie(tie) = &mut draft.constraint else {
+        draft.switch(Type::SurfaceToSurfaceSpring, &[]);
+        assert_eq!(draft.name(), "Surface_To_Surface_Spring-1");
+        let Constraint::SurfaceToSurfaceSpring(spring) = &mut draft.constraint else {
             unreachable!()
         };
-        tie.name = "Lager".into();
-        draft.switch(Type::SurfaceToSurfaceSpring, &[]);
+        spring.name = "Lager".into();
+        draft.switch(Type::CompressionOnly, &[]);
         assert_eq!(draft.name(), "Lager");
     }
 
@@ -518,7 +513,7 @@ mod tests {
         let mut draft = ConstraintDraft::new(&fe);
         draft.switch(Type::SurfaceSpring, &[]);
         assert_eq!(draft.region.target, Target::Edges);
-        draft.switch(Type::Tie, &[]);
+        draft.switch(Type::SurfaceToSurfaceSpring, &[]);
         assert_eq!(draft.pair.master.target, Target::Edges);
         assert_eq!(draft.pair.slave.target, Target::Edges);
     }

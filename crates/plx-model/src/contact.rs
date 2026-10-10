@@ -220,6 +220,8 @@ pub enum Constraint {
     PointSpring(PointSpring),
     SurfaceSpring(SurfaceSpring),
     CompressionOnly(CompressionOnly),
+    /// Only in projects saved while ties were constraints; [`crate::FeModel::migrate`] moves
+    /// them to the model's ties, listed with the contact pairs.
     Tie(Tie),
     SurfaceToSurfaceSpring(SurfaceToSurfaceSpring),
     RigidBody(RigidBody),
@@ -342,6 +344,12 @@ pub struct Tie {
 }
 
 impl Tie {
+    /// Turns the tie around, as [`ContactPair::swap_master_slave`].
+    pub fn swap_master_slave(&mut self) {
+        std::mem::swap(&mut self.master, &mut self.slave);
+        self.name = swapped_name(&self.name);
+    }
+
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),

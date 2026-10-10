@@ -16,7 +16,7 @@ use plx_model::{
     GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
     InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
     ModelSpace, NodeTie, OutputKind, Region, Section, SectionKind, StaticStep,
-    SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Totals,
+    SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals,
     UserKeyword, line_tangent,
 };
 
@@ -1152,22 +1152,32 @@ fn constraints(
                     body.name
                 )));
             }
-            Constraint::Tie(tie) => {
-                let master = sets.surface(&tie.name, "Master", &tie.master)?;
-                let slave = sets.surface(&tie.name, "Slave", &tie.slave)?;
-                let mut out = format!("*Tie, Name={}", name(&tie.name));
-                if let Some(tolerance) = tie.position_tolerance {
-                    let _ = write!(out, ", Position tolerance={}", number(tolerance));
-                }
-                if !tie.adjust {
-                    out.push_str(", Adjust=No");
-                }
-                let _ = writeln!(out, "\n{slave}, {master}");
-                keywords.push(Keyword::generated(out));
-            }
+            Constraint::Tie(t) => keywords.push(tie(sets, t)?),
+        }
+    }
+    for t in &model.ties {
+        if t.active {
+            keywords.push(tie(sets, t)?);
+        } else {
+            keywords.push(deactivated(&t.name));
         }
     }
     Ok(keywords)
+}
+
+/// `*Tie` of a slave surface glued to its master.
+fn tie(sets: &mut Sets, tie: &Tie) -> Result<Keyword, WriteError> {
+    let master = sets.surface(&tie.name, "Master", &tie.master)?;
+    let slave = sets.surface(&tie.name, "Slave", &tie.slave)?;
+    let mut out = format!("*Tie, Name={}", name(&tie.name));
+    if let Some(tolerance) = tie.position_tolerance {
+        let _ = write!(out, ", Position tolerance={}", number(tolerance));
+    }
+    if !tie.adjust {
+        out.push_str(", Adjust=No");
+    }
+    let _ = writeln!(out, "\n{slave}, {master}");
+    Ok(Keyword::generated(out))
 }
 
 /// One `*Pre-tension section` per pre-tension load, with a new node that carries the

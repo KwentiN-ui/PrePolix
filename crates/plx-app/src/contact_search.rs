@@ -11,8 +11,7 @@ use plx_mesh::{
     find_contact_pairs, find_line_joints, surface_faces,
 };
 use plx_model::{
-    Constraint, ContactMethod, ContactPair, FeModel, NodeTie, Quantity, Region, Tie, UnitSystem,
-    next_name,
+    ContactMethod, ContactPair, FeModel, NodeTie, Quantity, Region, Tie, UnitSystem, next_name,
 };
 
 use crate::model::{Highlight, Model};
@@ -120,7 +119,7 @@ pub struct ContactSearchDialog {
 pub enum SearchResult {
     Open,
     /// Create these ties, contact pairs and node ties.
-    Ok(Vec<Constraint>, Vec<ContactPair>, Vec<NodeTie>),
+    Ok(Vec<Tie>, Vec<ContactPair>, Vec<NodeTie>),
     Cancel,
 }
 
@@ -705,20 +704,13 @@ impl ContactSearchDialog {
 
     /// Ties, contact pairs and node ties of the rows, with names not yet taken in the model.
     #[allow(clippy::type_complexity)]
-    fn create(
-        &self,
-        model: &Model,
-    ) -> Result<(Vec<Constraint>, Vec<ContactPair>, Vec<NodeTie>), String> {
+    fn create(&self, model: &Model) -> Result<(Vec<Tie>, Vec<ContactPair>, Vec<NodeTie>), String> {
         let fe = &model.fe;
         let mut ties = Vec::new();
         let mut pairs = Vec::new();
         let mut joints = Vec::new();
         let mut joint_names: Vec<String> = fe.node_ties.iter().map(|t| t.name.clone()).collect();
-        let mut tie_names: Vec<String> = fe
-            .constraints
-            .iter()
-            .map(|c| c.name().to_string())
-            .collect();
+        let mut tie_names: Vec<String> = fe.ties.iter().map(|t| t.name.clone()).collect();
         let mut pair_names: Vec<String> = fe.contact_pairs.iter().map(|c| c.name.clone()).collect();
         let unique = |name: &str, taken: &mut Vec<String>| {
             let name = if taken.iter().any(|t| t.eq_ignore_ascii_case(name)) {
@@ -749,13 +741,13 @@ impl ContactSearchDialog {
             };
             let (master, slave) = (region(&row.item.master), region(&row.item.slave));
             match row.kind {
-                PairType::Tie => ties.push(Constraint::Tie(Tie {
+                PairType::Tie => ties.push(Tie {
                     position_tolerance: Some(row.distance),
                     adjust: row.adjust,
                     master,
                     slave,
                     ..Tie::new(unique(&row.name, &mut tie_names))
-                })),
+                }),
                 PairType::Contact => {
                     if !(fe.surface_interactions.iter()).any(|s| s.name == row.interaction) {
                         return Err(format!(

@@ -1818,7 +1818,7 @@ fn a_tie_writes_its_surfaces_slave_first() {
     tie.master = Region::Faces(lower);
     tie.slave = Region::Faces(upper);
     tie.position_tolerance = Some(0.5);
-    model.constraints.push(Constraint::Tie(tie));
+    model.ties.push(tie);
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
         "*Surface, Name=Internal_Selection-1_Tie-1_Master, Type=Element\n",
@@ -1899,7 +1899,7 @@ fn calculix_carries_the_load_across_a_tie() {
     tie.master = Region::Faces(lower);
     tie.slave = Region::Faces(upper);
     tie.position_tolerance = Some(0.05);
-    model.constraints.push(Constraint::Tie(tie));
+    model.ties.push(tie);
     let Some(frd) = run_ccx("tie", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
