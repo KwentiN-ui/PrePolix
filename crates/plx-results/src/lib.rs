@@ -22,6 +22,10 @@ pub use transformation::{Transformation, TransformationKind};
 pub enum AnalysisKind {
     Static,
     Frequency,
+    /// Complex eigenmodes of a rotating structure (`*COMPLEX FREQUENCY`); the value is the
+    /// real part of the frequency, the mode shape whirls with the magnitudes and phases of
+    /// the `PDISP` field.
+    ComplexFrequency,
     Buckling,
     Dynamic,
     Other(i32),
@@ -31,10 +35,27 @@ impl AnalysisKind {
     /// Label of the increment value (time, eigenfrequency, buckling factor).
     pub fn value_label(self) -> &'static str {
         match self {
-            AnalysisKind::Frequency => "Frequenz",
+            AnalysisKind::Frequency | AnalysisKind::ComplexFrequency => "Frequenz",
             AnalysisKind::Buckling => "Lastfaktor",
             _ => "Zeit",
         }
+    }
+
+    /// Whether the increments are eigenmodes, whose shapes are scaled arbitrarily and swing
+    /// about the undeformed shape.
+    pub fn is_modal(self) -> bool {
+        matches!(
+            self,
+            AnalysisKind::Frequency | AnalysisKind::ComplexFrequency | AnalysisKind::Buckling
+        )
+    }
+
+    /// Whether the increments are eigenmodes with a frequency.
+    pub fn is_frequency(self) -> bool {
+        matches!(
+            self,
+            AnalysisKind::Frequency | AnalysisKind::ComplexFrequency
+        )
     }
 }
 

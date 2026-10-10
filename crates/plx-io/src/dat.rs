@@ -361,14 +361,49 @@ pub fn parse_dat(text: &str) -> DatImport {
         if trimmed == "E I G E N V A L U E   O U T P U T" {
             let table = table_after(&lines, &mut i);
             let set = format!("STEP_{step}");
-            for values in table.iter().filter(|v| v.len() == 5) {
+            for values in &table {
+                // A frequency step prints eigenvalue, omega, frequency and imaginary part; a
+                // complex frequency step the real part as omega and frequency, then the
+                // imaginary part of omega, the damping of the whirling mode.
+                let (frequency, names): (f64, &[&str]) = match values.len() {
+                    5 => (
+                        values[3],
+                        &["EIGENVALUE", "OMEGA", "FREQUENCY", "FREQUENCY_IM"],
+                    ),
+                    4 => (values[2], &["OMEGA", "FREQUENCY", "OMEGA_IM"]),
+                    _ => continue,
+                };
                 let m = values[0] as u32;
-                frequencies.insert(m, values[3]);
-                let row = data.row(step, m, values[3]);
-                let names = ["EIGENVALUE", "OMEGA", "FREQUENCY", "FREQUENCY_IM"];
+                frequencies.insert(m, frequency);
+                let row = data.row(step, m, frequency);
                 for (name, value) in names.iter().zip(&values[1..]) {
                     data.add(&set, "EIGENVALUE_OUTPUT", name, name, row, *value);
                 }
+            }
+            continue;
+        }
+        // The whirl of each complex mode: F (forward, with the rotation) or B (backward).
+        if trimmed == "E I G E N M O D E   T U R N I N G   D I R E C T I O N" {
+            let set = format!("STEP_{step}");
+            while i < lines.len() {
+                let line = lines[i].trim();
+                i += 1;
+                let mut tokens = line.split_whitespace();
+                let Some(m) = tokens.next().and_then(|t| t.parse::<u32>().ok()) else {
+                    if line.is_empty() || line.starts_with("Axis") || line.starts_with("MODE") {
+                        continue;
+                    }
+                    break;
+                };
+                let direction = match tokens.next() {
+                    Some("F") => 1.0,
+                    Some("B") => -1.0,
+                    _ => 0.0,
+                };
+                let frequency = frequencies.get(&m).copied().unwrap_or(m as f64);
+                let row = data.row(step, m, frequency);
+                let name = "TURNING_DIRECTION";
+                data.add(&set, "EIGENVALUE_OUTPUT", name, name, row, direction);
             }
             continue;
         }

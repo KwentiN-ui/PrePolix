@@ -48,6 +48,10 @@ pub enum Problem {
     NoGlobalResults,
     IncrementExceedsStep,
     NoLoad,
+    /// A complex frequency step without a frequency step before it that stores its modes.
+    NoStoredModes,
+    /// A Coriolis complex frequency step without a centrifugal load before it.
+    NoRotation,
     /// Found in the solver output only.
     NoConvergence,
     /// Found in the solver output only.
@@ -65,7 +69,8 @@ impl Problem {
             | Problem::ConflictingBoundaries
             | Problem::LoadOnFixedNodes
             | Problem::RotationsIgnored
-            | Problem::NoLoad => Severity::Warning,
+            | Problem::NoLoad
+            | Problem::NoRotation => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -90,6 +95,8 @@ impl Problem {
             Problem::NoGlobalResults => "No global results",
             Problem::IncrementExceedsStep => "Inkrement größer als der Step",
             Problem::NoLoad => "Keine Last",
+            Problem::NoStoredModes => "No stored eigenmodes",
+            Problem::NoRotation => "No rotation",
             Problem::NoConvergence => "Keine Konvergenz",
             Problem::MpcAndSpc => "Freiheitsgrad doppelt gebunden",
             Problem::RotationIn2d => "Rotation in einem 2D-Modell",
@@ -199,6 +206,16 @@ impl Problem {
                 "Der Step hat weder eine aktive Last noch eine vorgegebene Verschiebung. \
                  Die Rechnung läuft, alle Ergebnisse sind aber null."
             }
+            Problem::NoStoredModes => {
+                "A Complex Frequency step works on the eigenmodes of the last Frequency step \
+                 before it, which writes them to the .eig file with Storage. Without it \
+                 CalculiX stops with \"the eigenvalue file does not exist\"."
+            }
+            Problem::NoRotation => {
+                "The Coriolis forces of a Complex Frequency step come from the centrifugal \
+                 load of a static step before the Frequency step. Without a rotation the \
+                 complex eigenfrequencies are those of the Frequency step."
+            }
             Problem::NoConvergence => {
                 "Die Newton-Iteration ist nicht konvergiert; CalculiX hat das Inkrement \
                  immer weiter verkleinert und aufgegeben (\"too many cutbacks\" oder \
@@ -298,6 +315,13 @@ impl Problem {
                 "Im Step das Anfangsinkrement höchstens so groß wie die Step-Dauer wählen."
             }
             Problem::NoLoad => "Unter Loads eine Last erstellen oder eine deaktivierte aktivieren.",
+            Problem::NoStoredModes => {
+                "Create a Frequency step with the Storage option before the Complex Frequency \
+                 step (as a perturbation step after a static step with the centrifugal load)."
+            }
+            Problem::NoRotation => {
+                "Create a Centrifugal load in the static step before the Frequency step."
+            }
             Problem::NoConvergence => {
                 "Kontakte prüfen (Steifigkeit der Surface Interaction, Adjust, Lage der \
                  Flächen), Teile ausreichend lagern, die Last auf mehrere Inkremente \
@@ -724,6 +748,32 @@ impl FeModel {
                 .iter()
                 .any(|w| text.contains(w))
         });
+        if let StepKind::ComplexFrequency(settings) = &step.kind {
+            let before = || self.steps[..s].iter().filter(|s| s.active);
+            let stored = before().rev().find_map(|s| match &s.kind {
+                StepKind::Frequency(f) => Some(f.storage),
+                _ => None,
+            });
+            if stored != Some(true) {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::NoStoredModes,
+                    format!("{}: no Frequency step with Storage before it", step.name),
+                ));
+            }
+            let rotating = before().any(|s| {
+                s.kind.supports_loads()
+                    && (s.loads.iter())
+                        .any(|l| l.active && matches!(l.kind, LoadKind::Centrifugal { .. }))
+            });
+            if settings.coriolis && !rotating {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::NoRotation,
+                    format!("{}: no centrifugal load in a step before it", step.name),
+                ));
+            }
+        }
         // A buckle step solves the static state of its loads first.
         let static_mechanical = matches!(
             step.kind,
