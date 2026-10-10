@@ -11,11 +11,12 @@ use std::fmt::Write as _;
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
-    Amplitude, AmplitudeTime, BoundaryKind, BuckleStep, Constraint, ContactMethod, ContactPair,
-    DynamicStep, FeModel, FieldOutput, FrequencyStep, GapConductance, HeatTransferStep,
-    HistoryKind, HistoryOutput, Incrementation, InitialConditionKind, InteractionProperty,
-    LoadKind, ModelSpace, NodeTie, OutputKind, Region, Section, SectionKind, StaticStep, Step,
-    StepKind, SurfaceBehavior, SurfaceInteraction, Totals, UserKeyword, line_tangent,
+    Amplitude, AmplitudeTime, BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint,
+    ContactMethod, ContactPair, DynamicStep, FeModel, FieldOutput, FrequencyStep, GapConductance,
+    HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialConditionKind,
+    InteractionProperty, LoadKind, ModelSpace, NodeTie, OutputKind, Region, Section, SectionKind,
+    StaticStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Totals, UserKeyword,
+    line_tangent,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -1282,6 +1283,7 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
     let (header, procedure) = match &step.kind {
         StepKind::Static(settings) => static_step(settings),
         StepKind::Frequency(settings) => frequency_step(settings),
+        StepKind::ComplexFrequency(settings) => complex_frequency_step(settings),
         StepKind::Buckle(settings) => buckle_step(settings),
         StepKind::HeatTransfer(settings) => heat_transfer_step(settings, "*Heat transfer", false),
         StepKind::CoupledTempDisp(settings) => {
@@ -1518,6 +1520,7 @@ fn deactivated_step(step: &Step) -> Keyword {
     let procedure = match step.kind {
         StepKind::Static(_) => "StaticStep",
         StepKind::Frequency(_) => "FrequencyStep",
+        StepKind::ComplexFrequency(_) => "ComplexFrequencyStep",
         StepKind::Buckle(_) => "BuckleStep",
         StepKind::HeatTransfer(_) => "HeatTransferStep",
         StepKind::CoupledTempDisp(_) => "CoupledTempDispStep",
@@ -1769,6 +1772,22 @@ fn frequency_step(settings: &FrequencyStep) -> (String, String) {
         }
     }
     procedure.push('\n');
+    (header, procedure)
+}
+
+/// The `*Step` line and the procedure keyword of a complex frequency step, as PrePoMax's
+/// `CalComplexFrequency` writes them.
+fn complex_frequency_step(settings: &ComplexFrequencyStep) -> (String, String) {
+    let mut header = String::from("*Step");
+    if settings.perturbation {
+        header.push_str(", Perturbation");
+    }
+    header.push('\n');
+    let mut procedure = String::from("*Complex frequency");
+    if settings.coriolis {
+        procedure.push_str(", Coriolis");
+    }
+    let _ = writeln!(procedure, "\n{}", settings.num_frequencies);
     (header, procedure)
 }
 

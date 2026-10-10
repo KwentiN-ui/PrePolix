@@ -154,7 +154,7 @@ impl ResultsView {
         let step: Vec<usize> = (0..self.increments.len())
             .filter(|&i| self.increments[i].step == last.step)
             .collect();
-        if last.kind == AnalysisKind::Frequency {
+        if last.kind.is_frequency() {
             step[0]
         } else if last.kind == AnalysisKind::Buckling {
             let first_mode = step.iter().find(|&&i| self.increments[i].increment > 0);
@@ -404,6 +404,16 @@ impl ResultsView {
                     "Step: #{}   Mode: #{}   Frequency: {value}",
                     inc.step, inc.increment
                 ),
+                AnalysisKind::ComplexFrequency => {
+                    let phase = match self.whirl() {
+                        Some((phase, _)) => format!("   Phase: {:.0} deg", phase.to_degrees()),
+                        None => String::new(),
+                    };
+                    format!(
+                        "Step: #{}   Mode: #{}   Complex frequency (real part): {value}{phase}",
+                        inc.step, inc.increment
+                    )
+                }
                 AnalysisKind::Buckling if inc.increment == 0 => {
                     format!(
                         "Step: #{}   Reference state of the buckling loads",
@@ -468,18 +478,118 @@ impl ResultsView {
         }
     }
 
-    /// Factor on the deformation of the shown animation frame; 1 without animation.
+    /// Factor on the deformation of the shown animation frame; 1 without animation, and 1
+    /// while a complex mode whirls, as its displacements already carry the phase.
     pub fn amplitude(&self) -> f32 {
+        if self.whirl().is_some() {
+            return 1.0;
+        }
         self.animation.as_ref().map_or(1.0, Animation::amplitude)
     }
 
     /// Factor on the shown values: the deformation factor, without its sign for magnitudes and
     /// equivalent values, which stay positive while a mode shape swings (as in PrePoMax).
+    /// Values other than the displacements of a whirling complex mode follow its real part.
     pub fn value_amplitude(&self) -> f32 {
-        let amplitude = self.amplitude();
+        let amplitude = match self.whirl() {
+            Some((phase, _)) => phase.cos(),
+            None => self.amplitude(),
+        };
         match self.current() {
             Some((_, component)) if component.is_invariant() => amplitude.abs(),
             _ => amplitude,
+        }
+    }
+
+    /// The whirl of a complex mode during a scale factor animation: the phase angle of the
+    /// shown frame, one turn over the frames, and the `PDISP` field with the magnitudes and
+    /// phases of the displacements CalculiX writes for `PU` output.
+    pub fn whirl(&self) -> Option<(f32, &Field)> {
+        let animation = self.animation.as_ref()?;
+        if animation.kind != AnimationKind::ScaleFactor || self.superposition.is_some() {
+            return None;
+        }
+        let increment = self.current_increment()?;
+        if increment.kind != AnalysisKind::ComplexFrequency {
+            return None;
+        }
+        let field = increment.field("PDISP")?;
+        let complete = ["MAG1", "MAG2", "MAG3", "PHA1", "PHA2", "PHA3"]
+            .iter()
+            .all(|n| field.component(n).is_some());
+        complete.then(|| (animation.progress() * std::f32::consts::TAU, field))
+    }
+
+    /// Displacements of a whirling complex mode at the phase of the shown frame:
+    /// `u_k = MAG_k cos(phase + PHA_k)` per node, PrePoMax's complex animation.
+    fn whirl_displacements(phase: f32, field: &Field) -> Vec<[f32; 3]> {
+        let magnitude = ["MAG1", "MAG2", "MAG3"].map(|n| &field.component(n).unwrap().values);
+        let shift = ["PHA1", "PHA2", "PHA3"].map(|n| &field.component(n).unwrap().values);
+        (0..magnitude[0].len())
+            .map(|i| {
+                [0, 1, 2].map(|k| {
+                    let (m, p) = (magnitude[k][i], shift[k][i]);
+                    if m.is_finite() && p.is_finite() {
+                        m * (phase + p.to_radians()).cos()
+                    } else {
+                        0.0
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Values of the shown displacement component of a whirling complex mode.
+    fn whirl_values(&self, phase: f32, field: &Field) -> Option<Vec<f32>> {
+        let (shown, component) = self.current()?;
+        if shown.name != "DISP" {
+            return None;
+        }
+        let displacements = Self::whirl_displacements(phase, field);
+        let values = match component.name.as_str() {
+            "U1" => displacements.iter().map(|d| d[0]).collect(),
+            "U2" => displacements.iter().map(|d| d[1]).collect(),
+            "U3" => displacements.iter().map(|d| d[2]).collect(),
+            "ALL" => displacements
+                .iter()
+                .map(|d| (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt())
+                .collect(),
+            _ => return None,
+        };
+        Some(values)
+    }
+
+    /// Range of the displacement component over a whole turn of a whirling complex mode.
+    fn whirl_range(&self, field: &Field) -> Option<(f32, f32)> {
+        let (shown, component) = self.current()?;
+        if shown.name != "DISP" {
+            return None;
+        }
+        let magnitude = ["MAG1", "MAG2", "MAG3"].map(|n| &field.component(n).unwrap().values);
+        let peak = |values: &[f32]| {
+            values
+                .iter()
+                .copied()
+                .filter(|v| v.is_finite())
+                .fold(0.0, f32::max)
+        };
+        match component.name.as_str() {
+            "U1" => Some((-peak(magnitude[0]), peak(magnitude[0]))),
+            "U2" => Some((-peak(magnitude[1]), peak(magnitude[1]))),
+            "U3" => Some((-peak(magnitude[2]), peak(magnitude[2]))),
+            "ALL" => {
+                let norm = (0..magnitude[0].len())
+                    .map(|i| {
+                        [0, 1, 2]
+                            .iter()
+                            .map(|&k| magnitude[k][i].powi(2))
+                            .sum::<f32>()
+                    })
+                    .filter(|v| v.is_finite())
+                    .fold(0.0, f32::max);
+                Some((0.0, norm.sqrt()))
+            }
+            _ => None,
         }
     }
 
@@ -491,9 +601,7 @@ impl ResultsView {
             .map_or(self.increment, |a| a.start_increment);
         self.select_increment(start);
         let step = self.current_increment().map(|i| i.step);
-        let modal = self
-            .current_increment()
-            .is_some_and(|i| matches!(i.kind, AnalysisKind::Frequency | AnalysisKind::Buckling));
+        let modal = self.current_increment().is_some_and(|i| i.kind.is_modal());
         let increments = (0..self.increments.len())
             .filter(|&i| Some(self.increments[i].step) == step)
             .collect();
@@ -503,6 +611,11 @@ impl ResultsView {
 
     /// Displacements as shown: those of the overlaid modes, or of the current increment.
     pub fn shown_displacements(&self) -> Option<std::borrow::Cow<'_, [[f32; 3]]>> {
+        if let Some((phase, field)) = self.whirl() {
+            return Some(std::borrow::Cow::Owned(Self::whirl_displacements(
+                phase, field,
+            )));
+        }
         match &self.superposition {
             Some(superposition) => Some(std::borrow::Cow::Borrowed(&superposition.displacements)),
             None => self
@@ -514,6 +627,9 @@ impl ResultsView {
 
     /// Displacement of one node as shown.
     pub fn shown_displacement(&self, node: usize) -> Option<[f32; 3]> {
+        if let Some((phase, field)) = self.whirl() {
+            return Self::whirl_displacements(phase, field).get(node).copied();
+        }
         if let Some(superposition) = &self.superposition {
             return superposition.displacements.get(node).copied();
         }
@@ -530,6 +646,11 @@ impl ResultsView {
                 .as_deref()
                 .map(std::borrow::Cow::Borrowed);
         }
+        if let Some((phase, field)) = self.whirl()
+            && let Some(values) = self.whirl_values(phase, field)
+        {
+            return Some(std::borrow::Cow::Owned(values));
+        }
         let amplitude = self.value_amplitude();
         Some(std::borrow::Cow::Owned(
             component.values.iter().map(|v| v * amplitude).collect(),
@@ -545,6 +666,7 @@ impl ResultsView {
     /// directional components turn and mirror with it. Overlaid modes keep their values.
     pub fn shown_values_on(&self, instance: &DAffine3) -> Option<std::borrow::Cow<'_, [f32]>> {
         if self.superposition.is_none()
+            && self.whirl().is_none()
             && let Some((field, _)) = self.current()
             && let Some(values) =
                 transformation::transformed_values(field, self.component, instance.matrix3)
@@ -609,6 +731,20 @@ impl ResultsView {
         let Some(animation) = &self.animation else {
             return Some((min, max));
         };
+        if let Some((_, pdisp)) = self.whirl()
+            && let Some(range) = self.whirl_range(pdisp)
+        {
+            return match animation.limits {
+                ColorLimits::AllFrames => Some(range),
+                ColorLimits::CurrentFrame => {
+                    let values = self.shown_values()?;
+                    let finite = values.iter().copied().filter(|v| v.is_finite());
+                    finite
+                        .map(|v| (v, v))
+                        .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
+                }
+            };
+        }
         match (animation.kind, animation.limits) {
             (AnimationKind::ScaleFactor, ColorLimits::CurrentFrame) => {
                 // A negative factor swaps the ends.
@@ -724,7 +860,28 @@ pub fn field_unit(field: &str, component: &str, units: UnitSystem) -> Option<Str
 /// PrePoMax's measure of the largest displacement: the root of the summed squares of the
 /// largest absolute value of every `DISP` component, including `ALL`.
 fn max_deformation(increment: &Increment) -> Option<f32> {
-    let field = increment.field("DISP")?;
+    // A complex mode reaches its magnitudes over a turn, not in its real part alone.
+    let field = match increment.field("PDISP") {
+        Some(pdisp)
+            if ["MAG1", "MAG2", "MAG3"]
+                .iter()
+                .all(|n| pdisp.component(n).is_some()) =>
+        {
+            let magnitudes = Field {
+                name: String::new(),
+                components: ["MAG1", "MAG2", "MAG3"]
+                    .iter()
+                    .map(|n| pdisp.component(n).unwrap().clone())
+                    .collect(),
+            };
+            return max_deformation_of(&magnitudes);
+        }
+        _ => increment.field("DISP")?,
+    };
+    max_deformation_of(field)
+}
+
+fn max_deformation_of(field: &Field) -> Option<f32> {
     let sum: f32 = field
         .components
         .iter()
@@ -881,6 +1038,71 @@ mod tests {
         assert!(
             lines[1].contains("Mode: #1   Buckling factor: 1"),
             "{lines:?}"
+        );
+    }
+
+    /// A complex mode: one node whirling in the y-z plane with magnitude 2, the real part
+    /// (phase 0) pointing in y.
+    fn complex_mode() -> Increment {
+        let mut increment = increment(3, 1, AnalysisKind::ComplexFrequency, &[[0.0, 2.0, 0.0]]);
+        let column = |name: &str, value: f32| Component {
+            name: name.into(),
+            values: vec![value],
+            derived: false,
+        };
+        increment.fields.push(Field {
+            name: "PDISP".into(),
+            components: vec![
+                column("MAG1", 0.0),
+                column("MAG2", 2.0),
+                column("MAG3", 2.0),
+                column("PHA1", 0.0),
+                column("PHA2", 0.0),
+                column("PHA3", -90.0),
+            ],
+        });
+        increment
+    }
+
+    #[test]
+    fn complex_modes_whirl_with_magnitude_and_phase() {
+        let mut view = ResultsView::new(vec![complex_mode()], Some(([0.0; 3], [10.0; 3])));
+        assert_eq!(view.increment, 0, "the first mode opens");
+        view.field = 0;
+        view.component = 0; // ALL
+        assert!(view.whirl().is_none());
+        view.start_animation(AnimationKind::ScaleFactor);
+        let animation = view.animation.as_mut().unwrap();
+        animation.frames = 5;
+        animation.go_to(0);
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5);
+        assert!(close(
+            view.shown_displacements().unwrap()[0],
+            [0.0, 2.0, 0.0]
+        ));
+        assert_eq!(view.amplitude(), 1.0);
+        // A quarter turn later the node has moved to z: PHA3 = -90 degrees.
+        view.animation.as_mut().unwrap().go_to(1);
+        assert!(close(
+            view.shown_displacements().unwrap()[0],
+            [0.0, 0.0, 2.0]
+        ));
+        assert_eq!(
+            view.shown_values().unwrap()[0],
+            2.0,
+            "ALL stays the magnitude"
+        );
+        view.animation.as_mut().unwrap().limits = ColorLimits::AllFrames;
+        let legend = view.legend().unwrap();
+        assert!((legend.max - 8.0_f32.sqrt()).abs() < 1e-5, "{}", legend.max);
+        view.component = 2; // U2
+        assert!((view.shown_values().unwrap()[0]).abs() < 1e-5);
+        assert_eq!(view.legend().map(|l| (l.min, l.max)), Some((-2.0, 2.0)));
+        // The automatic scale takes the magnitudes, not the real part alone.
+        view.deformation = Deformation::Automatic(1.0);
+        assert_eq!(
+            view.scale(),
+            round_significant(0.25 * 10.0 / 8.0_f64.sqrt(), 2) as f32
         );
     }
 

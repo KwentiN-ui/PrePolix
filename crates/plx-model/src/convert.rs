@@ -105,6 +105,7 @@ impl FeModel {
                         c.value(&mut damping.beta, Quantity::Time);
                     }
                 }
+                StepKind::ComplexFrequency(_) => {}
                 // Buckling factors and the accuracy have no unit.
                 StepKind::Buckle(_) => {}
             }
