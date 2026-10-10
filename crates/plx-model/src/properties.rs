@@ -4,12 +4,19 @@ use serde::{Deserialize, Serialize};
 use crate::UnitSystem;
 
 /// What the model is about as a whole, PrePoMax's model properties: the model space, the
-/// unit system and the physical constants.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// unit system, the physical constants and whether the model is a submodel.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelProperties {
     pub space: ModelSpace,
     pub units: UnitSystem,
+    /// PrePoMax's model type: a general model or a submodel driven by the results of a
+    /// global model.
+    pub kind: ModelKind,
+    /// Results file (`.frd`) of the global model a submodel reads its boundary displacements
+    /// from (`*SUBMODEL, INPUT=`); only used when [`ModelProperties::kind`] is
+    /// [`ModelKind::Submodel`].
+    pub global_results: Option<std::path::PathBuf>,
     /// Absolute zero on the model's temperature scale (`*PHYSICAL CONSTANTS`); radiation
     /// needs it. `None` leaves it undefined, as in PrePoMax.
     pub absolute_zero: Option<f64>,
@@ -18,6 +25,13 @@ pub struct ModelProperties {
 }
 
 impl ModelProperties {
+    /// The global results file of a submodel; `None` for a general model, as in PrePoMax.
+    pub fn submodel_input(&self) -> Option<&std::path::Path> {
+        (self.kind == ModelKind::Submodel)
+            .then_some(self.global_results.as_deref())
+            .flatten()
+    }
+
     /// Absolute zero and the Stefan-Boltzmann constant in the units of `units`; `None`
     /// without units.
     pub fn standard_constants(units: UnitSystem) -> Option<(f64, f64)> {
@@ -29,6 +43,28 @@ impl ModelProperties {
         let sigma =
             crate::UnitSystem::MKgSC.convert(5.670_374_419e-8, Quantity::StefanBoltzmann, units);
         Some((zero, sigma))
+    }
+}
+
+/// PrePoMax's model type.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelKind {
+    #[default]
+    General,
+    /// A detailed model of a region of a global model: its cut boundary follows the
+    /// displacements the global model computed there (`*SUBMODEL`, `*BOUNDARY, SUBMODEL`).
+    Submodel,
+}
+
+impl ModelKind {
+    pub const ALL: [ModelKind; 2] = [ModelKind::General, ModelKind::Submodel];
+
+    /// Name in the GUI.
+    pub fn label(self) -> &'static str {
+        match self {
+            ModelKind::General => "General model",
+            ModelKind::Submodel => "Submodel",
+        }
     }
 }
 
