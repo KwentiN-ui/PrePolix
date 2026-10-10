@@ -78,6 +78,13 @@ impl FeModel {
         for condition in &mut self.initial_conditions {
             match &mut condition.kind {
                 InitialConditionKind::Temperature(t) => c.value(t, Quantity::Temperature),
+                InitialConditionKind::Velocity(v) => {
+                    v.iter_mut().for_each(|v| c.value(v, Quantity::Velocity));
+                }
+                InitialConditionKind::AngularVelocity { point, speed, .. } => {
+                    point.iter_mut().for_each(|p| c.value(p, Quantity::Length));
+                    c.value(speed, Quantity::RotationalSpeed);
+                }
             }
         }
         for step in &mut self.steps {
@@ -90,6 +97,13 @@ impl FeModel {
                 StepKind::Frequency(f) => {
                     c.option(&mut f.lower_frequency, Quantity::Frequency);
                     c.option(&mut f.upper_frequency, Quantity::Frequency);
+                }
+                StepKind::Dynamic(d) => {
+                    d.increments.convert_units(&c);
+                    if let Some(damping) = &mut d.damping {
+                        c.value(&mut damping.alpha, Quantity::Frequency);
+                        c.value(&mut damping.beta, Quantity::Time);
+                    }
                 }
                 StepKind::ComplexFrequency(_) => {}
                 // Buckling factors and the accuracy have no unit.

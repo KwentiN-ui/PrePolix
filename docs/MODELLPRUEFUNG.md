@@ -12,7 +12,7 @@ fehlgeschlagenen Lauf aus der Ausgabe von CalculiX erkennt. Nachgestellt mit Cal
 | Teil nur über Kontakt gehalten | `zero pivot`, `too many cutbacks` | oft Abbruch | Warnung |
 | Elemente ohne Section | `no material was assigned to element N` | Abbruch | Elemente je Part gegen Sections |
 | Material ohne Elastizität | `no elastic constants were assigned` | Abbruch | Materialien, die eine Section nutzt |
-| Frequency Step ohne Dichte | `no density was assigned` | Abbruch | wie oben |
+| Frequency oder Dynamic Step ohne Dichte | `no density was assigned` | Abbruch | wie oben |
 | Wärmeübertragung ohne Wärmeleitfähigkeit | nur `WARNING ... no conductivity constants`, dann Absturz beim Lösen | Abbruch | Materialien in thermischen Steps |
 | Instationäre Wärmeübertragung ohne Dichte, spezifische Wärme oder Anfangstemperatur | `no density was assigned`, `no specific heat was assigned`, `please define initial conditions for the temperature` | Abbruch | Materialien und Initial Conditions |
 | Querkontraktionszahl >= 0,5 | `Poisson coefficient should be less than 0.5` | Abbruch beim Einlesen | E > 0, -1 < nu < 0,5 |
@@ -26,6 +26,7 @@ fehlgeschlagenen Lauf aus der Ausgabe von CalculiX erkennt. Nachgestellt mit Cal
 | Keine Konvergenz | `too many cutbacks`, `increment size smaller than minimum` | Abbruch | Ausgabe wird erkannt |
 | Last nur auf festgehaltenen Knoten | keine | Last wirkungslos | Warnung |
 | Statischer Step ohne Last | keine | Ergebnis null | Warnung |
+| Anfangsgeschwindigkeit (Initial Condition Velocity) ohne Dynamic Step | keine | ignoriert | Warnung an der Anfangsbedingung; im Dynamic Step zählt sie als Last |
 | Frequency Step ohne Lagerung | keine | sechs Starrkörpermoden nahe 0 Hz | keine (gewollt) |
 
 Quellen: CalculiX-Handbuch (ccx 2.21), [PrePoMax-Forum: Known CalculiX limitations](https://prepomax.discourse.group/t/known-calculix-limitations/3050),

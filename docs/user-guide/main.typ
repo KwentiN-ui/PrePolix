@@ -29,6 +29,7 @@
 #include "chapters/model/amplitudes.typ"
 #include "chapters/model/initial-conditions.typ"
 #include "chapters/model/steps.typ"
+#include "chapters/model/dynamic.typ"
 #include "chapters/model/complex-frequency.typ"
 #include "chapters/model/bcs-loads.typ"
 #include "chapters/model/keywords.typ"
