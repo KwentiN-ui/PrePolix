@@ -102,7 +102,7 @@ extrapolated from read-out points on the plate surface.
   [Read-out points], [Shows the extrapolation formula.],
   [Stress], [#ui("Perpendicular to weld toe"), #ui("Max principal stress") or #ui("Signed max
     abs principal stress").],
-  [Path direction], [Points away from the weld toe; prepolix turns it into the plate surface.],
+  [Path direction], [Points away from the weld toe; PrePolix turns it into the plate surface.],
 )
 
 The evaluation runs for all increments and writes `<result>_hot_spots.csv` next to the result

@@ -36,4 +36,4 @@ On the left are the library materials in categories, on the right the materials 
 - #ui("Preview Material Properties") shows the values of the selected material.
 
 The library is stored per user in `materials.ron` in the settings folder (@settings). When the
-dialog is closed, prepolix asks whether to save changes to the library.
+dialog is closed, PrePolix asks whether to save changes to the library.

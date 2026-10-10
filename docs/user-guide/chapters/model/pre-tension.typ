@@ -16,7 +16,7 @@ pre-tension load does. Create it with #ui("Create ...") on #ui("Loads") of a ste
   [Preload by], [#ui("Force") (default) or #ui("Displacement").],
   [Force], [The force pulling the two sides together; a positive value tightens the bolt.],
   [Shortening], [The length the bolt is shortened by, when preloading by displacement.],
-  [Direction], [The direction of the bolt axis. Unticked, prepolix uses the normal of the
+  [Direction], [The direction of the bolt axis. Unticked, PrePolix uses the normal of the
     selected faces; #ui("Given") takes the components #ui("X"), #ui("Y"), #ui("Z").],
 )
 

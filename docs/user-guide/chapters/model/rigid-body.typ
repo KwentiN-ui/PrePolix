@@ -15,7 +15,7 @@ reference point: a bolt head, a bearing seat or a face a lever acts on. Create i
     point the body is driven at; create it first.],
 )
 
-Written as `*RIGID BODY, NSET=..., REF NODE=..., ROT NODE=...`: prepolix adds a reference node at
+Written as `*RIGID BODY, NSET=..., REF NODE=..., ROT NODE=...`: PrePolix adds a reference node at
 the point for the translations and a rotation node for the rotations, as CalculiX requires.
 
 === Loads and supports on a reference point
