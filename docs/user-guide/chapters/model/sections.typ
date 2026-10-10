@@ -41,4 +41,4 @@ check reports "Truss structure is a mechanism".]
 Beams are written as `*BEAM SECTION` with `B31` or `B32` elements. Pipe and box sections need
 quadratic lines and are written as `B32R`, as CalculiX requires.
 
-#limitation[There are no shell sections yet. Line elements can only be used in 3D models.]
+#limitation[Line elements can only be used in 3D models.]

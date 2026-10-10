@@ -24,6 +24,7 @@
 #include "chapters/model/model-properties.typ"
 #include "chapters/model/materials.typ"
 #include "chapters/model/sections.typ"
+#include "chapters/model/shell-section.typ"
 #include "chapters/model/features.typ"
 #include "chapters/model/interactions.typ"
 #include "chapters/model/amplitudes.typ"
