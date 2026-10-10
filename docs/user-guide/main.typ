@@ -38,3 +38,4 @@
 #include "chapters/results/viewing.typ"
 #include "chapters/results/animation.typ"
 #include "chapters/results/evaluation.typ"
+#include "chapters/results/campbell.typ"
