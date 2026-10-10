@@ -221,6 +221,27 @@ fn calculix_reproduces_the_reference_cantilever() {
     );
 }
 
+/// A plate 100 x 10 of S8 shells, 2 thick, clamped at x = 0 and loaded by 1 N at its tip.
+fn shell_plate() -> (FeMesh, FeModel) {
+    let (length, width, thickness) = (100.0, 10.0, 2.0);
+    let mesh = rectangle(0.0, length, width, 20, 2);
+    let tip = nodes_at(&mesh, 0, length);
+    assert_eq!(tip.len(), 5);
+    let force = -1.0 / tip.len() as f64;
+    let mut model = plane_model(
+        ModelSpace::ThreeD,
+        1.0,
+        vec![(nodes_at(&mesh, 0, 0.0), [Some(0.0); 6])],
+        LoadKind::ConcentratedForce([0.0, 0.0, force]),
+        Region::Nodes(tip),
+    );
+    model.sections[0].kind = SectionKind::Shell {
+        thickness,
+        offset: 0.0,
+    };
+    (mesh, model)
+}
+
 /// The cantilever with its tip face as a rigid body driven by reference point RP-1 at the
 /// centre of the face, and the load or boundary condition given on the point.
 fn rigid_tip(load: Option<Load>, bc: Option<BoundaryCondition>) -> (FeMesh, FeModel) {
@@ -473,6 +494,57 @@ fn pre_tension(value: f64, by_displacement: bool) -> (FeMesh, FeModel) {
         amplitude: None,
     });
     (mesh, model)
+}
+
+#[test]
+fn a_shell_section_is_written_like_prepomax_does() {
+    let (mesh, mut model) = shell_plate();
+    model.sections[0].kind = SectionKind::Shell {
+        thickness: 2.0,
+        offset: 0.5,
+    };
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Element, Type=S8, Elset=PLATE\n"), "{text}");
+    assert!(
+        text.contains(
+            "*Shell section, Elset=Internal_Selection-1_Section-1, Material=Steel, Offset=0.5\n2\n"
+        ),
+        "{text}"
+    );
+    // Results at the shell nodes, not at the nodes CalculiX expands the shells to.
+    assert!(text.contains("*Node file, Output=2D\nRF, U\n"), "{text}");
+    assert!(text.contains("*El file, Output=2D\nS, E, NOE\n"), "{text}");
+    // A shell section on solid elements is refused before CalculiX would be.
+    let (solid_mesh, mut solid) = cantilever(tip_force());
+    solid.sections[0].kind = SectionKind::Shell {
+        thickness: 2.0,
+        offset: 0.0,
+    };
+    assert!(matches!(
+        write_inp(&solid_mesh, &solid, ""),
+        Err(WriteError::InvalidSection { .. })
+    ));
+}
+
+/// The shell plate bends like a beam: F L^3 / (3 E I) at the tip.
+#[test]
+fn calculix_bends_the_shell_plate_like_a_beam() {
+    let (mesh, model) = shell_plate();
+    let Some(frd) = run_ccx("schale", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let inertia = 10.0 * 2.0f64.powi(3) / 12.0;
+    let expected = -100.0f64.powi(3) / (3.0 * 210_000.0 * inertia);
+    let tip = nodes_at(&mesh, 0, 100.0);
+    let deflection: f64 = tip
+        .iter()
+        .map(|&n| node_value(&frd, "DISP", "U3", n))
+        .sum::<f64>()
+        / tip.len() as f64;
+    assert!(
+        (deflection - expected).abs() < 0.03 * expected.abs(),
+        "{deflection} != {expected}"
+    );
 }
 
 #[test]

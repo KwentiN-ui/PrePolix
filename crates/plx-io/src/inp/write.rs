@@ -313,6 +313,8 @@ pub fn model_keywords(
                 flux_kinds,
                 amplitudes: &model.amplitudes,
                 pair_surfaces: &pair_surfaces,
+                shells: (model.sections.iter())
+                    .any(|s| matches!(s.kind, SectionKind::Shell { .. })),
             };
             write_step(&mut sets, step, &context)
         })
@@ -1000,6 +1002,14 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError
                 let _ = writeln!(out, "*Solid section, Elset={set}, Material={material}");
                 let _ = writeln!(out, "{}", number(*area));
             }
+            SectionKind::Shell { thickness, offset } => {
+                let set = sets.element_set(&section.name, &section.region)?;
+                let _ = write!(out, "*Shell section, Elset={set}, Material={material}");
+                if *offset != 0.0 {
+                    let _ = write!(out, ", Offset={}", number(*offset));
+                }
+                let _ = writeln!(out, "\n{}", number(*thickness));
+            }
             SectionKind::Beam(beam) => {
                 let mut options = format!("Section={}", beam.profile.keyword());
                 for (k, offset) in (1..).zip(beam.offset) {
@@ -1396,6 +1406,9 @@ struct StepContext<'a> {
     flux_kinds: FluxKinds,
     amplitudes: &'a [Amplitude],
     pair_surfaces: &'a PairSurfaces,
+    /// The model has shells: results are written at the shell nodes (`Output=2D`) rather
+    /// than at the nodes CalculiX expands them to, so they fit the mesh.
+    shells: bool,
 }
 
 /// A step as PrePoMax structures it: the step title holds `*Step`, which holds the procedure
@@ -1411,6 +1424,7 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         flux_kinds,
         amplitudes,
         pair_surfaces,
+        shells,
     } = context;
     // Nodes of 2D models move in the x-y plane only; CalculiX fails on rotations there.
     let dofs = if space.is_2d() { 2 } else { 6 };
@@ -1688,7 +1702,9 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
             history_outputs.push(keyword);
         }
     }
-    let field_outputs = step.field_outputs.iter().filter_map(field_output).collect();
+    let field_outputs = (step.field_outputs.iter())
+        .filter_map(|output| field_output(output, shells))
+        .collect();
     let end = Keyword::generated("*End step\n".into());
     let contents = vec![
         Keyword::generated(procedure),
@@ -2101,7 +2117,7 @@ fn buckle_step(settings: &BuckleStep) -> (String, String) {
     (header, procedure)
 }
 
-fn field_output(output: &FieldOutput) -> Option<Keyword> {
+fn field_output(output: &FieldOutput, shells: bool) -> Option<Keyword> {
     if output.variables.is_empty() {
         return None;
     }
@@ -2117,8 +2133,9 @@ fn field_output(output: &FieldOutput) -> Option<Keyword> {
             "*El file"
         }
     };
+    let options = if shells { ", Output=2D" } else { "" };
     Some(Keyword::generated(format!(
-        "** Name: {}\n{keyword}\n{variables}\n",
+        "** Name: {}\n{keyword}{options}\n{variables}\n",
         output.name
     )))
 }

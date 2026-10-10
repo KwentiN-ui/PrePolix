@@ -41,13 +41,21 @@ pub enum SectionKind {
     Truss { area: f64 },
     /// Line elements with bending stiffness (`B31`, `B32`, `B32R`).
     Beam(BeamSection),
+    /// Surface elements of a 3D model as shells (`*SHELL SECTION`), PrePoMax's shell
+    /// section: the thickness and the offset of the reference surface from the mid-surface
+    /// as a fraction of the thickness.
+    Shell { thickness: f64, offset: f64 },
 }
 
 impl SectionKind {
-    pub const ALL: [SectionKind; 3] = [
+    pub const ALL: [SectionKind; 4] = [
         SectionKind::Solid,
         SectionKind::Truss { area: 1.0 },
         SectionKind::Beam(BeamSection::DEFAULT),
+        SectionKind::Shell {
+            thickness: 1.0,
+            offset: 0.0,
+        },
     ];
 
     /// Name of the kind, also the prefix of new sections' names, like PrePoMax's
@@ -57,6 +65,7 @@ impl SectionKind {
             SectionKind::Solid => "Solid_Section",
             SectionKind::Truss { .. } => "Truss_Section",
             SectionKind::Beam(_) => "Beam_Section",
+            SectionKind::Shell { .. } => "Shell_Section",
         }
     }
 
@@ -66,11 +75,12 @@ impl SectionKind {
             SectionKind::Solid => "Solid",
             SectionKind::Truss { .. } => "Stab (Truss)",
             SectionKind::Beam(_) => "Balken (Beam)",
+            SectionKind::Shell { .. } => "Shell",
         }
     }
 
     pub fn is_line(&self) -> bool {
-        !matches!(self, SectionKind::Solid)
+        matches!(self, SectionKind::Truss { .. } | SectionKind::Beam(_))
     }
 
     /// The CalculiX type the section gives a line element; `None` when the section does
@@ -79,7 +89,7 @@ impl SectionKind {
     /// line is written with its end nodes only. Pipe and box profiles need `B32R`.
     pub fn element_type(&self, shape: ElementShape) -> Option<&'static str> {
         match (self, shape) {
-            (SectionKind::Solid, _) => None,
+            (SectionKind::Solid | SectionKind::Shell { .. }, _) => None,
             (SectionKind::Truss { .. }, ElementShape::Line2 | ElementShape::Line3) => Some("T3D2"),
             (SectionKind::Beam(_), ElementShape::Line2) => Some("B31"),
             (SectionKind::Beam(beam), ElementShape::Line3) => {
@@ -103,6 +113,14 @@ impl SectionKind {
                 element.id
             )),
             SectionKind::Solid => None,
+            SectionKind::Shell { .. } if element.shape.family() != ElementFamily::Surface => {
+                Some(format!(
+                    "Element {} is not a surface element; a shell section needs triangles or \
+                     quads",
+                    element.id
+                ))
+            }
+            SectionKind::Shell { .. } => None,
             _ if !line => Some(format!("Element {} ist kein Linienelement", element.id)),
             SectionKind::Beam(beam)
                 if beam.profile.needs_reduced_integration()
