@@ -3824,13 +3824,17 @@ impl Workbench {
         let Some(model) = self.model_mut(which) else {
             return;
         };
+        // Offsets shown without an animation move nothing in the next tick, so rebuild here.
+        let mut moved = false;
         if let Some(change) = change {
             let animate = change == crate::exploded::dialog::Change::Parameter;
             preview_explosion(model, &mut dialog, animate);
+            moved = !animate;
         }
         match result {
             ExplodedResult::Open => {
                 self.exploded_dialog = Some((dialog, which));
+                self.results_changed |= moved;
                 return;
             }
             ExplodedResult::Ok => {
@@ -3841,6 +3845,7 @@ impl Workbench {
                 model.explosion.applied = (!nothing).then(|| parameters.clone());
                 if !model.explosion.is_animating() {
                     model.explosion.show(offsets, false);
+                    moved = true;
                 }
                 self.last_exploded = parameters;
             }
@@ -3859,6 +3864,7 @@ impl Workbench {
                 model.explosion.applied = None;
             }
         }
+        self.results_changed |= moved;
         self.viewport.preview = Default::default();
     }
 
