@@ -578,7 +578,7 @@ impl PrepolixApp {
         ui.horizontal(|ui| {
             // PrePoMax shows the unit system of the model at the right.
             if let Some(model) = &self.workbench.model {
-                let properties = model.fe.properties;
+                let properties = &model.fe.properties;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(format!(
                         "Einheitensystem: {}   Modellraum: {}",
@@ -2440,19 +2440,40 @@ impl Workbench {
         let heading = format!("prepolix: {}", model.file_name());
         let mut fe = model.fe.clone();
         fe.resolve_default_solver(default_solver);
-        let text = match plx_io::inp::write_inp(&model.mesh, &fe, &heading) {
-            Ok(text) => text,
-            Err(error) => {
-                self.output.push(format!("Export nicht möglich: {error}"));
-                return;
-            }
-        };
+        // Checked before asking for the file; the global results are staged once it is known.
+        if let Err(error) = plx_io::inp::write_inp(&model.mesh, &fe, &heading) {
+            self.output.push(format!("Export nicht möglich: {error}"));
+            return;
+        }
         let picked = rfd::FileDialog::new()
             .set_title("CalculiX-Eingabedatei exportieren")
             .add_filter("Eingabedatei (*.inp)", &["inp"])
             .set_file_name(format!("{}.inp", crate::tree::ANALYSIS_NAME))
             .save_file();
         if let Some(path) = picked {
+            // A submodel's global results go next to the input file, which names them.
+            let dir = path.parent().unwrap_or(std::path::Path::new("."));
+            let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+            if let Err(error) = crate::analysis::stage_global_results(
+                &mut fe,
+                dir,
+                stem.as_deref().unwrap_or("Analysis"),
+            ) {
+                self.output.push(error);
+                return;
+            }
+            let text = match plx_io::inp::write_inp(&model.mesh, &fe, &heading) {
+                Ok(text) => text,
+                Err(error) => {
+                    self.output.push(format!("Export nicht möglich: {error}"));
+                    return;
+                }
+            };
+            if fe.uses_global_results()
+                && let Some(global) = fe.properties.submodel_input()
+            {
+                self.output.push(format!("{} copied", global.display()));
+            }
             match std::fs::write(&path, text) {
                 Ok(()) => self.output.push(format!("{} geschrieben", path.display())),
                 Err(error) => self.output.push(format!("{}: {error}", path.display())),
@@ -3990,14 +4011,14 @@ impl Workbench {
     /// with the last choice proposed. `then_import` opens the geometry import afterwards.
     fn new_model(&mut self, then_import: bool) {
         self.model_dialog = Some(ModelPropertiesDialog::new_model(
-            self.settings.new_model,
+            self.settings.new_model.clone(),
             then_import,
         ));
     }
 
     fn edit_model_properties(&mut self) {
         if let Some(model) = &self.model {
-            self.model_dialog = Some(ModelPropertiesDialog::edit(model.fe.properties));
+            self.model_dialog = Some(ModelPropertiesDialog::edit(model.fe.properties.clone()));
         }
     }
 
@@ -4018,7 +4039,12 @@ impl Workbench {
                 self.set_model_properties(properties, convert)
             }
             DialogResult::Ok(properties) => {
-                self.settings.new_model = properties;
+                // New models propose the space and units, never a submodel's global results.
+                self.settings.new_model = plx_model::ModelProperties {
+                    kind: plx_model::ModelKind::General,
+                    global_results: None,
+                    ..properties.clone()
+                };
                 self.create_model(properties);
                 self.import_requested = then_import;
             }
@@ -4033,12 +4059,12 @@ impl Workbench {
             std::path::Path::new("Unbenannt"),
             plx_mesh::FeMesh::default(),
         );
-        model.fe.properties = properties;
         self.output.push(format!(
             "Neues Modell: {}, {}",
             properties.space.label(),
             properties.units.label()
         ));
+        model.fe.properties = properties;
         self.model = Some(model);
         self.set_tree_view(TreeView::Geometry);
         self.viewport.set_parts(&[]);
@@ -4052,14 +4078,14 @@ impl Workbench {
         let Some(model) = &mut self.model else {
             return;
         };
-        let old = model.fe.properties;
+        let old = model.fe.properties.clone();
         if convert && old.units != properties.units {
             self.convert_units(properties.units);
         }
         let Some(model) = &mut self.model else {
             return;
         };
-        model.fe.properties = properties;
+        model.fe.properties = properties.clone();
         if old.space != properties.space {
             let mut mesh = model.mesh.clone();
             if properties.space.convert_mesh(&mut mesh) {
