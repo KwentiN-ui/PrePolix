@@ -3,8 +3,9 @@ use std::process::Command;
 
 use plx_model::{
     BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, DefinedField, DefinedFieldKind,
-    DynamicStep, Elastic, EquationSolver, Load, Material, ModalDamping, ModalDynamicsStep, NodeTie,
-    Section, SectionKind, SteadyStateDynamicsStep, UserKeyword,
+    DynamicStep, Elastic, EquationSolver, Hardening, Load, Material, ModalDamping,
+    ModalDynamicsStep, NodeTie, Plastic, PlasticPoint, Section, SectionKind,
+    SteadyStateDynamicsStep, UserKeyword,
 };
 
 use super::*;
@@ -233,6 +234,95 @@ fn calculix_reproduces_the_reference_cantilever() {
         (ours - expected).abs() < 1e-6 * expected.abs(),
         "{ours} != {expected}"
     );
+}
+
+/// Steel S235 with a linear hardening to 400 MPa at 20 % plastic strain.
+fn s235(mesh_model: &mut FeModel) {
+    mesh_model.materials[0].plastic = Some(Plastic {
+        hardening: Hardening::Isotropic,
+        points: vec![
+            PlasticPoint {
+                stress: 235.0,
+                plastic_strain: 0.0,
+                temperature: 0.0,
+            },
+            PlasticPoint {
+                stress: 400.0,
+                plastic_strain: 0.2,
+                temperature: 0.0,
+            },
+        ],
+    });
+}
+
+#[test]
+fn a_plastic_material_is_written_like_prepomax_does() {
+    let (mesh, mut model) = cantilever(tip_force());
+    s235(&mut model);
+    model.materials[0].plastic.as_mut().unwrap().hardening = Hardening::Kinematic;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains(
+            "*Elastic\n210000, 0.3\n*Plastic, Hardening=Kinematic\n235, 0, 0\n400, 0.2, 0\n"
+        ),
+        "{text}"
+    );
+}
+
+/// A bar pulled beyond its yield stress: the stress stays on the hardening curve and the
+/// equivalent plastic strain is where the curve reaches the applied stress.
+#[test]
+fn calculix_yields_the_bar_pulled_beyond_its_yield_stress() {
+    let stress = 300.0;
+    let load = Load {
+        name: "Pressure-1".into(),
+        active: true,
+        region: Region::Surface("TIP".into()),
+        kind: LoadKind::Pressure(-stress),
+        amplitude: None,
+        factor_amplitude: None,
+    };
+    let (mesh, mut model) = cantilever(load);
+    s235(&mut model);
+    // Symmetry supports instead of the clamp: a clamped end restrains the lateral
+    // contraction, and with the small plastic tangent modulus that reaches along the
+    // whole bar; held this way the bar is in uniaxial tension.
+    let (min, max) = mesh.bounds().unwrap();
+    let nodes_at = |axis: usize, value: f64| -> Vec<NodeId> {
+        (1..=99)
+            .filter(|&id| mesh.node(id).is_some_and(|c| c[axis] == value))
+            .collect()
+    };
+    let hold = |axis: usize| {
+        let mut dofs = [None; 6];
+        dofs[axis] = Some(0.0);
+        BoundaryCondition {
+            name: format!("Symmetry-{}", axis + 1),
+            active: true,
+            region: Region::Nodes(nodes_at(axis, min[axis])),
+            kind: BoundaryKind::Displacement(dofs),
+            amplitude: None,
+        }
+    };
+    model.steps[0].boundary_conditions = vec![hold(0), hold(1), hold(2)];
+    model.steps[0].field_outputs[1]
+        .variables
+        .push("PEEQ".into());
+    let Some(frd) = run_ccx("plastisch", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let nodes = nodes_at(0, max[0]);
+    assert_eq!(nodes.len(), 9);
+    let expected_strain = (stress - 235.0) / (400.0 - 235.0) * 0.2;
+    for node in nodes {
+        let s = node_value(&frd, "STRESS", "S11", node);
+        assert!((s - stress).abs() < 0.02 * stress, "{s} != {stress}");
+        let peeq = node_value(&frd, "PE", "PE", node);
+        assert!(
+            (peeq - expected_strain).abs() < 0.05 * expected_strain,
+            "{peeq} != {expected_strain}"
+        );
+    }
 }
 
 /// The element faces at x = 50 of the elements left of the cut: a pre-tension section
@@ -2036,6 +2126,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
             conductivity: None,
             specific_heat: None,
             expansion: None,
+            plastic: None,
         }],
         sections: vec![Section {
             name: "Beam-1".into(),
