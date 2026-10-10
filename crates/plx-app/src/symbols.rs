@@ -135,6 +135,23 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     }
                 }
             }
+            // Gravity as an arrow at the centre of the loaded elements, as in PrePoMax.
+            Kind::Load(LoadKind::Gravity(acceleration)) => {
+                if let Some(center) = region_center(model, &item.region, &visible) {
+                    add(center, DVec3::from(acceleration), SymbolShape::Arrow);
+                }
+            }
+            // The rotation axis through the loaded elements: the point of the axis closest
+            // to their centre, with the direction of the axis.
+            Kind::Load(LoadKind::Centrifugal { point, axis, .. }) => {
+                if let Some(center) = region_center(model, &item.region, &visible)
+                    && let Some(direction) = DVec3::from(axis).try_normalize()
+                {
+                    let point = DVec3::from(point);
+                    let foot = point + (center - point).dot(direction) * direction;
+                    add(foot, direction, SymbolShape::RotationLock);
+                }
+            }
             Kind::Load(
                 LoadKind::SurfaceFlux(_) | LoadKind::Film { .. } | LoadKind::Radiation { .. },
             ) => {

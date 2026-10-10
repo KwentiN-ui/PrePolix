@@ -736,6 +736,17 @@ pub enum LoadKind {
     /// Radiation to the surroundings at the sink temperature (`*RADIATE`); needs the
     /// physical constants of the model.
     Radiation { sink: f64, emissivity: f64 },
+    /// Gravity, as the acceleration vector acting on the elements of the region
+    /// (`*DLOAD`, `GRAV`), PrePoMax's gravity load. Needs the density of the materials.
+    Gravity([f64; 3]),
+    /// Rotation of the elements of the region about an axis through `point` along `axis`
+    /// at `speed` radians per time (`*DLOAD`, `CENTRIF`), PrePoMax's centrifugal load.
+    /// CalculiX takes the square of the speed; the model keeps the speed the user entered.
+    Centrifugal {
+        point: [f64; 3],
+        axis: [f64; 3],
+        speed: f64,
+    },
 }
 
 impl LoadKind {
@@ -756,7 +767,15 @@ impl LoadKind {
                 | LoadKind::Pressure(_)
                 | LoadKind::SurfaceTraction(_)
                 | LoadKind::PreTension { .. }
+                | LoadKind::Gravity(_)
+                | LoadKind::Centrifugal { .. }
         )
+    }
+
+    /// Whether the load acts on the mass of the elements (gravity, centrifugal), so the
+    /// materials need a density.
+    pub fn is_body_force(&self) -> bool {
+        matches!(self, LoadKind::Gravity(_) | LoadKind::Centrifugal { .. })
     }
 }
 

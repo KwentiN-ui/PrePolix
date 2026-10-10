@@ -116,9 +116,9 @@ impl Problem {
                  Steifigkeit; CalculiX bricht mit \"no elastic constants were assigned\" ab."
             }
             Problem::NoDensity => {
-                "Ein Frequency Step und eine instationäre Wärmeübertragung brauchen die \
-                 Masse des Modells. Ohne Dichte bricht CalculiX mit \"no density was \
-                 assigned\" ab."
+                "Ein Frequency Step, eine instationäre Wärmeübertragung sowie Gewichts- und \
+                 Fliehkraftlasten brauchen die Masse des Modells. Ohne Dichte bricht CalculiX \
+                 mit \"no density was assigned\" ab."
             }
             Problem::NoConductivity => {
                 "Eine Wärmeübertragung braucht die Wärmeleitfähigkeit jedes Materials. \
@@ -498,6 +498,10 @@ impl FeModel {
             _ => false,
         });
         let frequency = active().any(|s| matches!(s.kind, StepKind::Frequency(_)));
+        // Gravity and centrifugal loads act on the mass of the elements.
+        let body_force = active().any(|s| {
+            s.kind.supports_loads() && (s.loads.iter()).any(|l| l.active && l.kind.is_body_force())
+        });
         for (i, material) in self.materials.iter().enumerate() {
             if !self.sections.iter().any(|s| s.material == material.name) {
                 continue;
@@ -532,7 +536,7 @@ impl FeModel {
                     format!("{} hat keine spezifische Wärmekapazität", material.name),
                 ));
             }
-            if (frequency || transient) && material.density.is_none_or(|d| d <= 0.0) {
+            if (frequency || transient || body_force) && material.density.is_none_or(|d| d <= 0.0) {
                 findings.push(Finding::new(
                     item,
                     Problem::NoDensity,
@@ -674,9 +678,12 @@ impl FeModel {
                     LoadKind::ConcentratedForce(f) | LoadKind::SurfaceTraction(f) => {
                         (0..3).filter(|&d| f[d] != 0.0 && d < dofs).collect()
                     }
-                    LoadKind::Pressure(_) => (0..dofs.min(3)).collect(),
                     // Acts on its own node, which nothing holds.
                     LoadKind::PreTension { .. } => Vec::new(),
+                    LoadKind::Pressure(_) | LoadKind::Centrifugal { .. } => {
+                        (0..dofs.min(3)).collect()
+                    }
+                    LoadKind::Gravity(g) => (0..3).filter(|&d| g[d] != 0.0 && d < dofs).collect(),
                     // Heat flows go into temperatures, which nothing but a temperature holds.
                     _ => Vec::new(),
                 };
@@ -1687,6 +1694,26 @@ mod tests {
         model.steps = vec![Step::new_frequency("Step-1")];
         assert_eq!(check(&model, &mesh), []);
         model.materials[0].density = None;
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Material(0), Problem::NoDensity)]
+        );
+    }
+
+    #[test]
+    fn body_loads_need_a_density() {
+        let mesh = cubes(1, false);
+        let mut model = model(&mesh);
+        model.materials[0].density = None;
+        assert_eq!(check(&model, &mesh), []);
+        model.steps[0].loads.push(Load {
+            name: "Gravity-1".into(),
+            active: true,
+            region: Region::Parts(mesh.parts.iter().map(|p| p.name.clone()).collect()),
+            kind: LoadKind::Gravity([0.0, 0.0, -9.81]),
+            amplitude: None,
+            factor_amplitude: None,
+        });
         assert_eq!(
             problems(&check(&model, &mesh)),
             [(ModelItem::Material(0), Problem::NoDensity)]
