@@ -343,7 +343,11 @@ fn transform_form(ui: &mut Ui, draft: &mut TransformDraft, two_d: bool, units: U
                 ui.end_row();
             }
             ui.label("Angle");
-            ui.add(numeric::drag_value(&mut draft.angle).speed(1.0).suffix(" °"));
+            ui.add(
+                numeric::drag_value(&mut draft.angle)
+                    .speed(1.0)
+                    .suffix(" °"),
+            );
             ui.end_row();
         }
         TransformKind::Mirror => {

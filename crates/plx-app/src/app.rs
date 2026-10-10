@@ -1323,6 +1323,10 @@ impl Workbench {
             };
             self.open_mesh_tool(MeshTool::Transform(parts));
         }
+        if response.merge_parts {
+            let parts: Vec<usize> = self.tree.selected_parts(view).into_iter().collect();
+            self.merge_mesh_parts(&parts);
+        }
         if let Some(findings) = response.findings {
             self.findings_window = Some(findings);
         }
@@ -3259,6 +3263,29 @@ impl Workbench {
         }
         model.set_mesh(mesh);
         self.output.push(deleted_message(&names));
+        self.after_parts_changed();
+    }
+
+    /// PrePoMax's Merge of mesh parts: the selected parts become one, named after the
+    /// first; the model's regions on the others follow.
+    fn merge_mesh_parts(&mut self, parts: &[usize]) {
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        let mut merged = None;
+        model.edit_mesh(|mesh, fe| {
+            merged = mesh.merge_parts(parts);
+            if let Some((kept, gone)) = &merged {
+                for name in gone {
+                    fe.rename_part(name, kept);
+                }
+            }
+        });
+        let Some((kept, gone)) = merged else {
+            return;
+        };
+        self.output
+            .push(format!("Parts {} merged into {kept}", gone.join(", ")));
         self.after_parts_changed();
     }
 

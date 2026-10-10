@@ -296,6 +296,9 @@ impl FeModel {
                     for name in names.iter_mut().filter(|n| n.as_str() == old) {
                         *name = new.to_string();
                     }
+                    // Merged parts leave the same name twice.
+                    let mut seen = std::collections::BTreeSet::new();
+                    names.retain(|name| seen.insert(name.clone()));
                 }
                 Region::ElementSet(name) if name == old => *name = new.to_string(),
                 _ => {}
@@ -861,6 +864,9 @@ mod tests {
             Region::ElementSet("C".into())
         );
         assert_eq!(step.loads[0].region, Region::Surface("A".into()));
+        // A part merged into another leaves no duplicate.
+        model.rename_part("B", "C");
+        assert_eq!(model.sections[0].region, Region::Parts(vec!["C".into()]));
     }
 
     #[test]
