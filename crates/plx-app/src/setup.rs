@@ -67,6 +67,8 @@ pub(crate) enum Source {
     NodeSet,
     ElementSet,
     Surface,
+    /// A reference point, which drives a rigid body.
+    ReferencePoint,
 }
 
 impl Source {
@@ -77,6 +79,7 @@ impl Source {
             Source::NodeSet => "Node Set",
             Source::ElementSet => "Element Set",
             Source::Surface => "Surface",
+            Source::ReferencePoint => "Reference Point",
         }
     }
 }
@@ -99,6 +102,13 @@ pub(crate) struct RegionDraft {
 
 pub(crate) const NODE_SOURCES: &[Source] = &[Source::Selection, Source::NodeSet, Source::Surface];
 pub(crate) const FACE_SOURCES: &[Source] = &[Source::Selection, Source::Surface];
+/// Nodes, or the reference point of a rigid body: for boundary conditions and point loads.
+pub(crate) const SUPPORT_SOURCES: &[Source] = &[
+    Source::Selection,
+    Source::NodeSet,
+    Source::Surface,
+    Source::ReferencePoint,
+];
 /// Solid elements: whole parts, element sets or the elements of picked faces.
 pub(crate) const SOLID_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet, Source::Selection];
 pub(crate) const ELEMENT_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet];
@@ -144,10 +154,14 @@ impl RegionDraft {
             Region::Geometry(entities) => {
                 draft.geometry = History::from_items(entities.iter().copied());
             }
-            Region::NodeSet(set) | Region::ElementSet(set) | Region::Surface(set) => {
+            Region::NodeSet(set)
+            | Region::ElementSet(set)
+            | Region::Surface(set)
+            | Region::ReferencePoint(set) => {
                 draft.source = match region {
                     Region::NodeSet(_) => Source::NodeSet,
                     Region::ElementSet(_) => Source::ElementSet,
+                    Region::ReferencePoint(_) => Source::ReferencePoint,
                     _ => Source::Surface,
                 };
                 draft.set = set.clone();
@@ -171,6 +185,7 @@ impl RegionDraft {
             Source::NodeSet => Region::NodeSet(self.set.clone()),
             Source::ElementSet => Region::ElementSet(self.set.clone()),
             Source::Surface => Region::Surface(self.set.clone()),
+            Source::ReferencePoint => Region::ReferencePoint(self.set.clone()),
         }
     }
 
@@ -435,13 +450,18 @@ impl RegionDraft {
                     ui.weak("Im Fenster \"Auswahl\" wählen, was ein Klick auswählt.");
                 }
                 Source::Parts => wanted |= self.parts.ui(ui, active),
-                Source::NodeSet | Source::ElementSet | Source::Surface => {
+                Source::NodeSet | Source::ElementSet | Source::Surface | Source::ReferencePoint => {
                     let names: Vec<&String> = match self.source {
                         Source::NodeSet => model.mesh.node_sets.keys().collect(),
                         Source::ElementSet => model.mesh.element_sets.keys().collect(),
+                        Source::ReferencePoint => {
+                            model.fe.reference_points.iter().map(|p| &p.name).collect()
+                        }
                         _ => model.mesh.surfaces.keys().collect(),
                     };
-                    if names.is_empty() {
+                    if names.is_empty() && self.source == Source::ReferencePoint {
+                        ui.weak("The model has no reference points (Features).");
+                    } else if names.is_empty() {
                         ui.weak("Das Netz enthält keine solchen Sets.");
                     }
                     egui::ComboBox::from_id_salt("region set")
@@ -578,6 +598,8 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
                 .collect();
         }
         Region::Geometry(entities) => return crate::cad_selection::highlight(model, entities),
+        // The point is drawn as a feature; the body it drives is the constraint's region.
+        Region::ReferencePoint(_) => {}
         Region::Nodes(_) | Region::NodeSet(_) => {
             highlight.nodes = region.nodes(&model.mesh);
             // Faces whose corners are all selected show as faces, like PrePoMax does for
@@ -668,6 +690,7 @@ const INITIAL_VELOCITY: &str = "Initial_Velocity";
 const INITIAL_ANGULAR_VELOCITY: &str = "Initial_Angular_Velocity";
 const SUBMODEL: &str = "Submodel";
 const FORCE: &str = "Concentrated_Force";
+const MOMENT: &str = "Moment";
 const PRESSURE: &str = "Pressure";
 const TRACTION: &str = "Surface_Traction";
 const PRE_TENSION: &str = "Pre-tension";
@@ -744,9 +767,10 @@ const DOF_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
 
 /// The load kinds of the dialog in PrePoMax's order: label, default name and the kind with
 /// zero values.
-fn load_kinds() -> [(&'static str, &'static str, LoadKind); 11] {
+fn load_kinds() -> [(&'static str, &'static str, LoadKind); 12] {
     [
         ("Einzelkraft", FORCE, LoadKind::ConcentratedForce([0.0; 3])),
+        ("Moment", MOMENT, LoadKind::Moment([0.0; 3])),
         ("Druck", PRESSURE, LoadKind::Pressure(0.0)),
         ("Flächenlast", TRACTION, LoadKind::SurfaceTraction([0.0; 3])),
         ("Gravity", GRAVITY, LoadKind::Gravity([0.0, 0.0, -9.81])),
@@ -852,6 +876,7 @@ fn vector_rows(
 fn load_kind_name(kind: &LoadKind) -> &'static str {
     match kind {
         LoadKind::ConcentratedForce(_) => FORCE,
+        LoadKind::Moment(_) => MOMENT,
         LoadKind::Pressure(_) => PRESSURE,
         LoadKind::SurfaceTraction(_) => TRACTION,
         LoadKind::PreTension { .. } => PRE_TENSION,
@@ -875,7 +900,9 @@ enum LoadTarget {
 
 fn load_target(kind: &LoadKind) -> LoadTarget {
     match kind {
-        LoadKind::ConcentratedForce(_) | LoadKind::ConcentratedFlux(_) => LoadTarget::Nodes,
+        LoadKind::ConcentratedForce(_) | LoadKind::Moment(_) | LoadKind::ConcentratedFlux(_) => {
+            LoadTarget::Nodes
+        }
         LoadKind::BodyFlux(_) | LoadKind::Gravity(_) | LoadKind::Centrifugal { .. } => {
             LoadTarget::Elements
         }
@@ -891,6 +918,8 @@ fn load_region(
     mesh: &FeMesh,
 ) -> RegionDraft {
     let (sources, target) = match load_target(kind) {
+        // Forces and moments also act on the reference point of a rigid body.
+        LoadTarget::Nodes if !kind.is_thermal() => (SUPPORT_SOURCES, Target::Nodes),
         LoadTarget::Nodes => (NODE_SOURCES, Target::Nodes),
         LoadTarget::Faces => (FACE_SOURCES, face_target(fe)),
         LoadTarget::Elements => (SOLID_SOURCES, face_target(fe)),
@@ -960,7 +989,7 @@ impl Editor {
                         kind,
                         amplitude: None,
                     },
-                    RegionDraft::new(NODE_SOURCES, Target::Nodes),
+                    RegionDraft::new(SUPPORT_SOURCES, Target::Nodes),
                 )
             }
             NewItem::Load(step) => {
@@ -1052,7 +1081,7 @@ impl Editor {
             TreeItem::BoundaryCondition(s, i) => {
                 let bc = fe.steps.get(s)?.boundary_conditions.get(i)?.clone();
                 let region =
-                    RegionDraft::from_region(&bc.region, NODE_SOURCES, Target::Nodes, mesh);
+                    RegionDraft::from_region(&bc.region, SUPPORT_SOURCES, Target::Nodes, mesh);
                 (Draft::BoundaryCondition(s, bc, region), i)
             }
             TreeItem::Load(s, i) => {
@@ -1432,6 +1461,27 @@ impl Editor {
                         ui.weak("Die Kraft wirkt an jedem Knoten der Region.");
                         ui.end_row();
                         revolution_hint(ui, axisymmetric);
+                    }
+                    LoadKind::Moment(moment) => {
+                        if two_d {
+                            ui.label("");
+                            ui.weak("Moments need a 3D model.");
+                            ui.end_row();
+                        } else {
+                            for (value, label) in moment.iter_mut().zip(["M1", "M2", "M3"]) {
+                                ui.label(label);
+                                ui.add(
+                                    numeric::quantity(value, units, Quantity::Moment).speed(1.0),
+                                );
+                                ui.end_row();
+                            }
+                        }
+                        ui.label("");
+                        ui.weak(
+                            "Acts at the reference point of a rigid body, or at every node of \
+                             the region that has rotations (beams, shells).",
+                        );
+                        ui.end_row();
                     }
                     LoadKind::Pressure(pressure) => {
                         ui.label("Druck");

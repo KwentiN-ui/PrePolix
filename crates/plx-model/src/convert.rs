@@ -142,6 +142,7 @@ impl FeModel {
             }
             for load in &mut step.loads {
                 match &mut load.kind {
+                    LoadKind::Moment(moment) => c.all(moment, Quantity::Moment),
                     LoadKind::PreTension {
                         value,
                         by_displacement,
@@ -261,7 +262,7 @@ impl Constraint {
                 c.option(&mut s.tensile_force, Quantity::Force);
             }
             Constraint::Tie(t) => c.option(&mut t.position_tolerance, Quantity::Length),
-            Constraint::NodeTie(_) => {}
+            Constraint::NodeTie(_) | Constraint::RigidBody(_) => {}
         }
     }
 }

@@ -4,7 +4,7 @@
 use egui::Ui;
 use plx_mesh::FeMesh;
 use plx_model::{
-    CompressionOnly, Constraint, FeModel, PointSpring, Quantity, Region, SurfaceSpring,
+    CompressionOnly, Constraint, FeModel, PointSpring, Quantity, Region, RigidBody, SurfaceSpring,
     SurfaceToSurfaceSpring, Tie, UnitSystem, next_name,
 };
 
@@ -20,7 +20,7 @@ const TYPES: [(&str, Option<Type>); 6] = [
     ("Point Spring", Some(Type::PointSpring)),
     ("Surface Spring", Some(Type::SurfaceSpring)),
     ("Compression Only", Some(Type::CompressionOnly)),
-    ("Rigid Body", None),
+    ("Rigid Body", Some(Type::RigidBody)),
     ("Tie", Some(Type::Tie)),
     (
         "Surface To Surface Spring",
@@ -33,6 +33,7 @@ enum Type {
     PointSpring,
     SurfaceSpring,
     CompressionOnly,
+    RigidBody,
     Tie,
     SurfaceToSurfaceSpring,
 }
@@ -43,6 +44,7 @@ impl Type {
             Constraint::PointSpring(_) => Type::PointSpring,
             Constraint::SurfaceSpring(_) => Type::SurfaceSpring,
             Constraint::CompressionOnly(_) => Type::CompressionOnly,
+            Constraint::RigidBody(_) => Type::RigidBody,
             Constraint::Tie(_) => Type::Tie,
             Constraint::SurfaceToSurfaceSpring(_) => Type::SurfaceToSurfaceSpring,
             // Moved to the node ties when the project was read; never edited here.
@@ -56,6 +58,7 @@ impl Type {
             Type::PointSpring => "Point_Spring",
             Type::SurfaceSpring => "Surface_Spring",
             Type::CompressionOnly => "Compression_Only",
+            Type::RigidBody => "Rigid_Body",
             Type::Tie => "Tie",
             Type::SurfaceToSurfaceSpring => "Surface_To_Surface_Spring",
         }
@@ -98,6 +101,7 @@ impl Type {
                 offset: 0.0,
                 nonlinear: false,
             }),
+            Type::RigidBody => Constraint::RigidBody(RigidBody::new(name, "")),
             Type::Tie => Constraint::Tie(Tie::new(name)),
             Type::SurfaceToSurfaceSpring => {
                 Constraint::SurfaceToSurfaceSpring(SurfaceToSurfaceSpring {
@@ -203,6 +207,9 @@ impl ConstraintDraft {
             self.pair.validate()
         } else if self.region.is_empty() {
             Err("Die Region ist leer.".into())
+        } else if matches!(&self.constraint, Constraint::RigidBody(b) if b.reference_point.is_empty())
+        {
+            Err("Choose the reference point that drives the rigid body.".into())
         } else {
             Ok(())
         }
@@ -284,6 +291,39 @@ impl ConstraintDraft {
                 self.region.ui(ui, model);
                 compression_only_rows(ui, support, units);
             }
+            Constraint::RigidBody(body) => {
+                self.region.ui(ui, model);
+                ui.label("Reference point");
+                let points = &model.fe.reference_points;
+                if body.reference_point.is_empty()
+                    && let Some(first) = points.first()
+                {
+                    body.reference_point = first.name.clone();
+                }
+                if points.is_empty() {
+                    ui.weak("The model has no reference points (Features).");
+                } else {
+                    egui::ComboBox::from_id_salt("rigid body point")
+                        .selected_text(body.reference_point.as_str())
+                        .width(200.0)
+                        .show_ui(ui, |ui| {
+                            for point in points {
+                                ui.selectable_value(
+                                    &mut body.reference_point,
+                                    point.name.clone(),
+                                    &point.name,
+                                );
+                            }
+                        });
+                }
+                ui.end_row();
+                hint(
+                    ui,
+                    "The nodes of the region move as one rigid body with the reference \
+                     point. Boundary conditions, forces and moments on the point drive the \
+                     body.",
+                );
+            }
             Constraint::Tie(tie) => contacts::tie_form(ui, model, tie, &mut self.pair),
             Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
             Constraint::SurfaceToSurfaceSpring(spring) => {
@@ -330,6 +370,7 @@ fn name_row(ui: &mut Ui, constraint: &mut Constraint) {
         Constraint::CompressionOnly(c) => &mut c.name,
         Constraint::Tie(c) => &mut c.name,
         Constraint::SurfaceToSurfaceSpring(c) => &mut c.name,
+        Constraint::RigidBody(c) => &mut c.name,
         Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
     };
     ui.label("Name");
