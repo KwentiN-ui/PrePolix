@@ -12,11 +12,12 @@ use std::fmt::Write as _;
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
     Amplitude, AmplitudeTime, BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint,
-    ContactMethod, ContactPair, DynamicStep, FeModel, FieldOutput, FrequencyStep, GapConductance,
-    HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialConditionKind,
-    InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep, ModelSpace, NodeTie,
-    OutputKind, Region, Section, SectionKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
-    SurfaceBehavior, SurfaceInteraction, Totals, UserKeyword, line_tangent,
+    ContactMethod, ContactPair, DefinedFieldKind, DynamicStep, FeModel, FieldOutput, FrequencyStep,
+    GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
+    InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
+    ModelSpace, NodeTie, OutputKind, Region, Section, SectionKind, StaticStep,
+    SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Totals,
+    UserKeyword, line_tangent,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -39,6 +40,9 @@ pub enum WriteError {
     /// A section that does not fit its elements, see [`Section::kind_problem`].
     #[error("{item}: {reason}")]
     InvalidSection { item: String, reason: String },
+    /// A defined field reads a result file whose name CalculiX cannot take.
+    #[error("{item}: the result file {file} has no valid name")]
+    InvalidResultFile { item: String, file: String },
     /// A boundary condition or load on a reference point no active rigid body is driven by,
     /// or a rigid body whose reference point does not exist.
     #[error("{item}: Reference Point {point} has no active rigid body")]
@@ -1694,6 +1698,7 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         }
         loads.push(Keyword::generated(out));
     }
+    let defined_fields = defined_fields(sets, step, amplitudes)?;
     let mut history_outputs = Vec::new();
     for output in &step.history_outputs {
         if !output.active {
@@ -1712,7 +1717,7 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         Keyword::title("Output frequency", Vec::new()),
         Keyword::title("Boundary conditions", boundaries),
         Keyword::title("Loads", loads),
-        Keyword::title("Defined fields", Vec::new()),
+        Keyword::title("Defined fields", defined_fields),
         Keyword::title("History outputs", history_outputs),
         Keyword::title("Field outputs", field_outputs),
         Keyword::title("End step", vec![end]),
@@ -1721,6 +1726,53 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         &step.name,
         vec![Keyword::parent(header, contents)],
     ))
+}
+
+/// The defined temperatures of a step as PrePoMax's `CalDefinedTemperature` writes them:
+/// `*Temperature` with the node set and the value, or with the result file of a previous
+/// analysis and the step to read. CalculiX 2.21 takes the file name with its extension and
+/// looks for it next to the input file; `BStep` is the only step parameter it knows.
+fn defined_fields(
+    sets: &mut Sets,
+    step: &Step,
+    amplitudes: &[Amplitude],
+) -> Result<Vec<Keyword>, WriteError> {
+    let mut keywords = Vec::new();
+    for field in &step.defined_fields {
+        // A thermal step solves for the temperatures; it leaves the field out like a
+        // deactivated one.
+        if !field.active || !step.kind.supports_defined_fields() {
+            keywords.push(deactivated(&field.name));
+            continue;
+        }
+        let out = match &field.kind {
+            DefinedFieldKind::Temperature(t) => {
+                let set = sets.node_set(&field.name, &field.region)?;
+                let amplitude =
+                    amplitude_parameter(amplitudes, &field.name, "Amplitude", &field.amplitude)?;
+                format!(
+                    "** Name: {}\n*Temperature{amplitude}\n{set}, {}\n",
+                    field.name,
+                    number(*t)
+                )
+            }
+            DefinedFieldKind::TemperatureFromFile { file, step } => {
+                let name = file.file_name().map(|n| n.to_string_lossy());
+                let Some(name) = name.filter(|n| !n.is_empty() && !n.contains(',')) else {
+                    return Err(WriteError::InvalidResultFile {
+                        item: field.name.clone(),
+                        file: file.display().to_string(),
+                    });
+                };
+                format!(
+                    "** Name: {}\n*Temperature, File={name}, BStep={step}\n",
+                    field.name
+                )
+            }
+        };
+        keywords.push(Keyword::generated(out));
+    }
+    Ok(keywords)
 }
 
 /// Comment that stands for a deactivated item, PrePoMax's `CalDeactivated`.
@@ -1757,7 +1809,10 @@ fn deactivated_step(step: &Step) -> Keyword {
             all(step.boundary_conditions.iter().map(|b| b.name.as_str())),
         ),
         Keyword::title("Loads", loads),
-        Keyword::title("Defined fields", Vec::new()),
+        Keyword::title(
+            "Defined fields",
+            all(step.defined_fields.iter().map(|f| f.name.as_str())),
+        ),
         Keyword::title(
             "History outputs",
             all(step.history_outputs.iter().map(|h| h.name.as_str())),

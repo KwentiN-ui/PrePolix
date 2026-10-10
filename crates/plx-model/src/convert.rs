@@ -124,6 +124,11 @@ impl FeModel {
                 // Buckling factors and the accuracy have no unit.
                 StepKind::Buckle(_) => {}
             }
+            for field in &mut step.defined_fields {
+                if let crate::DefinedFieldKind::Temperature(t) = &mut field.kind {
+                    c.value(t, Quantity::Temperature);
+                }
+            }
             for bc in &mut step.boundary_conditions {
                 match &mut bc.kind {
                     BoundaryKind::Fixed | BoundaryKind::Submodel { .. } => {}

@@ -38,6 +38,7 @@
 #include "chapters/model/modal-dynamics.typ"
 #include "chapters/model/bcs-loads.typ"
 #include "chapters/model/pre-tension.typ"
+#include "chapters/model/defined-fields.typ"
 #include "chapters/model/keywords.typ"
 
 #include "chapters/analysis/run.typ"
