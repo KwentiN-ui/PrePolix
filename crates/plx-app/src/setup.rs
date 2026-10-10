@@ -663,6 +663,8 @@ fn names<'a, T: 'a>(items: &'a [T], name: impl Fn(&T) -> &str + 'a) -> Vec<&'a s
 const FIXED: &str = "Fixed";
 const DISPLACEMENT: &str = "Displacement_Rotation";
 const TEMPERATURE: &str = "Temperature";
+const INITIAL_VELOCITY: &str = "Initial_Velocity";
+const INITIAL_ANGULAR_VELOCITY: &str = "Initial_Angular_Velocity";
 const FORCE: &str = "Concentrated_Force";
 const PRESSURE: &str = "Pressure";
 const TRACTION: &str = "Surface_Traction";
@@ -728,6 +730,57 @@ fn load_kinds() -> [(&'static str, &'static str, LoadKind); 8] {
             },
         ),
     ]
+}
+
+/// The initial condition kinds of the dialog: label, default name and the kind with zero
+/// values.
+fn initial_condition_kinds() -> [(&'static str, &'static str, InitialConditionKind); 3] {
+    [
+        (
+            "Temperature",
+            TEMPERATURE,
+            InitialConditionKind::Temperature(20.0),
+        ),
+        (
+            "Translational velocity",
+            INITIAL_VELOCITY,
+            InitialConditionKind::Velocity([0.0; 3]),
+        ),
+        (
+            "Angular velocity",
+            INITIAL_ANGULAR_VELOCITY,
+            InitialConditionKind::AngularVelocity {
+                point: [0.0; 3],
+                axis: [0.0, 0.0, 1.0],
+                speed: 0.0,
+            },
+        ),
+    ]
+}
+
+fn initial_condition_kind_name(kind: &InitialConditionKind) -> &'static str {
+    match kind {
+        InitialConditionKind::Temperature(_) => TEMPERATURE,
+        InitialConditionKind::Velocity(_) => INITIAL_VELOCITY,
+        InitialConditionKind::AngularVelocity { .. } => INITIAL_ANGULAR_VELOCITY,
+    }
+}
+
+/// The components of a vector; 2D models have none along z.
+fn vector_rows(
+    ui: &mut Ui,
+    vector: &mut [f64; 3],
+    labels: [&str; 3],
+    two_d: bool,
+    quantity: Quantity,
+    units: UnitSystem,
+) {
+    let count = if two_d { 2 } else { 3 };
+    for (value, label) in vector.iter_mut().zip(labels).take(count) {
+        ui.label(label);
+        ui.add(numeric::quantity(value, units, quantity).speed(1.0));
+        ui.end_row();
+    }
 }
 
 fn load_kind_name(kind: &LoadKind) -> &'static str {
@@ -1381,16 +1434,71 @@ impl Editor {
             }
             Draft::InitialCondition(condition, region) => {
                 name_row(ui, &mut condition.name);
+                ui.label("Art");
+                let current = initial_condition_kind_name(&condition.kind);
+                let label = (initial_condition_kinds().into_iter())
+                    .find(|(_, name, _)| *name == current)
+                    .map_or("", |(label, ..)| label);
+                egui::ComboBox::from_id_salt("initial condition kind")
+                    .selected_text(label)
+                    .width(200.0)
+                    .show_ui(ui, |ui| {
+                        for (label, name, kind) in initial_condition_kinds() {
+                            if ui.selectable_label(current == name, label).clicked()
+                                && current != name
+                            {
+                                condition.kind = kind;
+                                rename_default(&mut condition.name, current, name, &taken);
+                            }
+                        }
+                    });
+                ui.end_row();
                 match &mut condition.kind {
                     InitialConditionKind::Temperature(t) => {
                         ui.label("Temperatur");
                         ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0));
                         ui.end_row();
                     }
+                    InitialConditionKind::Velocity(v) => {
+                        vector_rows(ui, v, ["V1", "V2", "V3"], two_d, Quantity::Velocity, units);
+                    }
+                    InitialConditionKind::AngularVelocity { point, axis, speed } => {
+                        vector_rows(ui, point, ["X", "Y", "Z"], two_d, Quantity::Length, units);
+                        if two_d {
+                            ui.label("Axis");
+                            ui.label("Z");
+                            ui.end_row();
+                        } else {
+                            ui.label("Axis");
+                            ui.horizontal(|ui| {
+                                for a in axis.iter_mut() {
+                                    ui.add(numeric::drag_value(a).speed(0.1));
+                                }
+                            });
+                            ui.end_row();
+                        }
+                        ui.label("Rotational speed");
+                        ui.add(
+                            numeric::quantity(speed, units, Quantity::RotationalSpeed).speed(1.0),
+                        );
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak(format!(
+                            "{:.4} rpm; a positive speed turns counter-clockwise about the axis.",
+                            *speed * 60.0 / std::f64::consts::TAU
+                        ));
+                        ui.end_row();
+                    }
                 }
                 region.ui(ui, model);
                 ui.label("");
-                ui.weak("Temperatur vor dem ersten Step, z. B. für Wärmedehnung.");
+                let hint = match condition.kind {
+                    InitialConditionKind::Temperature(_) => {
+                        "Temperatur vor dem ersten Step, z. B. für Wärmedehnung."
+                    }
+                    _ => "Velocity at the start of a Dynamic step; other steps ignore it.",
+                };
+                ui.weak(hint);
                 ui.end_row();
             }
             Draft::NodeTie(tie, region) => {
@@ -1501,6 +1609,11 @@ impl Editor {
             .any(|other| other.eq_ignore_ascii_case(name));
         if duplicate {
             return Err(format!("Der Name {name} ist schon vergeben."));
+        }
+        if let Draft::InitialCondition(condition, _) = &self.draft
+            && let Some(problem) = condition.kind.problem()
+        {
+            return Err(problem);
         }
         if let Draft::Section(section, _) = &self.draft {
             if !fe.materials.iter().any(|m| m.name == section.material) {

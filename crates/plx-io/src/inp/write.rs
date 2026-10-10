@@ -810,22 +810,53 @@ fn amplitude_parameter(
     Ok(format!(", {parameter}={}", name(reference)))
 }
 
-/// Initial temperatures as PrePoMax's `CalInitialTemperature` writes them.
+/// Initial temperatures and velocities as PrePoMax's `CalInitialTemperature`,
+/// `CalInitialTranslationalVelocity` and `CalInitialAngularVelocity` write them: one line
+/// per set or node and non-zero component, 2D models without the third.
 fn initial_conditions(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+    let components = if model.properties.space.is_2d() { 2 } else { 3 };
     let mut keywords = Vec::new();
     for condition in &model.initial_conditions {
         if !condition.active {
             keywords.push(deactivated(&condition.name));
             continue;
         }
-        let set = sets.node_set(&condition.name, &condition.region)?;
-        let out = match condition.kind {
-            InitialConditionKind::Temperature(t) => format!(
-                "** Name: {}\n*Initial conditions, Type=Temperature\n{set}, {}\n",
-                condition.name,
-                number(t)
-            ),
+        let mut out = format!("** Name: {}\n", condition.name);
+        let velocity_lines = |out: &mut String, target: &str, v: [f64; 3]| {
+            for (dof, value) in v.iter().enumerate().take(components) {
+                if *value != 0.0 {
+                    out.push_str(&format!("{target}, {}, {}\n", dof + 1, number(*value)));
+                }
+            }
         };
+        match condition.kind {
+            InitialConditionKind::Temperature(t) => {
+                let set = sets.node_set(&condition.name, &condition.region)?;
+                out.push_str(&format!(
+                    "*Initial conditions, Type=Temperature\n{set}, {}\n",
+                    number(t)
+                ));
+            }
+            InitialConditionKind::Velocity(v) => {
+                let set = sets.node_set(&condition.name, &condition.region)?;
+                out.push_str("*Initial conditions, Type=Velocity\n");
+                velocity_lines(&mut out, &set, v);
+            }
+            InitialConditionKind::AngularVelocity { .. } => {
+                let nodes = condition.region.nodes(sets.mesh);
+                if nodes.is_empty() {
+                    return Err(empty(&condition.name, "Knoten"));
+                }
+                out.push_str("*Initial conditions, Type=Velocity\n");
+                for id in nodes {
+                    let Some(position) = sets.mesh.node(id) else {
+                        continue;
+                    };
+                    let v = condition.kind.velocity_at(position).unwrap_or_default();
+                    velocity_lines(&mut out, &id.to_string(), v);
+                }
+            }
+        }
         keywords.push(Keyword::generated(out));
     }
     Ok(keywords)

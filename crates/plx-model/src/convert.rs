@@ -78,6 +78,13 @@ impl FeModel {
         for condition in &mut self.initial_conditions {
             match &mut condition.kind {
                 InitialConditionKind::Temperature(t) => c.value(t, Quantity::Temperature),
+                InitialConditionKind::Velocity(v) => {
+                    v.iter_mut().for_each(|v| c.value(v, Quantity::Velocity));
+                }
+                InitialConditionKind::AngularVelocity { point, speed, .. } => {
+                    point.iter_mut().for_each(|p| c.value(p, Quantity::Length));
+                    c.value(speed, Quantity::RotationalSpeed);
+                }
             }
         }
         for step in &mut self.steps {
