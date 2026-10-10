@@ -29,6 +29,16 @@ Ties and surface-to-surface springs have a #ui("Master") and a #ui("Slave") regi
 own #ui("...") button. Choose the finer mesh as slave. #ui("Swap Master/Slave") in the context
 menu exchanges the two.
 
+The 3D view of the FE model shows active constraints in yellow, as PrePoMax does, together with
+the symbols of any step: a coil spring for each direction with stiffness, at each node of a
+point spring (at their centre for ten nodes or more), at the centre of a surface spring and at
+points spread over the slave surface of a surface-to-surface spring; cones pushing onto the
+surface of a compression only support; and lines to the reference point of a rigid body
+(@rigid-body). The selected or edited constraint is red. Ties have no symbol.
+
+#screenshot("constraint-symbols.png", [Point spring, surface spring, compression only support
+  and rigid body on a cantilever])
+
 #limitation[User-defined equations are not available yet.]
 
 == Contacts <contacts>

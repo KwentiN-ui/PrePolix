@@ -224,32 +224,33 @@ impl ConstraintDraft {
         }
     }
 
-    /// The symbol of the constraint as entered, for the 3D view: rigid bodies have one.
+    /// The symbol of the constraint as entered, for the 3D view.
     pub(crate) fn symbol(&self) -> Option<crate::symbols::Item> {
-        let Constraint::RigidBody(body) = &self.constraint else {
-            return None;
-        };
+        let (kind, region) = crate::symbols::Kind::of_constraint(&self.current())?;
         Some(crate::symbols::Item {
-            kind: crate::symbols::Kind::RigidBody {
-                reference_point: body.reference_point.clone(),
-            },
-            region: self.region.region(),
+            kind,
+            region,
             selected: true,
         })
     }
 
     /// The constraint with the regions as entered.
-    pub(crate) fn finish(mut self) -> Constraint {
+    pub(crate) fn finish(self) -> Constraint {
+        self.current()
+    }
+
+    fn current(&self) -> Constraint {
         let regions = if self.kind().has_master_slave() {
             let (master, slave) = self.pair.regions();
             vec![master, slave]
         } else {
             vec![self.region.region()]
         };
-        for (slot, region) in self.constraint.regions_mut().into_iter().zip(regions) {
+        let mut constraint = self.constraint.clone();
+        for (slot, region) in constraint.regions_mut().into_iter().zip(regions) {
             *slot = region;
         }
-        self.constraint
+        constraint
     }
 
     pub(crate) fn form(&mut self, ui: &mut Ui, model: &Model, taken: &[&str], creating: bool) {

@@ -3667,15 +3667,13 @@ impl Workbench {
         let mut items = Vec::new();
         let edited_constraint = self.editor.as_ref().and_then(|e| e.editing_constraint());
         for (i, constraint) in model.fe.constraints.iter().enumerate() {
-            if let plx_model::Constraint::RigidBody(body) = constraint
-                && body.active
-                && edited_constraint != Some(Some(i))
-            {
+            if !constraint.active() || edited_constraint == Some(Some(i)) {
+                continue;
+            }
+            if let Some((kind, region)) = symbols::Kind::of_constraint(constraint) {
                 items.push(symbols::Item {
-                    kind: symbols::Kind::RigidBody {
-                        reference_point: body.reference_point.clone(),
-                    },
-                    region: body.region.clone(),
+                    kind,
+                    region,
                     selected: edited_constraint.is_none()
                         && selected == Some(&TreeItem::Constraint(i)),
                 });

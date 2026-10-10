@@ -3,8 +3,11 @@
 //! pointing onto the faces, one arrow of the resultant force for a surface traction, and
 //! cones (translations) and plates (rotations) for held degrees of freedom. Heat loads and
 //! temperatures, which have no direction, are balls at the nodes; heat flowing through a
-//! surface is an arrow onto it (into the part) or off it. A rigid body is a fan of yellow
-//! lines from points spread over its region to its reference point.
+//! surface is an arrow onto it (into the part) or off it.
+//!
+//! Constraints are yellow as in PrePoMax: a rigid body is a fan of lines from points spread
+//! over its region to its reference point, springs are coils in the directions they act in,
+//! and a compression only support is cones pushing onto its surface.
 //!
 //! Symbols keep their size on screen like PrePoMax's glyphs (PrePoMax symbol size 50) and lie
 //! on top of the model. They are 3D shapes in pixel units, drawn as the outlines of their
@@ -15,7 +18,7 @@ use std::collections::HashSet;
 use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2, vec2};
 use glam::{DVec3, Vec3};
 use plx_mesh::{ElementId, NodeId};
-use plx_model::{BoundaryKind, LoadKind, Region};
+use plx_model::{BoundaryKind, Constraint, LoadKind, Region};
 use plx_render::Camera;
 
 use crate::model::Model;
@@ -33,6 +36,10 @@ const SELECTED_COLOR: Color32 = Color32::from_rgb(255, 0, 0);
 const CONSTRAINT_COLOR: Color32 = Color32::from_rgb(255, 255, 0);
 /// Width of the lines of a rigid body in pixels.
 const LINE_WIDTH: f32 = 1.5;
+/// Width of the wire of a spring in pixels: PrePoMax's tube radius 0.03 of the symbol size.
+const SPRING_WIDTH: f32 = 2.0;
+/// A point spring on more nodes is drawn once at their centre, as in PrePoMax.
+const POINT_SPRING_NODES: usize = 10;
 /// Splits of the region's extent when spreading arrows, as PrePoMax's spatial sampling.
 const DIVISIONS: f64 = 6.0;
 /// Sides of the polygons standing in for circles.
@@ -47,6 +54,40 @@ pub enum Kind {
     RigidBody {
         reference_point: String,
     },
+    /// Springs to ground at the nodes of the region, with their stiffness K1..K3.
+    PointSpring([f64; 3]),
+    /// Springs to ground at the centre of the region.
+    SurfaceSpring([f64; 3]),
+    /// Springs from points spread over the region, the slave surface of a connection.
+    SurfaceToSurfaceSpring([f64; 3]),
+    /// Gaps that only take pressure, on the faces of the region.
+    CompressionOnly,
+}
+
+impl Kind {
+    /// The kind and region of a constraint's symbol; ties have none, as in PrePoMax.
+    pub fn of_constraint(constraint: &Constraint) -> Option<(Kind, Region)> {
+        Some(match constraint {
+            Constraint::RigidBody(body) => (
+                Kind::RigidBody {
+                    reference_point: body.reference_point.clone(),
+                },
+                body.region.clone(),
+            ),
+            Constraint::PointSpring(spring) => {
+                (Kind::PointSpring(spring.stiffness), spring.region.clone())
+            }
+            Constraint::SurfaceSpring(spring) => {
+                (Kind::SurfaceSpring(spring.stiffness), spring.region.clone())
+            }
+            Constraint::SurfaceToSurfaceSpring(spring) => (
+                Kind::SurfaceToSurfaceSpring(spring.stiffness),
+                spring.slave.clone(),
+            ),
+            Constraint::CompressionOnly(support) => (Kind::CompressionOnly, support.region.clone()),
+            Constraint::Tie(_) | Constraint::NodeTie(_) => return None,
+        })
+    }
 }
 
 /// A boundary condition or load to draw.
@@ -85,6 +126,8 @@ pub enum SymbolShape {
     Ball,
     /// Line from the point to another point in render coordinates.
     LineTo(Vec3),
+    /// Coil spring ending at the point.
+    Spring,
 }
 
 /// Symbols of the items, on the visible parts of the model.
@@ -96,7 +139,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
             (_, true) => SELECTED_COLOR,
             (Kind::Load(_), false) => LOAD_COLOR,
             (Kind::Boundary(_), false) => BOUNDARY_COLOR,
-            (Kind::RigidBody { .. }, false) => CONSTRAINT_COLOR,
+            (_, false) => CONSTRAINT_COLOR,
         };
         let mut add = |position: DVec3, direction: DVec3, shape: SymbolShape| {
             if let Some(direction) = direction.try_normalize() {
@@ -126,6 +169,43 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                         shape: SymbolShape::LineTo(to),
                         color,
                     });
+                }
+            }
+            // A spring for each direction with stiffness: at each node, or at the centre of
+            // many nodes.
+            Kind::PointSpring(stiffness) => {
+                let mut points = node_points(model, &item.region, &visible);
+                if points.len() >= POINT_SPRING_NODES {
+                    points = vec![points.iter().sum::<DVec3>() / points.len() as f64];
+                }
+                for point in points {
+                    for axis in acting(stiffness) {
+                        add(point, axis, SymbolShape::Spring);
+                    }
+                }
+            }
+            Kind::SurfaceSpring(stiffness) => {
+                if let Some(center) = region_center(model, &item.region, &visible) {
+                    for axis in acting(stiffness) {
+                        add(center, axis, SymbolShape::Spring);
+                    }
+                }
+            }
+            Kind::SurfaceToSurfaceSpring(stiffness) => {
+                let faces = face_geometry(model, &item.region, &visible);
+                let centers: Vec<DVec3> = faces.iter().map(|f| f.center).collect();
+                for index in sample(&centers, DIVISIONS / 2.0) {
+                    for axis in acting(stiffness) {
+                        add(centers[index], axis, SymbolShape::Spring);
+                    }
+                }
+            }
+            // Cones from outside with their tips on the faces, like PrePoMax's.
+            Kind::CompressionOnly => {
+                let faces = face_geometry(model, &item.region, &visible);
+                let centers: Vec<DVec3> = faces.iter().map(|f| f.center).collect();
+                for index in sample(&centers, DIVISIONS) {
+                    add(faces[index].center, -faces[index].normal, SymbolShape::Cone);
                 }
             }
             Kind::Load(LoadKind::ConcentratedForce(force)) => {
@@ -236,6 +316,13 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
         }
     }
     symbols
+}
+
+/// The global directions a spring with this stiffness acts in.
+fn acting(stiffness: [f64; 3]) -> impl Iterator<Item = DVec3> {
+    (0..3)
+        .filter(move |&i| stiffness[i] != 0.0)
+        .map(|i| DVec3::AXES[i])
 }
 
 /// The parts shown; symbols on hidden parts are left out as in PrePoMax.
@@ -446,6 +533,16 @@ pub fn draw(painter: &Painter, rect: Rect, camera: &Camera, symbols: &[Symbol]) 
         if !rect.expand(2.0 * ARROW_SIZE).contains(anchor) {
             continue;
         }
+        if symbol.shape == SymbolShape::Spring {
+            let points: Vec<Pos2> = (spring_wire(symbol.direction).into_iter())
+                .map(|p| anchor + screen(p))
+                .collect();
+            let wire =
+                |width: f32, color: Color32| Shape::line(points.clone(), Stroke::new(width, color));
+            painter.add(wire(SPRING_WIDTH + 2.0, edge(symbol.color)));
+            painter.add(wire(SPRING_WIDTH, symbol.color));
+            continue;
+        }
         let mut solids = solids(symbol.shape, symbol.direction);
         solids.sort_by(|a, b| (b.depth.dot(forward)).total_cmp(&a.depth.dot(forward)));
         for solid in solids {
@@ -484,7 +581,7 @@ fn solids(shape: SymbolShape, direction: Vec3) -> Vec<Solid> {
     let size = match shape {
         SymbolShape::Arrow | SymbolShape::ArrowOnto | SymbolShape::MomentArrow => ARROW_SIZE,
         SymbolShape::Cone | SymbolShape::RotationLock | SymbolShape::Ball => SUPPORT_SIZE,
-        SymbolShape::LineTo(_) => return Vec::new(),
+        SymbolShape::LineTo(_) | SymbolShape::Spring => return Vec::new(),
     };
     let axis = direction * size;
     let (u, v) = direction.any_orthonormal_pair();
@@ -553,8 +650,31 @@ fn solids(shape: SymbolShape, direction: Vec3) -> Vec<Solid> {
                 },
             ]
         }
-        SymbolShape::LineTo(_) => Vec::new(),
+        SymbolShape::LineTo(_) | SymbolShape::Spring => Vec::new(),
     }
+}
+
+/// The wire of a spring along a direction in pixel units relative to its point, after
+/// PrePoMax's spring source: 1 long with straight ends of 0.2 and 4 coils of diameter 0.2,
+/// ending 0.05 before the point.
+fn spring_wire(direction: Vec3) -> Vec<Vec3> {
+    // Half turns, and steps per half turn.
+    const TURNS: usize = 8;
+    const STEPS: usize = 10;
+    let size = ARROW_SIZE;
+    let (u, v) = direction.any_orthonormal_pair();
+    let at = |along: f32, radial: Vec3| (direction * (along - 1.05) + radial) * size;
+    let (straight, radius) = (0.2, 0.1);
+    let mut points = vec![at(0.0, Vec3::ZERO), at(straight, Vec3::ZERO)];
+    let rise = (1.0 - 2.0 * straight) / (TURNS * STEPS) as f32;
+    for i in 0..=TURNS * STEPS {
+        let angle = i as f32 / STEPS as f32 * std::f32::consts::PI;
+        let radial = (u * angle.cos() + v * angle.sin()) * radius;
+        points.push(at(straight + rise * i as f32, radial));
+    }
+    points.push(at(1.0 - straight, Vec3::ZERO));
+    points.push(at(1.0, Vec3::ZERO));
+    points
 }
 
 /// Convex hull in counter-clockwise order (Andrew's monotone chain).
@@ -645,6 +765,43 @@ mod tests {
             assert!((from.x - 100.0).abs() < 1e-3, "{from}");
         }
         assert!(build(&model, &[item("RP-2")]).is_empty());
+    }
+
+    #[test]
+    fn springs_act_where_they_have_stiffness() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/kragbalken_c3d8.inp");
+        let mesh = plx_io::inp::read_inp(&path).unwrap().mesh;
+        let model = Model::new(&path, mesh);
+        let spring = |nodes: Vec<NodeId>| Item {
+            kind: Kind::PointSpring([1.0, 0.0, 2.0]),
+            region: Region::Nodes(nodes),
+            selected: false,
+        };
+        // Two directions at each of three nodes, or once at the centre of many nodes.
+        let few = build(&model, &[spring(vec![1, 12, 23])]);
+        assert_eq!(few.len(), 6);
+        assert!(
+            few.iter()
+                .all(|s| s.shape == SymbolShape::Spring && s.direction.y == 0.0)
+        );
+        assert_eq!(build(&model, &[spring((1..=20).collect())]).len(), 2);
+        // Cones onto the faces of a compression only support, from outside.
+        let support = Item {
+            kind: Kind::CompressionOnly,
+            region: Region::Surface("TIP".into()),
+            selected: false,
+        };
+        let cones = build(&model, &[support]);
+        assert!(!cones.is_empty());
+        assert!(
+            cones
+                .iter()
+                .all(|s| s.shape == SymbolShape::Cone && s.direction.x < -0.99)
+        );
+        // The spring's wire ends just before the point.
+        let wire = spring_wire(Vec3::X);
+        assert!((wire.last().unwrap().x / ARROW_SIZE + 0.05).abs() < 1e-5);
     }
 
     #[test]
