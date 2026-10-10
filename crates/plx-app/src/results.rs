@@ -384,7 +384,9 @@ impl ResultsView {
             self.date.as_deref().unwrap_or("-"),
             self.time.as_deref().unwrap_or("-")
         )];
-        if let (Some(inc), Some(superposition)) = (self.current_increment(), &self.superposition) {
+        // A single swinging mode keeps the usual mode line.
+        let superposed = self.superposition.as_ref().filter(|s| s.modes.len() > 1);
+        if let (Some(inc), Some(superposition)) = (self.current_increment(), superposed) {
             let modes: Vec<String> = superposition.modes.iter().map(u32::to_string).collect();
             lines.push(format!(
                 "Step: #{}   Superposition of modes: {}",
