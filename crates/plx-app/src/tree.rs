@@ -8,7 +8,7 @@ use egui::collapsing_header::CollapsingState;
 use egui::epaint::Mesh;
 use egui::{Color32, Pos2, Rect, Response, Shape, Ui, Vec2, WidgetText, pos2, vec2};
 use plx_job::JobStatus;
-use plx_model::{FeModel, Finding, ModelItem, Severity};
+use plx_model::{FeModel, Finding, ModelItem, SetKind, Severity};
 
 use crate::features::{FeatureItem, FeatureKind};
 use crate::model::{Model, PartInfo};
@@ -423,6 +423,33 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
     }
 }
 
+/// What double-clicking a container of the mesh's sets creates; in the FE Model tree only.
+fn creates_set(item: &TreeItem) -> Option<NewItem> {
+    match *item {
+        TreeItem::Group("Node Sets") => Some(NewItem::MeshSet(SetKind::Nodes)),
+        TreeItem::Group("Element Sets") => Some(NewItem::MeshSet(SetKind::Elements)),
+        TreeItem::Group("Surfaces") => Some(NewItem::MeshSet(SetKind::Surface)),
+        _ => None,
+    }
+}
+
+/// The kind of a node set, element set or surface of the mesh.
+pub fn set_kind(item: &TreeItem) -> Option<SetKind> {
+    match item {
+        TreeItem::NodeSet(_) => Some(SetKind::Nodes),
+        TreeItem::ElementSet(_) => Some(SetKind::Elements),
+        TreeItem::Surface(_) => Some(SetKind::Surface),
+        _ => None,
+    }
+}
+
+pub fn set_name(item: &TreeItem) -> Option<&str> {
+    match item {
+        TreeItem::NodeSet(n) | TreeItem::ElementSet(n) | TreeItem::Surface(n) => Some(n),
+        _ => None,
+    }
+}
+
 /// Whether double-clicking opens a dialog. As in PrePoMax, containers such as "Mesh" or
 /// "Parts" have none: they create their kind of item or open and close.
 fn has_properties(item: &TreeItem) -> bool {
@@ -447,6 +474,7 @@ fn deletable(view: TreeView, item: &TreeItem) -> bool {
             item,
             TreeItem::ResultFieldOutput(_) | TreeItem::HistorySet(_) | TreeItem::MeshItem(_)
         )
+        || (view == TreeView::FeModel && set_kind(item).is_some())
 }
 
 fn is_fe_item(item: &TreeItem) -> bool {
@@ -710,7 +738,9 @@ impl Tree<'_> {
         if let Some(reason) = closed {
             response = response.on_hover_text(reason);
         }
-        let creates = creates(&item).filter(|_| closed.is_none());
+        let creates = (creates(&item))
+            .or_else(|| (self.view == TreeView::FeModel).then(|| creates_set(&item))?)
+            .filter(|_| closed.is_none());
         if self.view == TreeView::Geometry && item == TreeItem::Group("Parts") {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -734,6 +764,7 @@ impl Tree<'_> {
         }
         let editable = is_fe_item(&item)
             || feature(&item).is_some()
+            || (self.view == TreeView::FeModel && set_kind(&item).is_some())
             || matches!(
                 item,
                 TreeItem::ResultFieldOutput(_)
@@ -1072,26 +1103,33 @@ impl Tree<'_> {
         self.branch(ui, TreeItem::Mesh, "Mesh", true, |tree, ui| {
             tree.parts(ui, model);
             let mesh = &model.mesh;
+            // The user's sets are listed even when their selection finds nothing on the mesh.
+            let names = |kind: SetKind| -> Vec<String> {
+                let mut names: BTreeSet<String> =
+                    kind.names(mesh).into_iter().map(str::to_owned).collect();
+                let user = model.fe.mesh_sets.iter().filter(|s| s.kind == kind);
+                names.extend(user.map(|s| s.name.clone()));
+                names.into_iter().collect()
+            };
             let sets: [(&'static str, Vec<TreeItem>); 3] = [
                 (
                     "Node Sets",
-                    mesh.node_sets
-                        .keys()
-                        .map(|n| TreeItem::NodeSet(n.clone()))
+                    names(SetKind::Nodes)
+                        .into_iter()
+                        .map(TreeItem::NodeSet)
                         .collect(),
                 ),
                 (
                     "Element Sets",
-                    mesh.element_sets
-                        .keys()
-                        .map(|n| TreeItem::ElementSet(n.clone()))
+                    (names(SetKind::Elements).into_iter())
+                        .map(TreeItem::ElementSet)
                         .collect(),
                 ),
                 (
                     "Surfaces",
-                    mesh.surfaces
-                        .keys()
-                        .map(|n| TreeItem::Surface(n.clone()))
+                    names(SetKind::Surface)
+                        .into_iter()
+                        .map(TreeItem::Surface)
                         .collect(),
                 ),
             ];

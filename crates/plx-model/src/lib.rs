@@ -14,6 +14,7 @@ mod features;
 mod geometry;
 mod history;
 pub mod library;
+mod mesh_set;
 mod properties;
 mod region;
 mod section;
@@ -38,6 +39,7 @@ pub use geometry::{
 };
 pub use history::{HistoryKind, HistoryOutput, Totals};
 pub use library::MaterialLibrary;
+pub use mesh_set::{MeshSet, SetKind};
 pub use properties::{ModelKind, ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
 pub use section::{
@@ -109,6 +111,10 @@ pub struct FeModel {
     /// Straight paths results are read on; not part of the input file.
     #[serde(default)]
     pub result_paths: Vec<ResultPath>,
+    /// Node sets, element sets and surfaces the user defined by a selection; their members
+    /// are written into the mesh's sets.
+    #[serde(default)]
+    pub mesh_sets: Vec<MeshSet>,
 }
 
 impl FeModel {
@@ -131,6 +137,7 @@ impl FeModel {
             .chain(self.constraints.iter().flat_map(Constraint::regions))
             .chain((self.contact_pairs.iter()).flat_map(|c| [&c.master, &c.slave]))
             .chain(self.node_ties.iter().map(|t| &t.region))
+            .chain(self.mesh_sets.iter().map(|s| &s.region))
             .chain(self.steps.iter().flat_map(|step| {
                 (step.boundary_conditions.iter().map(|b| &b.region))
                     .chain(step.loads.iter().map(|l| &l.region))
@@ -215,7 +222,7 @@ impl FeModel {
         (self.initial_conditions.iter_mut()).for_each(|i| follow(&mut i.region));
     }
 
-    fn regions_mut(&mut self) -> impl Iterator<Item = &mut Region> {
+    pub(crate) fn regions_mut(&mut self) -> impl Iterator<Item = &mut Region> {
         (self.sections.iter_mut().map(|s| &mut s.region))
             .chain(
                 self.constraints
@@ -224,6 +231,7 @@ impl FeModel {
             )
             .chain((self.contact_pairs.iter_mut()).flat_map(|c| [&mut c.master, &mut c.slave]))
             .chain(self.node_ties.iter_mut().map(|t| &mut t.region))
+            .chain(self.mesh_sets.iter_mut().map(|s| &mut s.region))
             .chain(self.steps.iter_mut().flat_map(|step| {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
@@ -302,6 +310,7 @@ impl FeModel {
             )
             .chain((self.contact_pairs.iter_mut()).flat_map(|c| [&mut c.master, &mut c.slave]))
             .chain(self.initial_conditions.iter_mut().map(|i| &mut i.region))
+            .chain(self.mesh_sets.iter_mut().map(|s| &mut s.region))
             .chain(self.steps.iter_mut().flat_map(|step| {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))

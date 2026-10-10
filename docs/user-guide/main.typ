@@ -21,6 +21,7 @@
 #include "chapters/geometry-mesh/geometry.typ"
 #include "chapters/geometry-mesh/mesh.typ"
 #include "chapters/geometry-mesh/mesh-tools.typ"
+#include "chapters/geometry-mesh/mesh-sets.typ"
 
 #include "chapters/model/model-properties.typ"
 #include "chapters/model/materials.typ"

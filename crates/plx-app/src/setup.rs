@@ -1,8 +1,9 @@
 //! Creating and editing the FE model: PrePoMax's item dialogs for materials, sections, steps,
 //! boundary conditions, loads and field outputs, and prepolix's hot spot definitions.
 //!
-//! Regions are picked in the 3D view while a dialog is open. As in PrePoMax the user never
-//! defines node or element sets for this; the input file writer derives them.
+//! Regions are picked in the 3D view while a dialog is open. As in PrePoMax the user does not
+//! need node or element sets for this; the input file writer derives them. Sets can still be
+//! defined in the Mesh branch of the tree, by a selection like any region.
 
 use std::collections::BTreeSet;
 
@@ -13,9 +14,10 @@ use plx_model::{
     BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, DefinedField, DefinedFieldKind,
     DynamicProcedure, DynamicStep, Elastic, EquationSolver, FeModel, FieldOutput, FrequencyStep,
     Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
-    InitialConditionKind, Load, LoadKind, Material, ModalDamping, ModalDynamicsStep, ModeDamping,
-    ModelSpace, NodeTie, OutputKind, PlasticPoint, Quantity, Region, Section, SectionKind,
-    StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceInteraction, UnitSystem, next_name,
+    InitialConditionKind, Load, LoadKind, Material, MeshSet, ModalDamping, ModalDynamicsStep,
+    ModeDamping, ModelSpace, NodeTie, OutputKind, PlasticPoint, Quantity, Region, Section,
+    SectionKind, SetKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceInteraction,
+    UnitSystem, next_name,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row};
@@ -58,6 +60,8 @@ pub enum NewItem {
     MeshSetupItem,
     /// A reference point, coordinate system or result path, edited in its own dialog.
     Feature(crate::features::FeatureKind),
+    /// A node set, element set or surface of the mesh, defined by a selection.
+    MeshSet(SetKind),
 }
 
 /// How a region is given.
@@ -114,6 +118,10 @@ pub(crate) const SUPPORT_SOURCES: &[Source] = &[
 /// Solid elements: whole parts, element sets or the elements of picked faces.
 pub(crate) const SOLID_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet, Source::Selection];
 pub(crate) const ELEMENT_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet];
+/// Nodes or elements of a user-defined set: picked, or of whole parts.
+pub(crate) const SET_SOURCES: &[Source] = &[Source::Selection, Source::Parts];
+/// Element faces of a user-defined surface.
+pub(crate) const SURFACE_SOURCES: &[Source] = &[Source::Selection];
 /// Nodes, also those of whole parts, e.g. for the initial temperature of the model.
 pub(crate) const NODE_PART_SOURCES: &[Source] = &[
     Source::Selection,
@@ -636,6 +644,9 @@ enum Draft {
     ContactPair(ContactPair, MasterSlave),
     NodeTie(NodeTie, RegionDraft),
     Amplitude(Amplitude, AmplitudeView),
+    /// A user-defined set; editing a set read from an input file makes it one, which then
+    /// replaces the set of the name given.
+    MeshSet(MeshSet, RegionDraft, Option<String>),
 }
 
 /// The region clicks in the 3D view pick for, if the dialog has one.
@@ -645,7 +656,8 @@ fn draft_region(draft: &Draft) -> Option<&RegionDraft> {
         | Draft::BoundaryCondition(_, _, r)
         | Draft::Load(_, _, r)
         | Draft::InitialCondition(_, r)
-        | Draft::NodeTie(_, r) => Some(r),
+        | Draft::NodeTie(_, r)
+        | Draft::MeshSet(_, r, _) => Some(r),
         Draft::ContactPair(_, regions) => Some(regions.current()),
         Draft::Constraint(c) => Some(c.region()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
@@ -660,7 +672,8 @@ fn draft_region_mut(draft: &mut Draft) -> Option<&mut RegionDraft> {
         | Draft::BoundaryCondition(_, _, r)
         | Draft::Load(_, _, r)
         | Draft::InitialCondition(_, r)
-        | Draft::NodeTie(_, r) => Some(r),
+        | Draft::NodeTie(_, r)
+        | Draft::MeshSet(_, r, _) => Some(r),
         Draft::ContactPair(_, regions) => Some(regions.current_mut()),
         Draft::Constraint(c) => Some(c.region_mut()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
@@ -1079,7 +1092,8 @@ impl Editor {
             | NewItem::ResultHistoryOutput
             | NewItem::ResultHotSpot
             | NewItem::MeshSetupItem
-            | NewItem::Feature(_) => {
+            | NewItem::Feature(_)
+            | NewItem::MeshSet(_) => {
                 return None;
             }
         };
@@ -1091,8 +1105,62 @@ impl Editor {
         })
     }
 
+    /// A dialog for a new node set, element set or surface, named after the sets the mesh
+    /// already has.
+    pub fn create_set(kind: SetKind, fe: &FeModel, mesh: &FeMesh) -> Self {
+        let name = next_name(kind.prefix(), set_names(kind, fe, mesh));
+        let region = RegionDraft::new(set_sources(kind), set_target(kind, fe));
+        Self {
+            draft: Draft::MeshSet(
+                MeshSet::new(name, kind, Region::Nodes(Vec::new())),
+                region,
+                None,
+            ),
+            index: None,
+            error: None,
+            picker: Picker::default(),
+        }
+    }
+
+    /// The dialog of a set of the mesh: of a user-defined one, or of one read from an input
+    /// file, which becomes user-defined when its nodes or faces are taken over. Element sets
+    /// and node surfaces of an input file cannot be edited.
+    fn edit_set(kind: SetKind, name: &str, fe: &FeModel, mesh: &FeMesh) -> Option<Self> {
+        let user = (fe.mesh_sets.iter()).position(|s| s.kind == kind && s.name == name);
+        let (set, index) = match user {
+            Some(i) => (fe.mesh_sets[i].clone(), Some(i)),
+            None => {
+                let region = match kind {
+                    SetKind::Nodes => Region::Nodes(mesh.node_sets.get(name)?.clone()),
+                    SetKind::Surface => match mesh.surfaces.get(name)? {
+                        plx_mesh::SurfaceDefinition::ElementFaces(faces) => {
+                            Region::Faces(faces.clone())
+                        }
+                        plx_mesh::SurfaceDefinition::Nodes(_) => return None,
+                    },
+                    SetKind::Elements => return None,
+                };
+                (MeshSet::new(name, kind, region), None)
+            }
+        };
+        let region =
+            RegionDraft::from_region(&set.region, set_sources(kind), set_target(kind, fe), mesh);
+        let replaces = index.is_none().then(|| name.to_owned());
+        Some(Self {
+            draft: Draft::MeshSet(set, region, replaces),
+            index,
+            error: None,
+            picker: Picker::default(),
+        })
+    }
+
     pub fn edit(item: &TreeItem, fe: &FeModel, mesh: &FeMesh) -> Option<Self> {
         let (draft, index) = match *item {
+            TreeItem::NodeSet(ref name) => return Self::edit_set(SetKind::Nodes, name, fe, mesh),
+            TreeItem::ElementSet(ref name) => {
+                return Self::edit_set(SetKind::Elements, name, fe, mesh);
+            }
+            TreeItem::Surface(ref name) => return Self::edit_set(SetKind::Surface, name, fe, mesh),
             TreeItem::Material(i) => (Draft::Material(fe.materials.get(i)?.clone()), i),
             TreeItem::Section(i) => {
                 let section = fe.sections.get(i)?.clone();
@@ -1192,6 +1260,7 @@ impl Editor {
             Draft::ContactPair(c, _) => ("Contact Pair", &c.name),
             Draft::NodeTie(t, _) => ("Node Tie", &t.name),
             Draft::Amplitude(a, _) => ("Amplitude", &a.name),
+            Draft::MeshSet(set, _, _) => (set.kind.label(), &set.name),
         };
         let action = if self.index.is_some() {
             "Edit"
@@ -1290,7 +1359,8 @@ impl Editor {
                         result = EditorResult::Cancel;
                     }
                     if ui.button("OK").clicked() {
-                        self.error = self.validate(&model.fe).err();
+                        self.error = (self.validate(&model.fe).err())
+                            .or_else(|| self.validate_set(model).err());
                         if self.error.is_none() {
                             result = EditorResult::Ok;
                         }
@@ -1891,6 +1961,10 @@ impl Editor {
                 name_row(ui, &mut pair.name);
                 contacts::contact_pair_form(ui, model, pair, regions);
             }
+            Draft::MeshSet(set, region, _) => {
+                name_row(ui, &mut set.name);
+                region.ui(ui, model);
+            }
         }
     }
 
@@ -1913,6 +1987,8 @@ impl Editor {
             Draft::ContactPair(..) => names(&fe.contact_pairs, |c| &c.name),
             Draft::NodeTie(..) => names(&fe.node_ties, |t| &t.name),
             Draft::Amplitude(..) => names(&fe.amplitudes, |a| &a.name),
+            // Against the mesh's sets, see validate_set.
+            Draft::MeshSet(..) => Vec::new(),
         };
         if let Some(index) = self.index.filter(|&i| i < siblings.len()) {
             siblings.remove(index);
@@ -1936,6 +2012,7 @@ impl Editor {
             Draft::ContactPair(c, _) => &c.name,
             Draft::NodeTie(t, _) => &t.name,
             Draft::Amplitude(a, _) => &a.name,
+            Draft::MeshSet(set, _, _) => &set.name,
         };
         if name.trim().is_empty() {
             return Err("Please enter a name.".into());
@@ -2049,6 +2126,44 @@ impl Editor {
         Ok(())
     }
 
+    /// The set of an input file the dialog's set takes the place of, which leaves the mesh
+    /// with OK.
+    pub fn replaced_set(&self) -> Option<(SetKind, &str)> {
+        match &self.draft {
+            Draft::MeshSet(set, _, Some(name)) => Some((set.kind, name)),
+            _ => None,
+        }
+    }
+
+    /// The name of a set must be new among the mesh's sets of its kind, and an element set
+    /// must not take the name of a part, whose elements the input file gathers under it.
+    fn validate_set(&self, model: &Model) -> Result<(), String> {
+        let Draft::MeshSet(set, _, replaces) = &self.draft else {
+            return Ok(());
+        };
+        // The set's own name, of the user-defined set or of the set of an input file it
+        // replaces, is free.
+        let own = (self.index.and_then(|i| model.fe.mesh_sets.get(i)))
+            .map(|o| o.name.as_str())
+            .or(replaces.as_deref());
+        let mut taken = set_names(set.kind, &model.fe, &model.mesh);
+        taken.retain(|n| Some(*n) != own);
+        if set.kind == SetKind::Elements {
+            taken.extend(model.mesh.parts.iter().map(|p| p.name.as_str()));
+        }
+        if taken.iter().any(|n| n.eq_ignore_ascii_case(&set.name)) {
+            return Err(format!("The name {} is already used.", set.name));
+        }
+        if !set
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-.".contains(c))
+        {
+            return Err("Use letters, digits, '_', '-' and '.' only in the name.".into());
+        }
+        Ok(())
+    }
+
     /// Copies the draft into the model.
     /// The tree item a new constraint, surface interaction or contact pair gets once
     /// applied to `fe`, to show it in the tree.
@@ -2064,6 +2179,11 @@ impl Editor {
             Draft::ContactPair(..) => Some(TreeItem::ContactPair(fe.contact_pairs.len())),
             Draft::NodeTie(..) => Some(TreeItem::NodeTie(fe.node_ties.len())),
             Draft::Amplitude(..) => Some(TreeItem::Amplitude(fe.amplitudes.len())),
+            Draft::MeshSet(ref set, ..) => Some(match set.kind {
+                SetKind::Nodes => TreeItem::NodeSet(set.name.clone()),
+                SetKind::Elements => TreeItem::ElementSet(set.name.clone()),
+                SetKind::Surface => TreeItem::Surface(set.name.clone()),
+            }),
             _ => None,
         }
     }
@@ -2202,7 +2322,45 @@ impl Editor {
                 }
                 put(&mut fe.amplitudes, index, amplitude);
             }
+            Draft::MeshSet(mut set, region, replaces) => {
+                set.region = region.region();
+                // Items on the set follow a new name.
+                let old = (index.and_then(|i| fe.mesh_sets.get(i)))
+                    .map(|o| o.name.clone())
+                    .or(replaces);
+                if let Some(old) = old {
+                    fe.rename_set(set.kind, &old, &set.name);
+                }
+                put(&mut fe.mesh_sets, index, set);
+            }
         }
+    }
+}
+
+/// Names of the mesh's sets of a kind together with the user-defined ones, which a
+/// selection that finds nothing leaves out of the mesh.
+fn set_names<'a>(kind: SetKind, fe: &'a FeModel, mesh: &'a FeMesh) -> Vec<&'a str> {
+    let mut names = kind.names(mesh);
+    for set in fe.mesh_sets.iter().filter(|s| s.kind == kind) {
+        if !names.contains(&set.name.as_str()) {
+            names.push(&set.name);
+        }
+    }
+    names
+}
+
+fn set_sources(kind: SetKind) -> &'static [Source] {
+    match kind {
+        SetKind::Nodes | SetKind::Elements => SET_SOURCES,
+        SetKind::Surface => SURFACE_SOURCES,
+    }
+}
+
+/// Node sets pick nodes; element sets and surfaces element faces, or edges in 2D models.
+fn set_target(kind: SetKind, fe: &FeModel) -> Target {
+    match kind {
+        SetKind::Nodes => Target::Nodes,
+        SetKind::Elements | SetKind::Surface => face_target(fe),
     }
 }
 
@@ -2334,6 +2492,9 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
     };
     if let Some([master, slave]) = master_slave {
         return contacts::master_slave_highlight(model, master, slave);
+    }
+    if let (Some(kind), Some(name)) = (crate::tree::set_kind(item), crate::tree::set_name(item)) {
+        return region_highlight(model, &kind.reference(name));
     }
     item_region(fe, item)
         .map(|region| region_highlight(model, region))
@@ -3724,5 +3885,85 @@ mod tests {
         assert_eq!(fe.steps[0].loads[0].factor_amplitude, None);
         assert!(delete(&mut fe, &TreeItem::Amplitude(0)));
         assert!(fe.amplitudes.is_empty());
+    }
+
+    #[test]
+    fn sets_are_created_renamed_and_take_over_sets_of_the_input_file() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/kragbalken_c3d8.inp");
+        let mesh = plx_io::inp::read_inp(&path).unwrap().mesh;
+        let mut model = Model::new(&path, mesh);
+        let part = model.mesh.parts[0].name.clone();
+
+        // A new element set of the whole part.
+        let mut editor = Editor::create_set(SetKind::Elements, &model.fe, &model.mesh);
+        let Draft::MeshSet(set, region, _) = &mut editor.draft else {
+            panic!("set dialog expected");
+        };
+        assert_eq!(set.name, "Element_Set-1");
+        region.source = Source::Parts;
+        region.parts = PartPicks::from_names([part.clone()]);
+        assert_eq!(editor.validate(&model.fe), Ok(()));
+        assert_eq!(editor.validate_set(&model), Ok(()));
+        // An element set must not take a part's name.
+        if let Draft::MeshSet(set, ..) = &mut editor.draft {
+            set.name = part.clone();
+        }
+        assert!(editor.validate_set(&model).is_err());
+        if let Draft::MeshSet(set, ..) = &mut editor.draft {
+            set.name = "Beam".into();
+        }
+        let sets = model.fe.mesh_sets.clone();
+        editor.apply(&mut model.fe);
+        model.fe.sync_mesh_sets(&sets, &mut model.mesh);
+        let elements = model.mesh.element_sets["Beam"].len();
+        assert_eq!(elements, model.mesh.element_count());
+
+        // A section on the set follows its new name.
+        model.fe.sections.push(Section {
+            name: "Section-1".into(),
+            material: "Steel".into(),
+            region: Region::ElementSet("Beam".into()),
+            thickness: 1.0,
+            kind: SectionKind::Solid,
+        });
+        let item = TreeItem::ElementSet("Beam".into());
+        let mut editor = Editor::edit(&item, &model.fe, &model.mesh).unwrap();
+        if let Draft::MeshSet(set, ..) = &mut editor.draft {
+            set.name = "Cantilever".into();
+        }
+        assert_eq!(editor.validate_set(&model), Ok(()));
+        let sets = model.fe.mesh_sets.clone();
+        editor.apply(&mut model.fe);
+        model.fe.sync_mesh_sets(&sets, &mut model.mesh);
+        assert!(!model.mesh.element_sets.contains_key("Beam"));
+        assert_eq!(model.mesh.element_sets["Cantilever"].len(), elements);
+        assert_eq!(
+            model.fe.sections[0].region,
+            Region::ElementSet("Cantilever".into())
+        );
+
+        // A node set of the input file keeps its nodes and becomes the user's.
+        let (name, nodes) = (model.mesh.node_sets.iter().next())
+            .map(|(n, ids)| (n.clone(), ids.clone()))
+            .unwrap();
+        let item = TreeItem::NodeSet(name.clone());
+        let editor = Editor::edit(&item, &model.fe, &model.mesh).unwrap();
+        assert_eq!(editor.replaced_set(), Some((SetKind::Nodes, name.as_str())));
+        assert_eq!(editor.validate_set(&model), Ok(()));
+        let sets = model.fe.mesh_sets.clone();
+        editor.apply(&mut model.fe);
+        model.fe.sync_mesh_sets(&sets, &mut model.mesh);
+        assert_eq!(
+            model.fe.mesh_set(SetKind::Nodes, &name).unwrap().region,
+            Region::Nodes(nodes.clone())
+        );
+        assert_eq!(model.mesh.node_sets[&name], nodes);
+
+        // A new mesh gets the sets again.
+        let mut mesh = model.mesh.clone();
+        mesh.element_sets.remove("Cantilever");
+        model.set_mesh(mesh);
+        assert_eq!(model.mesh.element_sets["Cantilever"].len(), elements);
     }
 }

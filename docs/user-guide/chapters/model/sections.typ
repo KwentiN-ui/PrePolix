@@ -10,8 +10,7 @@ reports "Elements without material". Create sections with #menu("Model", "Create
 #fields(
   [Type], [#ui("Solid"), #ui("Truss") or #ui("Beam").],
   [Material], [One of the model's materials.],
-  [Region], [#ui("Parts") (picked in the 3D view) or an #ui("Element Set") of an imported
-    mesh.],
+  [Region], [#ui("Parts") (picked in the 3D view) or an #ui("Element Set") (@mesh-sets).],
 )
 
 === Solid section

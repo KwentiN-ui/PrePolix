@@ -416,7 +416,9 @@ impl Model {
     }
 
     /// Replaces the mesh, e.g. by a newly generated one; the FE model stays.
-    pub fn set_mesh(&mut self, mesh: FeMesh) {
+    pub fn set_mesh(&mut self, mut mesh: FeMesh) {
+        // The user's sets are found on the new mesh by their selections.
+        self.fe.write_mesh_sets(&mut mesh);
         let mut fresh = Self::new(&self.path, mesh);
         std::mem::swap(&mut self.mesh, &mut fresh.mesh);
         self.parts = fresh.parts;
