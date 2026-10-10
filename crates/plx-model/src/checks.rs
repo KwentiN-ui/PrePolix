@@ -44,10 +44,14 @@ pub enum Problem {
     ConflictingBoundaries,
     LoadOnFixedNodes,
     RotationsIgnored,
+    /// A submodel boundary condition in a model without a global results file.
+    NoGlobalResults,
     IncrementExceedsStep,
     NoLoad,
     /// A modal step without a frequency step before it that stores the eigenmodes.
     NoStoredModes,
+    /// An initial velocity in a model without a Dynamic step.
+    VelocityIgnored,
     /// Found in the solver output only.
     NoConvergence,
     /// Found in the solver output only.
@@ -65,6 +69,7 @@ impl Problem {
             | Problem::ConflictingBoundaries
             | Problem::LoadOnFixedNodes
             | Problem::RotationsIgnored
+            | Problem::VelocityIgnored
             | Problem::NoLoad => Severity::Warning,
             _ => Severity::Error,
         }
@@ -87,9 +92,11 @@ impl Problem {
             Problem::ConflictingBoundaries => "Widersprüchliche Randbedingungen",
             Problem::LoadOnFixedNodes => "Last auf festgehaltenen Knoten",
             Problem::RotationsIgnored => "Rotationen ohne Wirkung",
+            Problem::NoGlobalResults => "No global results",
             Problem::IncrementExceedsStep => "Inkrement größer als der Step",
             Problem::NoLoad => "Keine Last",
-            Problem::NoStoredModes => "Keine gespeicherten Eigenformen",
+            Problem::NoStoredModes => "No stored eigenmodes",
+            Problem::VelocityIgnored => "Initial velocity without a Dynamic step",
             Problem::NoConvergence => "Keine Konvergenz",
             Problem::MpcAndSpc => "Freiheitsgrad doppelt gebunden",
             Problem::RotationIn2d => "Rotation in einem 2D-Modell",
@@ -186,6 +193,11 @@ impl Problem {
                  ignoriert oder führen in 2D-Modellen zum Abbruch (\"mpc of type is \
                  unknown\")."
             }
+            Problem::NoGlobalResults => {
+                "A submodel boundary condition takes its displacements from the results \
+                 of a global model (*SUBMODEL). Without the global results file the input \
+                 file cannot be written."
+            }
             Problem::IncrementExceedsStep => {
                 "Das Anfangsinkrement ist größer als die Dauer des Steps. CalculiX lehnt \
                  den Step mit \"initial increment size exceeds step size\" ab."
@@ -195,9 +207,13 @@ impl Problem {
                  Die Rechnung läuft, alle Ergebnisse sind aber null."
             }
             Problem::NoStoredModes => {
-                "Modal Dynamics und Steady State Dynamics überlagern die Eigenformen, die \
-                 ein vorheriger Frequency Step mit Storage in die .eig-Datei geschrieben \
-                 hat. Ohne ihn bricht CalculiX mit \"error opening the eigenvalue file\" ab."
+                "Modal Dynamics and Steady State Dynamics superpose the eigenmodes a \
+                 previous Frequency step with Storage wrote to the .eig file. Without it \
+                 CalculiX stops with \"error opening the eigenvalue file\"."
+            }
+            Problem::VelocityIgnored => {
+                "Only a Dynamic step (time integration) starts from an initial velocity; \
+                 static, frequency and thermal steps ignore it without a message."
             }
             Problem::NoConvergence => {
                 "Die Newton-Iteration ist nicht konvergiert; CalculiX hat das Inkrement \
@@ -290,14 +306,19 @@ impl Problem {
                 "UR1 bis UR3 in der Randbedingung frei lassen. Drehungen von Volumenkörpern \
                  über Verschiebungen mehrerer Knoten vorgeben."
             }
+            Problem::NoGlobalResults => {
+                "Open Model > Model Properties, set the model type to Submodel and pick the results \
+                 file (.frd) of the global model."
+            }
             Problem::IncrementExceedsStep => {
                 "Im Step das Anfangsinkrement höchstens so groß wie die Step-Dauer wählen."
             }
             Problem::NoLoad => "Unter Loads eine Last erstellen oder eine deaktivierte aktivieren.",
             Problem::NoStoredModes => {
-                "Davor einen Frequency Step mit \"Eigenformen speichern (Storage)\" \
-                 anlegen, mit denselben Lagerungen."
+                "Add a Frequency step with \"Store eigenmodes (Storage)\" before it, with \
+                 the same supports."
             }
+            Problem::VelocityIgnored => "Add a Dynamic step or deactivate the initial condition.",
             Problem::NoConvergence => {
                 "Kontakte prüfen (Steifigkeit der Surface Interaction, Adjust, Lage der \
                  Flächen), Teile ausreichend lagern, die Last auf mehrere Inkremente \
@@ -457,7 +478,19 @@ impl FeModel {
                 ));
             }
         }
-        let initial_temperature = self.initial_conditions.iter().any(|c| c.active);
+        let initial_temperature =
+            (self.initial_conditions.iter()).any(|c| c.active && !c.kind.is_velocity());
+        let dynamic =
+            (self.steps.iter()).any(|s| s.active && matches!(s.kind, StepKind::Dynamic(_)));
+        for (i, condition) in self.initial_conditions.iter().enumerate() {
+            if condition.active && condition.kind.is_velocity() && !dynamic {
+                findings.push(Finding::new(
+                    ModelItem::InitialCondition(i),
+                    Problem::VelocityIgnored,
+                    format!("{} needs a Dynamic step", condition.name),
+                ));
+            }
+        }
         let trusses = Trusses::new(self, mesh);
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             self.check_step(s, mesh, mesh_check, &trusses, &mut findings);
@@ -623,7 +656,25 @@ impl FeModel {
                     .collect(),
                 // Degree of freedom 11.
                 BoundaryKind::Temperature(t) => vec![(10, t)],
+                // The values come from the global model; NaN stands for them.
+                BoundaryKind::Submodel { dofs: held, .. } => (0..dofs)
+                    .filter(|&d| held[d])
+                    .map(|d| (d, f64::NAN))
+                    .collect(),
             };
+            if let BoundaryKind::Submodel { .. } = bc.kind
+                && self.properties.submodel_input().is_none()
+            {
+                findings.push(Finding::new(
+                    ModelItem::BoundaryCondition(s, i),
+                    Problem::NoGlobalResults,
+                    format!(
+                        "{} needs the results of a global model (Model > Model Properties: model type \
+                         Submodel and global results file)",
+                        bc.name
+                    ),
+                ));
+            }
             if let BoundaryKind::Displacement(values) = bc.kind
                 && values[3..].iter().any(Option::is_some)
                 && (space.is_2d() || !trusses.rotational.iter().any(|&r| r))
@@ -690,7 +741,10 @@ impl FeModel {
                 }
             }
             let displaced = fixed.values().any(|&(_, v)| v != 0.0);
-            if !loaded && !displaced && !user_keywords {
+            // A Dynamic step may start from an initial velocity instead of a load.
+            let started = matches!(step.kind, StepKind::Dynamic(_))
+                && (self.initial_conditions.iter()).any(|c| c.active && c.kind.is_velocity());
+            if !loaded && !displaced && !started && !user_keywords {
                 findings.push(Finding::new(
                     ModelItem::Step(s),
                     Problem::NoLoad,
@@ -698,7 +752,7 @@ impl FeModel {
                 ));
             }
         }
-        // Free-free eigenfrequencies are fine; a static step needs every part held. Own
+        // Free-free eigenfrequencies are fine; a static or buckle step needs every part held. Own
         // keywords may hold parts in ways the model does not know of.
         let constrained_by_keywords = self.user_keywords.iter().any(|k| {
             let text = k.text.to_ascii_uppercase();
@@ -714,9 +768,10 @@ impl FeModel {
                 .iter()
                 .any(|w| text.contains(w))
         });
+        // A buckle step solves the static state of its loads first.
         let static_mechanical = matches!(
             step.kind,
-            StepKind::Static(_) | StepKind::CoupledTempDisp(_)
+            StepKind::Static(_) | StepKind::Buckle(_) | StepKind::CoupledTempDisp(_)
         );
         if static_mechanical && !constrained_by_keywords {
             self.check_rigid_body(s, mesh, check, trusses, &fixed, findings);
@@ -1135,6 +1190,10 @@ fn describe_directions(free: &[[f64; 6]]) -> String {
 
 /// Whether two prescribed values are the same up to rounding.
 fn same(a: f64, b: f64) -> bool {
+    // Values read from the global model of a submodel.
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= 1e-12 * a.abs().max(b.abs())
 }
 
@@ -1562,6 +1621,59 @@ mod tests {
     fn a_held_and_loaded_model_has_no_findings() {
         let mesh = cubes(2, true);
         assert_eq!(check(&model(&mesh), &mesh), []);
+    }
+
+    #[test]
+    fn an_initial_velocity_needs_a_dynamic_step() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        model.initial_conditions.push(crate::InitialCondition {
+            name: "Initial_Velocity-1".into(),
+            active: true,
+            region: Region::Nodes(vec![1]),
+            kind: crate::InitialConditionKind::Velocity([1.0, 0.0, 0.0]),
+        });
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::InitialCondition(0), Problem::VelocityIgnored)]
+        );
+        // A Dynamic step takes it up, even without a load.
+        model.steps[0].kind = StepKind::Dynamic(crate::DynamicStep::default());
+        model.steps[0].loads.clear();
+        assert_eq!(check(&model, &mesh), []);
+        model.initial_conditions[0].active = false;
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Step(0), Problem::NoLoad)]
+        );
+    }
+
+    #[test]
+    fn submodel_boundaries_load_the_step_and_need_the_global_results() {
+        let mesh = cubes(1, false);
+        let mut model = model(&mesh);
+        let step = &mut model.steps[0];
+        step.loads.clear();
+        step.boundary_conditions.push(BoundaryCondition {
+            name: "Submodel-1".into(),
+            active: true,
+            region: Region::Nodes(vec![2, 3, 6, 7]),
+            kind: BoundaryKind::Submodel {
+                step: 1,
+                dofs: [true, true, true, false, false, false],
+            },
+            amplitude: None,
+        });
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::BoundaryCondition(0, 1), Problem::NoGlobalResults)]
+        );
+        model.properties.kind = crate::ModelKind::Submodel;
+        model.properties.global_results = Some("global.frd".into());
+        assert_eq!(check(&model, &mesh), []);
+        assert!(model.uses_global_results());
+        model.steps[0].kind = StepKind::Frequency(Default::default());
+        assert!(!model.uses_global_results());
     }
 
     #[test]

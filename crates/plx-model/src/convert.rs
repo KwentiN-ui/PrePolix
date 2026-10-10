@@ -78,6 +78,13 @@ impl FeModel {
         for condition in &mut self.initial_conditions {
             match &mut condition.kind {
                 InitialConditionKind::Temperature(t) => c.value(t, Quantity::Temperature),
+                InitialConditionKind::Velocity(v) => {
+                    v.iter_mut().for_each(|v| c.value(v, Quantity::Velocity));
+                }
+                InitialConditionKind::AngularVelocity { point, speed, .. } => {
+                    point.iter_mut().for_each(|p| c.value(p, Quantity::Length));
+                    c.value(speed, Quantity::RotationalSpeed);
+                }
             }
         }
         for step in &mut self.steps {
@@ -110,10 +117,12 @@ impl FeModel {
                     c.value(&mut s.time_upper, Quantity::Time);
                     convert_modal_damping(&mut s.damping, &c);
                 }
+                // Buckling factors and the accuracy have no unit.
+                StepKind::Buckle(_) => {}
             }
             for bc in &mut step.boundary_conditions {
                 match &mut bc.kind {
-                    BoundaryKind::Fixed => {}
+                    BoundaryKind::Fixed | BoundaryKind::Submodel { .. } => {}
                     BoundaryKind::Displacement(values) => {
                         for (i, value) in values.iter_mut().enumerate() {
                             let quantity = if i < 3 {

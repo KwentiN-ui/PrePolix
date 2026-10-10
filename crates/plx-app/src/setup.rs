@@ -10,9 +10,9 @@ use egui::Ui;
 use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
     Amplitude, BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, BoundaryKind,
-    Constraint, ContactPair, DynamicProcedure, DynamicStep, Elastic, EquationSolver, FeModel,
-    FieldOutput, FrequencyStep, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
-    InitialCondition, InitialConditionKind, Load, LoadKind, Material, ModalDamping,
+    BuckleStep, Constraint, ContactPair, DynamicProcedure, DynamicStep, Elastic, EquationSolver,
+    FeModel, FieldOutput, FrequencyStep, HeatTransferStep, HistoryKind, HistoryOutput,
+    Incrementation, InitialCondition, InitialConditionKind, Load, LoadKind, Material, ModalDamping,
     ModalDynamicsStep, ModeDamping, ModelSpace, NodeTie, OutputKind, Quantity, Region, Section,
     SectionKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceInteraction,
     UnitSystem, next_name,
@@ -664,6 +664,9 @@ fn names<'a, T: 'a>(items: &'a [T], name: impl Fn(&T) -> &str + 'a) -> Vec<&'a s
 const FIXED: &str = "Fixed";
 const DISPLACEMENT: &str = "Displacement_Rotation";
 const TEMPERATURE: &str = "Temperature";
+const INITIAL_VELOCITY: &str = "Initial_Velocity";
+const INITIAL_ANGULAR_VELOCITY: &str = "Initial_Angular_Velocity";
+const SUBMODEL: &str = "Submodel";
 const FORCE: &str = "Concentrated_Force";
 const PRESSURE: &str = "Pressure";
 const TRACTION: &str = "Surface_Traction";
@@ -674,7 +677,7 @@ const FILM: &str = "Convective_Film";
 const RADIATION: &str = "Radiation";
 
 /// The boundary condition kinds of the dialog: label, default name and the kind.
-fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 3] {
+fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 4] {
     [
         ("Fest eingespannt", FIXED, BoundaryKind::Fixed),
         (
@@ -683,6 +686,14 @@ fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 3] {
             BoundaryKind::Displacement([Some(0.0), None, None, None, None, None]),
         ),
         ("Temperatur", TEMPERATURE, BoundaryKind::Temperature(0.0)),
+        (
+            "Submodel",
+            SUBMODEL,
+            BoundaryKind::Submodel {
+                step: 1,
+                dofs: [true, true, true, false, false, false],
+            },
+        ),
     ]
 }
 
@@ -691,8 +702,42 @@ fn boundary_kind_name(kind: &BoundaryKind) -> &'static str {
         BoundaryKind::Fixed => FIXED,
         BoundaryKind::Displacement(_) => DISPLACEMENT,
         BoundaryKind::Temperature(_) => TEMPERATURE,
+        BoundaryKind::Submodel { .. } => SUBMODEL,
     }
 }
+
+/// Rows of a submodel boundary condition, PrePoMax's `ViewSubmodelBC`: the step of the
+/// global model to read and the degrees of freedom that follow it.
+fn submodel_rows(
+    ui: &mut egui::Ui,
+    step: &mut u32,
+    dofs: &mut [bool; 6],
+    two_d: bool,
+    fe: &FeModel,
+) {
+    ui.label("Global step");
+    ui.add(egui::DragValue::new(step).range(1..=u32::MAX).speed(0.1))
+        .on_hover_text("Step of the global model whose displacements are read");
+    ui.end_row();
+    // Nodes of 2D models only move in the x-y plane.
+    let count = if two_d { 2 } else { 6 };
+    for (held, label) in dofs.iter_mut().zip(DOF_LABELS).take(count) {
+        ui.label("");
+        ui.checkbox(held, label);
+        ui.end_row();
+    }
+    let note = match fe.properties.submodel_input() {
+        Some(path) => format!("Global results: {}", path.display()),
+        None => "No global results file yet: set the model type to Submodel in Model > \
+                 Model Properties and pick the global .frd file."
+            .into(),
+    };
+    ui.label("");
+    ui.add(egui::Label::new(egui::RichText::new(note).weak()).wrap());
+    ui.end_row();
+}
+
+const DOF_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
 
 /// The load kinds of the dialog in PrePoMax's order: label, default name and the kind with
 /// zero values.
@@ -729,6 +774,57 @@ fn load_kinds() -> [(&'static str, &'static str, LoadKind); 8] {
             },
         ),
     ]
+}
+
+/// The initial condition kinds of the dialog: label, default name and the kind with zero
+/// values.
+fn initial_condition_kinds() -> [(&'static str, &'static str, InitialConditionKind); 3] {
+    [
+        (
+            "Temperature",
+            TEMPERATURE,
+            InitialConditionKind::Temperature(20.0),
+        ),
+        (
+            "Translational velocity",
+            INITIAL_VELOCITY,
+            InitialConditionKind::Velocity([0.0; 3]),
+        ),
+        (
+            "Angular velocity",
+            INITIAL_ANGULAR_VELOCITY,
+            InitialConditionKind::AngularVelocity {
+                point: [0.0; 3],
+                axis: [0.0, 0.0, 1.0],
+                speed: 0.0,
+            },
+        ),
+    ]
+}
+
+fn initial_condition_kind_name(kind: &InitialConditionKind) -> &'static str {
+    match kind {
+        InitialConditionKind::Temperature(_) => TEMPERATURE,
+        InitialConditionKind::Velocity(_) => INITIAL_VELOCITY,
+        InitialConditionKind::AngularVelocity { .. } => INITIAL_ANGULAR_VELOCITY,
+    }
+}
+
+/// The components of a vector; 2D models have none along z.
+fn vector_rows(
+    ui: &mut Ui,
+    vector: &mut [f64; 3],
+    labels: [&str; 3],
+    two_d: bool,
+    quantity: Quantity,
+    units: UnitSystem,
+) {
+    let count = if two_d { 2 } else { 3 };
+    for (value, label) in vector.iter_mut().zip(labels).take(count) {
+        ui.label(label);
+        ui.add(numeric::quantity(value, units, quantity).speed(1.0));
+        ui.end_row();
+    }
 }
 
 fn load_kind_name(kind: &LoadKind) -> &'static str {
@@ -1219,11 +1315,8 @@ impl Editor {
                 if let BoundaryKind::Displacement(values) = &mut bc.kind {
                     // Nodes of 2D models only move in the x-y plane.
                     let dofs = if two_d { 2 } else { 6 };
-                    for (i, (value, label)) in values
-                        .iter_mut()
-                        .zip(["U1", "U2", "U3", "UR1", "UR2", "UR3"])
-                        .take(dofs)
-                        .enumerate()
+                    for (i, (value, label)) in
+                        values.iter_mut().zip(DOF_LABELS).take(dofs).enumerate()
                     {
                         let mut set = value.is_some();
                         ui.checkbox(&mut set, label);
@@ -1239,6 +1332,9 @@ impl Editor {
                         *value = set.then_some(number);
                         ui.end_row();
                     }
+                }
+                if let BoundaryKind::Submodel { step, dofs } = &mut bc.kind {
+                    submodel_rows(ui, step, dofs, two_d, &model.fe);
                 }
                 if bc.kind.takes_amplitude() {
                     amplitude_row(
@@ -1382,16 +1478,71 @@ impl Editor {
             }
             Draft::InitialCondition(condition, region) => {
                 name_row(ui, &mut condition.name);
+                ui.label("Art");
+                let current = initial_condition_kind_name(&condition.kind);
+                let label = (initial_condition_kinds().into_iter())
+                    .find(|(_, name, _)| *name == current)
+                    .map_or("", |(label, ..)| label);
+                egui::ComboBox::from_id_salt("initial condition kind")
+                    .selected_text(label)
+                    .width(200.0)
+                    .show_ui(ui, |ui| {
+                        for (label, name, kind) in initial_condition_kinds() {
+                            if ui.selectable_label(current == name, label).clicked()
+                                && current != name
+                            {
+                                condition.kind = kind;
+                                rename_default(&mut condition.name, current, name, &taken);
+                            }
+                        }
+                    });
+                ui.end_row();
                 match &mut condition.kind {
                     InitialConditionKind::Temperature(t) => {
                         ui.label("Temperatur");
                         ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0));
                         ui.end_row();
                     }
+                    InitialConditionKind::Velocity(v) => {
+                        vector_rows(ui, v, ["V1", "V2", "V3"], two_d, Quantity::Velocity, units);
+                    }
+                    InitialConditionKind::AngularVelocity { point, axis, speed } => {
+                        vector_rows(ui, point, ["X", "Y", "Z"], two_d, Quantity::Length, units);
+                        if two_d {
+                            ui.label("Axis");
+                            ui.label("Z");
+                            ui.end_row();
+                        } else {
+                            ui.label("Axis");
+                            ui.horizontal(|ui| {
+                                for a in axis.iter_mut() {
+                                    ui.add(numeric::drag_value(a).speed(0.1));
+                                }
+                            });
+                            ui.end_row();
+                        }
+                        ui.label("Rotational speed");
+                        ui.add(
+                            numeric::quantity(speed, units, Quantity::RotationalSpeed).speed(1.0),
+                        );
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak(format!(
+                            "{:.4} rpm; a positive speed turns counter-clockwise about the axis.",
+                            *speed * 60.0 / std::f64::consts::TAU
+                        ));
+                        ui.end_row();
+                    }
                 }
                 region.ui(ui, model);
                 ui.label("");
-                ui.weak("Temperatur vor dem ersten Step, z. B. für Wärmedehnung.");
+                let hint = match condition.kind {
+                    InitialConditionKind::Temperature(_) => {
+                        "Temperatur vor dem ersten Step, z. B. für Wärmedehnung."
+                    }
+                    _ => "Velocity at the start of a Dynamic step; other steps ignore it.",
+                };
+                ui.weak(hint);
                 ui.end_row();
             }
             Draft::NodeTie(tie, region) => {
@@ -1503,6 +1654,11 @@ impl Editor {
         if duplicate {
             return Err(format!("Der Name {name} ist schon vergeben."));
         }
+        if let Draft::InitialCondition(condition, _) = &self.draft
+            && let Some(problem) = condition.kind.problem()
+        {
+            return Err(problem);
+        }
         if let Draft::Section(section, _) = &self.draft {
             if !fe.materials.iter().any(|m| m.name == section.material) {
                 return Err("Bitte ein Material wählen; zuerst unter Materials anlegen.".into());
@@ -1548,9 +1704,18 @@ impl Editor {
                 }
             }
         }
+        if let Draft::BoundaryCondition(_, bc, _) = &self.draft
+            && let BoundaryKind::Submodel { dofs, .. } = bc.kind
+        {
+            let count = if fe.properties.space.is_2d() { 2 } else { 6 };
+            if !dofs[..count].iter().any(|&d| d) {
+                return Err("Select at least one degree of freedom.".into());
+            }
+        }
         if let Draft::Step(step) = &self.draft {
             match &step.kind {
                 StepKind::Frequency(settings) => validate_frequency_step(settings)?,
+                StepKind::Buckle(settings) => validate_buckle_step(settings)?,
                 StepKind::HeatTransfer(settings) | StepKind::CoupledTempDisp(settings) => {
                     validate_heat_transfer_step(settings)?
                 }
@@ -2207,7 +2372,7 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
 
 /// The step kinds of the dialog: label, the kind with its settings and its default field
 /// outputs, in PrePoMax's order.
-fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 7] {
+fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 8] {
     let heat = HeatTransferStep::default();
     [
         (
@@ -2236,6 +2401,11 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 7] {
             FieldOutput::defaults(),
         ),
         (
+            BUCKLE_LABEL,
+            StepKind::Buckle(BuckleStep::default()),
+            FieldOutput::defaults(),
+        ),
+        (
             HEAT_TRANSFER_LABEL,
             StepKind::HeatTransfer(heat.clone()),
             FieldOutput::heat_transfer_defaults(),
@@ -2253,6 +2423,7 @@ const FREQUENCY_LABEL: &str = "Eigenfrequenzen (Frequency)";
 const DYNAMIC_LABEL: &str = "Dynamic (time integration)";
 const MODAL_DYNAMICS_LABEL: &str = "Modal Dynamics (from stored modes)";
 const STEADY_STATE_LABEL: &str = "Steady State Dynamics (frequency response)";
+const BUCKLE_LABEL: &str = "Buckling (Buckle)";
 const HEAT_TRANSFER_LABEL: &str = "Wärmeübertragung (Heat Transfer)";
 const COUPLED_LABEL: &str = "Thermomechanisch gekoppelt (Coupled Temp-Disp)";
 
@@ -2263,6 +2434,7 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
         StepKind::Dynamic(_) => DYNAMIC_LABEL,
         StepKind::ModalDynamics(_) => MODAL_DYNAMICS_LABEL,
         StepKind::SteadyStateDynamics(_) => STEADY_STATE_LABEL,
+        StepKind::Buckle(_) => BUCKLE_LABEL,
         StepKind::HeatTransfer(_) => HEAT_TRANSFER_LABEL,
         StepKind::CoupledTempDisp(_) => COUPLED_LABEL,
     }
@@ -2297,6 +2469,7 @@ fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
         StepKind::Dynamic(settings) => dynamic_form(ui, settings, units),
         StepKind::ModalDynamics(settings) => modal_dynamics_form(ui, settings, units),
         StepKind::SteadyStateDynamics(settings) => steady_state_form(ui, settings, units),
+        StepKind::Buckle(settings) => buckle_form(ui, settings),
         StepKind::HeatTransfer(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::CoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, true),
     }
@@ -2629,6 +2802,37 @@ fn validate_frequency_step(settings: &FrequencyStep) -> Result<(), String> {
         && lower >= upper
     {
         return Err("Die untere Frequenzgrenze muss kleiner als die obere sein.".into());
+    }
+    Ok(())
+}
+
+/// PrePoMax's buckle step view: perturbation, solver, number of buckling factors and
+/// accuracy.
+fn buckle_form(ui: &mut Ui, settings: &mut BuckleStep) {
+    ui.label("");
+    ui.checkbox(
+        &mut settings.perturbation,
+        "Preload from previous step (Perturbation)",
+    );
+    ui.end_row();
+    solver_row(ui, &mut settings.solver, true);
+    ui.label("Number of buckling factors");
+    ui.add(numeric::drag_value(&mut settings.num_factors).range(1..=10_000));
+    ui.end_row();
+    ui.label("Accuracy");
+    ui.add(numeric::drag_value(&mut settings.accuracy).speed(0.0));
+    ui.end_row();
+    ui.label("");
+    ui.weak("The critical load is the buckling factor times the loads of this step.");
+    ui.end_row();
+}
+
+fn validate_buckle_step(settings: &BuckleStep) -> Result<(), String> {
+    if !settings.solver.solves_eigenvalues() {
+        return Err("The iterative solvers cannot compute buckling factors.".into());
+    }
+    if settings.accuracy <= 0.0 {
+        return Err("The accuracy must be greater than zero.".into());
     }
     Ok(())
 }

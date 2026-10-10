@@ -617,7 +617,7 @@ fn entity_preview(view: &Model, entity: CadEntity) -> Preview {
     }
 }
 
-fn entities_highlight(view: &Model, entities: &BTreeSet<CadEntity>) -> Highlight {
+pub fn entities_highlight(view: &Model, entities: &BTreeSet<CadEntity>) -> Highlight {
     let (mut faces, mut edges) = (BTreeSet::new(), BTreeSet::new());
     for entity in entities {
         match *entity {
@@ -758,6 +758,21 @@ mod tests {
         assert_eq!(size, geometry.meshing.max_size / 4.0);
         editor.click(&view, None, Operation::Replace);
         assert!(editor.finish().is_err(), "a click into empty space clears");
+    }
+
+    #[test]
+    fn faces_named_in_a_gmsh_error_show_red() {
+        let Some((_, view)) = geometry_view() else {
+            return;
+        };
+        let message = "Gmsh: Invalid boundary mesh (overlapping facets) on surface 1 curve 2";
+        let entities = plx_mesher::named_entities(message).into_iter().collect();
+        let highlight = entities_highlight(&view, &entities);
+        assert!(!highlight.faces.is_empty() && !highlight.lines.is_empty());
+        let face: BTreeSet<_> = (highlight.faces.iter())
+            .map(|&(e, _)| view.cad_entity(e))
+            .collect();
+        assert_eq!(face, BTreeSet::from([Some(CadEntity::Face(1))]));
     }
 
     #[test]

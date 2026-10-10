@@ -688,6 +688,27 @@ fn modal_cantilever(damping: Option<ModalDamping>) -> (FeMesh, FeModel) {
     (mesh, model)
 }
 
+/// The cantilever of `kragbalken_c3d20r.inp` in a buckle step, pressed along its axis by
+/// 1 N on each of the 21 nodes of its free end.
+fn buckle_analysis() -> (FeMesh, FeModel) {
+    let (mesh, mut model) = analysis(
+        "kragbalken_c3d20r.inp",
+        Load {
+            name: "Force-1".into(),
+            active: true,
+            region: Region::NodeSet("TIP".into()),
+            kind: LoadKind::ConcentratedForce([-1.0, 0.0, 0.0]),
+            amplitude: None,
+            factor_amplitude: None,
+        },
+    );
+    let mut step = Step::new_buckle("Step-1");
+    step.boundary_conditions = model.steps[0].boundary_conditions.clone();
+    step.loads = model.steps[0].loads.clone();
+    model.steps = vec![step];
+    (mesh, model)
+}
+
 #[test]
 fn modal_steps_are_written_like_prepomax_does() {
     let (mesh, mut model) = modal_cantilever(Some(ModalDamping::Constant(0.02)));
@@ -760,6 +781,32 @@ fn modal_steps_are_written_like_prepomax_does() {
     );
 }
 
+#[test]
+fn a_buckle_step_is_written_like_prepomax_does() {
+    let (mesh, mut model) = buckle_analysis();
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Step\n*Buckle\n1, 0.0001\n",
+        "*Boundary\nFIX, 1, 6, 0\n",
+        "*Cload\nTIP, 1, -1\n",
+        "*Node file\nRF, U\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in\n{text}");
+    }
+    let StepKind::Buckle(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.perturbation = true;
+    settings.num_factors = 3;
+    settings.accuracy = 0.01;
+    model.resolve_default_solver(EquationSolver::Spooles);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Step, Perturbation\n*Buckle, Solver=Spooles\n3, 0.01\n"),
+        "{text}"
+    );
+}
+
 /// The modal superposition swings the tip like the direct integration does, damped by the
 /// modal damping ratio of 0.1 to about 1.73 times the static deflection; the harmonic
 /// sweep peaks near the first bending mode at about 1 / (2 zeta) = 5 times the static
@@ -820,6 +867,104 @@ fn calculix_superposes_the_stored_modes_of_the_cantilever() {
         "peak at {at} Hz, mode at {}",
         modes[0]
     );
+}
+
+#[test]
+fn calculix_finds_the_euler_load_of_the_cantilever() {
+    let (mesh, mut model) = buckle_analysis();
+    let StepKind::Buckle(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.num_factors = 2;
+    let Some(frd) = run_ccx("beulen", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let buckling: Vec<_> = (frd.increments.iter())
+        .filter(|i| i.kind == plx_results::AnalysisKind::Buckling)
+        .collect();
+    // The static solution of the reference load comes first as increment 0, then one
+    // increment per buckling mode with its factor and mode shape.
+    let (reference, buckling) = buckling.split_first().unwrap();
+    assert_eq!((reference.increment, reference.value), (0, 0.0));
+    assert!(reference.field("STRESS").is_some());
+    let factors: Vec<f64> = buckling.iter().map(|i| i.value).collect();
+    assert_eq!(factors.len(), 2, "{factors:?}");
+    let modes: Vec<u32> = buckling.iter().map(|i| i.increment).collect();
+    assert_eq!(modes, [1, 2]);
+    assert!(buckling.iter().all(|i| i.displacements().is_some()));
+    // Euler case 1: P = π² EI / (4 L²) for the 10 x 10 x 100 steel beam, against the 21 N
+    // of the load; shear makes the real beam a little softer. The square section buckles
+    // alike in both directions.
+    let euler = std::f64::consts::PI.powi(2) * 210_000.0 * 10.0_f64.powi(4)
+        / 12.0
+        / (4.0 * 100.0_f64.powi(2))
+        / 21.0;
+    for factor in &factors {
+        assert!(
+            (0.95 * euler..1.001 * euler).contains(factor),
+            "{factor} vs. {euler}"
+        );
+    }
+}
+
+#[test]
+fn the_buckling_mode_exports_as_a_deformed_mesh() {
+    let (mesh, model) = buckle_analysis();
+    let Some(frd) = run_ccx("beulform", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let mode = frd.increments.iter().find(|i| i.increment == 1).unwrap();
+    let displacements = mode.displacements().unwrap();
+    let text = write_deformed_mesh_inp(&frd.mesh, &displacements, 0.5, "Beulform").unwrap();
+    // Only the mesh: no material, section or step.
+    for keyword in ["*Material", "*Solid section", "*Step", "*Boundary"] {
+        assert!(!text.contains(keyword), "{keyword} in\n{text}");
+    }
+    let read = read_inp_str(&text, None).unwrap().mesh;
+    assert_eq!(read.node_ids(), frd.mesh.node_ids());
+    assert_eq!(read.element_count(), frd.mesh.element_count());
+    for ((moved, start), u) in read
+        .coords()
+        .iter()
+        .zip(frd.mesh.coords())
+        .zip(&displacements)
+    {
+        for k in 0..3 {
+            let expected = start[k] + 0.5 * f64::from(u[k]);
+            assert!(
+                (moved[k] - expected).abs() < 1e-6,
+                "{moved:?} vs. {start:?} + {u:?}"
+            );
+        }
+    }
+    // The free end moves sideways in the mode, the clamped end stays.
+    let tip = frd.mesh.node_index(41).unwrap();
+    let fixed = frd.mesh.node_index(1).unwrap();
+    assert!(read.coords()[tip] != frd.mesh.coords()[tip]);
+    assert_eq!(read.coords()[fixed], frd.mesh.coords()[fixed]);
+}
+
+#[test]
+fn a_preloaded_buckle_step_counts_its_modes_from_one() {
+    let (mesh, mut model) = buckle_analysis();
+    // A static step with a side load before the buckle step, taken over as preload.
+    let mut preload = Step::new_static("Step-1");
+    preload.boundary_conditions = model.steps[0].boundary_conditions.clone();
+    preload.loads.push(tip_force());
+    model.steps.insert(0, preload);
+    model.steps[1].name = "Step-2".into();
+    let StepKind::Buckle(settings) = &mut model.steps[1].kind else {
+        unreachable!()
+    };
+    settings.perturbation = true;
+    let Some(frd) = run_ccx("vorspannung-beulen", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let ids: Vec<_> = (frd.increments.iter())
+        .map(|i| (i.step, i.increment, i.kind))
+        .collect();
+    use plx_results::AnalysisKind::{Buckling, Static};
+    assert_eq!(ids, [(1, 1, Static), (2, 0, Buckling), (2, 1, Buckling)]);
 }
 
 #[test]
@@ -3027,4 +3172,190 @@ fn calculix_prints_the_contact_force_of_a_pair() {
         .unwrap();
     assert!(all.field("CONTACT_STRESS").is_some());
     assert!(all.field("TOTAL_NUMBER_OF_CONTACT_ELEMENTS").is_some());
+}
+
+/// The free cantilever without supports or loads, moving from an initial velocity in a
+/// short Dynamic step with direct increments.
+fn coasting_cantilever(kind: plx_model::InitialConditionKind) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = dynamic_cantilever(1e-3, 1e-4, None);
+    let step = &mut model.steps[0];
+    step.boundary_conditions.clear();
+    step.loads.clear();
+    model.initial_conditions.push(plx_model::InitialCondition {
+        name: "Initial_Velocity-1".into(),
+        active: true,
+        region: Region::Parts(vec!["EALL".into()]),
+        kind,
+    });
+    (mesh, model)
+}
+
+#[test]
+fn initial_velocities_are_written_like_prepomax_does() {
+    use plx_model::InitialConditionKind;
+    let (mesh, mut model) =
+        coasting_cantilever(InitialConditionKind::Velocity([0.0, 0.0, -1000.0]));
+    model.initial_conditions[0].region = Region::NodeSet("FIX".into());
+    let tip = mesh.node(99).unwrap();
+    model.initial_conditions.push(plx_model::InitialCondition {
+        name: "Initial_Angular_Velocity-1".into(),
+        active: true,
+        region: Region::Nodes(vec![99]),
+        kind: InitialConditionKind::AngularVelocity {
+            point: [0.0, 0.0, 5.0],
+            axis: [0.0, 2.0, 0.0],
+            speed: 10.0,
+        },
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    // y x (x, y, z - 5) = (z - 5, 0, -x): the tip moves down and, off the axis, along x.
+    let expected = format!(
+        "** Name: Initial_Velocity-1\n*Initial conditions, Type=Velocity\nFIX, 3, -1000\n\
+         ** Name: Initial_Angular_Velocity-1\n*Initial conditions, Type=Velocity\n\
+         99, 1, {}\n99, 3, {}\n",
+        number(10.0 * (tip[2] - 5.0)),
+        number(-10.0 * tip[0])
+    );
+    assert!(text.contains(&expected), "missing {expected:?} in\n{text}");
+    assert!(
+        !text.contains("FIX, 1,"),
+        "zero components are left out:\n{text}"
+    );
+}
+
+/// A free body keeps its initial velocity: after 1 ms at 1000 mm/s the tip has moved
+/// 1 mm; rotating at 10 rad/s about the root, the tip at the length L has moved 10 L t.
+#[test]
+fn calculix_starts_the_cantilever_from_its_initial_velocity() {
+    use plx_model::InitialConditionKind;
+    let (mesh, model) = coasting_cantilever(InitialConditionKind::Velocity([0.0, 0.0, -1000.0]));
+    let Some(frd) = run_ccx(
+        "anfangsgeschwindigkeit",
+        &write_inp(&mesh, &model, "").unwrap(),
+    ) else {
+        return;
+    };
+    let u3 = node_value(&frd, "DISP", "U3", 99);
+    assert!((u3 + 1.0).abs() < 0.02, "tip moved {u3} mm, expected -1");
+    let tip = mesh.node(99).unwrap();
+    let (mesh, model) = coasting_cantilever(InitialConditionKind::AngularVelocity {
+        point: [0.0, tip[1], tip[2]],
+        axis: [0.0, 1.0, 0.0],
+        speed: 10.0,
+    });
+    let frd = run_ccx("anfangsdrehung", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let u3 = node_value(&frd, "DISP", "U3", 99);
+    let expected = -10.0 * tip[0] * 1e-3;
+    assert!(
+        (u3 - expected).abs() < 0.02 * expected.abs(),
+        "tip moved {u3} mm, expected {expected}"
+    );
+}
+
+/// The half x <= 50 of the cantilever as a submodel: held at x = 0, its cut at x = 50
+/// driven by the global results with `dofs`.
+fn cantilever_submodel(dofs: [bool; 6]) -> (FeMesh, FeModel) {
+    let text = std::fs::read_to_string(testdata("kragbalken_c3d8.inp")).unwrap();
+    let mesh = read_inp_str(&text, None).unwrap().mesh;
+    let x = |id: NodeId| mesh.node(id).unwrap()[0];
+    let mut sub = String::new();
+    let mut block = "";
+    for line in text.lines() {
+        if line.starts_with('*') {
+            let kept = ["*NODE,", "*ELEMENT,", "*NSET, NSET=FIX"];
+            block = if kept.iter().any(|k| line.starts_with(k)) {
+                line
+            } else {
+                ""
+            };
+            if !block.is_empty() {
+                sub.push_str(line);
+                sub.push('\n');
+            }
+            continue;
+        }
+        let ids: Vec<NodeId> = (line.split(',').map(str::trim))
+            .filter_map(|v| v.parse().ok())
+            .collect();
+        let keep = if block.starts_with("*NODE") {
+            x(ids[0]) <= 50.0
+        } else if block.starts_with("*ELEMENT") {
+            ids[1..].iter().all(|&n| x(n) <= 50.0)
+        } else {
+            !block.is_empty()
+        };
+        if keep {
+            sub.push_str(line);
+            sub.push('\n');
+        }
+    }
+    let mesh = read_inp_str(&sub, None).unwrap().mesh;
+    let cut: Vec<NodeId> = (mesh.node_ids().iter().copied())
+        .filter(|&n| (mesh.node(n).unwrap()[0] - 50.0).abs() < 1e-9)
+        .collect();
+    let (_, mut model) = cantilever(tip_force());
+    let step = &mut model.steps[0];
+    step.loads.clear();
+    step.boundary_conditions.push(BoundaryCondition {
+        name: "Submodel-1".into(),
+        active: true,
+        region: Region::Nodes(cut),
+        kind: BoundaryKind::Submodel { step: 1, dofs },
+        amplitude: None,
+    });
+    model.properties.kind = plx_model::ModelKind::Submodel;
+    model.properties.global_results = Some(PathBuf::from("/somewhere/global.frd"));
+    (mesh, model)
+}
+
+#[test]
+fn submodels_read_the_cut_displacements_of_the_global_results() {
+    let (mesh, mut model) = cantilever_submodel([true, false, true, false, false, false]);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let heading = text.find("*Heading").unwrap();
+    let submodel = text
+        .find("*Submodel, Type=Node, Input=\"global.frd\"\nInternal_Selection-1_Submodel-1\n")
+        .expect(&text);
+    assert!(heading < submodel && submodel < text.find("*Node").unwrap());
+    assert!(text.contains(
+        "** Name: Submodel-1\n*Boundary, Submodel, Step=1\nInternal_Selection-1_Submodel-1, 1, 1\n\
+         Internal_Selection-1_Submodel-1, 3, 3\n"
+    ));
+
+    // A general model has no global results, as in PrePoMax.
+    model.properties.kind = plx_model::ModelKind::General;
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::NoGlobalResults { item }) if item == "Submodel-1"
+    ));
+    // Without an active submodel boundary condition nothing is read.
+    model.steps[0].boundary_conditions[1].active = false;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Submodel"));
+}
+
+#[test]
+fn calculix_submodel_follows_the_global_cantilever() {
+    let (mesh, mut model) = cantilever_submodel([true, true, true, false, false, false]);
+    let name = "submodel";
+    let dir = std::env::temp_dir().join(format!("plx-write-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(testdata("kragbalken_c3d8.frd"), dir.join("global.frd")).unwrap();
+    model.properties.global_results = Some(dir.join("global.frd"));
+    let Some(frd) = run_ccx(name, &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let global = read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
+    // The submodel has the global mesh of its half, so it reproduces the global solution
+    // inside, not only at the cut.
+    for node in mesh.node_ids().iter().copied() {
+        for component in ["U1", "U2", "U3"] {
+            let ours = node_value(&frd, "DISP", component, node);
+            let expected = node_value(&global, "DISP", component, node);
+            assert!(
+                (ours - expected).abs() <= 1e-4 * expected.abs().max(1e-3),
+                "node {node} {component}: {ours} != {expected}"
+            );
+        }
+    }
 }
