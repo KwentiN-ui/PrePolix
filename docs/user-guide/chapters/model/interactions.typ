@@ -113,6 +113,6 @@ creates ties or contact pairs for them.
 
 #ui("Search") fills the table. Each row can be edited and switched off with its check box; select
 several rows to edit them together. The context menu of a row has #ui("Swap Master/Slave") and
-#ui("Merge by Master/Slave"). prepolix chooses the coarser mesh as master, then the stiffer
+#ui("Merge by Master/Slave"). PrePolix chooses the coarser mesh as master, then the stiffer
 material, then the larger surface. #ui("OK") creates the checked pairs, all under
 #ui("Contact Pairs"); line ends become node ties. Surfaces that are whole CAD faces are stored by geometry and survive remeshing.

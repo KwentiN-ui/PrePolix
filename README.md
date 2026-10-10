@@ -50,7 +50,7 @@ Ein Tag `v*` baut den Installer über den Workflow *Release* und hängt ihn an d
 
 ## Benutzerhandbuch
 
-Das Benutzerhandbuch (Englisch, Typst) liegt in [docs/user-guide/](docs/user-guide/). Jedes Release enthält es als PDF; selbst bauen mit `typst compile --ignore-system-fonts docs/user-guide/main.typ`. Neue Features werden dort im PR mitbeschrieben, siehe [docs/user-guide/README.md](docs/user-guide/README.md).
+Das Benutzerhandbuch (Englisch, Typst) liegt in [docs/user-guide/](docs/user-guide/). Jedes Release enthält es als PDF; selbst bauen mit `typst compile --root . --ignore-system-fonts docs/user-guide/main.typ`. Neue Features werden dort im PR mitbeschrieben, siehe [docs/user-guide/README.md](docs/user-guide/README.md).
 
 ## Bedienung der 3D-Ansicht
 

@@ -2,14 +2,14 @@
 
 == Meshing <meshing>
 
-prepolix meshes each geometry part separately with Gmsh. Parts do not share nodes; connect them
+PrePolix meshes each geometry part separately with Gmsh. Parts do not share nodes; connect them
 with ties, contacts or node ties (@constraints).
 
 - #menu("Mesh", "Mesh All Parts") meshes every part.
 - #ui("Create Mesh") in the context menu of a part meshes only this part. Its old mesh is
   replaced; the other parts keep their node and element numbers.
 
-The output pane lists each part with its element count and size range. Afterwards prepolix
+The output pane lists each part with its element count and size range. Afterwards PrePolix
 switches to the #ui("FE Model") tab.
 
 === Element types

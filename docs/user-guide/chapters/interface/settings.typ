@@ -34,7 +34,7 @@ user (`~/.local/share/prepolix` on Linux, `%APPDATA%\prepolix\data` on Windows).
   [Executable], [Path to `ccx`. A bare name such as `ccx` is looked up on the system path.],
   [Threads], [Number of threads CalculiX uses (`OMP_NUM_THREADS`), default 1.],
   [Work directory], [Where input and result files of a run are written. Empty means a `Temp`
-    folder next to the prepolix program, or `<system temp>/prepolix` if that folder is not
+    folder next to the PrePolix program, or `<system temp>/prepolix` if that folder is not
     writable.],
   [Equation solvers], [The direct solvers found in the CalculiX executable, for example
     PARDISO. Steps with the solver #ui("Default") use Pardiso when it is available.],

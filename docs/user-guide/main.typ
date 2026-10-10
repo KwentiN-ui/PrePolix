@@ -1,12 +1,13 @@
-// prepolix User Guide. Build with:
-//   typst compile --ignore-system-fonts docs/user-guide/main.typ prepolix-user-guide.pdf
-// The release workflow passes the version with `--input version=v1.2.3`.
+// PrePolix User Guide. Build with:
+//   typst compile --root . --ignore-system-fonts docs/user-guide/main.typ prepolix-user-guide.pdf
+// from the repository root. The version is read from the workspace Cargo.toml, which is why
+// the root must be the repository and not this folder.
 // Each topic lives in its own file under chapters/, so that changes to different features do
 // not touch the same file. See README.md in this folder.
 
 #import "template.typ": *
 
-#show: guide.with(version: sys.inputs.at("version", default: "dev"))
+#show: guide.with(version: toml("../../Cargo.toml").workspace.package.version)
 
 #include "chapters/introduction.typ"
 #include "chapters/first-analysis.typ"

@@ -2,7 +2,7 @@
 
 == Keyword editor <keyword-editor>
 
-#menu("Model", "Edit CalculiX Keywords ...") shows the input file prepolix writes, as a tree of
+#menu("Model", "Edit CalculiX Keywords ...") shows the input file PrePolix writes, as a tree of
 keywords on the left and as text on the right. Here you add CalculiX keywords for features the
 dialogs do not offer yet.
 
@@ -21,4 +21,4 @@ fields") for keywords like `*CONTROLS`, `*OUTPUT` or `*TEMPERATURE`.
 
 User keywords are saved in the project and written every time the input file is written (run,
 model check, export). If the model changes so that a keyword has no valid place any more,
-prepolix warns that it will not be written.
+PrePolix warns that it will not be written.

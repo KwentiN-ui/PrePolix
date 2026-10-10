@@ -67,9 +67,9 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Handbuch bauen
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; else version="dev"; fi
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
           mkdir -p target/user-guide
-          typst compile --ignore-system-fonts --input "version=$version" \
+          typst compile --root . --ignore-system-fonts \
             docs/user-guide/main.typ "target/user-guide/prepolix-$version-user-guide.pdf"
       - uses: actions/upload-artifact@v4
         with:

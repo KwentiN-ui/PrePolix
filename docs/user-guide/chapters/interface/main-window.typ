@@ -5,7 +5,7 @@
 == Main window <main-window>
 
 The layout of the main window is fixed, as in PrePoMax. Only the separators between the panes can
-be moved. prepolix remembers the window size and position.
+be moved. PrePolix remembers the window size and position.
 
 #screenshot("main-window.png", [Main window with a model on the FE Model tab])
 

@@ -7,12 +7,14 @@ English with [Typst](https://typst.app) and does not describe the code.
 ## Building
 
 ```sh
-typst compile --ignore-system-fonts docs/user-guide/main.typ prepolix-user-guide.pdf
+typst compile --root . --ignore-system-fonts docs/user-guide/main.typ prepolix-user-guide.pdf
 ```
 
+Run it from the repository root: `--root .` lets the document read the version from the
+workspace `Cargo.toml`, so the title page always shows the current version.
 `--ignore-system-fonts` uses only the fonts built into Typst, so the PDF looks the same
 everywhere. The release workflow builds the PDF for every tag `v*` and attaches it to the GitHub
-release; the version on the title page comes from `--input version=v1.2.3`.
+release.
 
 ## Layout
 

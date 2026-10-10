@@ -18,16 +18,16 @@
     would (@export-inp).],
   [Export Deformed Mesh (.inp) ...], [Writes the displayed deformed mesh of the current result
     as a mesh-only input file (@export-deformed).],
-  [Exit], [Closes prepolix. There is no prompt for unsaved changes.],
+  [Exit], [Closes PrePolix. There is no prompt for unsaved changes.],
 )
 
-#note[prepolix has no undo and does not ask about unsaved changes. Save regularly.]
+#note[PrePolix has no undo and does not ask about unsaved changes. Save regularly.]
 
 === What each file type does
 
-/ `.plx` (prepolix project): geometry, mesh setup, mesh and FE model in one file. Saving writes a
+/ `.plx` (PrePolix project): geometry, mesh setup, mesh and FE model in one file. Saving writes a
   temporary file first and then replaces the old one, so a crash during saving cannot destroy the
-  project. A project written by a newer version of prepolix is refused.
+  project. A project written by a newer version of PrePolix is refused.
 / `.inp` (CalculiX input): *only the mesh* is imported: nodes, elements, `*NSET`, `*ELSET`
   (also `GENERATE`), `*SURFACE` and files referenced with `*INCLUDE`. Every element set named in
   `*ELEMENT, ELSET=...` becomes a part. All other keywords (materials, steps, ...) are skipped and
@@ -49,4 +49,4 @@ Files can be dropped onto the window. Several CAD files dropped together are com
 geometry; otherwise only the first dropped file is opened.
 
 On the command line, `prepolix model.plx results.frd` opens all files in order. Without files,
-prepolix reopens the last saved project that was open at exit.
+PrePolix reopens the last saved project that was open at exit.

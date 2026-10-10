@@ -18,7 +18,7 @@ A model has one analysis, #ui("Analysis-1"). It uses the CalculiX settings under
 )
 
 These commands are in the #ui("Analysis") menu and in the context menu of #ui("Analysis-1").
-Before CalculiX starts, prepolix refuses to run a model without mesh, without step or with all
+Before CalculiX starts, PrePolix refuses to run a model without mesh, without step or with all
 steps deactivated, and it stops if the input file cannot be written (for example because a region
 is empty).
 
@@ -31,13 +31,13 @@ is finished.
 #screenshot("monitor.png", [Monitor after a completed run])
 
 The status at the end is #ui("completed"), #ui("finished with errors, results available"),
-#ui("failed") or #ui("killed"). If CalculiX failed, prepolix looks for known error messages
+#ui("failed") or #ui("killed"). If CalculiX failed, PrePolix looks for known error messages
 in the output and adds a line "Possible cause: ..." with a remedy, for example for distorted
 elements, missing material data, rigid body motion or missing convergence.
 
 == Model check <model-check>
 
-prepolix checks the model continuously while you work. Items with a problem get a warning sign in
+PrePolix checks the model continuously while you work. Items with a problem get a warning sign in
 the tree; items with an error and their containers are shown in red. Click the warning sign to see
 what is wrong and how to fix it.
 
@@ -69,7 +69,7 @@ displacements of the global model.
   #ui("Submodel"). Choose the global result file under #ui("Global results .frd").
 + In a static step, create a boundary condition of type #ui("Submodel") on the cut faces. Choose
   the #ui("Global step") and the displacement components.
-+ Run the analysis. prepolix copies the global results next to the input file and writes
++ Run the analysis. PrePolix copies the global results next to the input file and writes
   `*SUBMODEL` and `*BOUNDARY, SUBMODEL`.
 
 #limitation[Only displacements can be transferred. The global result file must not be the result

@@ -10,7 +10,7 @@ end and pulled at the other. Each step links to the chapter with the details.
 + *Import the geometry.* #menu("Geometry", "Import ...") reads the STEP file of the plate. It
   appears as part `SOLID-1` on the #ui("Geometry") tab (@geometry-import).
 + *Mesh it.* #menu("Mesh", "Default Mesh Parameters ...") sets the element size, #ui("Mesh All
-  Parts") creates quadratic tetrahedra. prepolix switches to the #ui("FE Model") tab
+  Parts") creates quadratic tetrahedra. PrePolix switches to the #ui("FE Model") tab
   (@meshing).
 + *Material and section.* #menu("Model", "Create Material ...") with density, Young's modulus
   210000 MPa and Poisson's ratio 0.3, or copy steel from the material library (@materials). Then

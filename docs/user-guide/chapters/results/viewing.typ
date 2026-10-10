@@ -10,7 +10,7 @@ with the same name is read as well. Several result files can be open at the same
 #ui("Result") box on the toolbar switches between them. #menu("Results", "Close Current
 Results") and #ui("Close All Results") close them.
 
-When a result file is opened, prepolix shows the #ui("Results") tab with the last increment.
+When a result file is opened, PrePolix shows the #ui("Results") tab with the last increment.
 
 #screenshot("results.png", [von Mises stress of a static step])
 
@@ -19,7 +19,7 @@ When a result file is opened, prepolix shows the #ui("Results") tab with the las
 / Model: the mesh of the results with its parts and sets, and the features (reference points,
   coordinate systems, planes) used for result evaluation.
 / Field Outputs: the fields of the result file with their components. Click a component to show
-  it. Names follow PrePoMax (`U1`, `S11`, ...). prepolix adds the displacement magnitude `ALL`,
+  it. Names follow PrePoMax (`U1`, `S11`, ...). PrePolix adds the displacement magnitude `ALL`,
   `MISES`, `TRESCA`, the principal stresses and the signed maximum absolute principal stress.
 / History Outputs: values from the `.dat` file and history outputs you create (@history-outputs).
 / Hot Spot Stresses, Paths, Plane Results: evaluations described in the following sections.

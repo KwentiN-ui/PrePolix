@@ -54,5 +54,5 @@ The `.dat` file of the step is read into the history outputs (@history-outputs).
 part of the eigenvalue, the damping of the whirl), and `TURNING_DIRECTION` is +1 for a forward
 and −1 for a backward whirling mode, as CalculiX prints it (F or B).
 
-#note[A Campbell diagram over the speed of rotation needs one analysis per speed; prepolix
+#note[A Campbell diagram over the speed of rotation needs one analysis per speed; PrePolix
 runs this sweep for you, see the Campbell diagram section of the results chapter.]
