@@ -3,7 +3,8 @@ use std::process::Command;
 
 use plx_model::{
     BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, DefinedField, DefinedFieldKind,
-    Elastic, EquationSolver, Load, Material, NodeTie, Section, SectionKind, UserKeyword,
+    DynamicStep, Elastic, EquationSolver, Load, Material, ModalDamping, ModalDynamicsStep, NodeTie,
+    Section, SectionKind, SteadyStateDynamicsStep, UserKeyword,
 };
 
 use super::*;
@@ -534,6 +535,174 @@ fn calculix_finds_the_bending_frequency_of_the_cantilever() {
     }
 }
 
+/// The cantilever with a dynamic step of the given duration, increments of `increment`,
+/// the tip force applied at once (a stepped amplitude) and the given damping.
+fn dynamic_cantilever(
+    duration: f64,
+    increment: f64,
+    damping: Option<plx_model::RayleighDamping>,
+) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = analysis("kragbalken_c3d20r.inp", tip_force());
+    model
+        .amplitudes
+        .push(amplitude("Stepped", vec![[0.0, 1.0], [1.0, 1.0]]));
+    let step = &mut model.steps[0];
+    step.loads[0].amplitude = Some("Stepped".into());
+    step.field_outputs = FieldOutput::dynamic_defaults();
+    step.kind = StepKind::Dynamic(DynamicStep {
+        increments: StaticStep {
+            incrementation: Incrementation::Direct,
+            initial_increment: increment,
+            time_period: duration,
+            ..StaticStep::default()
+        },
+        damping,
+        ..DynamicStep::default()
+    });
+    (mesh, model)
+}
+
+#[test]
+fn a_dynamic_step_is_written_like_prepomax_does() {
+    let damping = plx_model::RayleighDamping {
+        alpha: 0.0,
+        beta: 4e-5,
+    };
+    let (mesh, mut model) = dynamic_cantilever(1.5e-3, 2.5e-5, Some(damping));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Step, Inc=100\n*Dynamic, Direct\n0.000025, 0.0015\n*Damping, Alpha=0, Beta=0.00004\n",
+        "*Cload, Amplitude=Stepped\n",
+        "*Node file\nRF, U, V\n",
+        "*El file\nS, E, ENER, NOE\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in\n{text}");
+    }
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.damping = None;
+    settings.alpha = -0.1;
+    settings.procedure = plx_model::DynamicProcedure::Explicit;
+    settings.increments.nlgeom = true;
+    settings.increments.incrementation = Incrementation::Automatic;
+    settings.increments.solver = EquationSolver::Spooles;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains(
+            "*Step, Nlgeom, Inc=100\n*Dynamic, Solver=Spooles, Alpha=-0.1, Explicit=3\n\
+             0.000025, 0.0015, 0.00001, 1.00000000E30\n"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("*Damping"), "{text}");
+    model.steps[0].active = false;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("** Name: DynamicStep: Deactivated\n"),
+        "{text}"
+    );
+}
+
+/// The tip deflection over time of a dynamic increment: (time, U3 at node 99).
+fn tip_history(frd: &FrdImport) -> Vec<(f64, f64)> {
+    let index = frd.mesh.node_index(99).unwrap();
+    (frd.increments.iter())
+        .filter(|i| i.kind == plx_results::AnalysisKind::Dynamic)
+        .map(|i| {
+            let u3 = i.field("DISP").unwrap().component("U3").unwrap().values[index];
+            (i.value, f64::from(u3))
+        })
+        .collect()
+}
+
+/// A force applied at once makes the cantilever swing about its static deflection: the
+/// first trough is twice the static deflection, half a period of the first mode after the
+/// start. Stiffness-proportional damping with a ratio of 0.1 lowers the trough to about
+/// 1 + e^(-0.1 pi) = 1.73 times the static deflection.
+#[test]
+fn calculix_swings_the_cantilever_about_its_static_deflection() {
+    let (mesh, reference) = analysis("kragbalken_c3d20r.inp", tip_force());
+    let Some(frd) = run_ccx(
+        "dynamik_statisch",
+        &write_inp(&mesh, &reference, "").unwrap(),
+    ) else {
+        return;
+    };
+    let static_u3 = node_value(&frd, "DISP", "U3", 99);
+    assert!(static_u3 < 0.0, "{static_u3}");
+    // 60 increments over 1.25 periods of the 810 Hz bending mode.
+    let (mesh, model) = dynamic_cantilever(1.5e-3, 2.5e-5, None);
+    let frd = run_ccx("dynamik", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let history = tip_history(&frd);
+    assert_eq!(history.len(), 60, "{history:?}");
+    let (trough_time, trough) = (history.iter().copied())
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .unwrap();
+    let ratio = trough / static_u3;
+    assert!((1.8..2.1).contains(&ratio), "trough {ratio} x static");
+    let half_period = 0.5 / 810.0;
+    assert!(
+        (trough_time - half_period).abs() < 0.15 * half_period,
+        "trough at {trough_time} s, expected {half_period} s"
+    );
+    let omega = 2.0 * std::f64::consts::PI * 810.0;
+    let damping = plx_model::RayleighDamping {
+        alpha: 0.0,
+        beta: 2.0 * 0.1 / omega,
+    };
+    let (mesh, model) = dynamic_cantilever(1.5e-3, 2.5e-5, Some(damping));
+    let frd = run_ccx("dynamik_gedaempft", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let damped = (tip_history(&frd).iter()).map(|h| h.1).fold(0.0, f64::min);
+    let damped_ratio = damped / static_u3;
+    assert!(
+        (1.55..1.9).contains(&damped_ratio) && damped_ratio < ratio - 0.08,
+        "damped trough {damped_ratio} x static, undamped {ratio}"
+    );
+}
+
+/// The cantilever with a frequency step that stores its modes, a modal dynamics step with
+/// the tip force applied at once, and a steady state sweep of the tip force around the
+/// first bending mode; both modal steps damped as given.
+fn modal_cantilever(damping: Option<ModalDamping>) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = analysis("kragbalken_c3d20r.inp", tip_force());
+    model
+        .amplitudes
+        .push(amplitude("Stepped", vec![[0.0, 1.0], [1.0, 1.0]]));
+    let supports = model.steps[0].boundary_conditions.clone();
+    let mut force = model.steps[0].loads[0].clone();
+    force.amplitude = Some("Stepped".into());
+    let mut frequency = Step::new_frequency("Step-1");
+    frequency.boundary_conditions = supports.clone();
+    let StepKind::Frequency(settings) = &mut frequency.kind else {
+        unreachable!()
+    };
+    settings.storage = true;
+    settings.num_frequencies = 6;
+    let mut modal = Step::new_modal_dynamics("Step-2");
+    modal.boundary_conditions = supports.clone();
+    modal.loads = vec![force];
+    modal.kind = StepKind::ModalDynamics(ModalDynamicsStep {
+        increment: 2.5e-5,
+        time_period: 1.5e-3,
+        damping: damping.clone(),
+        ..ModalDynamicsStep::default()
+    });
+    let mut sweep = Step::new_steady_state_dynamics("Step-3");
+    sweep.boundary_conditions = supports;
+    sweep.loads = model.steps[0].loads.clone();
+    sweep.kind = StepKind::SteadyStateDynamics(SteadyStateDynamicsStep {
+        lower_frequency: 700.0,
+        upper_frequency: 900.0,
+        data_points: 21,
+        bias: 1.0,
+        damping,
+        ..SteadyStateDynamicsStep::default()
+    });
+    model.steps = vec![frequency, modal, sweep];
+    (mesh, model)
+}
+
 /// The cantilever of `kragbalken_c3d20r.inp` in a buckle step, pressed along its axis by
 /// 1 N on each of the 21 nodes of its free end.
 fn buckle_analysis() -> (FeMesh, FeModel) {
@@ -553,6 +722,78 @@ fn buckle_analysis() -> (FeMesh, FeModel) {
     step.loads = model.steps[0].loads.clone();
     model.steps = vec![step];
     (mesh, model)
+}
+
+#[test]
+fn modal_steps_are_written_like_prepomax_does() {
+    let (mesh, mut model) = modal_cantilever(Some(ModalDamping::Constant(0.02)));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Step\n*Frequency, Storage=Yes\n6\n",
+        "*Step, Inc=100\n*Modal dynamics\n0.000025, 0.0015\n*Modal damping\n1, 1000000, 0.02\n",
+        "*Cload, Amplitude=Stepped\n",
+        "*Step\n*Steady state dynamics\n700, 900, 21, 1\n*Modal damping\n1, 1000000, 0.02\n",
+        "*Node file\nRF, U, V\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in\n{text}");
+    }
+    let StepKind::ModalDynamics(settings) = &mut model.steps[1].kind else {
+        unreachable!()
+    };
+    settings.time_period = 0.01;
+    settings.steady_state = true;
+    settings.solver = EquationSolver::Spooles;
+    settings.damping = Some(ModalDamping::Direct(vec![
+        plx_model::ModeDamping {
+            lowest: 1,
+            highest: 2,
+            ratio: 0.05,
+        },
+        plx_model::ModeDamping {
+            lowest: 3,
+            highest: 6,
+            ratio: 0.1,
+        },
+    ]));
+    let StepKind::SteadyStateDynamics(settings) = &mut model.steps[2].kind else {
+        unreachable!()
+    };
+    settings.harmonic = false;
+    settings.fourier_terms = 5;
+    settings.time_upper = 0.002;
+    settings.damping = Some(ModalDamping::Rayleigh(plx_model::RayleighDamping {
+        alpha: 10.0,
+        beta: 4e-5,
+    }));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Step, Inc=100\n*Modal dynamics, Solver=Spooles, Steady state\n0.000025, 0.01\n\
+         *Modal damping\n1, 2, 0.05\n3, 6, 0.1\n",
+        "*Step\n*Steady state dynamics, Harmonic=No\n700, 900, 21, 1, 5, 0, 0.002\n\
+         *Modal damping, Rayleigh\n , , 10, 0.00004\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in\n{text}");
+    }
+    // The increment count grows with the time period.
+    let StepKind::ModalDynamics(settings) = &mut model.steps[1].kind else {
+        unreachable!()
+    };
+    settings.steady_state = false;
+    settings.time_period = 0.01;
+    assert_eq!(settings.increments(), 401);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Step, Inc=401\n*Modal dynamics"), "{text}");
+    model.steps[1].active = false;
+    model.steps[2].active = false;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("** Name: ModalDynamicsStep: Deactivated\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("** Name: SteadyStateDynamicsStep: Deactivated\n"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -578,6 +819,68 @@ fn a_buckle_step_is_written_like_prepomax_does() {
     assert!(
         text.contains("*Step, Perturbation\n*Buckle, Solver=Spooles\n3, 0.01\n"),
         "{text}"
+    );
+}
+
+/// The modal superposition swings the tip like the direct integration does, damped by the
+/// modal damping ratio of 0.1 to about 1.73 times the static deflection; the harmonic
+/// sweep peaks near the first bending mode at about 1 / (2 zeta) = 5 times the static
+/// deflection, a little less where the 10 Hz grid misses the resonance.
+#[test]
+fn calculix_superposes_the_stored_modes_of_the_cantilever() {
+    let (mesh, reference) = analysis("kragbalken_c3d20r.inp", tip_force());
+    let Some(frd) = run_ccx("modal_statisch", &write_inp(&mesh, &reference, "").unwrap()) else {
+        return;
+    };
+    let static_u3 = node_value(&frd, "DISP", "U3", 99);
+    let (mesh, model) = modal_cantilever(Some(ModalDamping::Constant(0.1)));
+    let frd = run_ccx("modal", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let index = frd.mesh.node_index(99).unwrap();
+    let tip = |i: &plx_results::Increment| {
+        f64::from(i.field("DISP").unwrap().component("U3").unwrap().values[index])
+    };
+    let modes: Vec<f64> = (frd.increments.iter())
+        .filter(|i| i.kind == plx_results::AnalysisKind::Frequency)
+        .map(|i| i.value)
+        .collect();
+    assert_eq!(modes.len(), 6, "{modes:?}");
+    assert!((780.0..835.0).contains(&modes[0]), "{modes:?}");
+    let history: Vec<f64> = (frd.increments.iter())
+        .filter(|i| i.step == 2)
+        .map(tip)
+        .collect();
+    assert_eq!(history.len(), 60, "{history:?}");
+    let trough = history.iter().copied().fold(0.0, f64::min) / static_u3;
+    assert!((1.55..1.9).contains(&trough), "trough {trough} x static");
+    // Each frequency point carries the real part (DISP) and the imaginary part (DISPI);
+    // the magnitude peaks at resonance.
+    let imaginary = |i: &plx_results::Increment| {
+        (i.field("DISPI"))
+            .and_then(|f| f.component("U3"))
+            .map_or(0.0, |c| f64::from(c.values[index]))
+    };
+    let sweep: Vec<(f64, f64)> = (frd.increments.iter())
+        .filter(|i| i.step == 3)
+        .map(|i| (i.value, tip(i).hypot(imaginary(i))))
+        .collect();
+    assert!(sweep.len() >= 21, "{}", sweep.len());
+    let mut peak = 0.0_f64;
+    let mut at = 0.0;
+    for (frequency, magnitude) in &sweep {
+        if *magnitude > peak {
+            peak = *magnitude;
+            at = *frequency;
+        }
+    }
+    let ratio = peak / static_u3.abs();
+    assert!(
+        (4.0..5.6).contains(&ratio),
+        "peak {ratio} x static at {at} Hz"
+    );
+    assert!(
+        (at - modes[0]).abs() < 12.0,
+        "peak at {at} Hz, mode at {}",
+        modes[0]
     );
 }
 
@@ -3032,6 +3335,84 @@ fn calculix_prints_the_contact_force_of_a_pair() {
         .unwrap();
     assert!(all.field("CONTACT_STRESS").is_some());
     assert!(all.field("TOTAL_NUMBER_OF_CONTACT_ELEMENTS").is_some());
+}
+
+/// The free cantilever without supports or loads, moving from an initial velocity in a
+/// short Dynamic step with direct increments.
+fn coasting_cantilever(kind: plx_model::InitialConditionKind) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = dynamic_cantilever(1e-3, 1e-4, None);
+    let step = &mut model.steps[0];
+    step.boundary_conditions.clear();
+    step.loads.clear();
+    model.initial_conditions.push(plx_model::InitialCondition {
+        name: "Initial_Velocity-1".into(),
+        active: true,
+        region: Region::Parts(vec!["EALL".into()]),
+        kind,
+    });
+    (mesh, model)
+}
+
+#[test]
+fn initial_velocities_are_written_like_prepomax_does() {
+    use plx_model::InitialConditionKind;
+    let (mesh, mut model) =
+        coasting_cantilever(InitialConditionKind::Velocity([0.0, 0.0, -1000.0]));
+    model.initial_conditions[0].region = Region::NodeSet("FIX".into());
+    let tip = mesh.node(99).unwrap();
+    model.initial_conditions.push(plx_model::InitialCondition {
+        name: "Initial_Angular_Velocity-1".into(),
+        active: true,
+        region: Region::Nodes(vec![99]),
+        kind: InitialConditionKind::AngularVelocity {
+            point: [0.0, 0.0, 5.0],
+            axis: [0.0, 2.0, 0.0],
+            speed: 10.0,
+        },
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    // y x (x, y, z - 5) = (z - 5, 0, -x): the tip moves down and, off the axis, along x.
+    let expected = format!(
+        "** Name: Initial_Velocity-1\n*Initial conditions, Type=Velocity\nFIX, 3, -1000\n\
+         ** Name: Initial_Angular_Velocity-1\n*Initial conditions, Type=Velocity\n\
+         99, 1, {}\n99, 3, {}\n",
+        number(10.0 * (tip[2] - 5.0)),
+        number(-10.0 * tip[0])
+    );
+    assert!(text.contains(&expected), "missing {expected:?} in\n{text}");
+    assert!(
+        !text.contains("FIX, 1,"),
+        "zero components are left out:\n{text}"
+    );
+}
+
+/// A free body keeps its initial velocity: after 1 ms at 1000 mm/s the tip has moved
+/// 1 mm; rotating at 10 rad/s about the root, the tip at the length L has moved 10 L t.
+#[test]
+fn calculix_starts_the_cantilever_from_its_initial_velocity() {
+    use plx_model::InitialConditionKind;
+    let (mesh, model) = coasting_cantilever(InitialConditionKind::Velocity([0.0, 0.0, -1000.0]));
+    let Some(frd) = run_ccx(
+        "anfangsgeschwindigkeit",
+        &write_inp(&mesh, &model, "").unwrap(),
+    ) else {
+        return;
+    };
+    let u3 = node_value(&frd, "DISP", "U3", 99);
+    assert!((u3 + 1.0).abs() < 0.02, "tip moved {u3} mm, expected -1");
+    let tip = mesh.node(99).unwrap();
+    let (mesh, model) = coasting_cantilever(InitialConditionKind::AngularVelocity {
+        point: [0.0, tip[1], tip[2]],
+        axis: [0.0, 1.0, 0.0],
+        speed: 10.0,
+    });
+    let frd = run_ccx("anfangsdrehung", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let u3 = node_value(&frd, "DISP", "U3", 99);
+    let expected = -10.0 * tip[0] * 1e-3;
+    assert!(
+        (u3 - expected).abs() < 0.02 * expected.abs(),
+        "tip moved {u3} mm, expected {expected}"
+    );
 }
 
 fn body_load(kind: LoadKind) -> Load {
