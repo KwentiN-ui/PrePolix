@@ -10,12 +10,12 @@ use egui::Ui;
 use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
     Amplitude, BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, BoundaryKind,
-    BuckleStep, Constraint, ContactPair, DynamicProcedure, DynamicStep, Elastic, EquationSolver,
-    FeModel, FieldOutput, FrequencyStep, HeatTransferStep, HistoryKind, HistoryOutput,
-    Incrementation, InitialCondition, InitialConditionKind, Load, LoadKind, Material, ModalDamping,
-    ModalDynamicsStep, ModeDamping, ModelSpace, NodeTie, OutputKind, Quantity, Region, Section,
-    SectionKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceInteraction,
-    UnitSystem, next_name,
+    BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, DynamicProcedure, DynamicStep,
+    Elastic, EquationSolver, FeModel, FieldOutput, FrequencyStep, HeatTransferStep, HistoryKind,
+    HistoryOutput, Incrementation, InitialCondition, InitialConditionKind, Load, LoadKind,
+    Material, ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, NodeTie, OutputKind,
+    Quantity, Region, Section, SectionKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
+    SurfaceInteraction, UnitSystem, next_name,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row};
@@ -1801,7 +1801,7 @@ impl Editor {
                         return Err(problem);
                     }
                 }
-                StepKind::Static(_) => {}
+                StepKind::Static(_) | StepKind::ComplexFrequency(_) => {}
             }
         }
         Ok(())
@@ -2439,7 +2439,7 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
 
 /// The step kinds of the dialog: label, the kind with its settings and its default field
 /// outputs, in PrePoMax's order.
-fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 8] {
+fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 9] {
     let heat = HeatTransferStep::default();
     [
         (
@@ -2468,6 +2468,11 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 8] {
             FieldOutput::defaults(),
         ),
         (
+            COMPLEX_FREQUENCY_LABEL,
+            StepKind::ComplexFrequency(ComplexFrequencyStep::default()),
+            FieldOutput::complex_frequency_defaults(),
+        ),
+        (
             BUCKLE_LABEL,
             StepKind::Buckle(BuckleStep::default()),
             FieldOutput::defaults(),
@@ -2490,6 +2495,7 @@ const FREQUENCY_LABEL: &str = "Eigenfrequenzen (Frequency)";
 const DYNAMIC_LABEL: &str = "Dynamic (time integration)";
 const MODAL_DYNAMICS_LABEL: &str = "Modal Dynamics (from stored modes)";
 const STEADY_STATE_LABEL: &str = "Steady State Dynamics (frequency response)";
+const COMPLEX_FREQUENCY_LABEL: &str = "Complex Frequency (rotating, Coriolis)";
 const BUCKLE_LABEL: &str = "Buckling (Buckle)";
 const HEAT_TRANSFER_LABEL: &str = "Wärmeübertragung (Heat Transfer)";
 const COUPLED_LABEL: &str = "Thermomechanisch gekoppelt (Coupled Temp-Disp)";
@@ -2501,6 +2507,7 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
         StepKind::Dynamic(_) => DYNAMIC_LABEL,
         StepKind::ModalDynamics(_) => MODAL_DYNAMICS_LABEL,
         StepKind::SteadyStateDynamics(_) => STEADY_STATE_LABEL,
+        StepKind::ComplexFrequency(_) => COMPLEX_FREQUENCY_LABEL,
         StepKind::Buckle(_) => BUCKLE_LABEL,
         StepKind::HeatTransfer(_) => HEAT_TRANSFER_LABEL,
         StepKind::CoupledTempDisp(_) => COUPLED_LABEL,
@@ -2536,6 +2543,7 @@ fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
         StepKind::Dynamic(settings) => dynamic_form(ui, settings, units),
         StepKind::ModalDynamics(settings) => modal_dynamics_form(ui, settings, units),
         StepKind::SteadyStateDynamics(settings) => steady_state_form(ui, settings, units),
+        StepKind::ComplexFrequency(settings) => complex_frequency_form(ui, settings),
         StepKind::Buckle(settings) => buckle_form(ui, settings),
         StepKind::HeatTransfer(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::CoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, true),
@@ -2858,6 +2866,30 @@ fn frequency_form(ui: &mut Ui, settings: &mut FrequencyStep, units: UnitSystem) 
     ui.end_row();
     ui.label("");
     ui.weak("Lasten wirken in einem Frequency Step nicht; nur die Randbedingungen zählen.");
+    ui.end_row();
+}
+
+/// Settings of a complex frequency step, PrePoMax's dialog: the number of modes; the Coriolis
+/// option and the perturbation flag are CalculiX's, with a hint at what the step builds on.
+fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep) {
+    ui.label("");
+    ui.checkbox(&mut settings.perturbation, "Perturbation step");
+    ui.end_row();
+    ui.label("");
+    ui.checkbox(
+        &mut settings.coriolis,
+        "Coriolis forces of the rotation (CORIOLIS)",
+    );
+    ui.end_row();
+    ui.label("Number of complex frequencies");
+    ui.add(numeric::drag_value(&mut settings.num_frequencies).range(1..=10_000));
+    ui.end_row();
+    ui.label("");
+    ui.weak(
+        "Solved on the modes of the last Frequency step with Storage before this step.\n\
+         The rotation comes from a Centrifugal load in the Static step before that one.\n\
+         Loads have no effect in this step; only the boundary conditions count.",
+    );
     ui.end_row();
 }
 
