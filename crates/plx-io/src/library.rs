@@ -54,7 +54,7 @@ pub fn read_library(path: &Path) -> Result<MaterialLibrary, LibraryError> {
             });
         }
     };
-    let library: MaterialLibrary = ron::from_str(&text).map_err(|e| LibraryError::Format {
+    let mut library: MaterialLibrary = ron::from_str(&text).map_err(|e| LibraryError::Format {
         path: path.to_owned(),
         message: e.to_string(),
     })?;
@@ -64,6 +64,7 @@ pub fn read_library(path: &Path) -> Result<MaterialLibrary, LibraryError> {
             format: library.format,
         });
     }
+    library.update_defaults();
     Ok(library)
 }
 
