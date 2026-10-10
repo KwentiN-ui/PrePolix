@@ -92,10 +92,12 @@ impl FeModel {
                     c.option(&mut f.upper_frequency, Quantity::Frequency);
                 }
                 StepKind::ComplexFrequency(_) => {}
+                // Buckling factors and the accuracy have no unit.
+                StepKind::Buckle(_) => {}
             }
             for bc in &mut step.boundary_conditions {
                 match &mut bc.kind {
-                    BoundaryKind::Fixed => {}
+                    BoundaryKind::Fixed | BoundaryKind::Submodel { .. } => {}
                     BoundaryKind::Displacement(values) => {
                         for (i, value) in values.iter_mut().enumerate() {
                             let quantity = if i < 3 {
