@@ -26,6 +26,7 @@ use crate::model_properties::{DialogResult, ModelPropertiesDialog, geometry_chec
 use crate::numeric;
 use crate::overlay::{Marker, Overlay};
 use crate::properties;
+use crate::query::{QueryAction, QueryWindow};
 use crate::results::{Deformation, ResultsView, format_legend_value};
 use crate::screenshot::{self, Screenshot};
 use crate::section::{PlaneDefinition, SectionDialog, SectionResult, SectionView};
@@ -98,6 +99,8 @@ struct Workbench {
     keyword_editor: Option<KeywordEditor>,
     /// Open search for contact pairs.
     contact_search: Option<ContactSearchDialog>,
+    /// PrePoMax's Query tool, while its window is open.
+    query: Option<QueryWindow>,
     /// Open material library editor.
     material_library: Option<MaterialLibraryEditor>,
     /// Open dialog creating or editing a field output derived from the shown results.
@@ -212,6 +215,7 @@ impl PrepolixApp {
                 confirm_delete: None,
                 keyword_editor: None,
                 contact_search: None,
+                query: None,
                 material_library: None,
                 field_output_dialog: None,
                 history_dialog: None,
@@ -492,6 +496,10 @@ impl PrepolixApp {
             ui.menu_button("Analyse", |ui| self.workbench.analysis_menu(ui));
             ui.menu_button("Ergebnisse", |ui| self.workbench.results_menu(ui));
             ui.menu_button("Werkzeuge", |ui| {
+                if ui.button("Query …").clicked() {
+                    self.workbench.query = Some(QueryWindow::default());
+                }
+                ui.separator();
                 if ui.button("Einstellungen …").clicked() {
                     self.workbench.settings_window =
                         Some(SettingsWindow::new(&self.workbench.settings));
@@ -876,6 +884,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.editor_window(&ctx);
         self.workbench.confirm_delete_window(&ctx);
         self.workbench.contact_search_window(&ctx);
+        self.workbench.query_window(&ctx);
         self.workbench.section_window(&ctx);
         self.workbench.exploded_window(&ctx);
         self.workbench.keyword_editor_window(&ctx);
@@ -1608,6 +1617,9 @@ impl Workbench {
     /// Whether clicks in the 3D view pick for an open dialog: an item dialog of the FE model
     /// or a history output or hot spot dialog of the results.
     fn picking(&self) -> bool {
+        if self.query.is_some() {
+            return true;
+        }
         match self.tree_view {
             TreeView::Results => {
                 (self.history_dialog.as_ref()).is_some_and(HistoryOutputDialog::picks)
@@ -1917,6 +1929,26 @@ impl Workbench {
         let mesh = egui::Button::new("Alle Parts vernetzen");
         if ui.add_enabled(self.meshing.is_none(), mesh).clicked() {
             self.generate_mesh(ui.ctx(), None);
+        }
+    }
+
+    fn query_window(&mut self, ctx: &egui::Context) {
+        let Some(query) = &mut self.query else {
+            return;
+        };
+        let model = match self.tree_view {
+            TreeView::Results => self.results.get(self.current_result),
+            TreeView::Geometry => self.geometry.as_ref(),
+            TreeView::FeModel => self.model.as_ref(),
+        };
+        match query.show(ctx, model, &mut self.output) {
+            QueryAction::Open => {}
+            QueryAction::Changed => self.update_contour(),
+            QueryAction::Close => {
+                self.query = None;
+                self.viewport.preview = Default::default();
+                self.update_contour();
+            }
         }
     }
 
@@ -2540,6 +2572,20 @@ impl Workbench {
     /// selects it in the tree, as in PrePoMax, and a click into empty space clears the tree
     /// selection and with it the highlighted region.
     fn click(&mut self, click: Click) {
+        if let Some(query) = &mut self.query {
+            let model = match self.tree_view {
+                TreeView::Results => self.results.get(self.current_result),
+                TreeView::Geometry => self.geometry.as_ref(),
+                TreeView::FeModel => self.model.as_ref(),
+            };
+            if let Some(model) = model {
+                let hit = model.pick_click(&click);
+                if query.click(model, hit.as_ref(), &mut self.output) {
+                    self.update_contour();
+                }
+            }
+            return;
+        }
         if self.feature_picks()
             && let Some(dialog) = &mut self.feature_dialog
         {
@@ -2719,6 +2765,16 @@ impl Workbench {
 
     /// Shows what a click would select where the mouse rests.
     fn hover(&mut self, hover: Option<Click>) {
+        if let Some(query) = &self.query {
+            self.viewport.preview = match (hover, self.shown()) {
+                (Some(click), Some(model)) => model
+                    .pick_click(&click)
+                    .map(|hit| query.preview(model, &hit))
+                    .unwrap_or_default(),
+                _ => Default::default(),
+            };
+            return;
+        }
         if self.feature_picks()
             && let Some(dialog) = &self.feature_dialog
             && let Some(model) = self.feature_model(dialog.results)
@@ -4443,8 +4499,14 @@ impl Workbench {
                 text: format!("{label}: {}\nSection plane", format_legend_value(value)),
             })
         };
+        let query = self
+            .query
+            .as_ref()
+            .map(|q| q.marks(model))
+            .unwrap_or_default();
         self.viewport.overlay = Overlay {
             legend: view.and_then(ResultsView::legend),
+            annotations: query.markers,
             status: view
                 .filter(|_| post.status_block)
                 .map_or_else(Vec::new, |v| v.status_lines(&model.file_name())),
@@ -4463,12 +4525,17 @@ impl Workbench {
             nodes: (model.highlight.nodes.iter())
                 .filter_map(|&id| model.node_position(model.mesh.node_index(id)?))
                 .chain(transformation.iter().flat_map(|d| d.points(model)))
+                .chain(query.points)
                 .collect(),
             edges: render_lines(model, &model.highlight.lines),
             secondary_edges: render_lines(model, &model.highlight.secondary_lines),
             axis,
             paths: self.overlay_paths(),
-            lines: transformation.map_or_else(Vec::new, |d| d.lines(model)),
+            lines: (transformation
+                .map_or_else(Vec::new, |d| d.lines(model))
+                .into_iter())
+            .chain(query.lines)
+            .collect(),
             features: Vec::new(),
             result_path: None,
         };
