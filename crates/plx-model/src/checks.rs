@@ -95,8 +95,8 @@ impl Problem {
             Problem::NoGlobalResults => "No global results",
             Problem::IncrementExceedsStep => "Inkrement größer als der Step",
             Problem::NoLoad => "Keine Last",
-            Problem::NoStoredModes => "Keine gespeicherten Eigenformen",
-            Problem::NoRotation => "Keine Rotation",
+            Problem::NoStoredModes => "No stored eigenmodes",
+            Problem::NoRotation => "No rotation",
             Problem::NoConvergence => "Keine Konvergenz",
             Problem::MpcAndSpc => "Freiheitsgrad doppelt gebunden",
             Problem::RotationIn2d => "Rotation in einem 2D-Modell",
@@ -207,14 +207,14 @@ impl Problem {
                  Die Rechnung läuft, alle Ergebnisse sind aber null."
             }
             Problem::NoStoredModes => {
-                "Ein Complex Frequency Step rechnet auf den Eigenformen des letzten Frequency \
-                 Steps davor, der sie mit Storage in die .eig-Datei schreibt. Ohne ihn bricht \
-                 CalculiX mit \"the eigenvalue file does not exist\" ab."
+                "A Complex Frequency step works on the eigenmodes of the last Frequency step \
+                 before it, which writes them to the .eig file with Storage. Without it \
+                 CalculiX stops with \"the eigenvalue file does not exist\"."
             }
             Problem::NoRotation => {
-                "Die Coriolis-Kräfte eines Complex Frequency Steps kommen aus der \
-                 Fliehkraftlast eines statischen Steps vor dem Frequency Step. Ohne Rotation \
-                 sind die komplexen Eigenfrequenzen die des Frequency Steps."
+                "The Coriolis forces of a Complex Frequency step come from the centrifugal \
+                 load of a static step before the Frequency step. Without a rotation the \
+                 complex eigenfrequencies are those of the Frequency step."
             }
             Problem::NoConvergence => {
                 "Die Newton-Iteration ist nicht konvergiert; CalculiX hat das Inkrement \
@@ -316,11 +316,11 @@ impl Problem {
             }
             Problem::NoLoad => "Unter Loads eine Last erstellen oder eine deaktivierte aktivieren.",
             Problem::NoStoredModes => {
-                "Vor dem Complex Frequency Step einen Frequency Step mit der Option Storage \
-                 anlegen (als Perturbation Step nach einem statischen Step mit der Fliehkraft)."
+                "Create a Frequency step with the Storage option before the Complex Frequency \
+                 step (as a perturbation step after a static step with the centrifugal load)."
             }
             Problem::NoRotation => {
-                "Im statischen Step vor dem Frequency Step eine Centrifugal Load erstellen."
+                "Create a Centrifugal load in the static step before the Frequency step."
             }
             Problem::NoConvergence => {
                 "Kontakte prüfen (Steifigkeit der Surface Interaction, Adjust, Lage der \
@@ -758,7 +758,7 @@ impl FeModel {
                 findings.push(Finding::new(
                     ModelItem::Step(s),
                     Problem::NoStoredModes,
-                    format!("{}: kein Frequency Step mit Storage davor", step.name),
+                    format!("{}: no Frequency step with Storage before it", step.name),
                 ));
             }
             let rotating = before().any(|s| {
@@ -770,7 +770,7 @@ impl FeModel {
                 findings.push(Finding::new(
                     ModelItem::Step(s),
                     Problem::NoRotation,
-                    format!("{}: keine Fliehkraftlast in einem Step davor", step.name),
+                    format!("{}: no centrifugal load in a step before it", step.name),
                 ));
             }
         }
