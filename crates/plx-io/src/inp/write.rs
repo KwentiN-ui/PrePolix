@@ -11,11 +11,12 @@ use std::fmt::Write as _;
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
-    Amplitude, AmplitudeTime, BoundaryKind, ComplexFrequencyStep, Constraint, ContactMethod,
-    ContactPair, FeModel, FieldOutput, FrequencyStep, GapConductance, HeatTransferStep,
-    HistoryKind, HistoryOutput, Incrementation, InitialConditionKind, InteractionProperty,
-    LoadKind, ModelSpace, NodeTie, OutputKind, Region, Section, SectionKind, StaticStep, Step,
-    StepKind, SurfaceBehavior, SurfaceInteraction, Totals, UserKeyword, line_tangent,
+    Amplitude, AmplitudeTime, BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint,
+    ContactMethod, ContactPair, FeModel, FieldOutput, FrequencyStep, GapConductance,
+    HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialConditionKind,
+    InteractionProperty, LoadKind, ModelSpace, NodeTie, OutputKind, Region, Section, SectionKind,
+    StaticStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Totals, UserKeyword,
+    line_tangent,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -41,6 +42,12 @@ pub enum WriteError {
     /// A load without a direction, such as a gravity of zero.
     #[error("{item}: {reason}")]
     InvalidLoad { item: String, reason: String },
+    /// A submodel boundary condition in a model that names no global results file.
+    #[error(
+        "{item}: the submodel has no global results file (Model > Model Properties: model \
+         type Submodel)"
+    )]
+    NoGlobalResults { item: String },
 }
 
 /// One entry of the keyword tree of an input file, the structure PrePoMax's keyword editor
@@ -120,6 +127,23 @@ pub fn write_inp(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<String
     let mut tree = model_keywords(mesh, model, heading)?;
     insert_user_keywords(&mut tree, &model.user_keywords);
     Ok(write_keywords(&tree))
+}
+
+/// An input file with only the mesh, its nodes moved by `scale` times `displacements` (one per
+/// node, in the order of [`FeMesh::coords`]), as PrePoMax's "Export deformed mesh": the
+/// deformed shape, e.g. a buckling mode as imperfection, can be imported into another model.
+pub fn write_deformed_mesh_inp(
+    mesh: &FeMesh,
+    displacements: &[[f32; 3]],
+    scale: f64,
+    heading: &str,
+) -> Result<String, WriteError> {
+    let mut deformed = mesh.clone();
+    for ((&id, coords), u) in mesh.node_ids().iter().zip(mesh.coords()).zip(displacements) {
+        let moved = std::array::from_fn(|k| coords[k] + scale * f64::from(u[k]));
+        deformed.set_node(id, moved);
+    }
+    write_inp(&deformed, &FeModel::default(), heading)
 }
 
 /// The input file for PrePoMax's "Check Model": every step's procedure is replaced by
@@ -332,8 +356,11 @@ pub fn model_keywords(
         .collect();
     let heading = format!("*Heading\n{}\n", heading.lines().next().unwrap_or_default());
     let empty = |name| Keyword::title(name, Vec::new());
-    Ok(vec![
-        Keyword::title("Heading", vec![Keyword::generated(heading)]),
+    let mut tree = vec![Keyword::title("Heading", vec![Keyword::generated(heading)])];
+    if let Some(submodel) = submodel(model, &sets.submodel_sets)? {
+        tree.push(Keyword::title("Submodel", vec![submodel]));
+    }
+    tree.extend([
         Keyword::title("Nodes", vec![Keyword::generated(nodes)]),
         Keyword::title("Elements", element_blocks),
         Keyword::title("Node sets", node_sets),
@@ -350,7 +377,33 @@ pub fn model_keywords(
         Keyword::title("Amplitudes", amplitudes),
         Keyword::title("Initial conditions", initial_conditions),
         Keyword::title("Steps", steps),
-    ])
+    ]);
+    Ok(tree)
+}
+
+/// `*SUBMODEL` with the node sets of the submodel boundary conditions, as PrePoMax writes it
+/// after the heading. The global results file is named without its directory; it has to be
+/// next to the input file, where the analysis and the export put it.
+fn submodel(
+    model: &FeModel,
+    node_sets: &[(String, String)],
+) -> Result<Option<Keyword>, WriteError> {
+    let Some((_, first)) = node_sets.first() else {
+        return Ok(None);
+    };
+    let input = (model.properties.submodel_input())
+        .and_then(|path| path.file_name())
+        .ok_or_else(|| WriteError::NoGlobalResults {
+            item: first.clone(),
+        })?;
+    let mut out = format!(
+        "*Submodel, Type=Node, Input=\"{}\"\n",
+        input.to_string_lossy()
+    );
+    for (set, _) in node_sets {
+        let _ = writeln!(out, "{set}");
+    }
+    Ok(Some(Keyword::generated(out)))
 }
 
 /// The line elements of beam and truss sections: the CalculiX type each one is written
@@ -512,6 +565,9 @@ struct Sets<'a> {
     used: BTreeSet<String>,
     /// Face element sets and node set of each element surface.
     surface_sets: BTreeMap<String, (Vec<(String, u8)>, String)>,
+    /// Node sets of submodel boundary conditions, with the first boundary condition naming
+    /// each; `*SUBMODEL` lists them.
+    submodel_sets: Vec<(String, String)>,
 }
 
 impl<'a> Sets<'a> {
@@ -530,6 +586,7 @@ impl<'a> Sets<'a> {
                 .chain(mesh.surfaces.keys().map(|n| n.to_ascii_uppercase()))
                 .collect(),
             surface_sets: BTreeMap::new(),
+            submodel_sets: Vec::new(),
         };
         for (name, ids) in &mesh.node_sets {
             sets.node_sets.push((name.clone(), ids.clone()));
@@ -1196,6 +1253,7 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         StepKind::Static(settings) => static_step(settings),
         StepKind::Frequency(settings) => frequency_step(settings),
         StepKind::ComplexFrequency(settings) => complex_frequency_step(settings),
+        StepKind::Buckle(settings) => buckle_step(settings),
         StepKind::HeatTransfer(settings) => heat_transfer_step(settings, "*Heat transfer", false),
         StepKind::CoupledTempDisp(settings) => {
             heat_transfer_step(settings, "*Coupled temperature-displacement", true)
@@ -1220,7 +1278,11 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         let reference = bc.amplitude.as_ref().filter(|_| bc.kind.takes_amplitude());
         let amplitude =
             amplitude_parameter(amplitudes, &bc.name, "Amplitude", &reference.cloned())?;
-        let mut out = format!("** Name: {}\n*Boundary{amplitude}\n", bc.name);
+        let options = match bc.kind {
+            BoundaryKind::Submodel { step, .. } => format!(", Submodel, Step={}", step.max(1)),
+            _ => amplitude,
+        };
+        let mut out = format!("** Name: {}\n*Boundary{options}\n", bc.name);
         match bc.kind {
             BoundaryKind::Fixed => {
                 let _ = writeln!(out, "{set}, 1, {dofs}, 0");
@@ -1234,6 +1296,14 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
             }
             BoundaryKind::Temperature(t) => {
                 let _ = writeln!(out, "{set}, 11, 11, {}", number(t));
+            }
+            BoundaryKind::Submodel { dofs: held, .. } => {
+                for dof in (1..=dofs).filter(|&d| held[d - 1]) {
+                    let _ = writeln!(out, "{set}, {dof}, {dof}");
+                }
+                if !sets.submodel_sets.iter().any(|(s, _)| *s == set) {
+                    sets.submodel_sets.push((set, bc.name.clone()));
+                }
             }
         }
         boundaries.push(Keyword::generated(out));
@@ -1419,6 +1489,7 @@ fn deactivated_step(step: &Step) -> Keyword {
         StepKind::Static(_) => "StaticStep",
         StepKind::Frequency(_) => "FrequencyStep",
         StepKind::ComplexFrequency(_) => "ComplexFrequencyStep",
+        StepKind::Buckle(_) => "BuckleStep",
         StepKind::HeatTransfer(_) => "HeatTransferStep",
         StepKind::CoupledTempDisp(_) => "CoupledTempDispStep",
     };
@@ -1657,6 +1728,27 @@ fn complex_frequency_step(settings: &ComplexFrequencyStep) -> (String, String) {
         procedure.push_str(", Coriolis");
     }
     let _ = writeln!(procedure, "\n{}", settings.num_frequencies);
+    (header, procedure)
+}
+
+/// The `*Step` line and the procedure keyword of a buckle step, as PrePoMax's
+/// `CalBuckleStep` writes them.
+fn buckle_step(settings: &BuckleStep) -> (String, String) {
+    let mut header = String::from("*Step");
+    if settings.perturbation {
+        header.push_str(", Perturbation");
+    }
+    header.push('\n');
+    let mut procedure = String::from("*Buckle");
+    if let Some(solver) = settings.solver.keyword() {
+        let _ = write!(procedure, ", Solver={solver}");
+    }
+    let _ = writeln!(
+        procedure,
+        "\n{}, {}",
+        settings.num_factors,
+        number(settings.accuracy)
+    );
     (header, procedure)
 }
 
