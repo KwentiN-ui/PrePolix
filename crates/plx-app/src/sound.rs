@@ -86,6 +86,9 @@ pub struct ModeSound {
     /// Mode shapes prepared for the overlay; rebuilt when the settings or the shown
     /// component change.
     pub mix: Option<ShapeMix>,
+    /// Increment of the mode clicked in the window; it swings in the 3D view while no sound
+    /// plays.
+    pub preview: Option<usize>,
 }
 
 /// A sine tone as the synthesizer plays it.
@@ -132,6 +135,7 @@ impl ModeSound {
             shape_speed: DEFAULT_SHAPE_SPEED,
             shape_fps: DEFAULT_SHAPE_FPS,
             shape_clock: (0.0, 0.0),
+            preview: None,
             mix: None,
         })
     }
@@ -400,6 +404,8 @@ pub struct ShapeMix {
     range: Option<(f32, f32)>,
     peak: f32,
     numbers: Vec<u32>,
+    /// The single previewed mode, or `None` for the chosen modes of the sound.
+    only: Option<usize>,
 }
 
 struct MixMode {
@@ -414,19 +420,31 @@ struct MixMode {
 }
 
 impl ShapeMix {
-    /// Prepares the enabled modes for the shown component `field`/`component`. Mode shapes
-    /// have arbitrary amplitudes, so each is scaled to the same largest displacement first
-    /// and then by its level. `None` without a mode with displacements.
+    /// Prepares the enabled modes for the shown component `field`/`component`, or with `only`
+    /// just that mode (the increment index) at full level and without dying away. Mode
+    /// shapes have arbitrary amplitudes, so each is scaled to the same largest displacement
+    /// first and then by its level. `None` without a mode with displacements.
     pub fn new(
         sound: &ModeSound,
         increments: &[Increment],
         field: &str,
         component: &str,
+        only: Option<usize>,
     ) -> Option<Self> {
-        let chosen: Vec<(&Voice, &Increment, Vec<[f32; 3]>, f32)> = sound
-            .voices
+        let preview: Vec<Voice> = (sound.voices.iter())
+            .filter(|v| Some(v.increment) == only)
+            .map(|v| Voice {
+                level: 1.0,
+                ..v.clone()
+            })
+            .collect();
+        let voices = match only {
+            Some(_) => &preview,
+            None => &sound.voices,
+        };
+        let chosen: Vec<(&Voice, &Increment, Vec<[f32; 3]>, f32)> = voices
             .iter()
-            .filter(|v| v.enabled && v.level > 0.0 && v.frequency > 0.0)
+            .filter(|v| (v.enabled || only.is_some()) && v.level > 0.0 && v.frequency > 0.0)
             .filter_map(|v| {
                 let increment = increments.get(v.increment)?;
                 let displacements = increment.displacements()?;
@@ -476,7 +494,10 @@ impl ShapeMix {
                 MixMode {
                     ratio: voice.frequency / lowest,
                     weight,
-                    decay: sound.decay_of(voice.frequency, lowest),
+                    decay: match only {
+                        Some(_) => f32::INFINITY,
+                        None => sound.decay_of(voice.frequency, lowest),
+                    },
                     displacements: displacements.clone(),
                     values,
                 }
@@ -498,12 +519,13 @@ impl ShapeMix {
             }),
             peak: reference * levels.sqrt(),
             numbers: chosen.iter().map(|c| c.0.mode).collect(),
+            only,
         })
     }
 
-    /// Whether the mix was prepared for this shown component.
-    pub fn shows(&self, field: &str, component: &str) -> bool {
-        self.field == field && self.component == component
+    /// Whether the mix was prepared for this shown component and the same mode selection.
+    pub fn shows(&self, field: &str, component: &str, only: Option<usize>) -> bool {
+        self.field == field && self.component == component && self.only == only
     }
 
     /// The overlaid mode shapes after `swings` swings of the lowest mode, `time` seconds after
@@ -993,7 +1015,7 @@ mod tests {
         let mut sound = ModeSound::new(&increments, 0).unwrap();
         sound.voices[1].enabled = true;
         sound.voices[1].level = 0.5;
-        let mix = ShapeMix::new(&sound, &increments, "DISP", "U2").unwrap();
+        let mix = ShapeMix::new(&sound, &increments, "DISP", "U2", None).unwrap();
         // A quarter swing of the lowest mode: mode 1 at its peak, mode 2 (twice as fast) back
         // at zero.
         let frame = mix.frame(0.25, 0.0);
@@ -1006,6 +1028,37 @@ mod tests {
         assert_eq!(frame.values.unwrap()[0], frame.displacements[0][1]);
         assert_eq!(frame.modes, [1, 2]);
         assert_eq!(frame.range, Some((-5.0, 5.0)));
+    }
+
+    #[test]
+    fn preview_swings_one_mode_at_full_size_without_dying_away() {
+        let increments = vec![
+            shape(
+                1,
+                1,
+                100.0,
+                [1.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ),
+            shape(
+                1,
+                2,
+                200.0,
+                [0.0, 10.0, 0.0],
+                [0.0, 100.0, 0.0, 0.0, 0.0, 0.0],
+            ),
+        ];
+        let mut sound = ModeSound::new(&increments, 0).unwrap();
+        // Mode 2 is neither ticked nor loud, and the sound would die away.
+        sound.voices[1].level = 0.2;
+        sound.envelope = Envelope::Struck;
+        let mix = ShapeMix::new(&sound, &increments, "DISP", "U2", Some(1)).unwrap();
+        assert!(mix.shows("DISP", "U2", Some(1)));
+        assert!(!mix.shows("DISP", "U2", None));
+        let frame = mix.frame(0.25, 100.0);
+        assert_eq!(frame.modes, [2]);
+        assert!((frame.displacements[0][1] - 10.0).abs() < 1e-4);
+        assert_eq!(frame.displacements[0][0], 0.0);
     }
 
     #[test]
@@ -1028,7 +1081,7 @@ mod tests {
         ];
         let mut sound = ModeSound::new(&increments, 0).unwrap();
         sound.voices[1].enabled = true;
-        let mix = ShapeMix::new(&sound, &increments, "STRESS", "MISES").unwrap();
+        let mix = ShapeMix::new(&sound, &increments, "STRESS", "MISES", None).unwrap();
         // Same frequency, opposite stresses: they cancel, so the von Mises stress is zero
         // although each mode alone has 10.
         let frame = mix.frame(0.25, 0.0);
