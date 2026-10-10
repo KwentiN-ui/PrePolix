@@ -91,12 +91,17 @@ impl Animation {
         }
     }
 
+    /// Position of the shown frame of a scale factor animation, from 0 at the first frame to
+    /// 1 at the last.
+    pub fn progress(&self) -> f32 {
+        self.frame.min(self.frame_count() - 1) as f32 / (self.frame_count() - 1) as f32
+    }
+
     /// Factor applied to deformation and values of the shown frame.
     pub fn amplitude(&self) -> f32 {
         match self.kind {
             AnimationKind::ScaleFactor => {
-                let t =
-                    self.frame.min(self.frame_count() - 1) as f32 / (self.frame_count() - 1) as f32;
+                let t = self.progress();
                 if self.modal {
                     // PrePoMax's modal ratios: a sine from -1 to 1, slow at the turning points
                     // like the oscillation itself.
