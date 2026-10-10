@@ -30,6 +30,7 @@
 #include "chapters/model/initial-conditions.typ"
 #include "chapters/model/steps.typ"
 #include "chapters/model/bcs-loads.typ"
+#include "chapters/model/pre-tension.typ"
 #include "chapters/model/keywords.typ"
 
 #include "chapters/analysis/run.typ"
