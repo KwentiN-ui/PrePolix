@@ -52,6 +52,6 @@ coefficient or the emissivity.
 In 2D models face loads act on element edges. In axisymmetric models forces act on the full
 circumference.
 
-#limitation[Moments, gravity, centrifugal loads, line loads, bolt pre-tension and defined
-temperature fields are not available in the dialogs yet. They can be added with the keyword
+#limitation[Line loads, bolt pre-tension and defined temperature fields are not available in
+the dialogs yet. They can be added with the keyword
 editor (@keyword-editor).]

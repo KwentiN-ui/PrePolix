@@ -29,7 +29,7 @@ Ties and surface-to-surface springs have a #ui("Master") and a #ui("Slave") regi
 own #ui("...") button. Choose the finer mesh as slave. #ui("Swap Master/Slave") in the context
 menu exchanges the two.
 
-#limitation[#ui("Rigid Body") and user-defined equations are not available yet.]
+#limitation[User-defined equations are not available yet.]
 
 == Contacts <contacts>
 

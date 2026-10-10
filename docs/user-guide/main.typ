@@ -26,6 +26,7 @@
 #include "chapters/model/sections.typ"
 #include "chapters/model/features.typ"
 #include "chapters/model/interactions.typ"
+#include "chapters/model/rigid-body.typ"
 #include "chapters/model/amplitudes.typ"
 #include "chapters/model/initial-conditions.typ"
 #include "chapters/model/steps.typ"
