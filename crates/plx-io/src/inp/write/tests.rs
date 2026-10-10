@@ -309,6 +309,115 @@ fn calculix_yields_the_bar_pulled_beyond_its_yield_stress() {
     }
 }
 
+/// The element faces at x = 50 of the elements left of the cut: a pre-tension section
+/// through the middle of the bar.
+fn cut_faces(mesh: &FeMesh) -> Vec<(ElementId, u8)> {
+    (mesh.elements().iter())
+        .flat_map(|e| {
+            (1..=6u8).filter_map(move |f| {
+                let corners = e.shape.faces()[usize::from(f) - 1].corners;
+                let at_cut = (corners.iter()).all(|&l| mesh.node(e.nodes[l]).unwrap()[0] == 50.0);
+                let left = (e.nodes.iter()).all(|&n| mesh.node(n).unwrap()[0] <= 50.0);
+                (at_cut && left).then_some((e.id, f))
+            })
+        })
+        .collect()
+}
+
+fn pre_tension(value: f64, by_displacement: bool) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = cantilever(tip_force());
+    let faces = cut_faces(&mesh);
+    assert_eq!(faces.len(), 4);
+    model.steps[0].loads = vec![Load {
+        name: "Pre_Tension-1".into(),
+        active: true,
+        region: Region::Faces(faces),
+        kind: LoadKind::PreTension {
+            value,
+            by_displacement,
+            direction: None,
+        },
+        amplitude: None,
+        factor_amplitude: None,
+    }];
+    // Both ends held: the bolt is clamped between them.
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Fixed-2".into(),
+        active: true,
+        region: Region::Surface("TIP".into()),
+        kind: BoundaryKind::Fixed,
+        amplitude: None,
+    });
+    (mesh, model)
+}
+
+#[test]
+fn a_pre_tension_load_is_written_like_prepomax_does() {
+    let (mesh, mut model) = pre_tension(1000.0, false);
+    // A second step keeps the bolt at its length instead of the force.
+    let mut second = model.steps[0].clone();
+    second.name = "Step-2".into();
+    second.loads[0].kind = LoadKind::PreTension {
+        value: 0.0,
+        by_displacement: true,
+        direction: Some([1.0, 0.0, 0.0]),
+    };
+    model.steps.push(second);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains(
+            "*Pre-tension section, Surface=Internal_Selection-1_Pre_Tension-1_Section, Node=100\n"
+        ),
+        "{text}"
+    );
+    assert_eq!(text.matches("*Pre-tension section").count(), 1);
+    assert!(text.contains("*Cload\n100, 1, 1000\n"), "{text}");
+    assert!(text.contains("*Boundary\n100, 1, 1, 0\n"), "{text}");
+    assert!(
+        text.contains("*Surface, Name=Internal_Selection-1_Pre_Tension-1_Section, Type=Element\n"),
+        "{text}"
+    );
+}
+
+/// A preload across the middle of the clamped bar puts the whole bar under that tension.
+#[test]
+fn calculix_preloads_the_clamped_bar_across_the_cut() {
+    let force = 1000.0;
+    let (mesh, model) = pre_tension(force, false);
+    let Some(frd) = run_ccx("vorspannung", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let reaction: f64 = (mesh.node_sets["FIX"].iter())
+        .map(|&node| node_value(&frd, "FORC", "F1", node))
+        .sum();
+    assert!((reaction.abs() - force).abs() < 1e-3 * force, "{reaction}");
+    // 1000 N on the 10 x 10 mm section, away from the clamped ends.
+    for id in (1..=99).filter(|&id| mesh.node(id).is_some_and(|c| c[0] == 50.0)) {
+        let s = node_value(&frd, "STRESS", "S11", id);
+        assert!((s - 10.0).abs() < 0.3, "{s}");
+    }
+}
+
+/// Shortening the bolt by a prescribed displacement stretches the bar by that much.
+#[test]
+fn calculix_shortens_the_bolt_by_the_prescribed_displacement() {
+    let shortening = 0.01;
+    let (mesh, model) = pre_tension(shortening, true);
+    let Some(frd) = run_ccx("verkuerzung", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    // The two halves overlap by the shortening: strain 0.01 / 100 in a bar held at both
+    // ends, 21 MPa, 2100 N.
+    let reaction: f64 = (mesh.node_sets["FIX"].iter())
+        .map(|&node| node_value(&frd, "FORC", "F1", node))
+        .sum();
+    let expected = shortening / 100.0 * 210_000.0 * 100.0;
+    assert!(
+        (reaction.abs() - expected).abs() < 0.02 * expected,
+        "{reaction} != {expected}"
+    );
+}
+
 #[test]
 fn calculix_pressure_on_a_surface_balances_the_reactions() {
     let load = Load {

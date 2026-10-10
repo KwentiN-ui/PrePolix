@@ -774,6 +774,8 @@ impl FeModel {
                     LoadKind::ConcentratedForce(f) | LoadKind::SurfaceTraction(f) => {
                         (0..3).filter(|&d| f[d] != 0.0 && d < dofs).collect()
                     }
+                    // Acts on its own node, which nothing holds.
+                    LoadKind::PreTension { .. } => Vec::new(),
                     LoadKind::Pressure(_) | LoadKind::Centrifugal { .. } => {
                         (0..dofs.min(3)).collect()
                     }

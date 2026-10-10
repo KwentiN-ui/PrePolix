@@ -18,6 +18,7 @@ use crate::hot_spot_dialog::HotSpotDialog;
 use crate::icons::{self, Icon};
 use crate::keywords::KeywordEditor;
 use crate::material_library::{LibraryResult, MaterialLibraryEditor};
+use crate::mesh_tools::{MeshTool, MeshToolDialog, MeshToolResult};
 use crate::meshing::{
     MeshItemEditor, MeshItemResult, MeshSetupResult, MeshSetupWindow, MeshingJob,
 };
@@ -101,6 +102,8 @@ struct Workbench {
     keyword_editor: Option<KeywordEditor>,
     /// Open search for contact pairs.
     contact_search: Option<ContactSearchDialog>,
+    /// Open mesh tool: transform parts, merge nodes or renumber.
+    mesh_tool: Option<MeshToolDialog>,
     /// PrePoMax's Query tool, while its window is open.
     query: Option<QueryWindow>,
     /// Open material library editor.
@@ -217,6 +220,7 @@ impl PrepolixApp {
                 confirm_delete: None,
                 keyword_editor: None,
                 contact_search: None,
+                mesh_tool: None,
                 query: None,
                 material_library: None,
                 field_output_dialog: None,
@@ -887,6 +891,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.editor_window(&ctx);
         self.workbench.confirm_delete_window(&ctx);
         self.workbench.contact_search_window(&ctx);
+        self.workbench.mesh_tool_window(&ctx);
         self.workbench.query_window(&ctx);
         self.workbench.section_window(&ctx);
         self.workbench.exploded_window(&ctx);
@@ -1334,6 +1339,20 @@ impl Workbench {
         }
         if response.search_contacts {
             self.open_contact_search();
+        }
+        if let Some(index) = response.transform_part {
+            // A part among several selected ones transforms them all.
+            let parts = self.tree.selected_parts(view);
+            let parts = if parts.contains(&index) {
+                parts.into_iter().collect()
+            } else {
+                vec![index]
+            };
+            self.open_mesh_tool(MeshTool::Transform(parts));
+        }
+        if response.merge_parts {
+            let parts: Vec<usize> = self.tree.selected_parts(view).into_iter().collect();
+            self.merge_mesh_parts(&parts);
         }
         if let Some(findings) = response.findings {
             self.findings_window = Some(findings);
@@ -1919,20 +1938,63 @@ impl Workbench {
     /// PrePoMax's Mesh menu: the mesh setup and mesh generation for the geometry.
     fn mesh_menu(&mut self, ui: &mut egui::Ui) {
         let has_geometry = self.model.as_ref().is_some_and(|m| m.geometry.is_some());
-        if !has_geometry {
+        let has_mesh = (self.model.as_ref()).is_some_and(|m| m.mesh.element_count() > 0);
+        if !has_geometry && !has_mesh {
             ui.label("Zuerst eine Geometrie importieren");
             return;
         }
-        if ui.button("Mesh-Setup-Eintrag erstellen …").clicked() {
-            self.create(NewItem::MeshSetupItem);
+        if has_geometry {
+            if ui.button("Mesh-Setup-Eintrag erstellen …").clicked() {
+                self.create(NewItem::MeshSetupItem);
+            }
+            if ui.button("Standard-Netzparameter …").clicked() {
+                self.open_mesh_setup();
+            }
+            ui.separator();
+            let mesh = egui::Button::new("Alle Parts vernetzen");
+            if ui.add_enabled(self.meshing.is_none(), mesh).clicked() {
+                self.generate_mesh(ui.ctx(), None);
+            }
         }
-        if ui.button("Standard-Netzparameter …").clicked() {
-            self.open_mesh_setup();
+        if has_mesh {
+            if has_geometry {
+                ui.separator();
+            }
+            if ui.button("Merge coincident nodes ...").clicked() {
+                self.open_mesh_tool(MeshTool::MergeNodes);
+            }
+            if ui.button("Renumber nodes and elements ...").clicked() {
+                self.open_mesh_tool(MeshTool::Renumber);
+            }
         }
-        ui.separator();
-        let mesh = egui::Button::new("Alle Parts vernetzen");
-        if ui.add_enabled(self.meshing.is_none(), mesh).clicked() {
-            self.generate_mesh(ui.ctx(), None);
+    }
+
+    fn open_mesh_tool(&mut self, tool: MeshTool) {
+        if let Some(model) = self.setup_model() {
+            self.mesh_tool = Some(MeshToolDialog::new(tool, model));
+            self.editor = None;
+            self.set_tree_view(TreeView::FeModel);
+        }
+    }
+
+    fn mesh_tool_window(&mut self, ctx: &egui::Context) {
+        let (Some(dialog), Some(model)) = (&mut self.mesh_tool, &mut self.model) else {
+            return;
+        };
+        match dialog.show(ctx, model) {
+            MeshToolResult::Open => {}
+            // On an error the dialog shows it and stays open.
+            MeshToolResult::Apply => {
+                if let Ok(done) = dialog.apply(model) {
+                    self.output.push(done);
+                    self.mesh_tool = None;
+                    self.highlighted = None;
+                    // The symbols of loads and supports sit on nodes that moved or changed.
+                    self.symbols_shown = None;
+                    self.results_changed = true;
+                }
+            }
+            MeshToolResult::Cancel => self.mesh_tool = None,
         }
     }
 
@@ -3403,6 +3465,29 @@ impl Workbench {
         }
         model.set_mesh(mesh);
         self.output.push(deleted_message(&names));
+        self.after_parts_changed();
+    }
+
+    /// PrePoMax's Merge of mesh parts: the selected parts become one, named after the
+    /// first; the model's regions on the others follow.
+    fn merge_mesh_parts(&mut self, parts: &[usize]) {
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        let mut merged = None;
+        model.edit_mesh(|mesh, fe| {
+            merged = mesh.merge_parts(parts);
+            if let Some((kept, gone)) = &merged {
+                for name in gone {
+                    fe.rename_part(name, kept);
+                }
+            }
+        });
+        let Some((kept, gone)) = merged else {
+            return;
+        };
+        self.output
+            .push(format!("Parts {} merged into {kept}", gone.join(", ")));
         self.after_parts_changed();
     }
 
