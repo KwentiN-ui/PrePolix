@@ -46,6 +46,8 @@ pub enum Problem {
     RotationsIgnored,
     IncrementExceedsStep,
     NoLoad,
+    /// A modal step without a frequency step before it that stores the eigenmodes.
+    NoStoredModes,
     /// Found in the solver output only.
     NoConvergence,
     /// Found in the solver output only.
@@ -87,6 +89,7 @@ impl Problem {
             Problem::RotationsIgnored => "Rotationen ohne Wirkung",
             Problem::IncrementExceedsStep => "Inkrement größer als der Step",
             Problem::NoLoad => "Keine Last",
+            Problem::NoStoredModes => "Keine gespeicherten Eigenformen",
             Problem::NoConvergence => "Keine Konvergenz",
             Problem::MpcAndSpc => "Freiheitsgrad doppelt gebunden",
             Problem::RotationIn2d => "Rotation in einem 2D-Modell",
@@ -191,6 +194,11 @@ impl Problem {
                 "Der Step hat weder eine aktive Last noch eine vorgegebene Verschiebung. \
                  Die Rechnung läuft, alle Ergebnisse sind aber null."
             }
+            Problem::NoStoredModes => {
+                "Modal Dynamics und Steady State Dynamics überlagern die Eigenformen, die \
+                 ein vorheriger Frequency Step mit Storage in die .eig-Datei geschrieben \
+                 hat. Ohne ihn bricht CalculiX mit \"error opening the eigenvalue file\" ab."
+            }
             Problem::NoConvergence => {
                 "Die Newton-Iteration ist nicht konvergiert; CalculiX hat das Inkrement \
                  immer weiter verkleinert und aufgegeben (\"too many cutbacks\" oder \
@@ -286,6 +294,10 @@ impl Problem {
                 "Im Step das Anfangsinkrement höchstens so groß wie die Step-Dauer wählen."
             }
             Problem::NoLoad => "Unter Loads eine Last erstellen oder eine deaktivierte aktivieren.",
+            Problem::NoStoredModes => {
+                "Davor einen Frequency Step mit \"Eigenformen speichern (Storage)\" \
+                 anlegen, mit denselben Lagerungen."
+            }
             Problem::NoConvergence => {
                 "Kontakte prüfen (Steifigkeit der Surface Interaction, Adjust, Lage der \
                  Flächen), Teile ausreichend lagern, die Last auf mehrere Inkremente \
@@ -449,6 +461,18 @@ impl FeModel {
         let trusses = Trusses::new(self, mesh);
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             self.check_step(s, mesh, mesh_check, &trusses, &mut findings);
+            let stored = (self.steps[..s].iter().filter(|p| p.active))
+                .any(|p| matches!(&p.kind, StepKind::Frequency(f) if f.storage));
+            if step.kind.is_modal() && !stored {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::NoStoredModes,
+                    format!(
+                        "{} braucht die Eigenformen eines Frequency Steps",
+                        step.name
+                    ),
+                ));
+            }
             if let StepKind::HeatTransfer(h) | StepKind::CoupledTempDisp(h) = &step.kind
                 && !h.steady_state
                 && !initial_temperature
@@ -486,8 +510,9 @@ impl FeModel {
             _ => false,
         });
         // Eigenfrequencies and inertia need the mass.
-        let frequency =
-            active().any(|s| matches!(s.kind, StepKind::Frequency(_) | StepKind::Dynamic(_)));
+        let frequency = active().any(|s| {
+            matches!(s.kind, StepKind::Frequency(_) | StepKind::Dynamic(_)) || s.kind.is_modal()
+        });
         for (i, material) in self.materials.iter().enumerate() {
             if !self.sections.iter().any(|s| s.material == material.name) {
                 continue;

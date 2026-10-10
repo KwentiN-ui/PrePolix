@@ -3,7 +3,8 @@ use std::process::Command;
 
 use plx_model::{
     BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, DynamicStep, Elastic,
-    EquationSolver, Load, Material, NodeTie, Section, SectionKind, UserKeyword,
+    EquationSolver, Load, Material, ModalDamping, ModalDynamicsStep, NodeTie, Section, SectionKind,
+    SteadyStateDynamicsStep, UserKeyword,
 };
 
 use super::*;
@@ -642,6 +643,182 @@ fn calculix_swings_the_cantilever_about_its_static_deflection() {
     assert!(
         (1.55..1.9).contains(&damped_ratio) && damped_ratio < ratio - 0.08,
         "damped trough {damped_ratio} x static, undamped {ratio}"
+    );
+}
+
+/// The cantilever with a frequency step that stores its modes, a modal dynamics step with
+/// the tip force applied at once, and a steady state sweep of the tip force around the
+/// first bending mode; both modal steps damped as given.
+fn modal_cantilever(damping: Option<ModalDamping>) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = analysis("kragbalken_c3d20r.inp", tip_force());
+    model
+        .amplitudes
+        .push(amplitude("Stepped", vec![[0.0, 1.0], [1.0, 1.0]]));
+    let supports = model.steps[0].boundary_conditions.clone();
+    let mut force = model.steps[0].loads[0].clone();
+    force.amplitude = Some("Stepped".into());
+    let mut frequency = Step::new_frequency("Step-1");
+    frequency.boundary_conditions = supports.clone();
+    let StepKind::Frequency(settings) = &mut frequency.kind else {
+        unreachable!()
+    };
+    settings.storage = true;
+    settings.num_frequencies = 6;
+    let mut modal = Step::new_modal_dynamics("Step-2");
+    modal.boundary_conditions = supports.clone();
+    modal.loads = vec![force];
+    modal.kind = StepKind::ModalDynamics(ModalDynamicsStep {
+        increment: 2.5e-5,
+        time_period: 1.5e-3,
+        damping: damping.clone(),
+        ..ModalDynamicsStep::default()
+    });
+    let mut sweep = Step::new_steady_state_dynamics("Step-3");
+    sweep.boundary_conditions = supports;
+    sweep.loads = model.steps[0].loads.clone();
+    sweep.kind = StepKind::SteadyStateDynamics(SteadyStateDynamicsStep {
+        lower_frequency: 700.0,
+        upper_frequency: 900.0,
+        data_points: 21,
+        bias: 1.0,
+        damping,
+        ..SteadyStateDynamicsStep::default()
+    });
+    model.steps = vec![frequency, modal, sweep];
+    (mesh, model)
+}
+
+#[test]
+fn modal_steps_are_written_like_prepomax_does() {
+    let (mesh, mut model) = modal_cantilever(Some(ModalDamping::Constant(0.02)));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Step\n*Frequency, Storage=Yes\n6\n",
+        "*Step, Inc=100\n*Modal dynamics\n0.000025, 0.0015\n*Modal damping\n1, 1000000, 0.02\n",
+        "*Cload, Amplitude=Stepped\n",
+        "*Step\n*Steady state dynamics\n700, 900, 21, 1\n*Modal damping\n1, 1000000, 0.02\n",
+        "*Node file\nRF, U, V\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in\n{text}");
+    }
+    let StepKind::ModalDynamics(settings) = &mut model.steps[1].kind else {
+        unreachable!()
+    };
+    settings.time_period = 0.01;
+    settings.steady_state = true;
+    settings.solver = EquationSolver::Spooles;
+    settings.damping = Some(ModalDamping::Direct(vec![
+        plx_model::ModeDamping {
+            lowest: 1,
+            highest: 2,
+            ratio: 0.05,
+        },
+        plx_model::ModeDamping {
+            lowest: 3,
+            highest: 6,
+            ratio: 0.1,
+        },
+    ]));
+    let StepKind::SteadyStateDynamics(settings) = &mut model.steps[2].kind else {
+        unreachable!()
+    };
+    settings.harmonic = false;
+    settings.fourier_terms = 5;
+    settings.time_upper = 0.002;
+    settings.damping = Some(ModalDamping::Rayleigh(plx_model::RayleighDamping {
+        alpha: 10.0,
+        beta: 4e-5,
+    }));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Step, Inc=100\n*Modal dynamics, Solver=Spooles, Steady state\n0.000025, 0.01\n\
+         *Modal damping\n1, 2, 0.05\n3, 6, 0.1\n",
+        "*Step\n*Steady state dynamics, Harmonic=No\n700, 900, 21, 1, 5, 0, 0.002\n\
+         *Modal damping, Rayleigh\n , , 10, 0.00004\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in\n{text}");
+    }
+    // The increment count grows with the time period.
+    let StepKind::ModalDynamics(settings) = &mut model.steps[1].kind else {
+        unreachable!()
+    };
+    settings.steady_state = false;
+    settings.time_period = 0.01;
+    assert_eq!(settings.increments(), 401);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Step, Inc=401\n*Modal dynamics"), "{text}");
+    model.steps[1].active = false;
+    model.steps[2].active = false;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("** Name: ModalDynamicsStep: Deactivated\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("** Name: SteadyStateDynamicsStep: Deactivated\n"),
+        "{text}"
+    );
+}
+
+/// The modal superposition swings the tip like the direct integration does, damped by the
+/// modal damping ratio of 0.1 to about 1.73 times the static deflection; the harmonic
+/// sweep peaks near the first bending mode at about 1 / (2 zeta) = 5 times the static
+/// deflection, a little less where the 10 Hz grid misses the resonance.
+#[test]
+fn calculix_superposes_the_stored_modes_of_the_cantilever() {
+    let (mesh, reference) = analysis("kragbalken_c3d20r.inp", tip_force());
+    let Some(frd) = run_ccx("modal_statisch", &write_inp(&mesh, &reference, "").unwrap()) else {
+        return;
+    };
+    let static_u3 = node_value(&frd, "DISP", "U3", 99);
+    let (mesh, model) = modal_cantilever(Some(ModalDamping::Constant(0.1)));
+    let frd = run_ccx("modal", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let index = frd.mesh.node_index(99).unwrap();
+    let tip = |i: &plx_results::Increment| {
+        f64::from(i.field("DISP").unwrap().component("U3").unwrap().values[index])
+    };
+    let modes: Vec<f64> = (frd.increments.iter())
+        .filter(|i| i.kind == plx_results::AnalysisKind::Frequency)
+        .map(|i| i.value)
+        .collect();
+    assert_eq!(modes.len(), 6, "{modes:?}");
+    assert!((780.0..835.0).contains(&modes[0]), "{modes:?}");
+    let history: Vec<f64> = (frd.increments.iter())
+        .filter(|i| i.step == 2)
+        .map(tip)
+        .collect();
+    assert_eq!(history.len(), 60, "{history:?}");
+    let trough = history.iter().copied().fold(0.0, f64::min) / static_u3;
+    assert!((1.55..1.9).contains(&trough), "trough {trough} x static");
+    // Each frequency point carries the real part (DISP) and the imaginary part (DISPI);
+    // the magnitude peaks at resonance.
+    let imaginary = |i: &plx_results::Increment| {
+        (i.field("DISPI"))
+            .and_then(|f| f.component("U3"))
+            .map_or(0.0, |c| f64::from(c.values[index]))
+    };
+    let sweep: Vec<(f64, f64)> = (frd.increments.iter())
+        .filter(|i| i.step == 3)
+        .map(|i| (i.value, tip(i).hypot(imaginary(i))))
+        .collect();
+    assert!(sweep.len() >= 21, "{}", sweep.len());
+    let mut peak = 0.0_f64;
+    let mut at = 0.0;
+    for (frequency, magnitude) in &sweep {
+        if *magnitude > peak {
+            peak = *magnitude;
+            at = *frequency;
+        }
+    }
+    let ratio = peak / static_u3.abs();
+    assert!(
+        (4.0..5.6).contains(&ratio),
+        "peak {ratio} x static at {at} Hz"
+    );
+    assert!(
+        (at - modes[0]).abs() < 12.0,
+        "peak at {at} Hz, mode at {}",
+        modes[0]
     );
 }
 

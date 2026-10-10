@@ -397,8 +397,13 @@ impl<'a> Reader<'a> {
                 }
             }
         }
+        // Steady state dynamics writes increment 0 into every `1PSTEP` line; the frequency
+        // points are then only told apart by the increment counter of the block header.
         let increment = match (kind, step.mode) {
             (AnalysisKind::Frequency, Some(mode)) => mode,
+            _ if step.increment == 0 => int_field(header, 58..63)
+                .map(|n| n.max(0) as u32)
+                .unwrap_or(0),
             _ => step.increment,
         };
         let data: &'a [u8] = self.data;

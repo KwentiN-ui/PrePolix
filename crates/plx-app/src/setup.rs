@@ -12,9 +12,10 @@ use plx_model::{
     Amplitude, BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, BoundaryKind,
     Constraint, ContactPair, DynamicProcedure, DynamicStep, Elastic, EquationSolver, FeModel,
     FieldOutput, FrequencyStep, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
-    InitialCondition, InitialConditionKind, Load, LoadKind, Material, ModelSpace, NodeTie,
-    OutputKind, Quantity, Region, Section, SectionKind, StaticStep, Step, StepKind,
-    SurfaceInteraction, UnitSystem, next_name,
+    InitialCondition, InitialConditionKind, Load, LoadKind, Material, ModalDamping,
+    ModalDynamicsStep, ModeDamping, ModelSpace, NodeTie, OutputKind, Quantity, Region, Section,
+    SectionKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceInteraction,
+    UnitSystem, next_name,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row};
@@ -1558,6 +1559,16 @@ impl Editor {
                         return Err(problem);
                     }
                 }
+                StepKind::ModalDynamics(settings) => {
+                    if let Some(problem) = settings.problem() {
+                        return Err(problem);
+                    }
+                }
+                StepKind::SteadyStateDynamics(settings) => {
+                    if let Some(problem) = settings.problem() {
+                        return Err(problem);
+                    }
+                }
                 StepKind::Static(_) => {}
             }
         }
@@ -2196,7 +2207,7 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
 
 /// The step kinds of the dialog: label, the kind with its settings and its default field
 /// outputs, in PrePoMax's order.
-fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 5] {
+fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 7] {
     let heat = HeatTransferStep::default();
     [
         (
@@ -2215,6 +2226,16 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 5] {
             FieldOutput::dynamic_defaults(),
         ),
         (
+            MODAL_DYNAMICS_LABEL,
+            StepKind::ModalDynamics(ModalDynamicsStep::default()),
+            FieldOutput::dynamic_defaults(),
+        ),
+        (
+            STEADY_STATE_LABEL,
+            StepKind::SteadyStateDynamics(SteadyStateDynamicsStep::default()),
+            FieldOutput::defaults(),
+        ),
+        (
             HEAT_TRANSFER_LABEL,
             StepKind::HeatTransfer(heat.clone()),
             FieldOutput::heat_transfer_defaults(),
@@ -2230,6 +2251,8 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 5] {
 const STATIC_LABEL: &str = "Statisch (Static)";
 const FREQUENCY_LABEL: &str = "Eigenfrequenzen (Frequency)";
 const DYNAMIC_LABEL: &str = "Dynamic (time integration)";
+const MODAL_DYNAMICS_LABEL: &str = "Modal Dynamics (from stored modes)";
+const STEADY_STATE_LABEL: &str = "Steady State Dynamics (frequency response)";
 const HEAT_TRANSFER_LABEL: &str = "Wärmeübertragung (Heat Transfer)";
 const COUPLED_LABEL: &str = "Thermomechanisch gekoppelt (Coupled Temp-Disp)";
 
@@ -2238,6 +2261,8 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
         StepKind::Static(_) => STATIC_LABEL,
         StepKind::Frequency(_) => FREQUENCY_LABEL,
         StepKind::Dynamic(_) => DYNAMIC_LABEL,
+        StepKind::ModalDynamics(_) => MODAL_DYNAMICS_LABEL,
+        StepKind::SteadyStateDynamics(_) => STEADY_STATE_LABEL,
         StepKind::HeatTransfer(_) => HEAT_TRANSFER_LABEL,
         StepKind::CoupledTempDisp(_) => COUPLED_LABEL,
     }
@@ -2270,6 +2295,8 @@ fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
         StepKind::Static(settings) => static_form(ui, settings, units),
         StepKind::Frequency(settings) => frequency_form(ui, settings, units),
         StepKind::Dynamic(settings) => dynamic_form(ui, settings, units),
+        StepKind::ModalDynamics(settings) => modal_dynamics_form(ui, settings, units),
+        StepKind::SteadyStateDynamics(settings) => steady_state_form(ui, settings, units),
         StepKind::HeatTransfer(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::CoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, true),
     }
@@ -2355,6 +2382,183 @@ fn dynamic_form(ui: &mut Ui, settings: &mut DynamicStep, units: UnitSystem) {
     ui.weak("beta = 2 zeta / omega. Loads need a stepped amplitude to act at once.");
     ui.end_row();
     settings.damping = damped.then_some(damping);
+}
+
+/// Settings of a modal dynamics step: the time increments, then the modal damping.
+fn modal_dynamics_form(ui: &mut Ui, settings: &mut ModalDynamicsStep, units: UnitSystem) {
+    solver_row(ui, &mut settings.solver, false);
+    ui.label("");
+    ui.checkbox(
+        &mut settings.steady_state,
+        "Steady state (until the response repeats)",
+    );
+    ui.end_row();
+    ui.label("Time increment");
+    ui.add(numeric::physical(
+        &mut settings.increment,
+        units,
+        Quantity::Time,
+    ));
+    ui.end_row();
+    if settings.steady_state {
+        ui.label("Relative error");
+        ui.add(
+            numeric::drag_value(&mut settings.relative_error)
+                .range(0.0..=1.0)
+                .speed(0.001)
+                .max_decimals(6),
+        );
+        ui.end_row();
+    } else {
+        ui.label("Time period");
+        ui.add(numeric::physical(
+            &mut settings.time_period,
+            units,
+            Quantity::Time,
+        ));
+        ui.end_row();
+    }
+    ui.label("Max. increments");
+    ui.add(numeric::drag_value(&mut settings.max_increments).range(1..=1_000_000));
+    ui.end_row();
+    ui.label("");
+    ui.weak("Needs a Frequency step with stored modes before it; loads need an amplitude.");
+    ui.end_row();
+    modal_damping_rows(ui, &mut settings.damping, units);
+}
+
+/// Settings of a steady state dynamics step: the frequency sweep, then the modal damping.
+fn steady_state_form(ui: &mut Ui, settings: &mut SteadyStateDynamicsStep, units: UnitSystem) {
+    solver_row(ui, &mut settings.solver, false);
+    ui.label("");
+    ui.checkbox(&mut settings.harmonic, "Harmonic excitation");
+    ui.end_row();
+    for (label, value) in [
+        ("Lower frequency", &mut settings.lower_frequency),
+        ("Upper frequency", &mut settings.upper_frequency),
+    ] {
+        ui.label(label);
+        ui.add(numeric::physical(value, units, Quantity::Frequency));
+        ui.end_row();
+    }
+    ui.label("Data points");
+    ui.add(numeric::drag_value(&mut settings.data_points).range(2..=100_000));
+    ui.end_row();
+    ui.label("Bias");
+    ui.add(
+        numeric::drag_value(&mut settings.bias)
+            .range(1.0..=1000.0)
+            .speed(0.1),
+    );
+    ui.end_row();
+    ui.label("");
+    ui.weak("Points between two eigenfrequencies; a bias above 1 crowds them near the modes.");
+    ui.end_row();
+    if !settings.harmonic {
+        ui.label("Fourier terms");
+        ui.add(numeric::drag_value(&mut settings.fourier_terms).range(1..=10_000));
+        ui.end_row();
+        for (label, value) in [
+            ("Period start", &mut settings.time_lower),
+            ("Period end", &mut settings.time_upper),
+        ] {
+            ui.label(label);
+            ui.add(numeric::physical(value, units, Quantity::Time));
+            ui.end_row();
+        }
+    }
+    ui.label("");
+    ui.weak("Needs a Frequency step with stored modes before it.");
+    ui.end_row();
+    modal_damping_rows(ui, &mut settings.damping, units);
+}
+
+/// The modal damping of a modal step: off, one ratio, a ratio per mode range, or Rayleigh.
+fn modal_damping_rows(ui: &mut Ui, damping: &mut Option<ModalDamping>, units: UnitSystem) {
+    let current = match damping {
+        None => 0,
+        Some(ModalDamping::Constant(_)) => 1,
+        Some(ModalDamping::Direct(_)) => 2,
+        Some(ModalDamping::Rayleigh(_)) => 3,
+    };
+    const CHOICES: [&str; 4] = ["Off", "Constant ratio", "Ratio per mode range", "Rayleigh"];
+    ui.label("Modal damping");
+    let mut chosen = current;
+    egui::ComboBox::from_id_salt("modal damping")
+        .selected_text(CHOICES[current])
+        .show_ui(ui, |ui| {
+            for (i, label) in CHOICES.iter().enumerate() {
+                ui.selectable_value(&mut chosen, i, *label);
+            }
+        });
+    ui.end_row();
+    if chosen != current {
+        *damping = match chosen {
+            1 => Some(ModalDamping::Constant(0.02)),
+            2 => Some(ModalDamping::Direct(vec![ModeDamping {
+                lowest: 1,
+                highest: 10,
+                ratio: 0.02,
+            }])),
+            3 => Some(ModalDamping::Rayleigh(Default::default())),
+            _ => None,
+        };
+    }
+    match damping {
+        None => {}
+        Some(ModalDamping::Constant(ratio)) => {
+            ui.label("    Damping ratio");
+            ui.add(
+                numeric::drag_value(ratio)
+                    .range(0.0..=1.0)
+                    .speed(0.001)
+                    .max_decimals(6),
+            );
+            ui.end_row();
+        }
+        Some(ModalDamping::Direct(ranges)) => {
+            let mut remove = None;
+            for (i, range) in ranges.iter_mut().enumerate() {
+                ui.label(if i == 0 { "    Modes, ratio" } else { "" });
+                ui.horizontal(|ui| {
+                    ui.add(numeric::drag_value(&mut range.lowest).range(1..=1_000_000));
+                    ui.label("to");
+                    ui.add(numeric::drag_value(&mut range.highest).range(1..=1_000_000));
+                    ui.add(
+                        numeric::drag_value(&mut range.ratio)
+                            .range(0.0..=1.0)
+                            .speed(0.001)
+                            .max_decimals(6),
+                    );
+                    if ui.small_button("x").clicked() {
+                        remove = Some(i);
+                    }
+                });
+                ui.end_row();
+            }
+            if let Some(i) = remove {
+                ranges.remove(i);
+            }
+            ui.label("");
+            if ui.button("Add range").clicked() {
+                let next = ranges.last().map_or(1, |r| r.highest + 1);
+                ranges.push(ModeDamping {
+                    lowest: next,
+                    highest: next,
+                    ratio: 0.02,
+                });
+            }
+            ui.end_row();
+        }
+        Some(ModalDamping::Rayleigh(r)) => {
+            ui.label("    Alpha (mass)");
+            ui.add(numeric::physical(&mut r.alpha, units, Quantity::Frequency));
+            ui.end_row();
+            ui.label("    Beta (stiffness)");
+            ui.add(numeric::physical(&mut r.beta, units, Quantity::Time));
+            ui.end_row();
+        }
+    }
 }
 
 fn validate_heat_transfer_step(settings: &HeatTransferStep) -> Result<(), String> {
