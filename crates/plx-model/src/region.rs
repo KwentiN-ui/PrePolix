@@ -24,6 +24,10 @@ pub enum Region {
     /// Faces, edges and vertices of the CAD geometry the mesh was generated from, picked
     /// as in PrePoMax. They are found on the mesh again after remeshing.
     Geometry(Vec<CadEntity>),
+    /// A reference point by name, for boundary conditions and loads on a rigid body: the
+    /// body's reference node, which exists only in the input file, so the region has no
+    /// nodes of the mesh.
+    ReferencePoint(String),
 }
 
 impl Region {
@@ -44,6 +48,7 @@ impl Region {
                 ids.extend(mesh.cad_faces(entities).iter().map(|(e, _)| *e));
             }
             Region::Nodes(_) | Region::NodeSet(_) | Region::Surface(_) => {}
+            Region::ReferencePoint(_) => {}
         }
         ids.into_iter().collect()
     }
@@ -73,6 +78,7 @@ impl Region {
                 }
                 None => {}
             },
+            Region::ReferencePoint(_) => {}
         }
         ids.into_iter().collect()
     }
@@ -100,6 +106,15 @@ impl Region {
                 name.clone()
             }
             Region::Geometry(entities) => describe_entities(entities),
+            Region::ReferencePoint(name) => name.clone(),
+        }
+    }
+
+    /// The reference point the region stands for, if it is one.
+    pub fn reference_point(&self) -> Option<&str> {
+        match self {
+            Region::ReferencePoint(name) => Some(name),
+            _ => None,
         }
     }
 

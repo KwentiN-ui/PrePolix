@@ -2210,6 +2210,11 @@ impl Workbench {
             .steps
             .last()
             .is_some_and(|s| s.kind.supports_loads());
+        let takes_defined_fields = model
+            .fe
+            .steps
+            .last()
+            .is_some_and(|s| s.kind.supports_defined_fields());
         let mut kind = None;
         for (item, label, enabled) in [
             (NewItem::Material, "Create Material …", true),
@@ -2235,6 +2240,11 @@ impl Workbench {
                 NewItem::HistoryOutput(last_step.unwrap_or(0)),
                 "Create History Output …",
                 last_step.is_some(),
+            ),
+            (
+                NewItem::DefinedField(last_step.unwrap_or(0)),
+                "Create Defined Field …",
+                takes_defined_fields,
             ),
         ] {
             if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
@@ -2599,6 +2609,11 @@ impl Workbench {
             match std::fs::write(&path, text) {
                 Ok(()) => self.output.push(format!("{} written", path.display())),
                 Err(error) => self.output.push(format!("{}: {error}", path.display())),
+            }
+            // CalculiX reads the result files of defined fields from next to the input file.
+            if let Some(dir) = path.parent() {
+                let notes = crate::analysis::copy_result_files(&fe, dir);
+                self.output.extend(notes);
             }
         }
     }
@@ -3654,7 +3669,8 @@ impl Workbench {
             | TreeItem::BoundaryCondition(s, _)
             | TreeItem::Load(s, _)
             | TreeItem::FieldOutput(s, _)
-            | TreeItem::HistoryOutput(s, _) => Some(s),
+            | TreeItem::HistoryOutput(s, _)
+            | TreeItem::DefinedField(s, _) => Some(s),
             _ => None,
         };
         let index = (edited.as_ref().map(|(s, ..)| *s))

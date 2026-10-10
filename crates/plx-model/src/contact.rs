@@ -4,7 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CompressionOnly, NodeTie, PointSpring, Region, SurfaceSpring, SurfaceToSurfaceSpring};
+use crate::{
+    CompressionOnly, NodeTie, PointSpring, Region, RigidBody, SurfaceSpring, SurfaceToSurfaceSpring,
+};
 
 /// PrePoMax's default colour of contact and constraint surfaces, yellow.
 pub const DEFAULT_SURFACE_COLOR: [u8; 3] = [255, 255, 0];
@@ -220,6 +222,7 @@ pub enum Constraint {
     CompressionOnly(CompressionOnly),
     Tie(Tie),
     SurfaceToSurfaceSpring(SurfaceToSurfaceSpring),
+    RigidBody(RigidBody),
     /// Only in projects saved while node ties were constraints; [`crate::FeModel::migrate`]
     /// moves them to the model's node ties, where they belong with the contact pairs.
     NodeTie(NodeTie),
@@ -233,6 +236,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => &c.name,
             Constraint::Tie(tie) => &tie.name,
             Constraint::SurfaceToSurfaceSpring(c) => &c.name,
+            Constraint::RigidBody(c) => &c.name,
             Constraint::NodeTie(c) => &c.name,
         }
     }
@@ -244,6 +248,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => c.active,
             Constraint::Tie(tie) => tie.active,
             Constraint::SurfaceToSurfaceSpring(c) => c.active,
+            Constraint::RigidBody(c) => c.active,
             Constraint::NodeTie(c) => c.active,
         }
     }
@@ -255,6 +260,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => &mut c.active,
             Constraint::Tie(tie) => &mut tie.active,
             Constraint::SurfaceToSurfaceSpring(c) => &mut c.active,
+            Constraint::RigidBody(c) => &mut c.active,
             Constraint::NodeTie(c) => &mut c.active,
         }
     }
@@ -266,6 +272,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => &mut c.name,
             Constraint::Tie(tie) => &mut tie.name,
             Constraint::SurfaceToSurfaceSpring(c) => &mut c.name,
+            Constraint::RigidBody(c) => &mut c.name,
             Constraint::NodeTie(c) => &mut c.name,
         }
     }
@@ -300,6 +307,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => vec![&c.region],
             Constraint::Tie(tie) => vec![&tie.master, &tie.slave],
             Constraint::SurfaceToSurfaceSpring(c) => vec![&c.master, &c.slave],
+            Constraint::RigidBody(c) => vec![&c.region],
             Constraint::NodeTie(c) => vec![&c.region],
         }
     }
@@ -311,6 +319,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => vec![&mut c.region],
             Constraint::Tie(tie) => vec![&mut tie.master, &mut tie.slave],
             Constraint::SurfaceToSurfaceSpring(c) => vec![&mut c.master, &mut c.slave],
+            Constraint::RigidBody(c) => vec![&mut c.region],
             Constraint::NodeTie(c) => vec![&mut c.region],
         }
     }

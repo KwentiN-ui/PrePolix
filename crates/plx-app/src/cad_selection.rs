@@ -388,6 +388,7 @@ mod tests {
                 conductivity: None,
                 specific_heat: None,
                 expansion: None,
+                plastic: None,
             }],
             sections: vec![Section {
                 name: "Section-1".into(),

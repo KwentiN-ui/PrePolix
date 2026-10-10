@@ -2,9 +2,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use plx_model::{
-    BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, DynamicStep, Elastic,
-    EquationSolver, Load, Material, ModalDamping, ModalDynamicsStep, NodeTie, Section, SectionKind,
-    SteadyStateDynamicsStep, UserKeyword,
+    BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, DefinedField, DefinedFieldKind,
+    DynamicStep, Elastic, EquationSolver, Hardening, Load, Material, ModalDamping,
+    ModalDynamicsStep, NodeTie, Plastic, PlasticPoint, ReferencePoint, RigidBody, Section,
+    SectionKind, SteadyStateDynamicsStep, UserKeyword,
 };
 
 use super::*;
@@ -175,27 +176,42 @@ fn empty_regions_and_unknown_materials_are_errors() {
 
 /// Runs CalculiX on the input file, if it is installed; CI does not have it.
 fn run_ccx(name: &str, text: &str) -> Option<FrdImport> {
+    let dir = ccx_dir(name)?;
+    let frd = run_ccx_in(&dir, name, text);
+    remove_ccx_dir(&dir);
+    Some(frd)
+}
+
+/// A fresh directory for a CalculiX run, `None` without CalculiX.
+fn ccx_dir(name: &str) -> Option<PathBuf> {
     if Command::new("ccx").arg("-v").output().is_err() {
         eprintln!("ccx not found, test skipped");
         return None;
     }
     let dir = std::env::temp_dir().join(format!("plx-write-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
+    Some(dir)
+}
+
+/// Runs CalculiX on the input file in the directory and reads the results.
+fn run_ccx_in(dir: &std::path::Path, name: &str, text: &str) -> FrdImport {
     std::fs::write(dir.join(format!("{name}.inp")), text).unwrap();
     let output = Command::new("ccx")
         .args(["-i", name])
-        .current_dir(&dir)
+        .current_dir(dir)
         .env("OMP_NUM_THREADS", "1")
         .output()
         .unwrap();
     let log = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && !log.contains("*ERROR"), "{log}");
-    let frd = read_frd(&dir.join(format!("{name}.frd"))).unwrap();
-    // PLX_KEEP_CCX keeps the files for a look at them.
+    read_frd(&dir.join(format!("{name}.frd"))).unwrap()
+}
+
+/// Removes the files of a run; PLX_KEEP_CCX keeps them for a look at them.
+fn remove_ccx_dir(dir: &std::path::Path) {
     if std::env::var_os("PLX_KEEP_CCX").is_none() {
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(dir);
     }
-    Some(frd)
 }
 
 fn node_value(frd: &FrdImport, field: &str, component: &str, node: NodeId) -> f64 {
@@ -218,6 +234,239 @@ fn calculix_reproduces_the_reference_cantilever() {
         (ours - expected).abs() < 1e-6 * expected.abs(),
         "{ours} != {expected}"
     );
+}
+
+/// A plate 100 x 10 of S8 shells, 2 thick, clamped at x = 0 and loaded by 1 N at its tip.
+fn shell_plate() -> (FeMesh, FeModel) {
+    let (length, width, thickness) = (100.0, 10.0, 2.0);
+    let mesh = rectangle(0.0, length, width, 20, 2);
+    let tip = nodes_at(&mesh, 0, length);
+    assert_eq!(tip.len(), 5);
+    let force = -1.0 / tip.len() as f64;
+    let mut model = plane_model(
+        ModelSpace::ThreeD,
+        1.0,
+        vec![(nodes_at(&mesh, 0, 0.0), [Some(0.0); 6])],
+        LoadKind::ConcentratedForce([0.0, 0.0, force]),
+        Region::Nodes(tip),
+    );
+    model.sections[0].kind = SectionKind::Shell {
+        thickness,
+        offset: 0.0,
+    };
+    (mesh, model)
+}
+
+/// The cantilever with its tip face as a rigid body driven by reference point RP-1 at the
+/// centre of the face, and the load or boundary condition given on the point.
+fn rigid_tip(load: Option<Load>, bc: Option<BoundaryCondition>) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = cantilever(tip_force());
+    model.steps[0].loads.clear();
+    model.steps[0].loads.extend(load);
+    model.steps[0].boundary_conditions.extend(bc);
+    model.reference_points.push(ReferencePoint {
+        name: "RP-1".into(),
+        position: [100.0, 5.0, 5.0],
+    });
+    let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+    body.region = Region::Surface("TIP".into());
+    model.constraints.push(Constraint::RigidBody(body));
+    (mesh, model)
+}
+
+fn moment(moment: [f64; 3]) -> Load {
+    Load {
+        name: "Moment-1".into(),
+        active: true,
+        region: Region::ReferencePoint("RP-1".into()),
+        kind: LoadKind::Moment(moment),
+        amplitude: None,
+        factor_amplitude: None,
+    }
+}
+
+#[test]
+fn a_rigid_body_and_its_reference_point_are_written_like_prepomax_does() {
+    let bc = BoundaryCondition {
+        name: "Turn-1".into(),
+        active: true,
+        region: Region::ReferencePoint("RP-1".into()),
+        kind: BoundaryKind::Displacement([Some(0.0), Some(0.0), None, None, None, Some(0.01)]),
+        amplitude: None,
+    };
+    let (mesh, model) = rigid_tip(Some(moment([0.0, 0.0, 1000.0])), Some(bc));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    // The reference and rotation node follow the mesh nodes, both on the point.
+    assert!(
+        text.contains("99, 1.00000000E2, 1.00000000E1, 1.00000000E1\n100, 1.00000000E2, 5.00000000E0, 5.00000000E0\n101, 1.00000000E2, 5.00000000E0, 5.00000000E0\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("*Nset, Nset=Internal_Selection-1_RP-1\n100\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("*Rigid body, Nset=Internal-1_TIP, Ref node=100, Rot node=101\n"),
+        "{text}"
+    );
+    // Translations on the reference node, rotations on the rotation node.
+    assert!(
+        text.contains(
+            "*Boundary\nInternal_Selection-1_RP-1, 1, 1, 0\nInternal_Selection-1_RP-1, 2, 2, 0\n101, 3, 3, 0.01\n"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("*Cload\n101, 3, 1000\n"), "{text}");
+}
+
+/// A moment at the reference point bends the beam: the reactions at the clamped end balance
+/// it and the rigid tip face stays plane.
+#[test]
+fn calculix_bends_the_cantilever_by_a_moment_on_the_rigid_tip() {
+    let m = 10_000.0;
+    let (mesh, model) = rigid_tip(Some(moment([0.0, 0.0, m])), None);
+    let Some(frd) = run_ccx("moment", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let reaction: f64 = (mesh.node_sets["FIX"].iter())
+        .map(|&node| {
+            let y = mesh.node(node).unwrap()[1];
+            (y - 5.0) * node_value(&frd, "FORC", "F1", node)
+        })
+        .sum();
+    assert!((reaction - m).abs() < 1e-3 * m, "{reaction} != {m}");
+    let tip = |y: f64| -> Vec<f64> {
+        (1..=99)
+            .filter(|&id| mesh.node(id).is_some_and(|c| c[0] == 100.0 && c[1] == y))
+            .map(|id| node_value(&frd, "DISP", "U1", id))
+            .collect()
+    };
+    let (top, bottom, middle) = (tip(10.0), tip(0.0), tip(5.0));
+    assert_eq!(top.len(), 3);
+    let rotation = (bottom[0] - top[0]) / 10.0;
+    assert!(rotation > 1e-4, "{rotation}");
+    for (u_top, u_bottom) in top.iter().zip(&bottom) {
+        assert!(
+            (u_top + u_bottom).abs() < 1e-6 * rotation,
+            "{u_top} {u_bottom}"
+        );
+    }
+    assert!(
+        middle.iter().all(|u| u.abs() < 1e-6 * rotation),
+        "{middle:?}"
+    );
+}
+
+/// A rotation prescribed at the reference point turns the rigid tip face about it.
+#[test]
+fn calculix_turns_the_rigid_tip_by_the_rotation_of_its_reference_point() {
+    let angle = 0.01;
+    let bc = BoundaryCondition {
+        name: "Turn-1".into(),
+        active: true,
+        region: Region::ReferencePoint("RP-1".into()),
+        kind: BoundaryKind::Displacement([None, None, None, None, None, Some(angle)]),
+        amplitude: None,
+    };
+    let (mesh, model) = rigid_tip(None, Some(bc));
+    let Some(frd) = run_ccx("drehung", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    for id in (1..=99).filter(|&id| mesh.node(id).is_some_and(|c| c[0] == 100.0)) {
+        let y = mesh.node(id).unwrap()[1];
+        let u1 = node_value(&frd, "DISP", "U1", id);
+        let expected = -angle * (y - 5.0);
+        assert!((u1 - expected).abs() < 1e-7, "{u1} != {expected}");
+    }
+}
+
+/// Steel S235 with a linear hardening to 400 MPa at 20 % plastic strain.
+fn s235(mesh_model: &mut FeModel) {
+    mesh_model.materials[0].plastic = Some(Plastic {
+        hardening: Hardening::Isotropic,
+        points: vec![
+            PlasticPoint {
+                stress: 235.0,
+                plastic_strain: 0.0,
+                temperature: 0.0,
+            },
+            PlasticPoint {
+                stress: 400.0,
+                plastic_strain: 0.2,
+                temperature: 0.0,
+            },
+        ],
+    });
+}
+
+#[test]
+fn a_plastic_material_is_written_like_prepomax_does() {
+    let (mesh, mut model) = cantilever(tip_force());
+    s235(&mut model);
+    model.materials[0].plastic.as_mut().unwrap().hardening = Hardening::Kinematic;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains(
+            "*Elastic\n210000, 0.3\n*Plastic, Hardening=Kinematic\n235, 0, 0\n400, 0.2, 0\n"
+        ),
+        "{text}"
+    );
+}
+
+/// A bar pulled beyond its yield stress: the stress stays on the hardening curve and the
+/// equivalent plastic strain is where the curve reaches the applied stress.
+#[test]
+fn calculix_yields_the_bar_pulled_beyond_its_yield_stress() {
+    let stress = 300.0;
+    let load = Load {
+        name: "Pressure-1".into(),
+        active: true,
+        region: Region::Surface("TIP".into()),
+        kind: LoadKind::Pressure(-stress),
+        amplitude: None,
+        factor_amplitude: None,
+    };
+    let (mesh, mut model) = cantilever(load);
+    s235(&mut model);
+    // Symmetry supports instead of the clamp: a clamped end restrains the lateral
+    // contraction, and with the small plastic tangent modulus that reaches along the
+    // whole bar; held this way the bar is in uniaxial tension.
+    let (min, max) = mesh.bounds().unwrap();
+    let nodes_at = |axis: usize, value: f64| -> Vec<NodeId> {
+        (1..=99)
+            .filter(|&id| mesh.node(id).is_some_and(|c| c[axis] == value))
+            .collect()
+    };
+    let hold = |axis: usize| {
+        let mut dofs = [None; 6];
+        dofs[axis] = Some(0.0);
+        BoundaryCondition {
+            name: format!("Symmetry-{}", axis + 1),
+            active: true,
+            region: Region::Nodes(nodes_at(axis, min[axis])),
+            kind: BoundaryKind::Displacement(dofs),
+            amplitude: None,
+        }
+    };
+    model.steps[0].boundary_conditions = vec![hold(0), hold(1), hold(2)];
+    model.steps[0].field_outputs[1]
+        .variables
+        .push("PEEQ".into());
+    let Some(frd) = run_ccx("plastisch", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let nodes = nodes_at(0, max[0]);
+    assert_eq!(nodes.len(), 9);
+    let expected_strain = (stress - 235.0) / (400.0 - 235.0) * 0.2;
+    for node in nodes {
+        let s = node_value(&frd, "STRESS", "S11", node);
+        assert!((s - stress).abs() < 0.02 * stress, "{s} != {stress}");
+        let peeq = node_value(&frd, "PE", "PE", node);
+        assert!(
+            (peeq - expected_strain).abs() < 0.05 * expected_strain,
+            "{peeq} != {expected_strain}"
+        );
+    }
 }
 
 /// The element faces at x = 50 of the elements left of the cut: a pre-tension section
@@ -260,6 +509,57 @@ fn pre_tension(value: f64, by_displacement: bool) -> (FeMesh, FeModel) {
         amplitude: None,
     });
     (mesh, model)
+}
+
+#[test]
+fn a_shell_section_is_written_like_prepomax_does() {
+    let (mesh, mut model) = shell_plate();
+    model.sections[0].kind = SectionKind::Shell {
+        thickness: 2.0,
+        offset: 0.5,
+    };
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Element, Type=S8, Elset=PLATE\n"), "{text}");
+    assert!(
+        text.contains(
+            "*Shell section, Elset=Internal_Selection-1_Section-1, Material=Steel, Offset=0.5\n2\n"
+        ),
+        "{text}"
+    );
+    // Results at the shell nodes, not at the nodes CalculiX expands the shells to.
+    assert!(text.contains("*Node file, Output=2D\nRF, U\n"), "{text}");
+    assert!(text.contains("*El file, Output=2D\nS, E, NOE\n"), "{text}");
+    // A shell section on solid elements is refused before CalculiX would be.
+    let (solid_mesh, mut solid) = cantilever(tip_force());
+    solid.sections[0].kind = SectionKind::Shell {
+        thickness: 2.0,
+        offset: 0.0,
+    };
+    assert!(matches!(
+        write_inp(&solid_mesh, &solid, ""),
+        Err(WriteError::InvalidSection { .. })
+    ));
+}
+
+/// The shell plate bends like a beam: F L^3 / (3 E I) at the tip.
+#[test]
+fn calculix_bends_the_shell_plate_like_a_beam() {
+    let (mesh, model) = shell_plate();
+    let Some(frd) = run_ccx("schale", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let inertia = 10.0 * 2.0f64.powi(3) / 12.0;
+    let expected = -100.0f64.powi(3) / (3.0 * 210_000.0 * inertia);
+    let tip = nodes_at(&mesh, 0, 100.0);
+    let deflection: f64 = tip
+        .iter()
+        .map(|&n| node_value(&frd, "DISP", "U3", n))
+        .sum::<f64>()
+        / tip.len() as f64;
+    assert!(
+        (deflection - expected).abs() < 0.03 * expected.abs(),
+        "{deflection} != {expected}"
+    );
 }
 
 #[test]
@@ -2021,6 +2321,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
             conductivity: None,
             specific_heat: None,
             expansion: None,
+            plastic: None,
         }],
         sections: vec![Section {
             name: "Beam-1".into(),
@@ -2665,6 +2966,154 @@ fn calculix_conducts_heat_along_a_bar() {
     }
     let hfl = node_value(&frd, "FLUX", "F1", 99);
     assert!((hfl.abs() - q).abs() < 1e-3, "{hfl}");
+}
+
+fn defined_temperature(name: &str, region: Region, value: f64) -> DefinedField {
+    DefinedField {
+        name: name.into(),
+        active: true,
+        region,
+        kind: DefinedFieldKind::Temperature(value),
+        amplitude: None,
+    }
+}
+
+fn temperature_from_file(name: &str, file: &str, step: u32) -> DefinedField {
+    DefinedField {
+        name: name.into(),
+        active: true,
+        region: Region::Nodes(Vec::new()),
+        kind: DefinedFieldKind::TemperatureFromFile {
+            file: PathBuf::from(file),
+            step,
+        },
+        amplitude: None,
+    }
+}
+
+#[test]
+fn a_defined_temperature_is_written_like_prepomax_does() {
+    let (mesh, mut model) = thermal_bar(
+        StepKind::Static(StaticStep::default()),
+        Vec::new(),
+        Vec::new(),
+    );
+    model.steps[0].defined_fields = vec![
+        defined_temperature(
+            "Defined_Temperature-1",
+            Region::Parts(vec!["EALL".into()]),
+            120.0,
+        ),
+        temperature_from_file("Defined_Temperature-2", "/results/heat run.frd", 2),
+    ];
+    model.steps[0].defined_fields[1].active = false;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let expected = "** Name: Defined_Temperature-1\n*Temperature\n\
+                    Internal_Selection-1_Defined_Temperature-1, 120\n\
+                    ** Name: Defined_Temperature-2: Deactivated\n";
+    assert!(text.contains(expected), "{text}");
+    model.steps[0].defined_fields[1].active = true;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("** Name: Defined_Temperature-2\n*Temperature, File=heat run.frd, BStep=2\n"),
+        "{text}"
+    );
+    assert_eq!(
+        model.result_files(),
+        [std::path::Path::new("/results/heat run.frd")]
+    );
+    // A thermal step solves for the temperatures and leaves the fields out.
+    model.steps[0].kind = steady();
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("** Name: Defined_Temperature-1: Deactivated\n"),
+        "{text}"
+    );
+    assert!(!text.contains("*Temperature"), "{text}");
+    assert!(model.result_files().is_empty());
+    model.steps[0].kind = StepKind::Static(StaticStep::default());
+    model.steps[0].defined_fields[1].kind = DefinedFieldKind::TemperatureFromFile {
+        file: PathBuf::from("a,b.frd"),
+        step: 1,
+    };
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::InvalidResultFile { .. })
+    ));
+}
+
+/// A heat transfer run gives the bar a gradient from 20 at x = 0 to 120 at the tip; the
+/// static run reads it from the frd file and the bar grows by alpha times the integral of
+/// T - 20 over its length, 1e-5 * 100^2 / 2.
+#[test]
+fn calculix_strains_the_bar_by_the_temperatures_of_a_result_file() {
+    let (mesh, heat) = thermal_bar(
+        steady(),
+        vec![
+            temperature("Temperature-1", Region::NodeSet("FIX".into()), 20.0),
+            temperature("Temperature-2", Region::Surface("TIP".into()), 120.0),
+        ],
+        Vec::new(),
+    );
+    let Some(dir) = ccx_dir("waermedehnung") else {
+        return;
+    };
+    run_ccx_in(&dir, "heat", &write_inp(&mesh, &heat, "").unwrap());
+    let (_, mut model) = thermal_bar(
+        StepKind::Static(StaticStep::default()),
+        Vec::new(),
+        Vec::new(),
+    );
+    // CalculiX refuses a *Temperature without an initial temperature.
+    model.initial_conditions.push(plx_model::InitialCondition {
+        name: "Initial_Temperature-1".into(),
+        active: true,
+        region: Region::Parts(vec!["EALL".into()]),
+        kind: plx_model::InitialConditionKind::Temperature(20.0),
+    });
+    // Held at x = 0 in x only, and against rigid motion at two nodes of that face, so the
+    // bar expands freely: the corner holds y and z, the node along y from it holds z.
+    let fix = nodes_at(&mesh, 0, 0.0);
+    let at = |n: NodeId| mesh.node(n).unwrap();
+    let corner = (fix.iter().copied())
+        .min_by(|&a, &b| (at(a)[1] + at(a)[2]).total_cmp(&(at(b)[1] + at(b)[2])))
+        .unwrap();
+    let along_y = (fix.iter().copied())
+        .filter(|&n| (at(n)[2] - at(corner)[2]).abs() < 1e-9 && n != corner)
+        .max_by(|&a, &b| at(a)[1].total_cmp(&at(b)[1]))
+        .unwrap();
+    let hold = |name: &str, nodes: Vec<NodeId>, held: [bool; 3]| BoundaryCondition {
+        name: name.into(),
+        active: true,
+        region: Region::Nodes(nodes),
+        kind: BoundaryKind::Displacement([
+            held[0].then_some(0.0),
+            held[1].then_some(0.0),
+            held[2].then_some(0.0),
+            None,
+            None,
+            None,
+        ]),
+        amplitude: None,
+    };
+    model.steps[0].boundary_conditions = vec![
+        hold("Axial", fix.clone(), [true, false, false]),
+        hold("Corner", vec![corner], [false, true, true]),
+        hold("Edge", vec![along_y], [false, false, true]),
+    ];
+    model.steps[0].defined_fields = vec![temperature_from_file(
+        "Defined_Temperature-1",
+        dir.join("heat.frd").to_str().unwrap(),
+        1,
+    )];
+    let frd = run_ccx_in(&dir, "static", &write_inp(&mesh, &model, "").unwrap());
+    remove_ccx_dir(&dir);
+    assert_all_close(&temperatures_at(&mesh, &frd, 100.0), 120.0, 1e-6);
+    let tip = nodes_at(&mesh, 0, 100.0);
+    let growth: Vec<f64> = (tip.iter())
+        .map(|&n| node_value(&frd, "DISP", "U1", n))
+        .collect();
+    assert_all_close(&growth, 1e-5 * 100.0 * 100.0 / 2.0, 1e-3);
 }
 
 /// Heat generated in the bar flows out at x = 0: T = Q (L x - x^2 / 2) / k.

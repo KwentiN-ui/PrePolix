@@ -10,12 +10,12 @@ use egui::Ui;
 use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
     Amplitude, BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, BoundaryKind,
-    BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, DynamicProcedure, DynamicStep,
-    Elastic, EquationSolver, FeModel, FieldOutput, FrequencyStep, HeatTransferStep, HistoryKind,
-    HistoryOutput, Incrementation, InitialCondition, InitialConditionKind, Load, LoadKind,
-    Material, ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, NodeTie, OutputKind,
-    Quantity, Region, Section, SectionKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
-    SurfaceInteraction, UnitSystem, next_name,
+    BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, DefinedField, DefinedFieldKind,
+    DynamicProcedure, DynamicStep, Elastic, EquationSolver, FeModel, FieldOutput, FrequencyStep,
+    Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
+    InitialConditionKind, Load, LoadKind, Material, ModalDamping, ModalDynamicsStep, ModeDamping,
+    ModelSpace, NodeTie, OutputKind, PlasticPoint, Quantity, Region, Section, SectionKind,
+    StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceInteraction, UnitSystem, next_name,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row};
@@ -38,6 +38,8 @@ pub enum NewItem {
     Load(usize),
     /// A history output of a step, printed into the `.dat` file.
     HistoryOutput(usize),
+    /// A defined temperature of a step.
+    DefinedField(usize),
     /// A spring, support or tie, chosen in the dialog.
     Constraint,
     SurfaceInteraction,
@@ -67,6 +69,8 @@ pub(crate) enum Source {
     NodeSet,
     ElementSet,
     Surface,
+    /// A reference point, which drives a rigid body.
+    ReferencePoint,
 }
 
 impl Source {
@@ -77,6 +81,7 @@ impl Source {
             Source::NodeSet => "Node Set",
             Source::ElementSet => "Element Set",
             Source::Surface => "Surface",
+            Source::ReferencePoint => "Reference Point",
         }
     }
 }
@@ -99,6 +104,13 @@ pub(crate) struct RegionDraft {
 
 pub(crate) const NODE_SOURCES: &[Source] = &[Source::Selection, Source::NodeSet, Source::Surface];
 pub(crate) const FACE_SOURCES: &[Source] = &[Source::Selection, Source::Surface];
+/// Nodes, or the reference point of a rigid body: for boundary conditions and point loads.
+pub(crate) const SUPPORT_SOURCES: &[Source] = &[
+    Source::Selection,
+    Source::NodeSet,
+    Source::Surface,
+    Source::ReferencePoint,
+];
 /// Solid elements: whole parts, element sets or the elements of picked faces.
 pub(crate) const SOLID_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet, Source::Selection];
 pub(crate) const ELEMENT_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet];
@@ -144,10 +156,14 @@ impl RegionDraft {
             Region::Geometry(entities) => {
                 draft.geometry = History::from_items(entities.iter().copied());
             }
-            Region::NodeSet(set) | Region::ElementSet(set) | Region::Surface(set) => {
+            Region::NodeSet(set)
+            | Region::ElementSet(set)
+            | Region::Surface(set)
+            | Region::ReferencePoint(set) => {
                 draft.source = match region {
                     Region::NodeSet(_) => Source::NodeSet,
                     Region::ElementSet(_) => Source::ElementSet,
+                    Region::ReferencePoint(_) => Source::ReferencePoint,
                     _ => Source::Surface,
                 };
                 draft.set = set.clone();
@@ -171,6 +187,7 @@ impl RegionDraft {
             Source::NodeSet => Region::NodeSet(self.set.clone()),
             Source::ElementSet => Region::ElementSet(self.set.clone()),
             Source::Surface => Region::Surface(self.set.clone()),
+            Source::ReferencePoint => Region::ReferencePoint(self.set.clone()),
         }
     }
 
@@ -435,13 +452,18 @@ impl RegionDraft {
                     ui.weak("Choose in the \"Selection\" window what a click selects.");
                 }
                 Source::Parts => wanted |= self.parts.ui(ui, active),
-                Source::NodeSet | Source::ElementSet | Source::Surface => {
+                Source::NodeSet | Source::ElementSet | Source::Surface | Source::ReferencePoint => {
                     let names: Vec<&String> = match self.source {
                         Source::NodeSet => model.mesh.node_sets.keys().collect(),
                         Source::ElementSet => model.mesh.element_sets.keys().collect(),
+                        Source::ReferencePoint => {
+                            model.fe.reference_points.iter().map(|p| &p.name).collect()
+                        }
                         _ => model.mesh.surfaces.keys().collect(),
                     };
-                    if names.is_empty() {
+                    if names.is_empty() && self.source == Source::ReferencePoint {
+                        ui.weak("The model has no reference points (Features).");
+                    } else if names.is_empty() {
                         ui.weak("The mesh contains no such sets.");
                     }
                     egui::ComboBox::from_id_salt("region set")
@@ -578,6 +600,8 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
                 .collect();
         }
         Region::Geometry(entities) => return crate::cad_selection::highlight(model, entities),
+        // The point is drawn as a feature; the body it drives is the constraint's region.
+        Region::ReferencePoint(_) => {}
         Region::Nodes(_) | Region::NodeSet(_) => {
             highlight.nodes = region.nodes(&model.mesh);
             // Faces whose corners are all selected show as faces, like PrePoMax does for
@@ -605,6 +629,8 @@ enum Draft {
     FieldOutput(usize, FieldOutput),
     /// The region draft is unused by contact history outputs.
     HistoryOutput(usize, HistoryOutput, RegionDraft),
+    /// The region draft is unused by temperatures read from a file.
+    DefinedField(usize, DefinedField, RegionDraft),
     Constraint(ConstraintDraft),
     SurfaceInteraction(SurfaceInteraction, contacts::InteractionView),
     ContactPair(ContactPair, MasterSlave),
@@ -623,6 +649,7 @@ fn draft_region(draft: &Draft) -> Option<&RegionDraft> {
         Draft::ContactPair(_, regions) => Some(regions.current()),
         Draft::Constraint(c) => Some(c.region()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
+        Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
         _ => None,
     }
 }
@@ -637,6 +664,7 @@ fn draft_region_mut(draft: &mut Draft) -> Option<&mut RegionDraft> {
         Draft::ContactPair(_, regions) => Some(regions.current_mut()),
         Draft::Constraint(c) => Some(c.region_mut()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
+        Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
         _ => None,
     }
 }
@@ -664,10 +692,12 @@ fn names<'a, T: 'a>(items: &'a [T], name: impl Fn(&T) -> &str + 'a) -> Vec<&'a s
 const FIXED: &str = "Fixed";
 const DISPLACEMENT: &str = "Displacement_Rotation";
 const TEMPERATURE: &str = "Temperature";
+const DEFINED_TEMPERATURE: &str = "Defined_Temperature";
 const INITIAL_VELOCITY: &str = "Initial_Velocity";
 const INITIAL_ANGULAR_VELOCITY: &str = "Initial_Angular_Velocity";
 const SUBMODEL: &str = "Submodel";
 const FORCE: &str = "Concentrated_Force";
+const MOMENT: &str = "Moment";
 const PRESSURE: &str = "Pressure";
 const TRACTION: &str = "Surface_Traction";
 const PRE_TENSION: &str = "Pre-tension";
@@ -744,13 +774,14 @@ const DOF_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
 
 /// The load kinds of the dialog in PrePoMax's order: label, default name and the kind with
 /// zero values.
-fn load_kinds() -> [(&'static str, &'static str, LoadKind); 11] {
+fn load_kinds() -> [(&'static str, &'static str, LoadKind); 12] {
     [
         (
             "Concentrated Force",
             FORCE,
             LoadKind::ConcentratedForce([0.0; 3]),
         ),
+        ("Moment", MOMENT, LoadKind::Moment([0.0; 3])),
         ("Pressure", PRESSURE, LoadKind::Pressure(0.0)),
         (
             "Surface Traction",
@@ -852,6 +883,7 @@ fn vector_rows(
 fn load_kind_name(kind: &LoadKind) -> &'static str {
     match kind {
         LoadKind::ConcentratedForce(_) => FORCE,
+        LoadKind::Moment(_) => MOMENT,
         LoadKind::Pressure(_) => PRESSURE,
         LoadKind::SurfaceTraction(_) => TRACTION,
         LoadKind::PreTension { .. } => PRE_TENSION,
@@ -875,7 +907,9 @@ enum LoadTarget {
 
 fn load_target(kind: &LoadKind) -> LoadTarget {
     match kind {
-        LoadKind::ConcentratedForce(_) | LoadKind::ConcentratedFlux(_) => LoadTarget::Nodes,
+        LoadKind::ConcentratedForce(_) | LoadKind::Moment(_) | LoadKind::ConcentratedFlux(_) => {
+            LoadTarget::Nodes
+        }
         LoadKind::BodyFlux(_) | LoadKind::Gravity(_) | LoadKind::Centrifugal { .. } => {
             LoadTarget::Elements
         }
@@ -891,6 +925,8 @@ fn load_region(
     mesh: &FeMesh,
 ) -> RegionDraft {
     let (sources, target) = match load_target(kind) {
+        // Forces and moments also act on the reference point of a rigid body.
+        LoadTarget::Nodes if !kind.is_thermal() => (SUPPORT_SOURCES, Target::Nodes),
         LoadTarget::Nodes => (NODE_SOURCES, Target::Nodes),
         LoadTarget::Faces => (FACE_SOURCES, face_target(fe)),
         LoadTarget::Elements => (SOLID_SOURCES, face_target(fe)),
@@ -939,6 +975,22 @@ impl Editor {
                     RegionDraft::new(NODE_PART_SOURCES, Target::Nodes),
                 )
             }
+            NewItem::DefinedField(step) => {
+                // A thermal step solves for the temperatures and takes no defined field.
+                let target = (fe.steps.get(step)).filter(|s| s.kind.supports_defined_fields())?;
+                let existing = names(&target.defined_fields, |f| &f.name);
+                Draft::DefinedField(
+                    step,
+                    DefinedField {
+                        name: next_name(DEFINED_TEMPERATURE, existing),
+                        active: true,
+                        region: Region::Nodes(Vec::new()),
+                        kind: DefinedFieldKind::Temperature(20.0),
+                        amplitude: None,
+                    },
+                    RegionDraft::new(NODE_PART_SOURCES, Target::Nodes),
+                )
+            }
             NewItem::Step => {
                 let mut step = Step::new_static(next_name("Step", names(&fe.steps, |s| &s.name)));
                 step.kind = StepKind::Static(previous_static(fe));
@@ -960,7 +1012,7 @@ impl Editor {
                         kind,
                         amplitude: None,
                     },
-                    RegionDraft::new(NODE_SOURCES, Target::Nodes),
+                    RegionDraft::new(SUPPORT_SOURCES, Target::Nodes),
                 )
             }
             NewItem::Load(step) => {
@@ -1052,7 +1104,7 @@ impl Editor {
             TreeItem::BoundaryCondition(s, i) => {
                 let bc = fe.steps.get(s)?.boundary_conditions.get(i)?.clone();
                 let region =
-                    RegionDraft::from_region(&bc.region, NODE_SOURCES, Target::Nodes, mesh);
+                    RegionDraft::from_region(&bc.region, SUPPORT_SOURCES, Target::Nodes, mesh);
                 (Draft::BoundaryCondition(s, bc, region), i)
             }
             TreeItem::Load(s, i) => {
@@ -1078,6 +1130,12 @@ impl Editor {
                 let output = fe.steps.get(s)?.history_outputs.get(i)?.clone();
                 let region = history_region(&output.kind, fe, mesh);
                 (Draft::HistoryOutput(s, output, region), i)
+            }
+            TreeItem::DefinedField(s, i) => {
+                let field = fe.steps.get(s)?.defined_fields.get(i)?.clone();
+                let region =
+                    RegionDraft::from_region(&field.region, NODE_PART_SOURCES, Target::Nodes, mesh);
+                (Draft::DefinedField(s, field, region), i)
             }
             TreeItem::Constraint(i) => (
                 Draft::Constraint(ConstraintDraft::edit(
@@ -1128,6 +1186,7 @@ impl Editor {
             Draft::InitialCondition(c, _) => ("Initial Condition", &c.name),
             Draft::FieldOutput(_, f) => ("Field Output", &f.name),
             Draft::HistoryOutput(_, h, _) => ("History Output", &h.name),
+            Draft::DefinedField(_, f, _) => ("Defined Field", &f.name),
             Draft::Constraint(c) => ("Constraint", c.name()),
             Draft::SurfaceInteraction(s, _) => ("Surface Interaction", &s.name),
             Draft::ContactPair(c, _) => ("Contact Pair", &c.name),
@@ -1265,6 +1324,10 @@ impl Editor {
                     .width(200.0)
                     .show_ui(ui, |ui| {
                         for kind in SectionKind::ALL {
+                            // Shells live in 3D models; 2D elements get a solid section.
+                            if matches!(kind, SectionKind::Shell { .. }) && two_d {
+                                continue;
+                            }
                             let selected = kind.prefix() == section.kind.prefix();
                             if ui.selectable_label(selected, kind.label()).clicked() && !selected {
                                 section.kind = kind;
@@ -1312,6 +1375,23 @@ impl Editor {
                         ui.end_row();
                     }
                     SectionKind::Beam(beam) => beam_form(ui, beam, units),
+                    SectionKind::Shell { thickness, offset } => {
+                        ui.label("Thickness");
+                        ui.add(
+                            numeric::quantity(thickness, units, Quantity::Length)
+                                .range(0.0..=f64::MAX),
+                        );
+                        ui.end_row();
+                        ui.label("Offset");
+                        ui.add(numeric::drag_value(offset).speed(0.01).range(-1.0..=1.0));
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak("Offset of the mesh from the mid-surface as a fraction");
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak("of the thickness: 0.5 puts the mesh on the top face.");
+                        ui.end_row();
+                    }
                 }
                 region.ui(ui, model);
             }
@@ -1411,6 +1491,27 @@ impl Editor {
                         ui.weak("The force acts on every node of the region.");
                         ui.end_row();
                         revolution_hint(ui, axisymmetric);
+                    }
+                    LoadKind::Moment(moment) => {
+                        if two_d {
+                            ui.label("");
+                            ui.weak("Moments need a 3D model.");
+                            ui.end_row();
+                        } else {
+                            for (value, label) in moment.iter_mut().zip(["M1", "M2", "M3"]) {
+                                ui.label(label);
+                                ui.add(
+                                    numeric::quantity(value, units, Quantity::Moment).speed(1.0),
+                                );
+                                ui.end_row();
+                            }
+                        }
+                        ui.label("");
+                        ui.weak(
+                            "Acts at the reference point of a rigid body, or at every node of \
+                             the region that has rotations (beams, shells).",
+                        );
+                        ui.end_row();
                     }
                     LoadKind::Pressure(pressure) => {
                         ui.label("Pressure");
@@ -1661,6 +1762,80 @@ impl Editor {
                 ui.weak(hint);
                 ui.end_row();
             }
+            Draft::DefinedField(_, field, region) => {
+                name_row(ui, &mut field.name);
+                ui.label("Type");
+                ui.label("Temperature");
+                ui.end_row();
+                ui.label("Source");
+                let by_value = field.kind.takes_region();
+                ui.horizontal(|ui| {
+                    if ui.radio(by_value, "By value").clicked() && !by_value {
+                        field.kind = DefinedFieldKind::Temperature(20.0);
+                    }
+                    if ui.radio(!by_value, "From result file").clicked() && by_value {
+                        field.kind = DefinedFieldKind::TemperatureFromFile {
+                            file: Default::default(),
+                            step: 1,
+                        };
+                    }
+                });
+                ui.end_row();
+                match &mut field.kind {
+                    DefinedFieldKind::Temperature(t) => {
+                        ui.label("Temperature");
+                        ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0));
+                        ui.end_row();
+                        amplitude_row(
+                            ui,
+                            "Amplitude",
+                            "defined field amplitude",
+                            &mut field.amplitude,
+                            &model.fe,
+                        );
+                        region.ui(ui, model);
+                    }
+                    DefinedFieldKind::TemperatureFromFile { file, step } => {
+                        ui.label("Result file");
+                        ui.horizontal(|ui| {
+                            let name = file.file_name().map_or_else(
+                                || "(none)".to_string(),
+                                |n| n.to_string_lossy().into_owned(),
+                            );
+                            ui.label(name).on_hover_text(file.display().to_string());
+                            if ui.button("...").clicked() {
+                                let mut dialog = rfd::FileDialog::new()
+                                    .set_title("Result file of the heat transfer analysis")
+                                    .add_filter("CalculiX results (*.frd)", &["frd"]);
+                                if let Some(dir) = file.parent().filter(|d| d.is_dir()) {
+                                    dialog = dialog.set_directory(dir);
+                                }
+                                if let Some(picked) = dialog.pick_file() {
+                                    *file = picked;
+                                }
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Step");
+                        ui.add(numeric::drag_value(step).range(1..=9999).speed(0.1));
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak("Temperatures of all nodes from the .frd file of a heat");
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak("transfer analysis on the same mesh (step counted from 1).");
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak(
+                            "The file is copied next to the input file when the analysis starts.",
+                        );
+                        ui.end_row();
+                    }
+                }
+                ui.label("");
+                ui.weak("Needs an initial temperature and a thermal expansion of the material.");
+                ui.end_row();
+            }
             Draft::NodeTie(tie, region) => {
                 name_row(ui, &mut tie.name);
                 region.ui(ui, model);
@@ -1732,6 +1907,7 @@ impl Editor {
             Draft::InitialCondition(..) => names(&fe.initial_conditions, |i| &i.name),
             Draft::FieldOutput(step, _) => names(&fe.steps[*step].field_outputs, |f| &f.name),
             Draft::HistoryOutput(step, ..) => names(&fe.steps[*step].history_outputs, |h| &h.name),
+            Draft::DefinedField(step, ..) => names(&fe.steps[*step].defined_fields, |f| &f.name),
             Draft::Constraint(_) => fe.constraints.iter().map(Constraint::name).collect(),
             Draft::SurfaceInteraction(..) => names(&fe.surface_interactions, |s| &s.name),
             Draft::ContactPair(..) => names(&fe.contact_pairs, |c| &c.name),
@@ -1754,6 +1930,7 @@ impl Editor {
             Draft::InitialCondition(c, _) => &c.name,
             Draft::FieldOutput(_, f) => &f.name,
             Draft::HistoryOutput(_, h, _) => &h.name,
+            Draft::DefinedField(_, f, _) => &f.name,
             Draft::Constraint(c) => c.name(),
             Draft::SurfaceInteraction(s, _) => &s.name,
             Draft::ContactPair(c, _) => &c.name,
@@ -1770,6 +1947,16 @@ impl Editor {
         if duplicate {
             return Err(format!("The name {name} is already used."));
         }
+        if let Draft::DefinedField(_, field, _) = &self.draft
+            && let DefinedFieldKind::TemperatureFromFile { file, step } = &field.kind
+        {
+            if file.as_os_str().is_empty() {
+                return Err("Choose the result file (.frd) of a heat transfer analysis.".into());
+            }
+            if *step == 0 {
+                return Err("The step to read counts from 1.".into());
+            }
+        }
         if let Draft::InitialCondition(condition, _) = &self.draft
             && let Some(problem) = condition.kind.problem()
         {
@@ -1785,6 +1972,12 @@ impl Editor {
                     return Err("The cross-section area must be greater than 0.".into());
                 }
                 SectionKind::Truss { .. } => {}
+                SectionKind::Shell { thickness, .. }
+                    if !(thickness.is_finite() && *thickness > 0.0) =>
+                {
+                    return Err("The shell thickness must be greater than 0.".into());
+                }
+                SectionKind::Shell { .. } => {}
                 SectionKind::Beam(beam) => {
                     if !beam.profile.is_valid() {
                         return Err(
@@ -1941,6 +2134,21 @@ impl Editor {
                 put(&mut fe.initial_conditions, index, condition);
             }
             Draft::FieldOutput(s, output) => put(&mut fe.steps[s].field_outputs, index, output),
+            Draft::DefinedField(s, mut field, region) => {
+                if field.kind.takes_region() {
+                    field.region = region.region();
+                } else {
+                    field.region = Region::Nodes(Vec::new());
+                }
+                if !field.kind.takes_amplitude() {
+                    field.amplitude = None;
+                }
+                let list = &mut fe.steps[s].defined_fields;
+                if let Some(existing) = index.and_then(|i| list.get(i)) {
+                    field.active = existing.active;
+                }
+                put(list, index, field);
+            }
             Draft::NodeTie(mut tie, region) => {
                 tie.region = region.region();
                 if let Some(existing) = index.and_then(|i| fe.node_ties.get(i)) {
@@ -2023,6 +2231,10 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
             .steps
             .get_mut(s)
             .is_some_and(|st| remove(&mut st.history_outputs, i)),
+        TreeItem::DefinedField(s, i) => fe
+            .steps
+            .get_mut(s)
+            .is_some_and(|st| remove(&mut st.defined_fields, i)),
         TreeItem::InitialCondition(i) => remove(&mut fe.initial_conditions, i),
         TreeItem::Constraint(i) => remove(&mut fe.constraints, i),
         TreeItem::SurfaceInteraction(i) => remove(&mut fe.surface_interactions, i),
@@ -2047,6 +2259,9 @@ pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::HistoryOutput(s, i) => (fe.steps.get_mut(s))
             .and_then(|st| st.history_outputs.get_mut(i))
             .map(|h| &mut h.active),
+        TreeItem::DefinedField(s, i) => (fe.steps.get_mut(s))
+            .and_then(|st| st.defined_fields.get_mut(i))
+            .map(|f| &mut f.active),
         TreeItem::Constraint(i) => fe.constraints.get_mut(i).map(Constraint::active_mut),
         TreeItem::ContactPair(i) => fe.contact_pairs.get_mut(i).map(|c| &mut c.active),
         TreeItem::NodeTie(i) => fe.node_ties.get_mut(i).map(|t| &mut t.active),
@@ -2137,6 +2352,9 @@ pub fn item_region<'a>(fe: &'a FeModel, item: &TreeItem) -> Option<&'a Region> {
             .map(|b| &b.region),
         TreeItem::Load(s, i) => fe.steps.get(s)?.loads.get(i).map(|l| &l.region),
         TreeItem::HistoryOutput(s, i) => fe.steps.get(s)?.history_outputs.get(i)?.kind.region(),
+        TreeItem::DefinedField(s, i) => (fe.steps.get(s)?.defined_fields.get(i))
+            .filter(|f| f.kind.takes_region())
+            .map(|f| &f.region),
         TreeItem::InitialCondition(i) => fe.initial_conditions.get(i).map(|c| &c.region),
         TreeItem::Constraint(i) => fe.constraints.get(i)?.regions().first().copied(),
         TreeItem::NodeTie(i) => fe.node_ties.get(i).map(|t| &t.region),
@@ -2412,6 +2630,7 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     );
     ui.end_row();
     material.elastic = elastic.then_some(values);
+    plastic_rows(ui, material, units);
     for (label, value, quantity) in [
         (
             "Thermal conductivity",
@@ -2458,6 +2677,121 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     material.expansion = expands.then_some(expansion);
 }
 
+/// The plasticity of the material form: the hardening rule and the hardening curve as an
+/// editable table like PrePoMax's `Plastic` property, rows of yield stress, plastic strain
+/// and temperature.
+fn plastic_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
+    let mut plastic = material.plastic.is_some();
+    ui.checkbox(&mut plastic, "Plasticity");
+    ui.end_row();
+    let mut values = material.plastic.clone().unwrap_or_default();
+    ui.label("    Hardening");
+    ui.add_enabled_ui(plastic, |ui| {
+        egui::ComboBox::from_id_salt("plastic hardening")
+            .selected_text(hardening_label(values.hardening))
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                for hardening in Hardening::ALL {
+                    ui.selectable_value(
+                        &mut values.hardening,
+                        hardening,
+                        hardening_label(hardening),
+                    );
+                }
+            });
+    });
+    ui.end_row();
+    ui.label("    Hardening curve");
+    ui.add_enabled_ui(plastic, |ui| {
+        ui.vertical(|ui| {
+            let header = |quantity| {
+                let unit = units.unit(quantity);
+                if unit.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{unit}]")
+                }
+            };
+            let mut remove = None;
+            egui::Grid::new("plastic points")
+                .num_columns(4)
+                .striped(true)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.strong(format!("Yield stress{}", header(Quantity::Pressure)));
+                    ui.strong("Plastic strain");
+                    ui.strong(format!("Temperature{}", header(Quantity::Temperature)));
+                    ui.label("");
+                    ui.end_row();
+                    let removable = values.points.len() > 1;
+                    for (i, point) in values.points.iter_mut().enumerate() {
+                        ui.add(numeric::without_unit(
+                            &mut point.stress,
+                            units,
+                            Quantity::Pressure,
+                        ));
+                        ui.add(
+                            numeric::drag_value(&mut point.plastic_strain)
+                                .speed(0.001)
+                                .range(0.0..=f64::MAX),
+                        );
+                        ui.add(numeric::without_unit(
+                            &mut point.temperature,
+                            units,
+                            Quantity::Temperature,
+                        ));
+                        if ui
+                            .add_enabled(removable, egui::Button::new("Remove").small())
+                            .clicked()
+                        {
+                            remove = Some(i);
+                        }
+                        ui.end_row();
+                    }
+                });
+            if let Some(i) = remove {
+                values.points.remove(i);
+            }
+            if ui.button("Add row").clicked() {
+                // Continues the curve: the same temperature, a larger plastic strain.
+                let next = match values.points.as_slice() {
+                    [.., a, b] => PlasticPoint {
+                        stress: b.stress,
+                        plastic_strain: b.plastic_strain
+                            + (b.plastic_strain - a.plastic_strain).max(0.0),
+                        temperature: b.temperature,
+                    },
+                    [b] => PlasticPoint {
+                        stress: b.stress,
+                        plastic_strain: b.plastic_strain + 0.1,
+                        temperature: b.temperature,
+                    },
+                    [] => PlasticPoint {
+                        stress: 0.0,
+                        plastic_strain: 0.0,
+                        temperature: 0.0,
+                    },
+                };
+                values.points.push(next);
+            }
+            ui.weak(
+                "First row at plastic strain 0 with the yield stress; the strain grows from \
+                 row to row. Rows at other temperatures start at 0 again.",
+            );
+        });
+    });
+    ui.end_row();
+    material.plastic = plastic.then_some(values);
+}
+
+fn hardening_label(hardening: Hardening) -> &'static str {
+    match hardening {
+        Hardening::Isotropic => "Isotropic",
+        Hardening::Kinematic => "Kinematic",
+        Hardening::Combined => "Combined",
+    }
+}
+
 /// Solution settings for a new static step: PrePoMax carries those of the last static step
 /// over.
 fn previous_static(fe: &FeModel) -> StaticStep {
@@ -2484,6 +2818,9 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
         .filter(|load| step.kind.supports_load(&load.kind))
         .cloned()
         .collect();
+    if step.kind.supports_defined_fields() {
+        step.defined_fields = last.defined_fields.clone();
+    }
 }
 
 /// The step kinds of the dialog: label, the kind with its settings and its default field

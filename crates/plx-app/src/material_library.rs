@@ -657,6 +657,22 @@ fn material_models(
             ],
         ));
     }
+    if let Some(plastic) = &material.plastic {
+        let mut rows = vec![("Hardening", plastic.hardening.keyword().to_string())];
+        let unit = units.unit(Quantity::Pressure);
+        for point in &plastic.points {
+            rows.push((
+                "Stress, strain, temperature",
+                format!(
+                    "{} {unit}, {}, {}",
+                    format_value(point.stress),
+                    format_value(point.plastic_strain),
+                    format_value(point.temperature)
+                ),
+            ));
+        }
+        models.push(("Plastic", rows));
+    }
     if let Some(expansion) = material.expansion {
         models.push((
             "Thermal Expansion",

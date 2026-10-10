@@ -12,11 +12,12 @@ use std::fmt::Write as _;
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
     Amplitude, AmplitudeTime, BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint,
-    ContactMethod, ContactPair, DynamicStep, FeModel, FieldOutput, FrequencyStep, GapConductance,
-    HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialConditionKind,
-    InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep, ModelSpace, NodeTie,
-    OutputKind, Region, Section, SectionKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
-    SurfaceBehavior, SurfaceInteraction, Totals, UserKeyword, line_tangent,
+    ContactMethod, ContactPair, DefinedFieldKind, DynamicStep, FeModel, FieldOutput, FrequencyStep,
+    GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
+    InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
+    ModelSpace, NodeTie, OutputKind, Region, Section, SectionKind, StaticStep,
+    SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Totals,
+    UserKeyword, line_tangent,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -39,6 +40,13 @@ pub enum WriteError {
     /// A section that does not fit its elements, see [`Section::kind_problem`].
     #[error("{item}: {reason}")]
     InvalidSection { item: String, reason: String },
+    /// A defined field reads a result file whose name CalculiX cannot take.
+    #[error("{item}: the result file {file} has no valid name")]
+    InvalidResultFile { item: String, file: String },
+    /// A boundary condition or load on a reference point no active rigid body is driven by,
+    /// or a rigid body whose reference point does not exist.
+    #[error("{item}: Reference Point {point} has no active rigid body")]
+    UnknownReferencePoint { item: String, point: String },
     /// A load without a direction, such as a gravity of zero.
     #[error("{item}: {reason}")]
     InvalidLoad { item: String, reason: String },
@@ -286,7 +294,7 @@ pub fn model_keywords(
     let materials = materials(model);
     let mut sections = sections(&mut sets, model)?;
     let mut generated = constraints::springs(&mut sets, model)?;
-    let mut constraints = constraints(&mut sets, model)?;
+    let mut constraints = constraints(&mut sets, model, &mut generated)?;
     let pre_tension_sections = pre_tension_sections(&mut sets, model, &mut generated)?;
     constraints.extend(generated.equations);
     sections.extend(generated.sections);
@@ -309,6 +317,8 @@ pub fn model_keywords(
                 flux_kinds,
                 amplitudes: &model.amplitudes,
                 pair_surfaces: &pair_surfaces,
+                shells: (model.sections.iter())
+                    .any(|s| matches!(s.kind, SectionKind::Shell { .. })),
             };
             write_step(&mut sets, step, &context)
         })
@@ -571,6 +581,18 @@ struct Sets<'a> {
     /// Node sets of submodel boundary conditions, with the first boundary condition naming
     /// each; `*SUBMODEL` lists them.
     submodel_sets: Vec<(String, String)>,
+    /// Reference and rotation node of each reference point an active rigid body is driven
+    /// by, and the node set holding the reference node once something refers to it.
+    reference_nodes: BTreeMap<String, ReferenceNodes>,
+}
+
+/// The nodes CalculiX's `*Rigid body` adds for a reference point: the reference node takes
+/// the translations, the rotation node the rotations as its displacements.
+#[derive(Clone, Debug)]
+struct ReferenceNodes {
+    reference: NodeId,
+    rotation: NodeId,
+    set: Option<String>,
 }
 
 impl<'a> Sets<'a> {
@@ -589,6 +611,7 @@ impl<'a> Sets<'a> {
                 .chain(mesh.surfaces.keys().map(|n| n.to_ascii_uppercase()))
                 .collect(),
             surface_sets: BTreeMap::new(),
+            reference_nodes: BTreeMap::new(),
             pre_tension_nodes: BTreeMap::new(),
             submodel_sets: Vec::new(),
         };
@@ -691,10 +714,29 @@ impl<'a> Sets<'a> {
         Ok(set)
     }
 
+    /// The nodes of the rigid body a reference point drives.
+    fn reference_nodes(&mut self, item: &str, point: &str) -> Result<ReferenceNodes, WriteError> {
+        let Some(nodes) = self.reference_nodes.get(point).cloned() else {
+            return Err(WriteError::UnknownReferencePoint {
+                item: item.to_string(),
+                point: point.to_string(),
+            });
+        };
+        if nodes.set.is_none() {
+            let set = self.free_name("Internal_Selection", &name(point));
+            self.node_sets.push((set.clone(), vec![nodes.reference]));
+            self.reference_nodes.get_mut(point).unwrap().set = Some(set);
+        }
+        Ok(self.reference_nodes[point].clone())
+    }
+
     /// Node set holding the nodes of a region.
     fn node_set(&mut self, item: &str, region: &Region) -> Result<String, WriteError> {
         match region {
             Region::NodeSet(set) => return Ok(set.clone()),
+            Region::ReferencePoint(point) => {
+                return Ok(self.reference_nodes(item, point)?.set.unwrap());
+            }
             Region::Surface(surface) => {
                 if let Some((_, nodes)) = self.surface_sets.get(surface) {
                     return Ok(nodes.clone());
@@ -775,6 +817,19 @@ fn materials(model: &FeModel) -> Vec<Keyword> {
                 properties.push(Keyword::generated(format!(
                     "*Elastic\n{young}, {poisson}\n"
                 )));
+            }
+            if let Some(plastic) = &material.plastic {
+                let mut out = format!("*Plastic, Hardening={}\n", plastic.hardening.keyword());
+                for point in &plastic.points {
+                    let _ = writeln!(
+                        out,
+                        "{}, {}, {}",
+                        number(point.stress),
+                        number(point.plastic_strain),
+                        number(point.temperature)
+                    );
+                }
+                properties.push(Keyword::generated(out));
             }
             // Thermal properties in PrePoMax's order.
             if let Some(expansion) = material.expansion {
@@ -951,6 +1006,14 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError
                 let _ = writeln!(out, "*Solid section, Elset={set}, Material={material}");
                 let _ = writeln!(out, "{}", number(*area));
             }
+            SectionKind::Shell { thickness, offset } => {
+                let set = sets.element_set(&section.name, &section.region)?;
+                let _ = write!(out, "*Shell section, Elset={set}, Material={material}");
+                if *offset != 0.0 {
+                    let _ = write!(out, ", Offset={}", number(*offset));
+                }
+                let _ = writeln!(out, "\n{}", number(*thickness));
+            }
             SectionKind::Beam(beam) => {
                 let mut options = format!("Section={}", beam.profile.keyword());
                 for (k, offset) in (1..).zip(beam.offset) {
@@ -1039,8 +1102,16 @@ fn beam_groups(sets: &mut Sets, section: &Section) -> Result<Vec<([f64; 3], Stri
 
 /// Tie constraints as PrePoMax's `CalTie` writes them: slave surface first. Springs and
 /// supports are written as elements, see [`constraints::springs`].
-fn constraints(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+fn constraints(
+    sets: &mut Sets,
+    model: &FeModel,
+    generated: &mut constraints::Generated,
+) -> Result<Vec<Keyword>, WriteError> {
     let mut keywords = Vec::new();
+    let mut next_node = (sets.mesh.node_ids().iter().copied())
+        .chain(generated.nodes.iter().map(|(id, _)| *id))
+        .max()
+        .map_or(1, |n| n + 1);
     for constraint in &model.constraints {
         if !constraint.active() {
             keywords.push(deactivated(constraint.name()));
@@ -1053,6 +1124,32 @@ fn constraints(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteEr
             | Constraint::SurfaceToSurfaceSpring(_) => {}
             // Moved to the model's node ties when the project was read.
             Constraint::NodeTie(_) => {}
+            Constraint::RigidBody(body) => {
+                let Some(point) = model.reference_point(&body.reference_point) else {
+                    return Err(WriteError::UnknownReferencePoint {
+                        item: body.name.clone(),
+                        point: body.reference_point.clone(),
+                    });
+                };
+                let set = sets.node_set(&body.name, &body.region)?;
+                // Both nodes sit on the reference point, as PrePoMax writes them.
+                let (reference, rotation) = (next_node, next_node + 1);
+                next_node += 2;
+                generated.nodes.push((reference, point.position));
+                generated.nodes.push((rotation, point.position));
+                sets.reference_nodes.insert(
+                    body.reference_point.clone(),
+                    ReferenceNodes {
+                        reference,
+                        rotation,
+                        set: None,
+                    },
+                );
+                keywords.push(Keyword::generated(format!(
+                    "** Name: {}\n*Rigid body, Nset={set}, Ref node={reference}, Rot node={rotation}\n",
+                    body.name
+                )));
+            }
             Constraint::Tie(tie) => {
                 let master = sets.surface(&tie.name, "Master", &tie.master)?;
                 let slave = sets.surface(&tie.name, "Slave", &tie.slave)?;
@@ -1313,6 +1410,9 @@ struct StepContext<'a> {
     flux_kinds: FluxKinds,
     amplitudes: &'a [Amplitude],
     pair_surfaces: &'a PairSurfaces,
+    /// The model has shells: results are written at the shell nodes (`Output=2D`) rather
+    /// than at the nodes CalculiX expands them to, so they fit the mesh.
+    shells: bool,
 }
 
 /// A step as PrePoMax structures it: the step title holds `*Step`, which holds the procedure
@@ -1328,6 +1428,7 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         flux_kinds,
         amplitudes,
         pair_surfaces,
+        shells,
     } = context;
     // Nodes of 2D models move in the x-y plane only; CalculiX fails on rotations there.
     let dofs = if space.is_2d() { 2 } else { 6 };
@@ -1369,6 +1470,11 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
             dofs
         };
         let set = sets.node_set(&bc.name, &bc.region)?;
+        // The rotations of a rigid body are the displacements of its rotation node.
+        let rotation_node = match bc.region.reference_point() {
+            Some(point) => Some(sets.reference_nodes(&bc.name, point)?.rotation),
+            None => None,
+        };
         // Fixed supports stay zero; an amplitude would not change them.
         let reference = bc.amplitude.as_ref().filter(|_| bc.kind.takes_amplitude());
         let amplitude =
@@ -1379,13 +1485,29 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         };
         let mut out = format!("** Name: {}\n*Boundary{options}\n", bc.name);
         match bc.kind {
-            BoundaryKind::Fixed => {
-                let _ = writeln!(out, "{set}, 1, {dofs}, 0");
-            }
+            BoundaryKind::Fixed => match rotation_node {
+                Some(rotation) => {
+                    let _ = writeln!(out, "{set}, 1, {}, 0", dofs.min(3));
+                    if dofs > 3 {
+                        let _ = writeln!(out, "{rotation}, 1, {}, 0", dofs - 3);
+                    }
+                }
+                None => {
+                    let _ = writeln!(out, "{set}, 1, {dofs}, 0");
+                }
+            },
             BoundaryKind::Displacement(values) => {
                 for (dof, value) in (1..).zip(values).take(dofs) {
                     if let Some(value) = value {
-                        let _ = writeln!(out, "{set}, {dof}, {dof}, {}", number(value));
+                        match rotation_node {
+                            Some(rotation) if dof > 3 => {
+                                let d = dof - 3;
+                                let _ = writeln!(out, "{rotation}, {d}, {d}, {}", number(value));
+                            }
+                            _ => {
+                                let _ = writeln!(out, "{set}, {dof}, {dof}, {}", number(value));
+                            }
+                        }
                     }
                 }
             }
@@ -1457,6 +1579,23 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
                 for (dof, value) in (1..).zip(force).take(dofs) {
                     if value != 0.0 {
                         let _ = writeln!(out, "{set}, {dof}, {}", number(value));
+                    }
+                }
+            }
+            LoadKind::Moment(moment) => {
+                // Moments at a reference point act on the rotation node of its rigid body,
+                // at nodes of beams and shells on their rotations.
+                let (target, first_dof) = match load.region.reference_point() {
+                    Some(point) => {
+                        let nodes = sets.reference_nodes(&load.name, point)?;
+                        (nodes.rotation.to_string(), 1)
+                    }
+                    None => (sets.node_set(&load.name, &load.region)?, 4),
+                };
+                let _ = writeln!(out, "*Cload{amplitude}");
+                for (dof, value) in (0..).zip(moment) {
+                    if value != 0.0 && dof + 4 <= dofs {
+                        let _ = writeln!(out, "{target}, {}, {}", first_dof + dof, number(value));
                     }
                 }
             }
@@ -1559,6 +1698,7 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         }
         loads.push(Keyword::generated(out));
     }
+    let defined_fields = defined_fields(sets, step, amplitudes)?;
     let mut history_outputs = Vec::new();
     for output in &step.history_outputs {
         if !output.active {
@@ -1567,7 +1707,9 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
             history_outputs.push(keyword);
         }
     }
-    let field_outputs = step.field_outputs.iter().filter_map(field_output).collect();
+    let field_outputs = (step.field_outputs.iter())
+        .filter_map(|output| field_output(output, shells))
+        .collect();
     let end = Keyword::generated("*End step\n".into());
     let contents = vec![
         Keyword::generated(procedure),
@@ -1575,7 +1717,7 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         Keyword::title("Output frequency", Vec::new()),
         Keyword::title("Boundary conditions", boundaries),
         Keyword::title("Loads", loads),
-        Keyword::title("Defined fields", Vec::new()),
+        Keyword::title("Defined fields", defined_fields),
         Keyword::title("History outputs", history_outputs),
         Keyword::title("Field outputs", field_outputs),
         Keyword::title("End step", vec![end]),
@@ -1584,6 +1726,53 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         &step.name,
         vec![Keyword::parent(header, contents)],
     ))
+}
+
+/// The defined temperatures of a step as PrePoMax's `CalDefinedTemperature` writes them:
+/// `*Temperature` with the node set and the value, or with the result file of a previous
+/// analysis and the step to read. CalculiX 2.21 takes the file name with its extension and
+/// looks for it next to the input file; `BStep` is the only step parameter it knows.
+fn defined_fields(
+    sets: &mut Sets,
+    step: &Step,
+    amplitudes: &[Amplitude],
+) -> Result<Vec<Keyword>, WriteError> {
+    let mut keywords = Vec::new();
+    for field in &step.defined_fields {
+        // A thermal step solves for the temperatures; it leaves the field out like a
+        // deactivated one.
+        if !field.active || !step.kind.supports_defined_fields() {
+            keywords.push(deactivated(&field.name));
+            continue;
+        }
+        let out = match &field.kind {
+            DefinedFieldKind::Temperature(t) => {
+                let set = sets.node_set(&field.name, &field.region)?;
+                let amplitude =
+                    amplitude_parameter(amplitudes, &field.name, "Amplitude", &field.amplitude)?;
+                format!(
+                    "** Name: {}\n*Temperature{amplitude}\n{set}, {}\n",
+                    field.name,
+                    number(*t)
+                )
+            }
+            DefinedFieldKind::TemperatureFromFile { file, step } => {
+                let name = file.file_name().map(|n| n.to_string_lossy());
+                let Some(name) = name.filter(|n| !n.is_empty() && !n.contains(',')) else {
+                    return Err(WriteError::InvalidResultFile {
+                        item: field.name.clone(),
+                        file: file.display().to_string(),
+                    });
+                };
+                format!(
+                    "** Name: {}\n*Temperature, File={name}, BStep={step}\n",
+                    field.name
+                )
+            }
+        };
+        keywords.push(Keyword::generated(out));
+    }
+    Ok(keywords)
 }
 
 /// Comment that stands for a deactivated item, PrePoMax's `CalDeactivated`.
@@ -1620,7 +1809,10 @@ fn deactivated_step(step: &Step) -> Keyword {
             all(step.boundary_conditions.iter().map(|b| b.name.as_str())),
         ),
         Keyword::title("Loads", loads),
-        Keyword::title("Defined fields", Vec::new()),
+        Keyword::title(
+            "Defined fields",
+            all(step.defined_fields.iter().map(|f| f.name.as_str())),
+        ),
         Keyword::title(
             "History outputs",
             all(step.history_outputs.iter().map(|h| h.name.as_str())),
@@ -1980,7 +2172,7 @@ fn buckle_step(settings: &BuckleStep) -> (String, String) {
     (header, procedure)
 }
 
-fn field_output(output: &FieldOutput) -> Option<Keyword> {
+fn field_output(output: &FieldOutput, shells: bool) -> Option<Keyword> {
     if output.variables.is_empty() {
         return None;
     }
@@ -1996,8 +2188,9 @@ fn field_output(output: &FieldOutput) -> Option<Keyword> {
             "*El file"
         }
     };
+    let options = if shells { ", Output=2D" } else { "" };
     Some(Keyword::generated(format!(
-        "** Name: {}\n{keyword}\n{variables}\n",
+        "** Name: {}\n{keyword}{options}\n{variables}\n",
         output.name
     )))
 }

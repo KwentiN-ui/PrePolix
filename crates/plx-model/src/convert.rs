@@ -58,6 +58,9 @@ impl FeModel {
         }
         for section in &mut self.sections {
             c.value(&mut section.thickness, Quantity::Length);
+            if let crate::SectionKind::Shell { thickness, .. } = &mut section.kind {
+                c.value(thickness, Quantity::Length);
+            }
         }
         for constraint in &mut self.constraints {
             constraint.convert_units(&c);
@@ -121,6 +124,11 @@ impl FeModel {
                 // Buckling factors and the accuracy have no unit.
                 StepKind::Buckle(_) => {}
             }
+            for field in &mut step.defined_fields {
+                if let crate::DefinedFieldKind::Temperature(t) = &mut field.kind {
+                    c.value(t, Quantity::Temperature);
+                }
+            }
             for bc in &mut step.boundary_conditions {
                 match &mut bc.kind {
                     BoundaryKind::Fixed | BoundaryKind::Submodel { .. } => {}
@@ -139,6 +147,7 @@ impl FeModel {
             }
             for load in &mut step.loads {
                 match &mut load.kind {
+                    LoadKind::Moment(moment) => c.all(moment, Quantity::Moment),
                     LoadKind::PreTension {
                         value,
                         by_displacement,
@@ -228,6 +237,12 @@ impl Material {
             c.value(&mut expansion.coefficient, Quantity::ThermalExpansion);
             c.value(&mut expansion.zero_temperature, Quantity::Temperature);
         }
+        if let Some(plastic) = &mut self.plastic {
+            for point in &mut plastic.points {
+                c.value(&mut point.stress, Quantity::Pressure);
+                c.value(&mut point.temperature, Quantity::Temperature);
+            }
+        }
     }
 }
 
@@ -251,7 +266,7 @@ impl Constraint {
                 c.option(&mut s.tensile_force, Quantity::Force);
             }
             Constraint::Tie(t) => c.option(&mut t.position_tolerance, Quantity::Length),
-            Constraint::NodeTie(_) => {}
+            Constraint::NodeTie(_) | Constraint::RigidBody(_) => {}
         }
     }
 }

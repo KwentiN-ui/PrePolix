@@ -100,6 +100,7 @@ impl Analysis {
         };
         let input = write(&model.mesh, &fe, &heading)
             .map_err(|e| format!("Input file not written: {e}"))?;
+        let copied = copy_result_files(&fe, &work_dir);
         let job_solver = solver.job_solver();
         let hint = "Check the executable under Tools > Settings > CalculiX.";
         if let Some(message) = crate::settings::missing_executable(&job_solver.executable) {
@@ -111,17 +112,19 @@ impl Analysis {
                 job_solver.executable.display()
             )
         })?;
+        let mut output = vec![format!(
+            "{} {} in {}",
+            ANALYSIS_NAME,
+            if check_model {
+                "model check started"
+            } else {
+                "started"
+            },
+            work_dir.display()
+        )];
+        output.extend(copied);
         Ok(Self {
-            output: vec![format!(
-                "{} {} in {}",
-                ANALYSIS_NAME,
-                if check_model {
-                    "model check started"
-                } else {
-                    "started"
-                },
-                work_dir.display()
-            )],
+            output,
             job,
             started: Instant::now(),
             finished: None,
@@ -255,4 +258,31 @@ impl Analysis {
     pub fn results(&self) -> Option<PathBuf> {
         self.job.results()
     }
+}
+
+/// Copies the result files the defined fields read next to the input file, where CalculiX
+/// looks for them; a file already there is left alone. Returns a line per file for the
+/// monitor output.
+pub fn copy_result_files(fe: &plx_model::FeModel, dir: &std::path::Path) -> Vec<String> {
+    let mut notes = Vec::new();
+    let files = fe.result_files();
+    if !files.is_empty()
+        && let Err(error) = std::fs::create_dir_all(dir)
+    {
+        return vec![format!("{} not created: {error}", dir.display())];
+    }
+    for file in files {
+        let Some(name) = file.file_name() else {
+            continue;
+        };
+        let target = dir.join(name);
+        if target == file {
+            continue;
+        }
+        match std::fs::copy(file, &target) {
+            Ok(_) => notes.push(format!("{} copied to {}", file.display(), dir.display())),
+            Err(error) => notes.push(format!("{} not copied: {error}", file.display())),
+        }
+    }
+    notes
 }

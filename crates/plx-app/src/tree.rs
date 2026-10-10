@@ -62,6 +62,8 @@ pub enum TreeItem {
     FieldOutput(usize, usize),
     /// A history output of a step, by step and index.
     HistoryOutput(usize, usize),
+    /// A defined field of a step, by step and index.
+    DefinedField(usize, usize),
     Analysis,
     /// Features of the FE model or of the shown results, by index.
     ReferencePoint(usize),
@@ -302,6 +304,7 @@ fn can_deactivate(item: &TreeItem) -> bool {
         TreeItem::Step(_)
             | TreeItem::BoundaryCondition(..)
             | TreeItem::Load(..)
+            | TreeItem::DefinedField(..)
             | TreeItem::Constraint(_)
             | TreeItem::ContactPair(_)
             | TreeItem::NodeTie(_)
@@ -360,6 +363,7 @@ fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
         ModelItem::HistoryOutput(s, i) => {
             (TreeItem::HistoryOutput(s, i), step(s, "History Outputs"))
         }
+        ModelItem::DefinedField(s, i) => (TreeItem::DefinedField(s, i), step(s, "Defined Fields")),
         ModelItem::Amplitude(i) => (
             TreeItem::Amplitude(i),
             vec![TreeItem::Group("Amplitudes"), TreeItem::Model],
@@ -403,6 +407,7 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
         TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
         TreeItem::StepGroup(step, "History Outputs") => Some(NewItem::HistoryOutput(step)),
+        TreeItem::StepGroup(step, "Defined Fields") => Some(NewItem::DefinedField(step)),
         TreeItem::Group(HOT_SPOTS) => Some(NewItem::ResultHotSpot),
         TreeItem::Group(REFERENCE_POINTS) => Some(NewItem::Feature(FeatureKind::ReferencePoint)),
         TreeItem::Group(COORDINATE_SYSTEMS) => {
@@ -460,6 +465,7 @@ fn is_fe_item(item: &TreeItem) -> bool {
             | TreeItem::Load(..)
             | TreeItem::FieldOutput(..)
             | TreeItem::HistoryOutput(..)
+            | TreeItem::DefinedField(..)
     )
 }
 
@@ -1354,10 +1360,19 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                 for (i, _) in (step.history_outputs.iter().enumerate()).filter(|(_, h)| !h.active) {
                     tree.inactive.insert(TreeItem::HistoryOutput(s, i));
                 }
+                for (i, _) in (step.defined_fields.iter().enumerate()).filter(|(_, f)| !f.active) {
+                    tree.inactive.insert(TreeItem::DefinedField(s, i));
+                }
                 if !step.kind.supports_loads() {
                     tree.closed.insert(
                         TreeItem::StepGroup(s, "Loads"),
                         "A frequency step has no loads.",
+                    );
+                }
+                if !step.kind.supports_defined_fields() {
+                    tree.closed.insert(
+                        TreeItem::StepGroup(s, "Defined Fields"),
+                        "A thermal step solves for the temperatures and takes no defined field.",
                     );
                 }
                 tree.branch(ui, TreeItem::Step(s), &step.name, true, |tree, ui| {
@@ -1377,7 +1392,10 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                         .map(|(i, l)| (TreeItem::Load(s, i), l.name.as_str()))
                         .collect();
                     tree.step_container(ui, s, "Loads", loads);
-                    tree.step_container(ui, s, "Defined Fields", Vec::new());
+                    let fields = (step.defined_fields.iter().enumerate())
+                        .map(|(i, f)| (TreeItem::DefinedField(s, i), f.name.as_str()))
+                        .collect();
+                    tree.step_container(ui, s, "Defined Fields", fields);
                 });
             }
         });

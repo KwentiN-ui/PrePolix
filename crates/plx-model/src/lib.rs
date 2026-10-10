@@ -23,7 +23,7 @@ mod validity;
 pub use amplitude::{Amplitude, AmplitudeTime};
 pub use checks::{Finding, MeshCheck, Problem, Severity, diagnose_solver_output};
 pub use constraint::{
-    CompressionOnly, NodeTie, PointSpring, SurfaceSpring, SurfaceToSurfaceSpring,
+    CompressionOnly, NodeTie, PointSpring, RigidBody, SurfaceSpring, SurfaceToSurfaceSpring,
 };
 pub use contact::{
     Constraint, ContactMethod, ContactPair, DEFAULT_SURFACE_COLOR, Friction, GapConductance,
@@ -45,6 +45,8 @@ pub use section::{
 };
 pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, Quantity, UnitSystem};
 pub use validity::{Invalid, ModelItem};
+
+use std::path::{Path, PathBuf};
 
 use plx_mesh::{CadEntity, NodeId};
 use serde::{Deserialize, Serialize};
@@ -225,6 +227,7 @@ impl FeModel {
             .chain(self.steps.iter_mut().flat_map(|step| {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
+                    .chain(step.defined_fields.iter_mut().map(|f| &mut f.region))
                     .chain((step.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
             }))
     }
@@ -250,7 +253,8 @@ impl FeModel {
                 .chain(
                     (step.loads.iter_mut())
                         .flat_map(|l| [&mut l.amplitude, &mut l.factor_amplitude]),
-                );
+                )
+                .chain(step.defined_fields.iter_mut().map(|f| &mut f.amplitude));
             for reference in references {
                 if reference.as_deref() == Some(old) {
                     *reference = Some(new.to_string());
@@ -301,6 +305,7 @@ impl FeModel {
             .chain(self.steps.iter_mut().flat_map(|step| {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
+                    .chain(step.defined_fields.iter_mut().map(|f| &mut f.region))
                     .chain((step.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
             }));
         for region in regions {
@@ -347,6 +352,95 @@ pub struct Material {
     /// Thermal expansion (`*EXPANSION`), for thermal strains.
     #[serde(default)]
     pub expansion: Option<Expansion>,
+    /// Rate-independent plasticity (`*PLASTIC`) with a tabular hardening curve.
+    #[serde(default)]
+    pub plastic: Option<Plastic>,
+}
+
+/// How the yield surface grows with plastic strain (`*PLASTIC, HARDENING=`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Hardening {
+    #[default]
+    Isotropic,
+    Kinematic,
+    Combined,
+}
+
+impl Hardening {
+    pub const ALL: [Hardening; 3] = [
+        Hardening::Isotropic,
+        Hardening::Kinematic,
+        Hardening::Combined,
+    ];
+
+    /// The value of CalculiX's `HARDENING` parameter.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Hardening::Isotropic => "Isotropic",
+            Hardening::Kinematic => "Kinematic",
+            Hardening::Combined => "Combined",
+        }
+    }
+}
+
+/// One point of the hardening curve: the yield stress at a plastic strain, valid at a
+/// temperature. CalculiX interpolates between the points and keeps the last stress beyond
+/// them; rows at different temperatures are interpolated in temperature.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlasticPoint {
+    pub stress: f64,
+    pub plastic_strain: f64,
+    pub temperature: f64,
+}
+
+/// Von Mises plasticity with a tabular hardening curve, like PrePoMax's `Plastic` material
+/// property.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Plastic {
+    pub hardening: Hardening,
+    /// Rows in the order CalculiX wants them: by temperature, then by plastic strain,
+    /// the first row of every temperature at plastic strain 0.
+    pub points: Vec<PlasticPoint>,
+}
+
+impl Default for Plastic {
+    /// An ideally plastic material has one row; the yield stress is still to be entered.
+    fn default() -> Self {
+        Self {
+            hardening: Hardening::Isotropic,
+            points: vec![PlasticPoint {
+                stress: 0.0,
+                plastic_strain: 0.0,
+                temperature: 0.0,
+            }],
+        }
+    }
+}
+
+impl Plastic {
+    /// The first row of each temperature must start at plastic strain 0 and the plastic
+    /// strain must grow within a temperature; otherwise CalculiX stops with an error or
+    /// interpolates nonsense. Returns the number of the first offending row.
+    pub fn invalid_row(&self) -> Option<usize> {
+        if self.points.is_empty() {
+            return Some(0);
+        }
+        let mut previous: Option<&PlasticPoint> = None;
+        for (i, point) in self.points.iter().enumerate() {
+            let new_temperature = previous.is_none_or(|p| p.temperature != point.temperature);
+            let ok = if new_temperature {
+                point.plastic_strain == 0.0 && point.stress > 0.0
+            } else {
+                previous.is_some_and(|p| point.plastic_strain > p.plastic_strain)
+                    && point.stress > 0.0
+            };
+            if !ok {
+                return Some(i);
+            }
+            previous = Some(point);
+        }
+        None
+    }
 }
 
 /// Linear isotropic thermal expansion.
@@ -386,6 +480,10 @@ pub struct Step {
     /// Values printed into the `.dat` file; steps saved before they existed have none.
     #[serde(default)]
     pub history_outputs: Vec<HistoryOutput>,
+    /// Temperatures prescribed for the step, PrePoMax's defined fields; steps saved before
+    /// they existed have none.
+    #[serde(default)]
+    pub defined_fields: Vec<DefinedField>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -447,6 +545,12 @@ impl StepKind {
     /// Whether the step computes eigenmodes, whose shapes are scaled arbitrarily.
     pub fn is_modal(&self) -> bool {
         matches!(self, StepKind::Frequency(_) | StepKind::ComplexFrequency(_))
+    }
+
+    /// Whether the step takes defined fields. A thermal step solves for the temperatures
+    /// instead of taking them, as in PrePoMax.
+    pub fn supports_defined_fields(&self) -> bool {
+        !self.is_thermal()
     }
 
     /// Whether the step solves for displacements.
@@ -962,6 +1066,7 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             field_outputs: FieldOutput::complex_frequency_defaults(),
+            defined_fields: Vec::new(),
         }
     }
 
@@ -974,6 +1079,7 @@ impl Step {
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
             history_outputs: Vec::new(),
+            defined_fields: Vec::new(),
             field_outputs: FieldOutput::defaults(),
         }
     }
@@ -987,6 +1093,7 @@ impl Step {
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
             history_outputs: Vec::new(),
+            defined_fields: Vec::new(),
             field_outputs: FieldOutput::frequency_defaults(),
         }
     }
@@ -1000,6 +1107,7 @@ impl Step {
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
             history_outputs: Vec::new(),
+            defined_fields: Vec::new(),
             field_outputs: FieldOutput::defaults(),
         }
     }
@@ -1013,6 +1121,7 @@ impl Step {
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
             history_outputs: Vec::new(),
+            defined_fields: Vec::new(),
             field_outputs: FieldOutput::heat_transfer_defaults(),
         }
     }
@@ -1027,6 +1136,7 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             field_outputs: FieldOutput::dynamic_defaults(),
+            defined_fields: Vec::new(),
         }
     }
 
@@ -1056,6 +1166,7 @@ impl Step {
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
             history_outputs: Vec::new(),
+            defined_fields: Vec::new(),
             field_outputs: FieldOutput::coupled_defaults(),
         }
     }
@@ -1125,6 +1236,10 @@ pub struct Load {
 pub enum LoadKind {
     /// Force applied at every node of the region, as CalculiX's `*CLOAD` on a node set.
     ConcentratedForce([f64; 3]),
+    /// Moment applied at every node of the region (`*CLOAD` on degrees of freedom 4 to 6):
+    /// at a reference point of a rigid body, or at nodes of beams and shells, which have
+    /// rotations.
+    Moment([f64; 3]),
     /// Pressure on a surface region; positive pushes into the material.
     Pressure(f64),
     /// Total force on a surface region, spread over its nodes by area when the input file is
@@ -1178,6 +1293,7 @@ impl LoadKind {
         !matches!(
             self,
             LoadKind::ConcentratedForce(_)
+                | LoadKind::Moment(_)
                 | LoadKind::Pressure(_)
                 | LoadKind::SurfaceTraction(_)
                 | LoadKind::PreTension { .. }
@@ -1254,6 +1370,65 @@ impl InitialConditionKind {
             }
             _ => None,
         }
+    }
+}
+
+/// Temperatures prescribed in a step for the thermal strains of a mechanical analysis,
+/// PrePoMax's defined temperature (`*TEMPERATURE`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DefinedField {
+    pub name: String,
+    /// A deactivated field is left out of the input file.
+    #[serde(default = "active")]
+    pub active: bool,
+    /// The nodes that take the value; a field read from a file covers all nodes of the
+    /// file and ignores the region.
+    pub region: Region,
+    pub kind: DefinedFieldKind,
+    /// Amplitude a value follows over time; `None` is CalculiX's default ramp. A field
+    /// read from a file has none.
+    #[serde(default)]
+    pub amplitude: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum DefinedFieldKind {
+    /// One temperature on the nodes of the region.
+    Temperature(f64),
+    /// The temperatures of a step of a result file, as a heat transfer analysis on the
+    /// same mesh wrote it (`*TEMPERATURE, FILE=`); the step counts from 1. CalculiX reads
+    /// the file from the working directory of the analysis, so the file is copied there
+    /// when the analysis starts.
+    TemperatureFromFile { file: PathBuf, step: u32 },
+}
+
+impl DefinedFieldKind {
+    /// Whether the field takes its nodes from its region.
+    pub fn takes_region(&self) -> bool {
+        matches!(self, DefinedFieldKind::Temperature(_))
+    }
+
+    /// Whether the value can follow an amplitude.
+    pub fn takes_amplitude(&self) -> bool {
+        matches!(self, DefinedFieldKind::Temperature(_))
+    }
+}
+
+impl FeModel {
+    /// The result files the active defined fields of the active steps read, each once;
+    /// CalculiX needs them next to the input file.
+    pub fn result_files(&self) -> Vec<&Path> {
+        let mut files: Vec<&Path> = (self.steps.iter().filter(|s| s.active))
+            .filter(|s| s.kind.supports_defined_fields())
+            .flat_map(|s| s.defined_fields.iter().filter(|f| f.active))
+            .filter_map(|f| match &f.kind {
+                DefinedFieldKind::TemperatureFromFile { file, .. } => Some(file.as_path()),
+                DefinedFieldKind::Temperature(_) => None,
+            })
+            .collect();
+        files.sort_unstable();
+        files.dedup();
+        files
     }
 }
 

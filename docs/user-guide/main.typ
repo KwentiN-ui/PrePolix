@@ -24,9 +24,12 @@
 
 #include "chapters/model/model-properties.typ"
 #include "chapters/model/materials.typ"
+#include "chapters/model/plastic.typ"
 #include "chapters/model/sections.typ"
+#include "chapters/model/shell-section.typ"
 #include "chapters/model/features.typ"
 #include "chapters/model/interactions.typ"
+#include "chapters/model/rigid-body.typ"
 #include "chapters/model/amplitudes.typ"
 #include "chapters/model/initial-conditions.typ"
 #include "chapters/model/steps.typ"
@@ -35,6 +38,7 @@
 #include "chapters/model/modal-dynamics.typ"
 #include "chapters/model/bcs-loads.typ"
 #include "chapters/model/pre-tension.typ"
+#include "chapters/model/defined-fields.typ"
 #include "chapters/model/keywords.typ"
 
 #include "chapters/analysis/run.typ"
