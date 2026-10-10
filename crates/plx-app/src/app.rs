@@ -64,6 +64,8 @@ struct Workbench {
     /// Open dialog of a mesh setup item.
     mesh_item_editor: Option<MeshItemEditor>,
     meshing: Option<MeshingJob>,
+    /// CAD faces and edges Gmsh named when meshing failed, shown red on the geometry.
+    mesh_failure: BTreeSet<plx_mesher::CadEntity>,
     /// The results workspace: every results file opened in this session, PrePoMax's results
     /// collection. One of them is shown on the Results tab.
     results: Vec<Model>,
@@ -192,6 +194,7 @@ impl PrepolixApp {
                 mesh_setup: None,
                 mesh_item_editor: None,
                 meshing: None,
+                mesh_failure: BTreeSet::new(),
                 results: Vec::new(),
                 current_result: 0,
                 parked_camera: None,
@@ -1981,6 +1984,7 @@ impl Workbench {
         };
         self.output.push(format!("Vernetze {what} …"));
         self.meshing = Some(MeshingJob::start(geometry, parts, ctx));
+        self.mesh_failure.clear();
     }
 
     fn poll_meshing(&mut self) {
@@ -2045,9 +2049,21 @@ impl Workbench {
                     self.view_command = Some(ViewCommand::Fit);
                 }
             }
-            Err(error) => self
-                .output
-                .push(format!("Vernetzung fehlgeschlagen: {error}")),
+            Err(error) => {
+                let message = error.to_string();
+                self.mesh_failure = plx_mesher::named_entities(&message).into_iter().collect();
+                self.output
+                    .push(format!("Vernetzung fehlgeschlagen: {message}"));
+                // The geometry shows the faces and edges Gmsh names in red.
+                if !self.mesh_failure.is_empty() {
+                    self.output.push(
+                        "Die betroffenen Flächen und Kanten sind in der Geometrie rot markiert"
+                            .into(),
+                    );
+                    self.tree.selected = None;
+                    self.set_tree_view(TreeView::Geometry);
+                }
+            }
         }
     }
 
@@ -3326,7 +3342,8 @@ impl Workbench {
                 .get(*index)
                 .map(|item| crate::meshing::item_highlight(view, &item.kind))
                 .unwrap_or_default(),
-            _ => Highlight::default(),
+            // Without a selection, the faces and edges meshing failed on.
+            _ => crate::meshing::entities_highlight(view, &self.mesh_failure),
         };
         if highlight != view.highlight {
             view.highlight = highlight;
