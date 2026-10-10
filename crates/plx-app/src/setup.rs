@@ -2271,6 +2271,17 @@ pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
     active.map(|a| *a = !*a).is_some()
 }
 
+/// Moves step `s` one place up or down, like reordering in PrePoMax's step list; returns the
+/// new index. Loads, boundary conditions and outputs belong to their step and move with it.
+pub fn move_step(fe: &mut FeModel, s: usize, up: bool) -> Option<usize> {
+    let to = if up { s.checked_sub(1)? } else { s + 1 };
+    if s >= fe.steps.len() || to >= fe.steps.len() {
+        return None;
+    }
+    fe.steps.swap(s, to);
+    Some(to)
+}
+
 /// Swaps master and slave of a tie, spring connection or contact pair; a swapped name
 /// `<slave>_to_<master>` that is taken gets the next free number, as in PrePoMax.
 pub fn swap_master_slave(fe: &mut FeModel, item: &TreeItem) -> bool {
@@ -3667,6 +3678,24 @@ mod tests {
         assert!(fe.steps[0].boundary_conditions[0].active);
         assert!(!toggle_active(&mut fe, &TreeItem::Load(0, 0)));
         assert!(!toggle_active(&mut fe, &TreeItem::Material(0)));
+    }
+
+    #[test]
+    fn steps_are_moved_with_their_items() {
+        let mut fe = FeModel::default();
+        for _ in 0..3 {
+            Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
+        }
+        let names: Vec<_> = fe.steps.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(move_step(&mut fe, 0, true), None);
+        assert_eq!(move_step(&mut fe, 2, false), None);
+        assert_eq!(move_step(&mut fe, 2, true), Some(1));
+        assert_eq!(
+            fe.steps.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            [&names[0], &names[2], &names[1]]
+        );
+        assert_eq!(move_step(&mut fe, 0, false), Some(1));
+        assert_eq!(fe.steps[0].name, names[2]);
     }
 
     #[test]

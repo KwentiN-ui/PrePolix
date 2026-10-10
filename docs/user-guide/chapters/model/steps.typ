@@ -4,13 +4,27 @@
 
 A step is one analysis of CalculiX with its own boundary conditions, loads and outputs. Create it
 with #menu("Model", "Create Step ...") or #ui("Create ...") on #ui("Steps"). A new step copies the
-boundary conditions and loads of the last step, as far as its type accepts them. Steps cannot be
-reordered, and the type of a step cannot be changed after it was created.
+boundary conditions and loads of the last step, as far as its type accepts them. The type of a
+step cannot be changed after it was created.
 
 #note[Every step writes `OP=NEW` for its boundary conditions and loads. What applies in a step is
 exactly what is listed under it in the tree.]
 
 #screenshot("step.png", [Static step])
+
+=== Order of the steps
+
+CalculiX runs the steps in the order of the list, and a step starts from the state at the end of
+the previous one. To change the order, right-click a step in the #ui("Steps") list and choose
+#ui("Move Up") or #ui("Move Down"). The step keeps its boundary conditions, loads, defined
+fields and outputs, and stays selected. #ui("Move Up") is disabled on the first step and
+#ui("Move Down") on the last.
+
+#screenshot("step-move-menu.png", [Context menu of a step])
+
+Steps that build on the previous one, such as a step with #ui("Perturbation"), take the state of
+whatever step now precedes them, so check the order after moving. The step numbers of existing
+results refer to the order at the time of the run.
 
 === Solver
 

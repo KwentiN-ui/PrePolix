@@ -1299,6 +1299,14 @@ impl Workbench {
             };
             self.confirm_delete = Some((view, items));
         }
+        if let (Some((s, up)), Some(model)) = (response.move_step, self.model.as_mut())
+            && let Some(to) = crate::setup::move_step(&mut model.fe, s, up)
+        {
+            // The moved step stays selected.
+            if let Some((_, item @ TreeItem::Step(_))) = &mut self.tree.selected {
+                *item = TreeItem::Step(to);
+            }
+        }
         if let (Some(item), Some(model)) = (response.toggle_active, self.model.as_mut()) {
             crate::setup::toggle_active(&mut model.fe, &item);
         }
