@@ -16,7 +16,7 @@ use plx_model::{
     GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
     InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
     ModelSpace, NodeTie, OutputKind, Region, Section, SectionKind, StaticStep,
-    SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Totals,
+    SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals,
     UserKeyword, line_tangent,
 };
 
@@ -309,8 +309,10 @@ pub fn model_keywords(
     let steps = model
         .steps
         .iter()
-        .map(|step| {
+        .enumerate()
+        .map(|(s, step)| {
             let context = StepContext {
+                stored_perturbation: stored_perturbation(&model.steps[..s]),
                 extra_boundary: generated.boundary.as_ref(),
                 space,
                 lines: &lines,
@@ -1150,22 +1152,32 @@ fn constraints(
                     body.name
                 )));
             }
-            Constraint::Tie(tie) => {
-                let master = sets.surface(&tie.name, "Master", &tie.master)?;
-                let slave = sets.surface(&tie.name, "Slave", &tie.slave)?;
-                let mut out = format!("*Tie, Name={}", name(&tie.name));
-                if let Some(tolerance) = tie.position_tolerance {
-                    let _ = write!(out, ", Position tolerance={}", number(tolerance));
-                }
-                if !tie.adjust {
-                    out.push_str(", Adjust=No");
-                }
-                let _ = writeln!(out, "\n{slave}, {master}");
-                keywords.push(Keyword::generated(out));
-            }
+            Constraint::Tie(t) => keywords.push(tie(sets, t)?),
+        }
+    }
+    for t in &model.ties {
+        if t.active {
+            keywords.push(tie(sets, t)?);
+        } else {
+            keywords.push(deactivated(&t.name));
         }
     }
     Ok(keywords)
+}
+
+/// `*Tie` of a slave surface glued to its master.
+fn tie(sets: &mut Sets, tie: &Tie) -> Result<Keyword, WriteError> {
+    let master = sets.surface(&tie.name, "Master", &tie.master)?;
+    let slave = sets.surface(&tie.name, "Slave", &tie.slave)?;
+    let mut out = format!("*Tie, Name={}", name(&tie.name));
+    if let Some(tolerance) = tie.position_tolerance {
+        let _ = write!(out, ", Position tolerance={}", number(tolerance));
+    }
+    if !tie.adjust {
+        out.push_str(", Adjust=No");
+    }
+    let _ = writeln!(out, "\n{slave}, {master}");
+    Ok(Keyword::generated(out))
 }
 
 /// One `*Pre-tension section` per pre-tension load, with a new node that carries the
@@ -1413,6 +1425,19 @@ struct StepContext<'a> {
     /// The model has shells: results are written at the shell nodes (`Output=2D`) rather
     /// than at the nodes CalculiX expands them to, so they fit the mesh.
     shells: bool,
+    /// `*STEP, PERTURBATION` of the frequency step whose stored modes a complex frequency
+    /// step uses; CalculiX stops when the two differ.
+    stored_perturbation: bool,
+}
+
+/// The perturbation flag of the last active frequency step with storage among `before`.
+fn stored_perturbation(before: &[Step]) -> bool {
+    (before.iter().rev().filter(|s| s.active))
+        .find_map(|s| match &s.kind {
+            StepKind::Frequency(f) if f.storage => Some(f.perturbation),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 /// A step as PrePoMax structures it: the step title holds `*Step`, which holds the procedure
@@ -1429,6 +1454,7 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         amplitudes,
         pair_surfaces,
         shells,
+        stored_perturbation,
     } = context;
     // Nodes of 2D models move in the x-y plane only; CalculiX fails on rotations there.
     let dofs = if space.is_2d() { 2 } else { 6 };
@@ -1438,7 +1464,9 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
     let (header, procedure) = match &step.kind {
         StepKind::Static(settings) => static_step(settings),
         StepKind::Frequency(settings) => frequency_step(settings),
-        StepKind::ComplexFrequency(settings) => complex_frequency_step(settings),
+        StepKind::ComplexFrequency(settings) => {
+            complex_frequency_step(settings, stored_perturbation)
+        }
         StepKind::Buckle(settings) => buckle_step(settings),
         StepKind::HeatTransfer(settings) => heat_transfer_step(settings, "*Heat transfer", false),
         StepKind::CoupledTempDisp(settings) => {
@@ -2136,10 +2164,11 @@ fn frequency_step(settings: &FrequencyStep) -> (String, String) {
 }
 
 /// The `*Step` line and the procedure keyword of a complex frequency step, as PrePoMax's
-/// `CalComplexFrequency` writes them.
-fn complex_frequency_step(settings: &ComplexFrequencyStep) -> (String, String) {
+/// `CalComplexFrequency` writes them. `perturbation` is the flag of the frequency step that
+/// stored the modes: CalculiX requires the same on both `*STEP` cards.
+fn complex_frequency_step(settings: &ComplexFrequencyStep, perturbation: bool) -> (String, String) {
     let mut header = String::from("*Step");
-    if settings.perturbation {
+    if perturbation {
         header.push_str(", Perturbation");
     }
     header.push('\n');

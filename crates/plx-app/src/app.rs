@@ -1183,14 +1183,13 @@ impl Workbench {
     }
 
     fn output(&self, ui: &mut egui::Ui) {
-        egui::ScrollArea::both()
-            .auto_shrink([false, false])
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                for line in &self.output {
-                    ui.monospace(line);
-                }
-            });
+        crate::virtual_table::lines(
+            ui,
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
+                .stick_to_bottom(true),
+            &self.output,
+        );
     }
 
     fn model_tree(&mut self, ui: &mut egui::Ui, view: TreeView) {
@@ -1298,6 +1297,14 @@ impl Workbench {
                 item => vec![item],
             };
             self.confirm_delete = Some((view, items));
+        }
+        if let (Some((s, up)), Some(model)) = (response.move_step, self.model.as_mut())
+            && let Some(to) = crate::setup::move_step(&mut model.fe, s, up)
+        {
+            // The moved step stays selected.
+            if let Some((_, item @ TreeItem::Step(_))) = &mut self.tree.selected {
+                *item = TreeItem::Step(to);
+            }
         }
         if let (Some(item), Some(model)) = (response.toggle_active, self.model.as_mut()) {
             crate::setup::toggle_active(&mut model.fe, &item);
@@ -2175,6 +2182,7 @@ impl Workbench {
             (NewItem::Constraint, "Create Constraint …"),
             (NewItem::SurfaceInteraction, "Create Surface Interaction …"),
             (NewItem::ContactPair, "Create Contact Pair …"),
+            (NewItem::Tie, "Create Tie …"),
         ] {
             if ui.button(label).clicked() {
                 kind = Some(item);
@@ -2703,6 +2711,7 @@ impl Workbench {
                 dialog.click(
                     model,
                     hit.as_ref().map(|h| (h, click.precision_at(h.point))),
+                    Operation::from_modifiers(click.shift, click.ctrl),
                 );
             }
             return;
@@ -2843,6 +2852,18 @@ impl Workbench {
             return;
         }
         let operation = Operation::from_modifiers(area.shift, area.ctrl);
+        if self.feature_picks()
+            && let Some(dialog) = &mut self.feature_dialog
+        {
+            let model = match dialog.results {
+                Some(index) => self.results.get(index),
+                None => self.model.as_ref(),
+            };
+            if let Some(model) = model {
+                dialog.box_select(model, area, operation);
+            }
+            return;
+        }
         if self.tree_view == TreeView::Results {
             if let Some(model) = self.results.get(self.current_result) {
                 if let Some(dialog) = &mut self.hot_spot_dialog {
@@ -3168,16 +3189,16 @@ impl Workbench {
                 // The first new item shows in the tree, even in a collapsed branch.
                 let first = if !pairs.is_empty() {
                     Some(TreeItem::ContactPair(model.fe.contact_pairs.len()))
-                } else if !joints.is_empty() {
-                    Some(TreeItem::NodeTie(model.fe.node_ties.len()))
+                } else if !ties.is_empty() {
+                    Some(TreeItem::Tie(model.fe.ties.len()))
                 } else {
-                    (!ties.is_empty()).then_some(TreeItem::Constraint(model.fe.constraints.len()))
+                    (!joints.is_empty()).then_some(TreeItem::NodeTie(model.fe.node_ties.len()))
                 };
                 if let Some(item) = first {
                     self.tree.selected = Some((TreeView::FeModel, item));
                     self.tree.reveal = true;
                 }
-                model.fe.constraints.extend(ties);
+                model.fe.ties.extend(ties);
                 model.fe.contact_pairs.extend(pairs);
                 model.fe.node_ties.extend(joints);
                 self.output.push(created);
@@ -3543,7 +3564,7 @@ impl Workbench {
             let feature = (self.feature_dialog.as_ref())
                 .filter(|d| on_results && d.results == Some(index) && index == current);
             let highlight = match (dialog, &self.tree.selected) {
-                _ if feature.is_some() => feature.map(FeatureDialog::highlight).unwrap_or_default(),
+                _ if feature.is_some() => feature.map(|d| d.highlight(model)).unwrap_or_default(),
                 _ if transformation.is_some() => transformation
                     .map(TransformationDialog::highlight)
                     .unwrap_or_default(),
@@ -3569,7 +3590,7 @@ impl Workbench {
             dialog.highlight()
         } else if let Some(dialog) = feature {
             self.highlighted = None;
-            dialog.highlight()
+            dialog.highlight(model)
         } else if let Some(dialog) = &self.contact_search {
             self.highlighted = None;
             dialog.highlight(model)
@@ -3663,6 +3684,23 @@ impl Workbench {
             Some((TreeView::FeModel, item)) => Some(item),
             _ => None,
         };
+        // Constraints belong to no step: PrePoMax draws them with the symbols of any step.
+        let mut items = Vec::new();
+        let edited_constraint = self.editor.as_ref().and_then(|e| e.editing_constraint());
+        for (i, constraint) in model.fe.constraints.iter().enumerate() {
+            if !constraint.active() || edited_constraint == Some(Some(i)) {
+                continue;
+            }
+            if let Some((kind, region)) = symbols::Kind::of_constraint(constraint) {
+                items.push(symbols::Item {
+                    kind,
+                    region,
+                    selected: edited_constraint.is_none()
+                        && selected == Some(&TreeItem::Constraint(i)),
+                });
+            }
+        }
+        items.extend(self.editor.as_ref().and_then(Editor::constraint_item));
         let step_of = |item: &TreeItem| match *item {
             TreeItem::Step(s)
             | TreeItem::StepGroup(s, _)
@@ -3677,7 +3715,7 @@ impl Workbench {
             .or_else(|| selected.and_then(step_of))
             .or_else(|| model.fe.steps.len().checked_sub(1));
         let Some((index, step)) = index.and_then(|i| Some((i, model.fe.steps.get(i)?))) else {
-            return Vec::new();
+            return items;
         };
         // The edited item replaces its saved version.
         let replaced = |load: bool, i: usize| {
@@ -3687,7 +3725,6 @@ impl Workbench {
         };
         let is_selected = |item: TreeItem| edited.is_none() && selected == Some(&item);
         // Like PrePoMax, deactivated items have no symbols; the edited one is drawn anyway.
-        let mut items = Vec::new();
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
             if step.active && bc.active && !replaced(false, i) {
                 items.push(symbols::Item {
@@ -3787,13 +3824,17 @@ impl Workbench {
         let Some(model) = self.model_mut(which) else {
             return;
         };
+        // Offsets shown without an animation move nothing in the next tick, so rebuild here.
+        let mut moved = false;
         if let Some(change) = change {
             let animate = change == crate::exploded::dialog::Change::Parameter;
             preview_explosion(model, &mut dialog, animate);
+            moved = !animate;
         }
         match result {
             ExplodedResult::Open => {
                 self.exploded_dialog = Some((dialog, which));
+                self.results_changed |= moved;
                 return;
             }
             ExplodedResult::Ok => {
@@ -3804,6 +3845,7 @@ impl Workbench {
                 model.explosion.applied = (!nothing).then(|| parameters.clone());
                 if !model.explosion.is_animating() {
                     model.explosion.show(offsets, false);
+                    moved = true;
                 }
                 self.last_exploded = parameters;
             }
@@ -3822,6 +3864,7 @@ impl Workbench {
                 model.explosion.applied = None;
             }
         }
+        self.results_changed |= moved;
         self.viewport.preview = Default::default();
     }
 
@@ -3929,7 +3972,7 @@ impl Workbench {
         match dialog.show(ctx, model, cut) {
             FeatureResult::Open => self.feature_dialog = Some(dialog),
             FeatureResult::Ok => {
-                dialog.apply(&mut model.fe);
+                dialog.apply(&mut model.fe, &model.mesh);
                 self.viewport.preview = Default::default();
             }
             FeatureResult::Cancel => self.viewport.preview = Default::default(),

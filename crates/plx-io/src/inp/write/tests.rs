@@ -264,10 +264,9 @@ fn rigid_tip(load: Option<Load>, bc: Option<BoundaryCondition>) -> (FeMesh, FeMo
     model.steps[0].loads.clear();
     model.steps[0].loads.extend(load);
     model.steps[0].boundary_conditions.extend(bc);
-    model.reference_points.push(ReferencePoint {
-        name: "RP-1".into(),
-        position: [100.0, 5.0, 5.0],
-    });
+    model
+        .reference_points
+        .push(ReferencePoint::new("RP-1", [100.0, 5.0, 5.0]));
     let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
     body.region = Region::Surface("TIP".into());
     model.constraints.push(Constraint::RigidBody(body));
@@ -1818,7 +1817,7 @@ fn a_tie_writes_its_surfaces_slave_first() {
     tie.master = Region::Faces(lower);
     tie.slave = Region::Faces(upper);
     tie.position_tolerance = Some(0.5);
-    model.constraints.push(Constraint::Tie(tie));
+    model.ties.push(tie);
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
         "*Surface, Name=Internal_Selection-1_Tie-1_Master, Type=Element\n",
@@ -1899,7 +1898,7 @@ fn calculix_carries_the_load_across_a_tie() {
     tie.master = Region::Faces(lower);
     tie.slave = Region::Faces(upper);
     tie.position_tolerance = Some(0.05);
-    model.constraints.push(Constraint::Tie(tie));
+    model.ties.push(tie);
     let Some(frd) = run_ccx("tie", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
@@ -3994,9 +3993,43 @@ fn a_complex_frequency_step_is_written_like_prepomax_does() {
         unreachable!()
     };
     settings.coriolis = false;
+    let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
+        unreachable!()
+    };
     settings.perturbation = false;
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Step\n*Complex frequency\n4\n"), "{text}");
+}
+
+#[test]
+fn the_complex_frequency_step_takes_perturbation_from_the_stored_frequency_step() {
+    // CalculiX stops ("the .eig-file was created without perturbation info") unless both
+    // steps agree; a rotor without prestress in the frequency step must solve as well.
+    for perturbation in [false, true] {
+        let (mesh, mut model) = rotor_analysis(100.0);
+        let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
+            unreachable!()
+        };
+        settings.perturbation = perturbation;
+        let text = write_inp(&mesh, &model, "").unwrap();
+        let complex = &text[text.find("** Step-3").unwrap()..];
+        let header = if perturbation {
+            "*Step, Perturbation\n"
+        } else {
+            "*Step\n"
+        };
+        assert!(
+            complex.contains(&format!("{header}*Complex frequency, Coriolis\n")),
+            "{complex}"
+        );
+        let Some(frd) = run_ccx(&format!("rotor-perturbation-{perturbation}"), &text) else {
+            return;
+        };
+        let whirling = (frd.increments.iter())
+            .filter(|i| i.kind == plx_results::AnalysisKind::ComplexFrequency)
+            .count();
+        assert_eq!(whirling, 4);
+    }
 }
 
 #[test]

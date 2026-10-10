@@ -821,7 +821,7 @@ mod tests {
         editor.copy_to_model();
         editor.copy_to_model();
         let names: Vec<&str> = editor.materials.iter().map(|m| m.name.as_str()).collect();
-        assert_eq!(names, ["S235", "S235_Library-1"]);
+        assert_eq!(names, ["Generic Steel", "Generic Steel_Library-1"]);
         assert_eq!(editor.material_selected, Some(1));
         let LibraryResult::Ok(Some(materials)) = editor.accept() else {
             panic!("the model materials changed");
@@ -855,7 +855,16 @@ mod tests {
         let (material, units) = editor.previewed().unwrap();
         let models = material_models(material, units);
         let labels: Vec<&str> = models.iter().map(|(label, _)| *label).collect();
-        assert_eq!(labels, [DENSITY, ELASTIC]);
+        assert_eq!(
+            labels,
+            [
+                DENSITY,
+                ELASTIC,
+                "Thermal Expansion",
+                "Thermal Conductivity",
+                "Specific Heat"
+            ]
+        );
         assert_eq!(models[0].1[0].1, "7.85E-9 t/mm³");
         assert_eq!(models[1].1[0].1, "210000 MPa");
     }

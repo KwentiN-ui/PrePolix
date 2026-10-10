@@ -50,6 +50,8 @@ pub enum TreeItem {
     Constraint(usize),
     SurfaceInteraction(usize),
     ContactPair(usize),
+    /// A tie of two surfaces, listed with the contact pairs.
+    Tie(usize),
     /// A node tie, listed with the contact pairs.
     NodeTie(usize),
     Amplitude(usize),
@@ -198,6 +200,8 @@ pub struct TreeResponse {
     pub delete: Option<TreeItem>,
     /// Activate a deactivated step, boundary condition or load, or deactivate an active one.
     pub toggle_active: Option<TreeItem>,
+    /// Move a step one place up (`true`) or down in the list of steps.
+    pub move_step: Option<(usize, bool)>,
     /// Swap master and slave of a tie, spring connection or contact pair.
     pub swap_master_slave: Option<TreeItem>,
     /// An entry of the analysis' context menu, or the monitor by double click.
@@ -307,6 +311,7 @@ fn can_deactivate(item: &TreeItem) -> bool {
             | TreeItem::DefinedField(..)
             | TreeItem::Constraint(_)
             | TreeItem::ContactPair(_)
+            | TreeItem::Tie(_)
             | TreeItem::NodeTie(_)
             | TreeItem::InitialCondition(_)
     )
@@ -344,6 +349,14 @@ fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
         ),
         ModelItem::ContactPair(i) => (
             TreeItem::ContactPair(i),
+            vec![
+                TreeItem::Group("Contact Pairs"),
+                TreeItem::Group("Contacts"),
+                TreeItem::Model,
+            ],
+        ),
+        ModelItem::Tie(i) => (
+            TreeItem::Tie(i),
             vec![
                 TreeItem::Group("Contact Pairs"),
                 TreeItem::Group("Contacts"),
@@ -457,6 +470,7 @@ fn is_fe_item(item: &TreeItem) -> bool {
             | TreeItem::Constraint(_)
             | TreeItem::SurfaceInteraction(_)
             | TreeItem::ContactPair(_)
+            | TreeItem::Tie(_)
             | TreeItem::NodeTie(_)
             | TreeItem::Amplitude(_)
             | TreeItem::InitialCondition(_)
@@ -521,12 +535,13 @@ fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
             item,
             SurfaceInteraction(_)
                 | ContactPair(_)
+                | Tie(_)
                 | NodeTie(_)
                 | Group("Surface Interactions")
                 | Group("Contact Pairs")
         ),
         Group("Surface Interactions") => matches!(item, SurfaceInteraction(_)),
-        Group("Contact Pairs") => matches!(item, ContactPair(_) | NodeTie(_)),
+        Group("Contact Pairs") => matches!(item, ContactPair(_) | Tie(_) | NodeTie(_)),
         _ => false,
     }
 }
@@ -650,6 +665,8 @@ struct Tree<'a> {
     inactive: HashSet<TreeItem>,
     /// Items with a master and a slave, whose menu offers to swap them.
     master_slave: HashSet<TreeItem>,
+    /// Number of steps, to disable "Move Down" on the last one.
+    step_count: usize,
 }
 
 impl Tree<'_> {
@@ -767,11 +784,15 @@ impl Tree<'_> {
                         self.response.generate_mesh = true;
                     }
                 }
-                // Node ties live with the contact pairs; the search creates most of them.
-                if item == TreeItem::Group("Contact Pairs")
-                    && ui.button("Create Node Tie …").clicked()
-                {
-                    self.response.create = Some(NewItem::NodeTie);
+                // Ties and node ties live with the contact pairs; the search creates most
+                // of them.
+                if item == TreeItem::Group("Contact Pairs") {
+                    if ui.button("Create Tie …").clicked() {
+                        self.response.create = Some(NewItem::Tie);
+                    }
+                    if ui.button("Create Node Tie …").clicked() {
+                        self.response.create = Some(NewItem::NodeTie);
+                    }
                 }
                 // PrePoMax offers the search on constraints and contact pairs.
                 if matches!(item, TreeItem::Group("Constraints" | "Contact Pairs")) {
@@ -804,6 +825,21 @@ impl Tree<'_> {
                         let label = if inactive { "Activate" } else { "Deactivate" };
                         if ui.button(label).clicked() {
                             self.response.toggle_active = Some(item.clone());
+                        }
+                        ui.separator();
+                    }
+                    if let TreeItem::Step(s) = item {
+                        if ui
+                            .add_enabled(s > 0, egui::Button::new("Move Up"))
+                            .clicked()
+                        {
+                            self.response.move_step = Some((s, true));
+                        }
+                        if ui
+                            .add_enabled(s + 1 < self.step_count, egui::Button::new("Move Down"))
+                            .clicked()
+                        {
+                            self.response.move_step = Some((s, false));
                         }
                         ui.separator();
                     }
@@ -873,6 +909,9 @@ impl Tree<'_> {
             TreeItem::Group("Features") => TreeIcon::Features,
             TreeItem::Group("Reference Points") => TreeIcon::ReferencePoint,
             TreeItem::Group("Coordinate Systems") => TreeIcon::CoordinateSystem,
+            TreeItem::Group(PLANES) => TreeIcon::Plane,
+            TreeItem::Group(PATHS) => TreeIcon::Path,
+            TreeItem::Group(PLANE_RESULTS) => TreeIcon::PlaneResult,
             TreeItem::Group("Materials") => TreeIcon::Material,
             TreeItem::Group("Sections") => TreeIcon::Section,
             TreeItem::Group("Constraints") => TreeIcon::Constraints,
@@ -1201,6 +1240,7 @@ pub fn show(
         closed: HashMap::new(),
         inactive: HashSet::new(),
         master_slave: HashSet::new(),
+        step_count: 0,
     };
     let expanding = tree.state.expand.clone();
     egui::ScrollArea::both()
@@ -1301,6 +1341,12 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             }
             tree.master_slave.insert(TreeItem::ContactPair(i));
         }
+        for (i, tie) in fe.ties.iter().enumerate() {
+            if !tie.active {
+                tree.inactive.insert(TreeItem::Tie(i));
+            }
+            tree.master_slave.insert(TreeItem::Tie(i));
+        }
         for (i, _) in (fe.node_ties.iter().enumerate()).filter(|(_, t)| !t.active) {
             tree.inactive.insert(TreeItem::NodeTie(i));
         }
@@ -1311,6 +1357,7 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
         let contacts = TreeItem::Group("Contacts");
         let open = !fe.surface_interactions.is_empty()
             || !fe.contact_pairs.is_empty()
+            || !fe.ties.is_empty()
             || !fe.node_ties.is_empty();
         tree.branch(ui, contacts, "Contacts", open, |tree, ui| {
             let interactions = (fe.surface_interactions.iter().enumerate())
@@ -1319,6 +1366,9 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             tree.container(ui, "Surface Interactions", interactions);
             let pairs = (fe.contact_pairs.iter().enumerate())
                 .map(|(i, c)| (TreeItem::ContactPair(i), c.name.as_str()))
+                .chain(
+                    (fe.ties.iter().enumerate()).map(|(i, t)| (TreeItem::Tie(i), t.name.as_str())),
+                )
                 .chain(
                     (fe.node_ties.iter().enumerate())
                         .map(|(i, t)| (TreeItem::NodeTie(i), t.name.as_str())),
@@ -1343,6 +1393,7 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             tree.leaf(ui, steps, "Steps");
             return;
         }
+        tree.step_count = fe.steps.len();
         let text = counted("Steps", fe.steps.len());
         tree.branch(ui, steps, text, true, |tree, ui| {
             for (s, step) in fe.steps.iter().enumerate() {

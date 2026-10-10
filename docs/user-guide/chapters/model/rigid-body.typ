@@ -15,6 +15,12 @@ reference point: a bolt head, a bearing seat or a face a lever acts on. Create i
     point the body is driven at; create it first.],
 )
 
+In the 3D view of the FE model, a rigid body is drawn as yellow lines from nodes spread over its
+region to its reference point, as in PrePoMax, with the symbols of any step. A selected or edited
+rigid body is drawn in red; a deactivated one has no lines.
+
+#screenshot("rigid-body-symbol.png", [Rigid body on the end face of a cantilever, driven by RP-1])
+
 Written as `*RIGID BODY, NSET=..., REF NODE=..., ROT NODE=...`: PrePolix adds a reference node at
 the point for the translations and a rotation node for the rotations, as CalculiX requires.
 

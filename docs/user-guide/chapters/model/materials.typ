@@ -35,5 +35,16 @@ On the left are the library materials in categories, on the right the materials 
   organise the library.
 - #ui("Preview Material Properties") shows the values of the selected material.
 
+A new library contains #ui("Generic Steel") (category #ui("Steel / Structural")) and generic
+plastics in the category #ui("Plastics"): PLA, PETG, ABS, PA6, PA12, PET, PC, PP, POM and PMMA.
+Each has density, Young's modulus, Poisson's ratio, thermal expansion, thermal conductivity and
+specific heat. The values are typical room-temperature means from datasheets. Plastics vary a
+lot with grade, moisture, temperature and, for 3D printing, with print orientation and infill,
+so treat them as starting points and replace them with the values of your material.
+
+Libraries saved by an older version are updated when they are opened: missing generic
+materials are added, and the former S235 is renamed to Generic Steel if you have not changed
+it. Materials you changed or deleted are not touched afterwards.
+
 The library is stored per user in `materials.ron` in the settings folder (@settings). When the
 dialog is closed, PrePolix asks whether to save changes to the library.

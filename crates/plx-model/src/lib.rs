@@ -30,8 +30,8 @@ pub use contact::{
     InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
 };
 pub use features::{
-    CoordinatePlane, CoordinateSystem, CoordinateSystemKind, GLOBAL, Plane, PlaneSource, PointRef,
-    ReferencePoint, ResultPath, ResultPlane,
+    CoordinatePlane, CoordinateSystem, CoordinateSystemKind, GLOBAL, Plane, PlaneSource,
+    PointDefinition, PointRef, ReferencePoint, ResultPath, ResultPlane,
 };
 pub use geometry::{
     Algorithm2d, Algorithm3d, Geometry, MeshSetupItem, MeshSetupKind, MeshingParameters,
@@ -82,6 +82,9 @@ pub struct FeModel {
     pub surface_interactions: Vec<SurfaceInteraction>,
     #[serde(default)]
     pub contact_pairs: Vec<ContactPair>,
+    /// Surfaces glued to each other (`*TIE`), shown among the contact pairs.
+    #[serde(default)]
+    pub ties: Vec<Tie>,
     /// Ends of beams and trusses tied node to node, shown among the contact pairs.
     #[serde(default)]
     pub node_ties: Vec<NodeTie>,
@@ -130,6 +133,7 @@ impl FeModel {
         (self.sections.iter().map(|s| &s.region))
             .chain(self.constraints.iter().flat_map(Constraint::regions))
             .chain((self.contact_pairs.iter()).flat_map(|c| [&c.master, &c.slave]))
+            .chain((self.ties.iter()).flat_map(|t| [&t.master, &t.slave]))
             .chain(self.node_ties.iter().map(|t| &t.region))
             .chain(self.steps.iter().flat_map(|step| {
                 (step.boundary_conditions.iter().map(|b| &b.region))
@@ -223,6 +227,7 @@ impl FeModel {
                     .flat_map(Constraint::regions_mut),
             )
             .chain((self.contact_pairs.iter_mut()).flat_map(|c| [&mut c.master, &mut c.slave]))
+            .chain((self.ties.iter_mut()).flat_map(|t| [&mut t.master, &mut t.slave]))
             .chain(self.node_ties.iter_mut().map(|t| &mut t.region))
             .chain(self.steps.iter_mut().flat_map(|step| {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
@@ -232,12 +237,13 @@ impl FeModel {
             }))
     }
 
-    /// Brings a model read from an older project up to date: node ties saved among the
-    /// constraints move to [`FeModel::node_ties`], in their order.
+    /// Brings a model read from an older project up to date: ties and node ties saved among
+    /// the constraints move to [`FeModel::ties`] and [`FeModel::node_ties`], in their order.
     pub fn migrate(&mut self) {
         let mut constraints = Vec::with_capacity(self.constraints.len());
         for constraint in std::mem::take(&mut self.constraints) {
             match constraint {
+                Constraint::Tie(tie) => self.ties.push(tie),
                 Constraint::NodeTie(tie) => self.node_ties.push(tie),
                 other => constraints.push(other),
             }
@@ -1011,14 +1017,16 @@ impl Default for FrequencyStep {
 /// Settings of a `*COMPLEX FREQUENCY` step, with PrePoMax's defaults. CalculiX solves it on
 /// the eigenmodes of the last frequency step with [`FrequencyStep::storage`]; the Coriolis
 /// forces come from the centrifugal load of the static step before that frequency step.
+///
+/// The step has no perturbation flag of its own: CalculiX stops unless `*STEP, PERTURBATION`
+/// of this step matches the one of the frequency step that stored the modes, so the writer
+/// takes [`FrequencyStep::perturbation`] of that step.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ComplexFrequencyStep {
     /// Number of complex eigenfrequencies to compute.
     pub num_frequencies: u32,
     /// Coriolis forces of the rotation (`CORIOLIS`); the usual reason for the step.
     pub coriolis: bool,
-    /// `*STEP, PERTURBATION`, as PrePoMax offers it for this step.
-    pub perturbation: bool,
 }
 
 impl Default for ComplexFrequencyStep {
@@ -1026,7 +1034,6 @@ impl Default for ComplexFrequencyStep {
         Self {
             num_frequencies: 10,
             coriolis: true,
-            perturbation: true,
         }
     }
 }

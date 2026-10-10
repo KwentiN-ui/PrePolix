@@ -427,6 +427,8 @@ impl Model {
         self.part_nodes = Default::default();
         self.checks = Default::default();
         self.cad_index = Default::default();
+        // Reference points at the centre of a selection follow the new mesh.
+        self.fe.update_reference_points(&self.mesh);
         // The exploded view stays on and is laid out anew for the new mesh.
         self.explosion.clear_layout();
         if let Some(parameters) = self.explosion.applied.clone() {

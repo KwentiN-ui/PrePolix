@@ -9,8 +9,6 @@ shaft. Create it with #menu("Model", "Create Step ...") and choose the type in t
 #screenshot("complex-frequency-step.png", [Complex Frequency step])
 
 #fields(
-  [Perturbation step], [Writes `*STEP, PERTURBATION`, as PrePoMax does for this step (default
-    on).],
   [Coriolis forces of the rotation (CORIOLIS)], [Adds the Coriolis matrix of the rotation
     (default on). Without it the step repeats the frequencies of the frequency step.],
   [Number of complex frequencies], [How many complex eigenfrequencies CalculiX computes
@@ -24,6 +22,11 @@ The step needs two steps before it, in this order:
 + A #ui("Frequency") step with #ui("Store matrices and eigenmodes") and #ui("Perturbation")
   switched on. The complex frequency step is solved on the eigenmodes this step writes to the
   `.eig` file. Its number of eigenfrequencies limits how many complex frequencies make sense.
+
+The complex frequency step writes `*STEP, PERTURBATION` exactly when this frequency step has
+#ui("Perturbation") switched on, since CalculiX stops when the two steps differ ("the .eig-file
+was created without perturbation info"). Without perturbation the modes ignore the stiffening by
+the centrifugal preload of the static step.
 
 The complex frequency step takes the boundary conditions of the step before it and no loads. The
 model check (@model-check) reports a missing stored frequency step as an error ("No stored

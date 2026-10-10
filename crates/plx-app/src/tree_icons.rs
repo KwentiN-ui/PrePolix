@@ -49,6 +49,9 @@ pub enum TreeIcon {
     Geometry,
     MeshSetup,
     HotSpot,
+    Plane,
+    Path,
+    PlaneResult,
     Dots,
     DotsOpen,
 }
@@ -99,6 +102,9 @@ fn pixmap(icon: TreeIcon) -> &'static Pixmap {
         TreeIcon::Warning => &WARNING,
         TreeIcon::Geometry => &GEOMETRY,
         TreeIcon::MeshSetup => &MESH_SETUP,
+        TreeIcon::Plane => &PLANE,
+        TreeIcon::Path => &PATH,
+        TreeIcon::PlaneResult => &PLANE_RESULT,
         TreeIcon::Dots => &DOTS,
         TreeIcon::DotsOpen => &DOTS_OPEN,
     }
@@ -1403,6 +1409,89 @@ const MESH_SETUP: Pixmap = Pixmap {
     ],
 };
 
+/// Not in PrePoMax: a plane with its normal.
+const PLANE: Pixmap = Pixmap {
+    colors: &[
+        [0, 110, 160, 255],
+        [175, 215, 240, 255],
+        [0, 80, 130, 255],
+        [0, 50, 90, 255],
+    ],
+    rows: [
+        "........A.......",
+        ".......AAA......",
+        "......A.A.A.....",
+        "........A.......",
+        "........A.......",
+        "........A.......",
+        ".......CACCCCCCC",
+        "......CBABBBBBC.",
+        ".....CBBABBBBC..",
+        "....CBBBDBBBC...",
+        "...CBBBBBBBC....",
+        "..CBBBBBBBC.....",
+        ".CCCCCCCCC......",
+        "................",
+        "................",
+        "................",
+    ],
+};
+
+/// Not in PrePoMax: a straight path between two points.
+const PATH: Pixmap = Pixmap {
+    colors: &[[200, 0, 160, 255], [255, 255, 255, 255]],
+    rows: [
+        "................",
+        "............AAA.",
+        "............ABA.",
+        "............AAA.",
+        "...........A....",
+        "..........A.....",
+        ".........A......",
+        "........A.......",
+        ".......A........",
+        "......A.........",
+        ".....A..........",
+        "....A...........",
+        ".AAA............",
+        ".ABA............",
+        ".AAA............",
+        "................",
+    ],
+};
+
+/// Not in PrePoMax: a plane coloured by results.
+const PLANE_RESULT: Pixmap = Pixmap {
+    colors: &[
+        [70, 70, 70, 255],
+        [40, 40, 255, 255],
+        [0, 200, 255, 255],
+        [0, 230, 120, 255],
+        [120, 240, 0, 255],
+        [255, 235, 0, 255],
+        [255, 140, 0, 255],
+        [255, 30, 30, 255],
+    ],
+    rows: [
+        "................",
+        "................",
+        "................",
+        "................",
+        "................",
+        "................",
+        ".......AAAAAAAAA",
+        "......AEEFGGHHA.",
+        ".....ADEEFGGHA..",
+        "....ACDEEFGGA...",
+        "...ACCDEEFGA....",
+        "..ABCCDEEFA.....",
+        ".AAAAAAAAA......",
+        "................",
+        "................",
+        "................",
+    ],
+};
+
 /// Dots.ico
 const DOTS: Pixmap = Pixmap {
     colors: &[[109, 109, 109, 255]],
@@ -1494,6 +1583,9 @@ mod tests {
             TreeIcon::Geometry,
             TreeIcon::MeshSetup,
             TreeIcon::HotSpot,
+            TreeIcon::Plane,
+            TreeIcon::Path,
+            TreeIcon::PlaneResult,
             TreeIcon::Dots,
             TreeIcon::DotsOpen,
         ] {

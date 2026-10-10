@@ -15,7 +15,8 @@ use plx_model::{
     Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
     InitialConditionKind, Load, LoadKind, Material, ModalDamping, ModalDynamicsStep, ModeDamping,
     ModelSpace, NodeTie, OutputKind, PlasticPoint, Quantity, Region, Section, SectionKind,
-    StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceInteraction, UnitSystem, next_name,
+    StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceInteraction, Tie, UnitSystem,
+    next_name,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row};
@@ -40,10 +41,12 @@ pub enum NewItem {
     HistoryOutput(usize),
     /// A defined temperature of a step.
     DefinedField(usize),
-    /// A spring, support or tie, chosen in the dialog.
+    /// A spring, support or rigid body, chosen in the dialog.
     Constraint,
     SurfaceInteraction,
     ContactPair,
+    /// Surfaces glued to each other; listed with the contact pairs.
+    Tie,
     /// Nodes tied to each other, the ends of beams; listed with the contact pairs.
     NodeTie,
     /// A time curve for boundary conditions and loads.
@@ -407,7 +410,11 @@ impl RegionDraft {
         id: &str,
         active: bool,
     ) -> bool {
-        ui.label(label);
+        // Top-aligned: the grid centers a cell, which would put the label beside the
+        // rows below the source combo box.
+        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.label(label)
+        });
         let wanted = ui.push_id(id, |ui| self.ui_body(ui, model, active)).inner;
         ui.end_row();
         wanted
@@ -634,6 +641,7 @@ enum Draft {
     Constraint(ConstraintDraft),
     SurfaceInteraction(SurfaceInteraction, contacts::InteractionView),
     ContactPair(ContactPair, MasterSlave),
+    Tie(Tie, MasterSlave),
     NodeTie(NodeTie, RegionDraft),
     Amplitude(Amplitude, AmplitudeView),
 }
@@ -646,7 +654,7 @@ fn draft_region(draft: &Draft) -> Option<&RegionDraft> {
         | Draft::Load(_, _, r)
         | Draft::InitialCondition(_, r)
         | Draft::NodeTie(_, r) => Some(r),
-        Draft::ContactPair(_, regions) => Some(regions.current()),
+        Draft::ContactPair(_, regions) | Draft::Tie(_, regions) => Some(regions.current()),
         Draft::Constraint(c) => Some(c.region()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
@@ -661,7 +669,7 @@ fn draft_region_mut(draft: &mut Draft) -> Option<&mut RegionDraft> {
         | Draft::Load(_, _, r)
         | Draft::InitialCondition(_, r)
         | Draft::NodeTie(_, r) => Some(r),
-        Draft::ContactPair(_, regions) => Some(regions.current_mut()),
+        Draft::ContactPair(_, regions) | Draft::Tie(_, regions) => Some(regions.current_mut()),
         Draft::Constraint(c) => Some(c.region_mut()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
@@ -1064,6 +1072,10 @@ impl Editor {
                     MasterSlave::new(face_target(fe)),
                 )
             }
+            NewItem::Tie => {
+                let name = next_name("Tie", names(&fe.ties, |t| &t.name));
+                Draft::Tie(Tie::new(name), MasterSlave::new(face_target(fe)))
+            }
             NewItem::NodeTie => {
                 let name = next_name("Node_Tie", names(&fe.node_ties, |t| &t.name));
                 Draft::NodeTie(
@@ -1156,6 +1168,12 @@ impl Editor {
                     MasterSlave::from_regions(&pair.master, &pair.slave, face_target(fe), mesh);
                 (Draft::ContactPair(pair, regions), i)
             }
+            TreeItem::Tie(i) => {
+                let tie = fe.ties.get(i)?.clone();
+                let regions =
+                    MasterSlave::from_regions(&tie.master, &tie.slave, face_target(fe), mesh);
+                (Draft::Tie(tie, regions), i)
+            }
             TreeItem::NodeTie(i) => {
                 let tie = fe.node_ties.get(i)?.clone();
                 let region =
@@ -1190,6 +1208,7 @@ impl Editor {
             Draft::Constraint(c) => ("Constraint", c.name()),
             Draft::SurfaceInteraction(s, _) => ("Surface Interaction", &s.name),
             Draft::ContactPair(c, _) => ("Contact Pair", &c.name),
+            Draft::Tie(t, _) => ("Tie", &t.name),
             Draft::NodeTie(t, _) => ("Node Tie", &t.name),
             Draft::Amplitude(a, _) => ("Amplitude", &a.name),
         };
@@ -1215,6 +1234,19 @@ impl Editor {
             selected: true,
         };
         Some((step, self.index, item))
+    }
+
+    /// The index of the constraint being edited (`None` for a new one), if a constraint is.
+    pub fn editing_constraint(&self) -> Option<Option<usize>> {
+        matches!(self.draft, Draft::Constraint(_)).then_some(self.index)
+    }
+
+    /// The symbol of the constraint being edited as it would be applied, for the 3D view.
+    pub fn constraint_item(&self) -> Option<crate::symbols::Item> {
+        match &self.draft {
+            Draft::Constraint(c) => c.symbol(),
+            _ => None,
+        }
     }
 
     /// Whether clicks in the 3D view pick for this dialog.
@@ -1251,7 +1283,7 @@ impl Editor {
     /// The region being edited, for the 3D view.
     pub fn highlight(&self, model: &Model) -> Highlight {
         match &self.draft {
-            Draft::ContactPair(_, regions) => regions.highlight(model),
+            Draft::ContactPair(_, regions) | Draft::Tie(_, regions) => regions.highlight(model),
             Draft::Constraint(c) => c.highlight(model),
             _ => self
                 .region()
@@ -1891,6 +1923,10 @@ impl Editor {
                 name_row(ui, &mut pair.name);
                 contacts::contact_pair_form(ui, model, pair, regions);
             }
+            Draft::Tie(tie, regions) => {
+                name_row(ui, &mut tie.name);
+                contacts::tie_form(ui, model, tie, regions);
+            }
         }
     }
 
@@ -1911,6 +1947,7 @@ impl Editor {
             Draft::Constraint(_) => fe.constraints.iter().map(Constraint::name).collect(),
             Draft::SurfaceInteraction(..) => names(&fe.surface_interactions, |s| &s.name),
             Draft::ContactPair(..) => names(&fe.contact_pairs, |c| &c.name),
+            Draft::Tie(..) => names(&fe.ties, |t| &t.name),
             Draft::NodeTie(..) => names(&fe.node_ties, |t| &t.name),
             Draft::Amplitude(..) => names(&fe.amplitudes, |a| &a.name),
         };
@@ -1934,6 +1971,7 @@ impl Editor {
             Draft::Constraint(c) => c.name(),
             Draft::SurfaceInteraction(s, _) => &s.name,
             Draft::ContactPair(c, _) => &c.name,
+            Draft::Tie(t, _) => &t.name,
             Draft::NodeTie(t, _) => &t.name,
             Draft::Amplitude(a, _) => &a.name,
         };
@@ -2000,6 +2038,7 @@ impl Editor {
                 contacts::validate_contact_pair(pair, fe)?;
                 regions.validate()?;
             }
+            Draft::Tie(_, regions) => regions.validate()?,
             Draft::SurfaceInteraction(interaction, _) => {
                 contacts::validate_interaction(interaction)?;
             }
@@ -2062,6 +2101,7 @@ impl Editor {
                 Some(TreeItem::SurfaceInteraction(fe.surface_interactions.len()))
             }
             Draft::ContactPair(..) => Some(TreeItem::ContactPair(fe.contact_pairs.len())),
+            Draft::Tie(..) => Some(TreeItem::Tie(fe.ties.len())),
             Draft::NodeTie(..) => Some(TreeItem::NodeTie(fe.node_ties.len())),
             Draft::Amplitude(..) => Some(TreeItem::Amplitude(fe.amplitudes.len())),
             _ => None,
@@ -2148,6 +2188,13 @@ impl Editor {
                     field.active = existing.active;
                 }
                 put(list, index, field);
+            }
+            Draft::Tie(mut tie, regions) => {
+                (tie.master, tie.slave) = regions.regions();
+                if let Some(existing) = index.and_then(|i| fe.ties.get(i)) {
+                    tie.active = existing.active;
+                }
+                put(&mut fe.ties, index, tie);
             }
             Draft::NodeTie(mut tie, region) => {
                 tie.region = region.region();
@@ -2239,6 +2286,7 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::Constraint(i) => remove(&mut fe.constraints, i),
         TreeItem::SurfaceInteraction(i) => remove(&mut fe.surface_interactions, i),
         TreeItem::ContactPair(i) => remove(&mut fe.contact_pairs, i),
+        TreeItem::Tie(i) => remove(&mut fe.ties, i),
         TreeItem::NodeTie(i) => remove(&mut fe.node_ties, i),
         TreeItem::Amplitude(i) => remove(&mut fe.amplitudes, i),
         _ => false,
@@ -2264,11 +2312,23 @@ pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
             .map(|f| &mut f.active),
         TreeItem::Constraint(i) => fe.constraints.get_mut(i).map(Constraint::active_mut),
         TreeItem::ContactPair(i) => fe.contact_pairs.get_mut(i).map(|c| &mut c.active),
+        TreeItem::Tie(i) => fe.ties.get_mut(i).map(|t| &mut t.active),
         TreeItem::NodeTie(i) => fe.node_ties.get_mut(i).map(|t| &mut t.active),
         TreeItem::InitialCondition(i) => fe.initial_conditions.get_mut(i).map(|c| &mut c.active),
         _ => None,
     };
     active.map(|a| *a = !*a).is_some()
+}
+
+/// Moves step `s` one place up or down, like reordering in PrePoMax's step list; returns the
+/// new index. Loads, boundary conditions and outputs belong to their step and move with it.
+pub fn move_step(fe: &mut FeModel, s: usize, up: bool) -> Option<usize> {
+    let to = if up { s.checked_sub(1)? } else { s + 1 };
+    if s >= fe.steps.len() || to >= fe.steps.len() {
+        return None;
+    }
+    fe.steps.swap(s, to);
+    Some(to)
 }
 
 /// Swaps master and slave of a tie, spring connection or contact pair; a swapped name
@@ -2311,6 +2371,22 @@ pub fn swap_master_slave(fe: &mut FeModel, item: &TreeItem) -> bool {
             fe.rename_contact_pair(&old, &new);
             true
         }
+        TreeItem::Tie(i) => {
+            let Some(tie) = fe.ties.get_mut(i) else {
+                return false;
+            };
+            let old = tie.name.clone();
+            tie.swap_master_slave();
+            let name = tie.name.clone();
+            let others = (fe.ties.iter().enumerate())
+                .filter(|&(j, _)| j != i)
+                .map(|(_, t)| t.name.as_str());
+            if name != old && others.clone().any(|n| n.eq_ignore_ascii_case(&name)) {
+                let free = next_name(&name, others);
+                fe.ties[i].name = free;
+            }
+            true
+        }
         _ => false,
     }
 }
@@ -2321,6 +2397,7 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
     let master_slave = match *item {
         TreeItem::Constraint(i) => fe.constraints.get(i).and_then(Constraint::master_slave),
         TreeItem::ContactPair(i) => fe.contact_pairs.get(i).map(|c| [&c.master, &c.slave]),
+        TreeItem::Tie(i) => fe.ties.get(i).map(|t| [&t.master, &t.slave]),
         TreeItem::HistoryOutput(s, i) => {
             let output = fe.steps.get(s).and_then(|st| st.history_outputs.get(i));
             match output.map(|h| &h.kind) {
@@ -3256,11 +3333,9 @@ fn frequency_form(ui: &mut Ui, settings: &mut FrequencyStep, units: UnitSystem) 
 }
 
 /// Settings of a complex frequency step, PrePoMax's dialog: the number of modes; the Coriolis
-/// option and the perturbation flag are CalculiX's, with a hint at what the step builds on.
+/// option is CalculiX's, with a hint at what the step builds on. The perturbation flag is the
+/// one of the Frequency step, since CalculiX requires the same on both steps.
 fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep) {
-    ui.label("");
-    ui.checkbox(&mut settings.perturbation, "Perturbation step");
-    ui.end_row();
     ui.label("");
     ui.checkbox(
         &mut settings.coriolis,
@@ -3274,6 +3349,8 @@ fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep) {
     ui.weak(
         "Solved on the modes of the last Frequency step with Storage before this step.\n\
          The rotation comes from a Centrifugal load in the Static step before that one.\n\
+         Perturbation is taken from that Frequency step: tick \"Perturbation\" there\n\
+         to include the stiffening by the centrifugal preload.\n\
          Loads have no effect in this step; only the boundary conditions count.",
     );
     ui.end_row();
@@ -3667,6 +3744,24 @@ mod tests {
         assert!(fe.steps[0].boundary_conditions[0].active);
         assert!(!toggle_active(&mut fe, &TreeItem::Load(0, 0)));
         assert!(!toggle_active(&mut fe, &TreeItem::Material(0)));
+    }
+
+    #[test]
+    fn steps_are_moved_with_their_items() {
+        let mut fe = FeModel::default();
+        for _ in 0..3 {
+            Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
+        }
+        let names: Vec<_> = fe.steps.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(move_step(&mut fe, 0, true), None);
+        assert_eq!(move_step(&mut fe, 2, false), None);
+        assert_eq!(move_step(&mut fe, 2, true), Some(1));
+        assert_eq!(
+            fe.steps.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            [&names[0], &names[2], &names[1]]
+        );
+        assert_eq!(move_step(&mut fe, 0, false), Some(1));
+        assert_eq!(fe.steps[0].name, names[2]);
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub enum ModelItem {
     Section(usize),
     Constraint(usize),
     ContactPair(usize),
+    Tie(usize),
     NodeTie(usize),
     /// Boundary condition by step and index.
     BoundaryCondition(usize, usize),
@@ -89,6 +90,14 @@ impl FeModel {
             if let Some(reason) = reason {
                 invalid.push(Invalid {
                     item: ModelItem::ContactPair(i),
+                    reason,
+                });
+            }
+        }
+        for (i, tie) in self.ties.iter().enumerate() {
+            if let Some(reason) = master_slave_reference(&tie.master, &tie.slave, mesh) {
+                invalid.push(Invalid {
+                    item: ModelItem::Tie(i),
                     reason,
                 });
             }

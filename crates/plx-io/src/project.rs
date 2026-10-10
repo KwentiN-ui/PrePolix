@@ -96,10 +96,7 @@ mod tests {
                 text: "*Amplitude, Name=A\n0, 0, 1, 1".into(),
                 active: false,
             }],
-            reference_points: vec![plx_model::ReferencePoint {
-                name: "RP-1".into(),
-                position: [1.0, 2.0, 3.0],
-            }],
+            reference_points: vec![plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])],
             coordinate_systems: vec![plx_model::CoordinateSystem {
                 kind: plx_model::CoordinateSystemKind::Cylindrical,
                 ..plx_model::CoordinateSystem::new("Coordinate_System-1")
@@ -122,11 +119,12 @@ mod tests {
                 start: plx_model::PointRef::ReferencePoint("RP-1".into()),
                 ..plx_model::ResultPath::new("Path-1")
             }],
-            constraints: vec![Constraint::Tie(Tie {
+            constraints: Vec::new(),
+            ties: vec![Tie {
                 master: Region::Faces(vec![(1, 2)]),
                 slave: Region::Surface("TOP".into()),
                 ..Tie::new("Tie-1")
-            })],
+            }],
             node_ties: vec![plx_model::NodeTie {
                 region: Region::Nodes(vec![1, 2]),
                 rotations: false,
@@ -218,8 +216,8 @@ mod tests {
     }
 
     #[test]
-    fn node_ties_of_older_projects_move_to_the_contact_pairs() {
-        // Node ties were constraints for a day; a project saved then still opens with them.
+    fn ties_of_older_projects_move_to_the_contact_pairs() {
+        // Ties and node ties were constraints; a project saved then still opens with them.
         let mut tie = plx_model::NodeTie::new("Node_Tie-1");
         tie.region = Region::Nodes(vec![3, 7]);
         let older = FeModel {
@@ -231,7 +229,8 @@ mod tests {
         };
         let mut model: FeModel = ron::from_str(&ron::to_string(&older).unwrap()).unwrap();
         model.migrate();
-        assert_eq!(model.constraints, [Constraint::Tie(Tie::new("Tie-1"))]);
+        assert_eq!(model.constraints, []);
+        assert_eq!(model.ties, [Tie::new("Tie-1")]);
         assert_eq!(model.node_ties, [tie]);
     }
 

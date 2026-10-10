@@ -1122,6 +1122,11 @@ impl FeModel {
             join(&mut ties, &tied, &[]);
             join(&mut contacts, &tied, &[]);
         }
+        for tie in self.ties.iter().filter(|t| t.active) {
+            let (a, b) = (pieces(&tie.master), pieces(&tie.slave));
+            join(&mut ties, &a, &b);
+            join(&mut contacts, &a, &b);
+        }
         for pair in self.contact_pairs.iter().filter(|c| c.active) {
             join(&mut contacts, &pieces(&pair.master), &pieces(&pair.slave));
         }
@@ -1270,6 +1275,10 @@ impl FeModel {
                     }
                 }
             }
+        }
+        for tie in self.ties.iter().filter(|t| t.active) {
+            mark(&tie.master, &mut held_otherwise);
+            mark(&tie.slave, &mut held_otherwise);
         }
         for pair in self.contact_pairs.iter().filter(|c| c.active) {
             mark(&pair.master, &mut held_otherwise);
@@ -2003,7 +2012,7 @@ mod tests {
         let mut tie = Tie::new("Tie-1");
         tie.master = Region::Surface("RIGHT".into());
         tie.slave = Region::Surface("LEFT".into());
-        model.constraints.push(Constraint::Tie(tie));
+        model.ties.push(tie);
         assert_eq!(check(&model, &mesh), []);
     }
 
@@ -2070,10 +2079,9 @@ mod tests {
     fn a_reference_point_needs_an_active_rigid_body_and_holds_it() {
         let mesh = cubes(1, false);
         let mut model = model(&mesh);
-        model.reference_points.push(ReferencePoint {
-            name: "RP-1".into(),
-            position: [0.0, 0.5, 0.5],
-        });
+        model
+            .reference_points
+            .push(ReferencePoint::new("RP-1", [0.0, 0.5, 0.5]));
         // The support moves from the nodes to the reference point: without a rigid body
         // the point has no node, the cube is loose.
         model.steps[0].boundary_conditions[0].region = Region::ReferencePoint("RP-1".into());

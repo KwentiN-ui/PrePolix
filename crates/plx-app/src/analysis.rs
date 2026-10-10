@@ -221,15 +221,14 @@ impl Analysis {
                 });
                 ui.separator();
                 let height = ui.available_height() - 36.0;
-                egui::ScrollArea::both()
-                    .max_height(height.max(80.0))
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for line in &self.output {
-                            ui.monospace(line);
-                        }
-                    });
+                crate::virtual_table::lines(
+                    ui,
+                    egui::ScrollArea::both()
+                        .max_height(height.max(80.0))
+                        .auto_shrink([false, false])
+                        .stick_to_bottom(true),
+                    &self.output,
+                );
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui

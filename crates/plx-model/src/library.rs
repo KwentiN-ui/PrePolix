@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Elastic, Material, UnitSystem};
+use crate::{Elastic, Expansion, Material, UnitSystem};
 
 /// Version of the library file format written by this build.
 pub const LIBRARY_FORMAT: u32 = 1;
@@ -26,6 +26,10 @@ pub struct MaterialLibrary {
     /// PrePoMax's default "mm, ton, s, °C".
     #[serde(default)]
     pub units: UnitSystem,
+    /// Version of the built-in materials this library has been updated to; 0 for libraries
+    /// saved before the field existed.
+    #[serde(default)]
+    pub defaults_version: u32,
     pub root: Category,
 }
 
@@ -76,31 +80,201 @@ impl Category {
     }
 }
 
+/// Version of the built-in materials. Raise it when `MaterialLibrary::default` gains or changes
+/// materials; libraries saved with an older version are updated by
+/// [`MaterialLibrary::update_defaults`].
+pub const DEFAULTS_VERSION: u32 = 1;
+
+/// Generic material in the library's unit system (mm, t, s, degC) from datasheet values.
+struct Generic {
+    name: &'static str,
+    /// Density in kg/m^3.
+    density: f64,
+    /// Young's modulus in MPa.
+    young: f64,
+    poisson: f64,
+    /// Coefficient of thermal expansion in 1/K.
+    expansion: f64,
+    /// Thermal conductivity in W/(m K).
+    conductivity: f64,
+    /// Specific heat in J/(kg K).
+    specific_heat: f64,
+}
+
+impl Generic {
+    fn material(&self) -> Material {
+        Material {
+            name: self.name.into(),
+            // kg/m^3 -> t/mm^3
+            density: Some(self.density / 1e12),
+            elastic: Some(Elastic {
+                young: self.young,
+                poisson: self.poisson,
+            }),
+            // W/(m K) = t mm/(s^3 K): the same number
+            conductivity: Some(self.conductivity),
+            // J/(kg K) = m^2/(s^2 K) -> mm^2/(s^2 K)
+            specific_heat: Some(self.specific_heat * 1e6),
+            expansion: Some(Expansion {
+                coefficient: self.expansion,
+                ..Expansion::default()
+            }),
+            ..Material::default()
+        }
+    }
+}
+
+/// Name of the steel the library started with; it is renamed to [`GENERIC_STEEL`].
+const OLD_STEEL: &str = "S235";
+const GENERIC_STEEL: &str = "Generic Steel";
+
+/// Typical room-temperature mean values from manufacturer datasheets and handbooks. Plastics
+/// vary a lot with grade, moisture, temperature and (for 3D printing) print orientation and
+/// infill, so these are starting points to be replaced with the values of the actual material.
+const STEEL: Generic = Generic {
+    name: GENERIC_STEEL,
+    density: 7850.0,
+    young: 210_000.0,
+    poisson: 0.3,
+    expansion: 12e-6,
+    conductivity: 50.0,
+    specific_heat: 470.0,
+};
+
+const PLASTICS: [Generic; 10] = [
+    Generic {
+        name: "Generic PLA",
+        density: 1240.0,
+        young: 3500.0,
+        poisson: 0.36,
+        expansion: 68e-6,
+        conductivity: 0.13,
+        specific_heat: 1800.0,
+    },
+    Generic {
+        name: "Generic PETG",
+        density: 1270.0,
+        young: 2100.0,
+        poisson: 0.38,
+        expansion: 60e-6,
+        conductivity: 0.20,
+        specific_heat: 1200.0,
+    },
+    Generic {
+        name: "Generic ABS",
+        density: 1050.0,
+        young: 2200.0,
+        poisson: 0.35,
+        expansion: 90e-6,
+        conductivity: 0.17,
+        specific_heat: 1400.0,
+    },
+    Generic {
+        name: "Generic PA6",
+        density: 1140.0,
+        young: 3000.0,
+        poisson: 0.39,
+        expansion: 80e-6,
+        conductivity: 0.25,
+        specific_heat: 1700.0,
+    },
+    Generic {
+        name: "Generic PA12",
+        density: 1020.0,
+        young: 1700.0,
+        poisson: 0.40,
+        expansion: 100e-6,
+        conductivity: 0.23,
+        specific_heat: 1700.0,
+    },
+    Generic {
+        name: "Generic PET",
+        density: 1380.0,
+        young: 2800.0,
+        poisson: 0.37,
+        expansion: 70e-6,
+        conductivity: 0.24,
+        specific_heat: 1100.0,
+    },
+    Generic {
+        name: "Generic PC",
+        density: 1200.0,
+        young: 2300.0,
+        poisson: 0.37,
+        expansion: 65e-6,
+        conductivity: 0.21,
+        specific_heat: 1200.0,
+    },
+    Generic {
+        name: "Generic PP",
+        density: 905.0,
+        young: 1400.0,
+        poisson: 0.42,
+        expansion: 100e-6,
+        conductivity: 0.22,
+        specific_heat: 1900.0,
+    },
+    Generic {
+        name: "Generic POM",
+        density: 1410.0,
+        young: 2900.0,
+        poisson: 0.35,
+        expansion: 110e-6,
+        conductivity: 0.31,
+        specific_heat: 1500.0,
+    },
+    Generic {
+        name: "Generic PMMA",
+        density: 1180.0,
+        young: 3200.0,
+        poisson: 0.37,
+        expansion: 70e-6,
+        conductivity: 0.19,
+        specific_heat: 1470.0,
+    },
+];
+
+/// The S235 of libraries created before the generic materials; renamed only while unchanged.
+fn old_steel() -> Material {
+    Material {
+        name: OLD_STEEL.into(),
+        density: Some(7.85e-9),
+        elastic: Some(Elastic {
+            young: 210_000.0,
+            poisson: 0.3,
+        }),
+        ..Material::default()
+    }
+}
+
+fn category_node(name: &str, items: Vec<LibraryNode>) -> LibraryNode {
+    LibraryNode::Category(Category::new(name, items))
+}
+
 impl Default for MaterialLibrary {
     /// The library a new installation starts with. Values in the unit system mm, t, s, as
     /// PrePoMax's default "mm, ton, s, °C".
     fn default() -> Self {
-        let s235 = Material {
-            name: "S235".into(),
-            density: Some(7.85e-9),
-            elastic: Some(Elastic {
-                young: 210_000.0,
-                poisson: 0.3,
-            }),
-            ..Material::default()
+        let materials = |list: &[Generic]| {
+            (list.iter())
+                .map(|g| LibraryNode::Material(g.material()))
+                .collect()
         };
-        let category = |name, items| LibraryNode::Category(Category::new(name, items));
         Self {
             format: LIBRARY_FORMAT,
             units: UnitSystem::MmTonSC,
+            defaults_version: DEFAULTS_VERSION,
             root: Category::new(
                 ROOT_NAME,
-                vec![category(
+                vec![category_node(
                     "Elastic_Models",
-                    vec![category(
-                        "Steel",
-                        vec![category("Structural", vec![LibraryNode::Material(s235)])],
-                    )],
+                    vec![
+                        category_node(
+                            "Steel",
+                            vec![category_node("Structural", materials(&[STEEL]))],
+                        ),
+                        category_node("Plastics", materials(&PLASTICS)),
+                    ],
                 )],
             ),
         }
@@ -253,6 +427,44 @@ impl MaterialLibrary {
         Some(moved)
     }
 
+    /// Brings a library saved by an older version up to the current built-in materials: the
+    /// old "S235" becomes "Generic Steel" if the user has not changed it, and built-in
+    /// materials that are missing are added to their category. Materials the user has
+    /// deleted come back only once, when the version rises.
+    pub fn update_defaults(&mut self) {
+        if self.defaults_version >= DEFAULTS_VERSION {
+            return;
+        }
+        self.defaults_version = DEFAULTS_VERSION;
+        if self.units != UnitSystem::MmTonSC {
+            return;
+        }
+        let old = old_steel();
+        let reference = MaterialLibrary::default();
+        let Some(LibraryNode::Category(elastic)) = reference.root.items.first() else {
+            return;
+        };
+        for node in &elastic.items {
+            let LibraryNode::Category(group) = node else {
+                continue;
+            };
+            let target = ensure_category(&mut self.root, &["Elastic_Models", &group.name]);
+            for node in &group.items {
+                match node {
+                    LibraryNode::Material(m) => add_default(target, m, &old),
+                    LibraryNode::Category(sub) => {
+                        let target = ensure_category(target, &[&sub.name]);
+                        for node in &sub.items {
+                            if let LibraryNode::Material(m) = node {
+                                add_default(target, m, &old);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Path of the first material in tree order, which PrePoMax selects on opening.
     pub fn first_material(&self) -> Option<LibraryPath> {
         fn find(category: &Category, path: &mut LibraryPath) -> bool {
@@ -269,6 +481,43 @@ impl MaterialLibrary {
         }
         let mut path = Vec::new();
         find(&self.root, &mut path).then_some(path)
+    }
+}
+
+/// The category reached by names from `category`, created where missing.
+fn ensure_category<'a>(category: &'a mut Category, names: &[&str]) -> &'a mut Category {
+    let Some((first, rest)) = names.split_first() else {
+        return category;
+    };
+    let index = category
+        .items
+        .iter()
+        .position(|n| matches!(n, LibraryNode::Category(c) if c.name.eq_ignore_ascii_case(first)));
+    let index = index.unwrap_or_else(|| {
+        category.items.push(category_node(first, Vec::new()));
+        category.items.len() - 1
+    });
+    match &mut category.items[index] {
+        LibraryNode::Category(c) => ensure_category(c, rest),
+        LibraryNode::Material(_) => unreachable!("index points to a category"),
+    }
+}
+
+/// Adds a built-in material unless the category has one of that name; an unchanged old
+/// S235 is replaced by Generic Steel instead.
+fn add_default(category: &mut Category, material: &Material, old: &Material) {
+    if material.name == GENERIC_STEEL {
+        let unchanged = category
+            .items
+            .iter_mut()
+            .find(|n| matches!(n, LibraryNode::Material(m) if m == old));
+        if let Some(node) = unchanged {
+            *node = LibraryNode::Material(material.clone());
+            return;
+        }
+    }
+    if !category.contains(&material.name) {
+        category.items.push(LibraryNode::Material(material.clone()));
     }
 }
 
@@ -309,7 +558,7 @@ mod tests {
         let library = MaterialLibrary::default();
         assert_eq!(library.first_material(), Some(S235.to_vec()));
         let s235 = library.material(&S235).unwrap();
-        assert_eq!(s235.name, "S235");
+        assert_eq!(s235.name, "Generic Steel");
         assert_eq!(s235.density, Some(7.85e-9));
         let names: Vec<&str> = (1..4)
             .map(|n| library.node(&S235[..n]).unwrap().name())
@@ -333,17 +582,20 @@ mod tests {
         let s235 = library.material(&S235).unwrap().clone();
         let path = library.add_material(&S235, &s235).unwrap();
         assert_eq!(path, [0, 0, 0, 1]);
-        assert_eq!(library.material(&path).unwrap().name, "S235_Model-1");
+        assert_eq!(
+            library.material(&path).unwrap().name,
+            "Generic Steel_Model-1"
+        );
         let path = library.add_material(&[], &s235).unwrap();
         assert_eq!(path, [1]);
-        assert_eq!(library.material(&path).unwrap().name, "S235");
+        assert_eq!(library.material(&path).unwrap().name, "Generic Steel");
     }
 
     #[test]
     fn rename_rejects_names_of_siblings() {
         let mut library = MaterialLibrary::default();
         let new = library.add_category(&[0, 0, 0]).unwrap();
-        assert!(library.rename(&new, "s235").is_err());
+        assert!(library.rename(&new, "generic steel").is_err());
         assert!(library.rename(&new, " ").is_err());
         assert!(library.rename(&[], "Root").is_err());
         library.rename(&new, "Custom").unwrap();
@@ -357,7 +609,8 @@ mod tests {
         library.add_material(&S235, &s235);
         assert_eq!(library.delete(&[0, 0, 0, 1]), Some(vec![0, 0, 0, 0]));
         assert_eq!(library.delete(&S235), Some(vec![0, 0, 0]));
-        assert_eq!(library.first_material(), None);
+        // Only the plastics are left.
+        assert_eq!(library.first_material(), Some(vec![0, 1, 0]));
         assert_eq!(library.delete(&[]), None);
     }
 
@@ -368,7 +621,10 @@ mod tests {
         library.add_material(&S235, &s235);
         assert_eq!(library.move_material(&S235, true), None);
         assert_eq!(library.move_material(&S235, false), Some(vec![0, 0, 0, 1]));
-        assert_eq!(library.material(&S235).unwrap().name, "S235_Model-1");
+        assert_eq!(
+            library.material(&S235).unwrap().name,
+            "Generic Steel_Model-1"
+        );
         assert_eq!(library.move_material(&[0, 0, 0, 1], false), None);
         assert_eq!(library.move_material(&[0], false), None);
     }
@@ -380,5 +636,57 @@ mod tests {
             name_for_model("S235", ["s235", "S235_Library-1"]),
             "S235_Library-2"
         );
+    }
+
+    #[test]
+    fn default_library_has_generic_plastics() {
+        let library = MaterialLibrary::default();
+        let plastics = library.category(&[0, 1]).unwrap();
+        assert_eq!(plastics.name, "Plastics");
+        let pla = (plastics.items.iter())
+            .find_map(|n| match n {
+                LibraryNode::Material(m) if m.name == "Generic PLA" => Some(m),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(pla.density, Some(1.24e-9));
+        assert_eq!(pla.elastic.unwrap().young, 3500.0);
+        assert_eq!(pla.specific_heat, Some(1.8e9));
+    }
+
+    #[test]
+    fn old_libraries_get_the_generic_materials() {
+        // A library as saved before the generic materials: S235 only, no version.
+        let mut old = MaterialLibrary {
+            defaults_version: 0,
+            ..MaterialLibrary::default()
+        };
+        old.root.items.clear();
+        let steel = ensure_category(&mut old.root, &["Elastic_Models", "Steel", "Structural"]);
+        steel.items.push(LibraryNode::Material(old_steel()));
+        let mut mine = old.clone();
+        mine.update_defaults();
+        assert_eq!(mine.defaults_version, DEFAULTS_VERSION);
+        assert_eq!(mine.material(&[0, 0, 0, 0]).unwrap().name, "Generic Steel");
+        assert!(mine.category(&[0, 1]).unwrap().items.len() >= 10);
+        let again = mine.clone();
+        mine.update_defaults();
+        assert_eq!(mine, again);
+
+        // A changed S235 stays; Generic Steel is added next to it.
+        let mut changed = old;
+        let LibraryNode::Material(m) = &mut ensure_category(
+            &mut changed.root,
+            &["Elastic_Models", "Steel", "Structural"],
+        )
+        .items[0] else {
+            unreachable!()
+        };
+        m.elastic.as_mut().unwrap().young = 200_000.0;
+        changed.update_defaults();
+        let names: Vec<&str> = (changed.category(&[0, 0, 0]).unwrap().items.iter())
+            .map(LibraryNode::name)
+            .collect();
+        assert_eq!(names, ["S235", "Generic Steel"]);
     }
 }
