@@ -494,7 +494,7 @@ impl FeModel {
                 findings.push(Finding::new(
                     ModelItem::Step(s),
                     Problem::NoInitialTemperature,
-                    format!("{} gibt Temperaturen vor (Defined Field)", step.name),
+                    format!("{} prescribes temperatures (Defined Field)", step.name),
                 ));
             }
             if let StepKind::Static(settings) = &step.kind
